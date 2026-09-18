@@ -44,5 +44,8 @@ export async function computePacingScan(
 	const accounts = await listAccountResponses(dbOps, config, getStrategy, {
 		sideEffects,
 	});
-	return computePacingFromAccounts(accounts, now);
+	return computePacingFromAccounts(
+		accounts.filter((account) => !account.disabled),
+		now,
+	);
 }

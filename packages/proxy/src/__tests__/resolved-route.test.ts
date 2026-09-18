@@ -268,3 +268,19 @@ describe("Chat capability boundary", () => {
 		).toThrow("Chat Completions");
 	});
 });
+
+it("disabled accounts cannot be forced by header, global override, pin, or maintenance", () => {
+	const disabled = { ...c, disabled: true };
+	for (const restriction of [
+		{},
+		{ forcedAccountId: "c" },
+		{ headerAccountId: "c" },
+		{ pin: { accountId: "c", providers: null } },
+		{ maintenance: { accountId: "c", purpose: "keepalive" as const } },
+		{ maintenance: { accountId: "c", purpose: "auto_refresh" as const } },
+	]) {
+		expect(() => build({ accounts: [disabled], ...restriction })).toThrow(
+			"account is disabled",
+		);
+	}
+});

@@ -9,6 +9,7 @@ import {
 	createAccountBillingTypeHandler,
 	createAccountConsumeRateLimitResetCreditHandler,
 	createAccountCustomEndpointUpdateHandler,
+	createAccountDisabledHandler,
 	createAccountForceClearHandler,
 	createAccountForceGetHandler,
 	createAccountForceHandler,
@@ -662,6 +663,21 @@ export class APIRouter {
 		if (path.startsWith("/api/accounts/")) {
 			const parts = path.split("/");
 			const accountId = parts[3];
+			if (
+				accountId &&
+				(["force", "refresh-usage", "force-reset-rate-limit"].includes(
+					parts[4] ?? "",
+				) ||
+					(parts[4] === "rate-limit-reset-credits" &&
+						parts[5] === "consume")) &&
+				method === "POST"
+			) {
+				if ((await this.context.dbOps.getAccount(accountId))?.disabled)
+					return Response.json(
+						{ error: "Enable this account before using it" },
+						{ status: 409 },
+					);
+			}
 
 			// Consume one earned Codex usage reset. Callers must provide their own
 			// idempotency key and reuse it for retries of the same logical attempt.
@@ -719,6 +735,17 @@ export class APIRouter {
 				return await this.wrapHandler((_req, url) =>
 					resetCreditEventsHandler(url, accountId),
 				)(req, url);
+			}
+
+			if (
+				parts.length === 5 &&
+				(parts[4] === "disable" || parts[4] === "enable") &&
+				method === "POST"
+			) {
+				return createAccountDisabledHandler(
+					this.context.dbOps,
+					parts[4] === "disable",
+				)(req, accountId);
 			}
 
 			// Account pause

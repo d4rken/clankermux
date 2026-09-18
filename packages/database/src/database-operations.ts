@@ -1109,8 +1109,9 @@ OAuth tokens will need to be re-authenticated.
 	// Account operations delegated to the repository. Retry on lock contention
 	// is applied by the repository wrapper installed in the constructor, so
 	// these delegations must NOT add their own — see withRetryingMethods().
-	async getAllAccounts(): Promise<Account[]> {
-		return this.accounts.findAll();
+	/** Operational pool by default; management/history may explicitly include disabled rows. */
+	async getAllAccounts(includeDisabled = false): Promise<Account[]> {
+		return this.accounts.findAll(includeDisabled);
 	}
 
 	async getAccount(accountId: string): Promise<Account | null> {
@@ -1316,6 +1317,14 @@ OAuth tokens will need to be re-authenticated.
 			expectedApiKey,
 			expectedEndpoint,
 		);
+	}
+
+	async setAccountDisabled(
+		accountId: string,
+		disabled: boolean,
+		enabledOn: string,
+	): Promise<boolean> {
+		return this.accounts.setDisabled(accountId, disabled, enabledOn);
 	}
 
 	async pauseAccount(accountId: string, reason = "manual"): Promise<void> {

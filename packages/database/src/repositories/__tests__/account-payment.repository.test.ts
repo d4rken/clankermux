@@ -28,6 +28,12 @@ const NOW = new Date(2026, 5, 9, 12).getTime();
 function makeDb(): { db: Database; repo: AccountPaymentRepository } {
 	const db = new Database(":memory:");
 	ensureSchema(db);
+	for (const id of ["acc-1", "acc-2", "acc-3"])
+		db.run("INSERT INTO accounts (id, name, created_at) VALUES (?, ?, ?)", [
+			id,
+			id,
+			NOW,
+		]);
 	const adapter = new BunSqlAdapter(db);
 	const repo = new AccountPaymentRepository(adapter);
 	return { db, repo };

@@ -24,6 +24,14 @@ Poll `/workloads` and select stable IDs: `class:anthropic`, `class:codex`, and
 `parentWorkloadId` where a single parent class is known. Fable overlaps Claude;
 capacities and percentages must not be added.
 
+Disabled accounts are omitted from current account inventories, configured and
+paused totals, workload availability, and forecasts. Their historical requests
+and costs remain in historical endpoints. `constrainedAccounts` includes enabled
+accounts paused for an expired subscription or by the operator; it does not mean
+that the provider blocked them. Account availability distinguishes
+`payment_required` from `blocked`, and a subscription lapse remains
+`paused` with reason `subscription_expired`.
+
 Each workload has two independently timestamped sections:
 
 - `availability`: the candidates for a fresh, unpinned, nominal-size request,

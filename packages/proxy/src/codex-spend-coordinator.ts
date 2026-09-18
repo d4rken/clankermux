@@ -406,7 +406,7 @@ export class CodexSpendCoordinator {
 		request: CodexRateLimitResetCreditConsumeRequest,
 	): Promise<CodexResetCreditConsumeDispatchOutcome> {
 		const account = await this.ctx.dbOps.getAccount(accountId);
-		if (!account) {
+		if (!account || account.disabled) {
 			return this.failResetCreditConsume(
 				accountId,
 				accountId,
@@ -614,8 +614,13 @@ export class CodexSpendCoordinator {
 		accountId: string,
 	): Promise<CodexUsageRefreshOutcome> {
 		const account = await this.ctx.dbOps.getAccount(accountId);
-		if (!account) {
-			return { success: false, message: `Account ${accountId} not found` };
+		if (!account || account.disabled) {
+			return {
+				success: false,
+				message: account?.disabled
+					? "Account is disabled"
+					: `Account ${accountId} not found`,
+			};
 		}
 		if (account.provider !== "codex") {
 			return {
@@ -697,8 +702,13 @@ export class CodexSpendCoordinator {
 	): Promise<CodexSpendResult> {
 		// 1. Load the fresh full account.
 		const account = await this.ctx.dbOps.getAccount(accountId);
-		if (!account) {
-			return { status: "skipped", reason: `Account ${accountId} not found` };
+		if (!account || account.disabled) {
+			return {
+				status: "skipped",
+				reason: account?.disabled
+					? "Account is disabled"
+					: `Account ${accountId} not found`,
+			};
 		}
 
 		// 2. Validate provider + token presence.
@@ -810,8 +820,13 @@ export class CodexSpendCoordinator {
 		accountId: string,
 	): Promise<CodexUsageRefreshOutcome> {
 		const account = await this.ctx.dbOps.getAccount(accountId);
-		if (!account) {
-			return { success: false, message: `Account ${accountId} not found` };
+		if (!account || account.disabled) {
+			return {
+				success: false,
+				message: account?.disabled
+					? "Account is disabled"
+					: `Account ${accountId} not found`,
+			};
 		}
 		if (account.provider !== "codex") {
 			return {
@@ -972,6 +987,7 @@ export class CodexSpendCoordinator {
 		const currentAccount = await this.ctx.dbOps.getAccount(accountId);
 		if (
 			!currentAccount ||
+			currentAccount.disabled ||
 			!tokenGenerations.has(currentAccount.access_token ?? null)
 		) {
 			return {
@@ -1196,7 +1212,7 @@ export class CodexSpendCoordinator {
 		//    single request even if scheduling was disabled meanwhile.
 		if (!causes.has("manual-refresh")) {
 			const fresh = await this.ctx.dbOps.getAccount(accountId);
-			if (!fresh?.auto_refresh_enabled) {
+			if (fresh?.disabled || !fresh?.auto_refresh_enabled) {
 				return {
 					status: "skipped",
 					reason: `Scheduled priming suppressed for '${account.name}': auto-refresh disabled`,

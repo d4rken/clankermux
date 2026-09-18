@@ -924,6 +924,7 @@ export function createPublicSnapshotReader(
 					rate_limit_status,
 					CASE WHEN rate_limited_until > ? THEN 1 ELSE 0 END as rate_limited
 				FROM accounts
+				WHERE disabled = 0
 				ORDER BY name ASC
 			`,
 			[now],

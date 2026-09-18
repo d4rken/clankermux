@@ -73,6 +73,7 @@ export interface RunwayAccountSource {
 	name: string;
 	provider: string;
 	/** Paused accounts contribute neither capacity nor pacing constraints. */
+	disabled?: boolean;
 	paused?: boolean;
 	usageData: FullUsageData | null;
 	prediction?: AccountUsagePrediction | null;
@@ -519,7 +520,10 @@ function runwayFor(
 	band: RunwayBand | null;
 } {
 	const eligible = accounts.filter(
-		(account) => !account.paused && isAccountAllowedByPin(pin, account),
+		(account) =>
+			!account.disabled &&
+			!account.paused &&
+			isAccountAllowedByPin(pin, account),
 	);
 	const inputs = eligible.map(toRunwayAccountInput);
 	const outcome = computeCapacityRunway(inputs, now);

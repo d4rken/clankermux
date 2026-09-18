@@ -1337,6 +1337,15 @@ class API extends HttpClient {
 		}
 	}
 
+	async setAccountDisabled(
+		accountId: string,
+		disabled: boolean,
+	): Promise<{ recheckError: string | null }> {
+		return this.post(
+			`/api/accounts/${accountId}/${disabled ? "disable" : "enable"}`,
+		);
+	}
+
 	async pauseAccount(accountId: string): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/pause`;

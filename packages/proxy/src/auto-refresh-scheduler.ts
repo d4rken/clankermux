@@ -330,7 +330,7 @@ export class AutoRefreshScheduler {
 					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
 					pause_reason
 				FROM accounts
-				WHERE
+				WHERE disabled = 0 AND
 					auto_refresh_enabled = 1
 					AND provider IN ('anthropic', 'codex', 'zai')
 					-- NOTE: the 5-hour reset predicate that used to live here has moved
@@ -680,7 +680,7 @@ export class AutoRefreshScheduler {
 			// off — no real quota spent. This single guard covers both callers (the
 			// 5h refresh loop and the weekly-dormant prime); both route through here.
 			const freshFlag = await this.db.query<{ auto_refresh_enabled: number }>(
-				"SELECT COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled FROM accounts WHERE id = ?",
+				"SELECT COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled FROM accounts WHERE disabled = 0 AND id = ?",
 				[accountRow.id],
 			);
 			if (!freshFlag[0] || freshFlag[0].auto_refresh_enabled === 0) {
@@ -1251,7 +1251,7 @@ export class AutoRefreshScheduler {
 			`
 			SELECT id, name, provider, refresh_token, access_token, expires_at, custom_endpoint
 			FROM accounts
-			WHERE
+			WHERE disabled = 0 AND
 				provider = 'qwen'
 				AND refresh_token IS NOT NULL
 				AND (
@@ -1306,7 +1306,7 @@ export class AutoRefreshScheduler {
 			`
 			SELECT id, name, provider, refresh_token, access_token, expires_at, custom_endpoint
 			FROM accounts
-			WHERE
+			WHERE disabled = 0 AND
 				provider = 'codex'
 				AND refresh_token IS NOT NULL
 				AND (
@@ -1353,7 +1353,7 @@ export class AutoRefreshScheduler {
 
 			// Get all account IDs that have auto-refresh enabled
 			const rows = await this.db.query<{ id: string }>(
-				`SELECT id FROM accounts WHERE auto_refresh_enabled = 1 AND provider IN ('anthropic', 'codex', 'zai')`,
+				`SELECT id FROM accounts WHERE disabled = 0 AND auto_refresh_enabled = 1 AND provider IN ('anthropic', 'codex', 'zai')`,
 			);
 
 			const activeAccountIds = rows.map((row) => row.id);
@@ -1432,7 +1432,7 @@ export class AutoRefreshScheduler {
 			peak_hours_pause_enabled: number;
 		}>(
 			`SELECT id, name, COALESCE(paused, 0) as paused, pause_reason, COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled
-			 FROM accounts WHERE provider = 'zai' AND peak_hours_pause_enabled = 1`,
+			 FROM accounts WHERE disabled = 0 AND provider = 'zai' AND peak_hours_pause_enabled = 1`,
 		);
 
 		for (const account of zaiAccounts) {

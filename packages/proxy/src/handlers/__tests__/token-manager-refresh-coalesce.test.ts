@@ -383,10 +383,10 @@ describe("refreshAccessTokenSafe awaited CAS persist", () => {
 				updateAccountTokens: async () => false,
 				getAccount: async () => {
 					getAccountCalls += 1;
-					// First read is the pre-refresh adoption check — return null so the
-					// refresh actually fires. Second read is the post-CAS-loss re-read —
+					// Lifecycle and pre-refresh adoption reads precede the refresh.
+					// The post-CAS-loss read sees the new generation:
 					// return the winner's (authoritative) credentials.
-					if (getAccountCalls === 1) return null;
+					if (getAccountCalls <= 2) return null;
 					return {
 						id: acctId,
 						access_token: "db-winner-access",
@@ -554,7 +554,7 @@ describe("refreshAccessTokenSafe review-hardening regressions", () => {
 				updateAccountTokens: async () => false,
 				getAccount: async () => {
 					getAccountCalls += 1;
-					if (getAccountCalls === 1) return null; // pre-refresh adoption check
+					if (getAccountCalls <= 2) return null; // pre-refresh adoption check
 					return {
 						id: acctId,
 						// Winner's access token already expired → not servable…
@@ -593,10 +593,10 @@ describe("refreshAccessTokenSafe review-hardening regressions", () => {
 			updateAccountTokens: async () => false, // CAS loss
 			getAccount: async () => {
 				getAccountCalls += 1;
-				// First two reads are the winner's and joiner's pre-refresh adoption
+				// First four reads are the winner's and joiner's lifecycle and adoption
 				// checks; later reads (post-CAS-loss adopt + joiner sync) see the
 				// authoritative winner row.
-				if (getAccountCalls <= 2) return null;
+				if (getAccountCalls <= 4) return null;
 				return {
 					id: acctId,
 					access_token: "db-winner-access",
@@ -1097,7 +1097,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(refreshTokenSpy).not.toHaveBeenCalled();
 		// The flush IS the read: the row it just wrote can only repeat what the
 		// entry already says.
-		expect(getAccountSpy).not.toHaveBeenCalled();
+		expect(getAccountSpy).toHaveBeenCalledTimes(1); // Disable preflight only.
 		// The flush CASes on the anchor, not on the caller's in-memory token.
 		expect(updateTokensSpy.mock.calls[0][5]).toBe("rt-anchor");
 		expect(acct.access_token).toBe("at-pending");
@@ -1142,7 +1142,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		// pending one is what the provider actually issued last.
 		expect(token).toBe("at-pending-live");
 		expect(refreshTokenSpy).not.toHaveBeenCalled();
-		expect(getAccountSpy).not.toHaveBeenCalled();
+		expect(getAccountSpy).toHaveBeenCalledTimes(1); // Disable preflight only.
 		expect(acct.refresh_token).toBe("rt-pending");
 		// Still pending: the write has not landed.
 		expect(getPendingRotation(acctId)).toBeDefined();
@@ -1192,7 +1192,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(acct.access_token).toBe("at-newer-pending");
 		expect(acct.refresh_token).toBe("rt-newer-pending");
 		expect(refreshTokenSpy).not.toHaveBeenCalled();
-		expect(getAccountSpy).not.toHaveBeenCalled();
+		expect(getAccountSpy).toHaveBeenCalledTimes(1); // Disable preflight only.
 		// The newer rotation is still unpersisted — its own write never ran.
 		expect(getPendingRotation(acctId)).toBeDefined();
 	});
@@ -1241,7 +1241,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		const token = await tokenP;
 
 		expect(token).toBe("at-reauthed");
-		expect(getAccountSpy).toHaveBeenCalledTimes(1);
+		expect(getAccountSpy).toHaveBeenCalledTimes(2); // Includes disable preflight.
 		expect(acct.refresh_token).toBe("rt-reauthed");
 		expect(refreshTokenSpy).not.toHaveBeenCalled();
 	});
@@ -1345,6 +1345,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 					return true;
 				},
 				getAccount: async () => {
+					if (persistCalls === 0) return null; // Disable preflight succeeds.
 					throw new Error("database is locked");
 				},
 			},
@@ -1376,7 +1377,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(entry?.refreshToken).toBe("C");
 		expect(entry?.attemptedRefreshToken).toBe("B");
 		// Only the ownership check read the row; no adopt-authoritative re-read.
-		expect(getAccountSpy).toHaveBeenCalledTimes(1);
+		expect(getAccountSpy).toHaveBeenCalledTimes(2); // Includes disable preflight.
 	});
 
 	it("pauses when the rejected token IS the pending generation even though the entry carries no refresh token", async () => {
@@ -1528,7 +1529,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 		expect(acct.refresh_token).toBe("rt-survivor");
 		// Only the pre-refresh re-read ran: the registry outranks the row, so the
 		// post-CAS-loss authoritative re-read was skipped.
-		expect(getAccountSpy).toHaveBeenCalledTimes(1);
+		expect(getAccountSpy).toHaveBeenCalledTimes(2); // Includes disable preflight.
 	});
 
 	it("does NOT pause on an invalid_grant that replayed a stale generation while a rotation awaits persist", async () => {

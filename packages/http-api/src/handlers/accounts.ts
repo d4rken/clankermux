@@ -18,6 +18,7 @@ import {
 	validatePriority,
 	validateString,
 } from "@clankermux/core";
+import { anchorDateFromInstant } from "@clankermux/core/renewal";
 import {
 	type CodexResetCreditEventRow,
 	type DatabaseOperations,
@@ -472,6 +473,7 @@ export async function listAccountResponses(
 			refresh_token: string;
 			access_token: string | null;
 			paused: 0 | 1;
+			disabled: 0 | 1;
 			priority: number;
 			token_valid: 0 | 1;
 			rate_limited: 0 | 1;
@@ -529,6 +531,7 @@ export async function listAccountResponses(
 					refresh_token,
 					access_token,
 					COALESCE(paused, 0) as paused,
+					COALESCE(disabled, 0) as disabled,
 					COALESCE(priority, 0) as priority,
 					COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
@@ -601,6 +604,7 @@ export async function listAccountResponses(
 					id: a.id,
 					provider: a.provider ?? "",
 					paused: !!a.paused,
+					disabled: !!a.disabled,
 					// pause_reason and rate_limit_reset feed wouldAutoUnpause —
 					// without them peekRanked() can't simulate the auto-unpause that
 					// select() performs on safe-reason paused accounts whose
@@ -727,6 +731,7 @@ export async function listAccountResponses(
 		if (sideEffects === "management") {
 			for (const account of accounts) {
 				if (
+					!account.disabled &&
 					account.provider === "codex" &&
 					codexRateLimitResetCreditsCache.needsRefresh(account.id, now)
 				) {
@@ -839,7 +844,7 @@ export async function listAccountResponses(
 						// caller's policy rather than asserted by this call site: the
 						// assembler is shared with read-only projections, so a hardcoded
 						// `true` here promised an invariant the code could not keep.
-						{ seedCache: sideEffects === "management" },
+						{ seedCache: !account.disabled && sideEffects === "management" },
 					);
 					usageData = resolved.data;
 					usageIsLiveCacheEntry = resolved.source === "cache";
@@ -1179,6 +1184,7 @@ export async function listAccountResponses(
 						: null,
 					created: new Date(Number(account.created_at)).toISOString(),
 					paused: account.paused === 1,
+					disabled: account.disabled === 1,
 					pauseReason: account.pause_reason ?? null,
 					priority: Number(account.priority) || 0,
 					tokenStatus: account.token_valid ? "valid" : "expired",
@@ -1342,7 +1348,9 @@ export async function listAccountResponses(
 		// after the array is fully built — mirroring how isPrimary is stamped per
 		// row above. computeDuplicateAccountFlags groups by provider-scoped identity
 		// (external id / email) and returns each account's sibling ids.
-		const duplicateFlags = computeDuplicateAccountFlags(response);
+		const duplicateFlags = computeDuplicateAccountFlags(
+			response.filter((account) => !account.disabled),
+		);
 		for (const account of response) {
 			const dupIds = duplicateFlags.get(account.id) ?? [];
 			account.isDuplicateAccount = dupIds.length > 0;
@@ -1708,6 +1716,65 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 	};
 }
 
+export function createAccountDisabledHandler(
+	dbOps: DatabaseOperations,
+	disabled: boolean,
+) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const account = await dbOps.getAccount(accountId);
+			if (!account) return errorResponse(NotFound("Account not found"));
+			const enabledOn = anchorDateFromInstant(Date.now());
+			if (!enabledOn) throw new Error("Could not determine current date");
+			await dbOps.setAccountDisabled(accountId, disabled, enabledOn);
+			invalidateDashboardCache("payments-summary");
+			let recheckError: string | null = null;
+			if (disabled) {
+				usageCache.stopPolling(accountId);
+				usageCache.delete(accountId);
+				codexRateLimitResetCreditsCache.delete(accountId);
+				clearWeeklyBurnSlopes(accountId);
+				clearUsageRevisionAnchors(accountId);
+				sessionCacheStore.evictAccount(accountId);
+				clearCapacityRestoredProbePending(accountId);
+				clearAccountAffinity(accountId);
+				if (getForcedAccount() === accountId) setForcedAccount(null);
+			} else {
+				// Enabling is durable even when a provider is unavailable. Report
+				// the access recheck separately so callers still refresh the list.
+				try {
+					if (account.provider === "codex") {
+						const result = await refreshCodexUsageForAccount(accountId);
+						if (!result.success) recheckError = result.message;
+					} else if (
+						account.provider === "openrouter" &&
+						!account.custom_endpoint
+					) {
+						if (
+							!(await refreshOpenRouterAccountMetadata(dbOps, {
+								...account,
+								disabled: false,
+							}))
+						)
+							recheckError = "Could not refresh account metadata";
+					} else if (supportsUsagePolling(account.provider)) {
+						if (!(await restartUsagePollingForAccount(accountId)))
+							recheckError = "Could not restart usage polling";
+					}
+				} catch (error) {
+					recheckError =
+						error instanceof Error ? error.message : "Access recheck failed";
+				}
+			}
+			return jsonResponse({ success: true, disabled, recheckError });
+		} catch (error) {
+			return errorResponse(
+				error instanceof Error ? error : new Error("Failed to update account"),
+			);
+		}
+	};
+}
+
 /**
  * Create an account pause handler
  */
@@ -1838,8 +1905,8 @@ export function createAccountForceHandler(dbOps: DatabaseOperations) {
 	return async (_req: Request, accountId: string): Promise<Response> => {
 		try {
 			const db = dbOps.getAdapter();
-			const account = await db.get<{ name: string }>(
-				"SELECT name FROM accounts WHERE id = ?",
+			const account = await db.get<{ name: string; disabled: number }>(
+				"SELECT name, disabled FROM accounts WHERE id = ?",
 				[accountId],
 			);
 
@@ -1847,6 +1914,10 @@ export function createAccountForceHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
+			if (account.disabled)
+				return errorResponse(
+					BadRequest("Enable this account before forcing it"),
+				);
 			setForcedAccount(accountId);
 			log.warn(
 				`Force-account ENABLED: all traffic now routed to '${account.name}' (${accountId})`,
@@ -2702,6 +2773,11 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
 			}
+
+			if (account.disabled)
+				return errorResponse(
+					BadRequest("Enable this account before refreshing it"),
+				);
 
 			if (account.provider === "openrouter") {
 				const metadata = await refreshOpenRouterAccountMetadata(dbOps, account);

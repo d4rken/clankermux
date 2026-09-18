@@ -60,7 +60,7 @@ export function AccountsTab() {
 		isLoading: loading,
 		error,
 		refetch: loadAccountsQuery,
-	} = useAccounts();
+	} = useAccounts(true);
 	const { data: forcedAccountData } = useForcedAccount();
 	const forcedAccountId = forcedAccountData?.accountId ?? null;
 	const renameAccount = useRenameAccount();
@@ -493,6 +493,23 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleDisabledToggle = async (account: Account) => {
+		try {
+			const result = await api.setAccountDisabled(
+				account.id,
+				!account.disabled,
+			);
+			await loadAccounts();
+			setActionError(
+				result.recheckError
+					? `Account enabled. Access recheck failed: ${result.recheckError}`
+					: null,
+			);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handlePauseToggle = async (account: Account) => {
 		try {
 			if (account.paused) {
@@ -875,6 +892,7 @@ export function AccountsTab() {
 						forcedAccountId={forcedAccountId}
 						onForceAccount={handleForceAccount}
 						onPauseToggle={handlePauseToggle}
+						onDisabledToggle={handleDisabledToggle}
 						onForceResetRateLimit={handleForceResetRateLimit}
 						onRefreshUsage={handleRefreshUsage}
 						onRemove={handleRemoveAccount}

@@ -173,7 +173,9 @@ export function computePacingFromAccounts(
 ): PacingSnapshot {
 	// Paused inventory stays visible on the accounts resource, but contributes
 	// no budget, governor counts or fallback capacity to the active workload.
-	const activeAccounts = accounts.filter((account) => !account.paused);
+	const activeAccounts = accounts.filter(
+		(account) => !account.disabled && !account.paused,
+	);
 	const sevenDay = computePoolUsage(activeAccounts, "seven_day", now);
 	const fiveHour = computePoolUsage(activeAccounts, "five_hour", now);
 

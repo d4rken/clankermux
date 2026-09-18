@@ -102,6 +102,19 @@ See [cache-policy coverage and client semantics](docs/public-api/cache-policy.md
 for the provider matrix, timing rules, and sources. Session state stays separate
 from model metadata, and cache creation alone is not evidence of expiry.
 
+Accounts can be **paused** to stop routing temporarily, or **disabled** to keep
+an account saved without operating it. Disable stops routing, polling, token
+refresh, probes and automatic credit redemption, and excludes the account from
+current pool statistics and forecasts. Configuration and historical usage and
+payments remain available. Enable rechecks supported provider metadata and
+preserves existing subscription, authentication and pause conditions.
+
+Automatic subscription payment recording stops while disabled and resumes from
+the local calendar date of enabling, without catching up earlier disabled dates.
+Disabling an account does not cancel its upstream subscription. The management
+API exposes `POST /api/accounts/:id/disable` and `/enable`; account responses
+include `disabled` independently of `paused`.
+
 * [Public widget API](docs/public-api/README.md) for external displays and
   applets, with JSON Schemas and example payloads.
 * [Clankermux Usage for Cinnamon](https://github.com/d4rken/clankermux-mint-applet),
