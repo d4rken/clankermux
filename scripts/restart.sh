@@ -3,8 +3,9 @@
 # pre-building so the restart is server init rather than a build.
 #
 # This does not deploy anything. The zz-release.conf drop-in pins
-# WorkingDirectory to a release snapshot under .cache/releases/<sha>, and this
-# script builds in whatever snapshot is pinned right now — never in the
+# WorkingDirectory to a snapshot under .codex/worktrees/release-<sha>
+# (or the legacy .cache/releases/<sha>). This builds in the pinned snapshot,
+# never in the
 # development checkout, whose contents the service does not run. To ship a new
 # commit, use scripts/promote-release.sh.
 #
@@ -34,13 +35,14 @@ set -e
 # Resolve the MAIN checkout, not this copy of the script: run from a worktree,
 # `dirname $0`/.. would name that worktree's own .cache/releases and reject the
 # real production path. The common git dir is shared by every worktree.
-RELEASES=$(dirname "$(git -C "$(dirname "$0")/.." rev-parse --path-format=absolute --git-common-dir)")/.cache/releases
+ROOT=$(dirname "$(git -C "$(dirname "$0")/.." rev-parse --path-format=absolute --git-common-dir)")
+RELEASES="$ROOT/.cache/releases"
 TARGET=$(systemctl show clankermux -p WorkingDirectory --value)
 case "$TARGET" in
-"$RELEASES"/?*) ;;
+"$RELEASES"/?*|"$ROOT/.codex/worktrees/release-"?*) ;;
 *)
 	echo "restart.sh: the unit's WorkingDirectory is '${TARGET:-<unset>}', not a" >&2
-	echo "release snapshot under $RELEASES. The zz-release.conf drop-in is" >&2
+	echo "release snapshot under .codex/worktrees/ or $RELEASES. The zz-release.conf drop-in is" >&2
 	echo "missing or broken — fix it with scripts/promote-release.sh." >&2
 	exit 1
 	;;

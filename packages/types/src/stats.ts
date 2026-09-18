@@ -452,6 +452,16 @@ export interface ClientEfficiencyRow {
 	contextToolsCharsSum: number;
 	contextSystemCharsSum: number;
 	contextToolCountSum: number;
+	/** All sums use requests with all five composition measurements present. */
+	contextBreakdown?: {
+		coveredRequests: number;
+		systemCharsSum: number;
+		toolsCharsSum: number;
+		toolResultCharsSum: number;
+		/** Message content excluding the tool results counted above. */
+		otherMessagesCharsSum: number;
+		messageCountSum: number;
+	};
 }
 
 /** One (API key × model) group of the within-model comparison. */

@@ -1617,6 +1617,12 @@ export function createAnalyticsHandler(context: APIContext) {
 							context_tools_chars_sum: number | null;
 							context_system_chars_sum: number | null;
 							context_tool_count_sum: number | null;
+							breakdown_covered_requests: number;
+							breakdown_system_chars_sum: number | null;
+							breakdown_tools_chars_sum: number | null;
+							breakdown_tool_result_chars_sum: number | null;
+							breakdown_other_messages_chars_sum: number | null;
+							breakdown_message_count_sum: number | null;
 						}
 					>(
 						`
@@ -1637,6 +1643,13 @@ export function createAnalyticsHandler(context: APIContext) {
 						r.context_tools_chars AS context_tools_chars,
 						r.context_system_chars AS context_system_chars,
 						r.context_tool_count AS context_tool_count,
+						r.context_tool_result_chars AS context_tool_result_chars,
+						r.context_message_count AS context_message_count,
+						(r.context_system_chars IS NOT NULL
+							AND r.context_tools_chars IS NOT NULL
+							AND r.context_messages_chars IS NOT NULL
+							AND r.context_tool_result_chars IS NOT NULL
+							AND r.context_message_count IS NOT NULL) AS breakdown_covered,
 						-- Computed HERE, where the \`r\` alias exists, so the shared
 						-- token definition is not copied a fourth time.
 						${CONTEXT_TOKENS_SQL} AS context_tokens,
@@ -1675,7 +1688,19 @@ export function createAnalyticsHandler(context: APIContext) {
 						THEN resolved.context_tokens END) AS context_tokens_sum,
 					SUM(resolved.context_tools_chars) AS context_tools_chars_sum,
 					SUM(resolved.context_system_chars) AS context_system_chars_sum,
-					SUM(resolved.context_tool_count) AS context_tool_count_sum
+					SUM(resolved.context_tool_count) AS context_tool_count_sum,
+					SUM(resolved.breakdown_covered) AS breakdown_covered_requests,
+					SUM(CASE WHEN resolved.breakdown_covered THEN resolved.context_system_chars END)
+						AS breakdown_system_chars_sum,
+					SUM(CASE WHEN resolved.breakdown_covered THEN resolved.context_tools_chars END)
+						AS breakdown_tools_chars_sum,
+					SUM(CASE WHEN resolved.breakdown_covered THEN resolved.context_tool_result_chars END)
+						AS breakdown_tool_result_chars_sum,
+					SUM(CASE WHEN resolved.breakdown_covered
+						THEN resolved.context_messages_chars - resolved.context_tool_result_chars END)
+						AS breakdown_other_messages_chars_sum,
+					SUM(CASE WHEN resolved.breakdown_covered THEN resolved.context_message_count END)
+						AS breakdown_message_count_sum
 				FROM resolved
 				LEFT JOIN api_keys k ON k.id = resolved.api_key_id
 				GROUP BY resolved.api_key_id, resolved.resolved_harness
@@ -1770,6 +1795,16 @@ export function createAnalyticsHandler(context: APIContext) {
 								contextSystemCharsSum:
 									Number(row.context_system_chars_sum) || 0,
 								contextToolCountSum: Number(row.context_tool_count_sum) || 0,
+								contextBreakdown: {
+									coveredRequests: Number(row.breakdown_covered_requests) || 0,
+									systemCharsSum: Number(row.breakdown_system_chars_sum) || 0,
+									toolsCharsSum: Number(row.breakdown_tools_chars_sum) || 0,
+									toolResultCharsSum:
+										Number(row.breakdown_tool_result_chars_sum) || 0,
+									otherMessagesCharsSum:
+										Number(row.breakdown_other_messages_chars_sum) || 0,
+									messageCountSum: Number(row.breakdown_message_count_sum) || 0,
+								},
 							}),
 						),
 					};

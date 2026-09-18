@@ -59,10 +59,10 @@ systemd-analyze security clankermux.service   # review exposure level
 
 This runs the service directly from the development checkout, which is not how
 production runs here. `scripts/promote-release.sh <commit>` builds a release
-snapshot under `.cache/releases/` and installs the `zz-release.conf` pin that
+snapshot under `.codex/worktrees/release-<sha>` and installs the `zz-release.conf` pin that
 points the unit at it; `scripts/restart.sh` refuses to act until such a pin
 exists, because it requires the unit's `WorkingDirectory` to be under
-`.cache/releases/` (`restart.sh:37-47`).
+`.codex/worktrees/release-<sha>` or the legacy `.cache/releases/<sha>`.
 
 ### Existing install, updating the drop-ins
 
