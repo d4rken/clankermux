@@ -23,7 +23,6 @@ import {
 import {
 	type ClientEfficiencyGroup,
 	type ClientGrouping,
-	cacheChurnRatio,
 	cacheHitRate,
 	costPerRequest,
 	declaredHarnessMismatch,
@@ -32,6 +31,7 @@ import {
 	perCoveredRequest,
 	rollUpClientEfficiency,
 	successRate,
+	tokensPerRequest,
 	UNKNOWN_HARNESS_LABEL,
 } from "./client-efficiency-rollup";
 import { type SortDir, SortHeaderButton } from "./sort-header";
@@ -48,8 +48,8 @@ type SortKey =
 	| "requests"
 	| "successRate"
 	| "cacheHitRate"
-	| "cacheChurn"
-	| "inputTokens"
+	| "avgTokensPerRequest"
+	| "avgUncachedInput"
 	| "outputTokens"
 	| "costPerRequest"
 	| "avgContextTokens"
@@ -59,8 +59,8 @@ const NUMERIC_COLUMNS: Array<{ key: SortKey; label: string }> = [
 	{ key: "requests", label: "Requests" },
 	{ key: "successRate", label: "Success" },
 	{ key: "cacheHitRate", label: "Cache hit" },
-	{ key: "cacheChurn", label: "Cache churn" },
-	{ key: "inputTokens", label: "Tokens in" },
+	{ key: "avgTokensPerRequest", label: "Avg tokens / req" },
+	{ key: "avgUncachedInput", label: "Avg uncached in" },
 	{ key: "outputTokens", label: "Tokens out" },
 	{ key: "costPerRequest", label: "Cost / req" },
 	{ key: "avgContextTokens", label: "Avg context" },
@@ -74,8 +74,9 @@ function metrics(group: ClientEfficiencyGroup): Record<SortKey, number | null> {
 		requests: group.requests,
 		successRate: successRate(group),
 		cacheHitRate: cacheHitRate(group),
-		cacheChurn: cacheChurnRatio(group),
-		inputTokens: group.inputTokens,
+		avgTokensPerRequest: tokensPerRequest(group),
+		avgUncachedInput:
+			group.requests > 0 ? group.inputTokens / group.requests : null,
 		outputTokens: group.outputTokens,
 		costPerRequest: costPerRequest(group),
 		avgContextTokens: perCoveredRequest(
@@ -94,9 +95,8 @@ function formatMetric(key: SortKey, value: number): string {
 		case "successRate":
 		case "cacheHitRate":
 			return `${value.toFixed(1)}%`;
-		case "cacheChurn":
-			return `${value.toFixed(2)}×`;
-		case "inputTokens":
+		case "avgTokensPerRequest":
+		case "avgUncachedInput":
 		case "outputTokens":
 		case "avgContextTokens":
 			return formatTokens(Math.round(value));

@@ -54,6 +54,25 @@ describe("normalizeClientUserAgent", () => {
 });
 
 describe("detectHarness", () => {
+	it("normalizes pi agent user-agents to the pi harness", () => {
+		for (const userAgent of [
+			"pi/0.1.0",
+			"pi-agent/1.2.3",
+			"pi-coding-agent/0.4.0",
+		]) {
+			expect(detectHarness(new Headers({ "user-agent": userAgent }))).toEqual({
+				harness: "pi",
+				userAgent,
+			});
+		}
+	});
+	it("does not collapse unrelated pi-prefixed user-agents", () => {
+		for (const userAgent of ["pi-hole/5.0", "pip/1.0", "pixel/1.0"]) {
+			expect(
+				detectHarness(new Headers({ "user-agent": userAgent })).harness,
+			).toBe(userAgent.split("/", 1)[0]);
+		}
+	});
 	it("labels a Claude Code user-agent claude-code", () => {
 		const detection = detectHarness(
 			headers({ "user-agent": "claude-cli/2.1.270 (external, cli)" }),

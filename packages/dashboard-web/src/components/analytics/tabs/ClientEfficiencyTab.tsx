@@ -3,6 +3,7 @@ import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { CostCoverageNote } from "../../CostCoverage";
 import {
 	AnalyticsControls,
+	ClientEfficiencySummary,
 	ClientEfficiencyTable,
 	ClientModelEfficiencyPanel,
 	MissingSectionsNotice,
@@ -89,6 +90,12 @@ export function ClientEfficiencyTab(props: ClientEfficiencyTabProps) {
 			<MissingSectionsNotice
 				analytics={analytics}
 				requested={CLIENT_SECTIONS}
+			/>
+
+			<ClientEfficiencySummary
+				rows={rows}
+				truncated={analytics?.clientEfficiency?.truncated ?? false}
+				loading={loading}
 			/>
 
 			{unpricedRequests > 0 && (

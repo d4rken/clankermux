@@ -236,6 +236,32 @@ export function cacheHitRate(group: {
 	return total > 0 ? (group.cacheReadTokens / total) * 100 : null;
 }
 
+/** Input plus generated tokens, including cache reads and writes. */
+export function totalTokens(group: {
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheCreationTokens: number;
+	outputTokens: number;
+}): number {
+	return (
+		group.inputTokens +
+		group.cacheReadTokens +
+		group.cacheCreationTokens +
+		group.outputTokens
+	);
+}
+
+/** Average consumption per recorded request. */
+export function tokensPerRequest(group: {
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheCreationTokens: number;
+	outputTokens: number;
+	requests: number;
+}): number | null {
+	return group.requests > 0 ? totalTokens(group) / group.requests : null;
+}
+
 /**
  * Cache writes per cache read. Above ~1 the client is paying to build a cache
  * it never reads back. Null when nothing was read, where the ratio is undefined

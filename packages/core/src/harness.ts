@@ -15,6 +15,9 @@ const MAX_HARNESS_CHARS = 64;
  */
 const CODEX_USER_AGENT = /^codex[-_]/i;
 
+/** User-agents emitted by pi and its pi-coding-agent distribution. */
+const PI_USER_AGENT = /^pi(?:-agent|-coding-agent)?(?:[/\s]|$)/i;
+
 export interface HarnessDetection {
 	/**
 	 * The harness family this request's own headers name, or `null` when they
@@ -103,6 +106,9 @@ export function detectHarness(headers: Headers): HarnessDetection {
 	}
 	if (isCodexClient(headers)) {
 		return { harness: "codex", userAgent };
+	}
+	if (userAgent && PI_USER_AGENT.test(userAgent)) {
+		return { harness: "pi", userAgent };
 	}
 	if (userAgent?.startsWith("QwenCode/")) {
 		return { harness: "qwen-code", userAgent };
