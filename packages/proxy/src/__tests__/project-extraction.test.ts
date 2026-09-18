@@ -961,6 +961,79 @@ describe("extractProjectFromBody — tier ordering", () => {
 		});
 	});
 
+	it.each([
+		"anthropic-expiry",
+		"expiry-independent",
+	])("attributes Codex worktree %s to clankermux", (worktree) => {
+		const cwd = `/home/darken/clankermux/.codex/worktrees/${worktree}`;
+		expect(
+			extractProjectFromBody(
+				body(
+					[
+						`Primary working directory: ${cwd}`,
+						`Contents of ${cwd}/.claude/CLAUDE.md (project instructions, checked into the codebase):`,
+					].join("\n"),
+				),
+			),
+		).toEqual({ project: "clankermux", source: "repo_root" });
+	});
+
+	it("keeps an explicitly mapped project consistent across nested instructions and sidechains", () => {
+		const rules: ProjectRules = {
+			...RULES,
+			overrides: [{ prefix: "/home/darken/projects/porter", name: "porter" }],
+		};
+		const cache = new SessionProjectCache();
+		const metadata = {
+			user_id: JSON.stringify({ session_id: "porter-session" }),
+		};
+		const cwd =
+			"/home/darken/projects/porter/app/api/.claude/worktrees/shizuku-wire-user-services";
+		for (const instructions of [
+			"",
+			"Contents of /home/darken/projects/porter/app/.claude/CLAUDE.md (project instructions, checked into the codebase):",
+			"Contents of /home/darken/projects/porter/app/.claude/rules/pull-requests.md (project instructions, checked into the codebase):",
+		]) {
+			const resolved = resolveProject(
+				"POST",
+				"/v1/messages",
+				new Headers(),
+				{
+					...body(`Primary working directory: ${cwd}\n${instructions}`),
+					metadata,
+				},
+				"key-1",
+				cache,
+				rules,
+			);
+			expect(resolved).toEqual({
+				project: "porter",
+				source: "path_override",
+				sessionKey: "key-1:porter-session",
+			});
+			if (resolved.project && resolved.sessionKey)
+				cache.set(resolved.sessionKey, resolved.project);
+		}
+		expect(
+			resolveProject(
+				"POST",
+				"/v1/messages",
+				new Headers(),
+				{
+					...body("You are a helpful assistant."),
+					metadata,
+				},
+				"key-1",
+				cache,
+				rules,
+			),
+		).toEqual({
+			project: "porter",
+			source: "session_inherited",
+			sessionKey: "key-1:porter-session",
+		});
+	});
+
 	it("falls back to the folder walk when no instruction file names a root", () => {
 		expect(
 			extractProjectFromBody(
