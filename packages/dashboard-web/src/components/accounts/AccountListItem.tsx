@@ -13,6 +13,7 @@ import {
 	MoreHorizontal,
 	Pause,
 	Play,
+	Power,
 	Receipt,
 	RefreshCw,
 	StickyNote,
@@ -304,20 +305,6 @@ export function AccountListItem({
 							<Pause className="h-4 w-4" />
 						)}
 					</Button>
-					{onDisabledToggle && (
-						<Button
-							variant="ghost"
-							size="sm"
-							onClick={() => onDisabledToggle(account)}
-							title={
-								account.disabled
-									? "Enable account and recheck access"
-									: "Disable account: stop gateway activity and exclude from current statistics"
-							}
-						>
-							{account.disabled ? "Enable" : "Disable"}
-						</Button>
-					)}
 					{onForceAccount && (
 						<Button
 							variant="ghost"
@@ -584,6 +571,19 @@ export function AccountListItem({
 								</DropdownMenuItem>
 							)}
 							<DropdownMenuSeparator />
+							{onDisabledToggle && (
+								<DropdownMenuItem
+									onClick={() => onDisabledToggle(account)}
+									title={
+										account.disabled
+											? "Enable account and recheck access"
+											: "Disable account: stop gateway activity and exclude from current statistics"
+									}
+								>
+									<Power className="mr-item h-4 w-4" />
+									{account.disabled ? "Enable Account" : "Disable Account"}
+								</DropdownMenuItem>
+							)}
 							<DropdownMenuItem
 								onClick={() => onRemove(account)}
 								className="text-destructive-strong focus:bg-destructive/10 focus:text-destructive-strong"
