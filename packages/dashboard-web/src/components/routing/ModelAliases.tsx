@@ -23,6 +23,13 @@ export function useModelAliases() {
 	return useQuery({
 		queryKey: modelAliasesKey,
 		queryFn: () => api.get<{ data: ModelAlias[] }>("/api/model-aliases"),
+		select: ({ data }) => ({
+			data: [...data].sort(
+				(a, b) =>
+					a.displayName.localeCompare(b.displayName) ||
+					a.id.localeCompare(b.id),
+			),
+		}),
 	});
 }
 export function ModelAliases() {
