@@ -1839,3 +1839,24 @@ describe("a provider whose short window is a calendar day", () => {
 		expect(daily?.scopeId).toBeNull();
 	});
 });
+
+it("omits disabled accounts from public inventory, counts, and provider discovery", async () => {
+	insertAccount({ id: "enabled", name: "Enabled", provider: "codex" });
+	insertAccount({
+		id: "disabled",
+		name: "Disabled",
+		provider: "anthropic",
+		paused: 1,
+		pause_reason: "subscription_expired",
+	});
+	db.run("UPDATE accounts SET disabled = 1 WHERE id = 'disabled'");
+	const snapshot = await createPublicSnapshotReader(
+		fakeDbOps(),
+		fakeConfig,
+		() => fakeStrategy(),
+	)(NOW);
+	expect(snapshot.accounts.map((a) => a.id)).toEqual(["enabled"]);
+	expect(snapshot.pool.configured).toBe(1);
+	expect(snapshot.pool.paused).toBe(0);
+	expect(snapshot.providers.map((p) => p.provider)).toEqual(["codex"]);
+});

@@ -174,3 +174,26 @@ describe("startUsagePollingFor", () => {
 		expect(started).toHaveLength(0);
 	});
 });
+
+it.each([
+	"anthropic",
+	"codex",
+	"devin",
+	"zai",
+	"kilo",
+])("never starts polling a disabled %s account", (provider) => {
+	expect(
+		startUsagePollingFor(
+			account({
+				provider,
+				disabled: true,
+				access_token: "token",
+				refresh_token: "refresh",
+			}),
+			starters(),
+		),
+	).toBe(false);
+	expect(started).toHaveLength(0);
+	expect(anthropicStarts).toHaveLength(0);
+	expect(devinStarts).toHaveLength(0);
+});

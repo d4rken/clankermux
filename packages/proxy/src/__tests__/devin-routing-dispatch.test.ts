@@ -191,3 +191,21 @@ it("does not accept synthetic status header tampering", async () => {
 	).rejects.toThrow();
 	expect(globalThis.fetch).not.toHaveBeenCalled();
 });
+
+it("rejects a destination disabled after route selection before dispatch", async () => {
+	const { account, ctx, meta, request, proof } = await setup();
+	ctx.dbOps.getAccount = mock(async () => ({ ...account, disabled: true }));
+	globalThis.fetch = mock(async () => devinReply()) as never;
+	await expect(
+		sendAuthorizedRequest(
+			request,
+			account,
+			meta,
+			ctx,
+			undefined,
+			undefined,
+			proof,
+		),
+	).rejects.toThrow("Account was disabled before dispatch");
+	expect(globalThis.fetch).not.toHaveBeenCalled();
+});

@@ -52,7 +52,7 @@ export function isAutoUnpauseCandidate(
 	account: Account,
 	now: number = Date.now(),
 ): boolean {
-	if (!account.paused) return false;
+	if (account.disabled || !account.paused) return false;
 	if (!account.auto_fallback_enabled) return false;
 	if (!supportsWindowResetUnpause(account.provider)) return false;
 

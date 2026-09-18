@@ -2,19 +2,26 @@ import { Logger } from "@clankermux/logger";
 import type { AnthropicUsageObservation } from "@clankermux/providers";
 import type { Account, AccountIdentity } from "@clankermux/types";
 
-/**
- * How stale an account's subscription capture may get before the next usage
- * poll re-reads the profile. Same 6h the Codex coordinator uses
- * (`CODEX_SUBSCRIPTION_CHECK_INTERVAL_MS`).
- *
- * The profile endpoint shares the usage endpoint's rate-limit bucket, which the
- * 90s usage poll already spends ~960 requests a day per account into; four more
- * is not a cost worth a cheaper cadence.
- */
+/** Routine profile refresh cadence for accounts whose usage is accessible. */
 export const ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS = 60_000;
 export const ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS = 5 * 60_000;
+
+export function anthropicSubscriptionDiagnosisThrottleMs(
+	account: Account,
+): number {
+	const checkedAt = account.identity_subscription_checked_at;
+	const fetchedAt = account.identity_profile_fetched_at;
+	const confirmedActive =
+		account.identity_subscription_status === "active" &&
+		checkedAt != null &&
+		fetchedAt != null &&
+		fetchedAt >= checkedAt;
+	return confirmedActive
+		? ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS
+		: ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS;
+}
 
 export interface AnthropicSubscriptionRefreshDeps {
 	/**
@@ -109,6 +116,7 @@ export async function refreshAnthropicSubscription(
 		const account = await deps.getAccount(accountId);
 		if (
 			!account ||
+			account.disabled ||
 			!isCurrent() ||
 			deps.canFetchProfile?.() === false ||
 			!isAnthropicSubscriptionRefreshDue(account, nowMs, throttleMs)
@@ -160,11 +168,14 @@ export async function observeAnthropicUsage(
 	if (!isCurrent()) return;
 	const log = deps.logger ?? new Logger("AnthropicSubscriptionRefresh");
 	try {
-		const changed = await deps.recordUsageAccess(
-			accountId,
-			accessToken,
-			outcome === "permission_denied",
-		);
+		const changed =
+			outcome === "unavailable"
+				? false
+				: await deps.recordUsageAccess(
+						accountId,
+						accessToken,
+						outcome === "permission_denied",
+					);
 		if (!isCurrent()) return;
 		if (changed)
 			log.info(
@@ -172,16 +183,15 @@ export async function observeAnthropicUsage(
 			);
 		const current = await deps.getAccount(accountId);
 		const needsDiagnosis =
-			outcome === "permission_denied" &&
-			current?.paused &&
-			current.pause_reason === "usage_permission_denied";
+			current?.paused && current.pause_reason === "usage_permission_denied";
+		if (outcome === "unavailable" && !needsDiagnosis) return;
 		await refreshAnthropicSubscription(accountId, accessToken, deps, {
 			isCurrent,
 			throttleMs:
 				firstPermissionDenial || (outcome === "success" && changed)
 					? ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS
 					: needsDiagnosis
-						? ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS
+						? anthropicSubscriptionDiagnosisThrottleMs(current)
 						: ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 		});
 	} catch (err) {

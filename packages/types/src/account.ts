@@ -360,6 +360,7 @@ export interface AccountRow {
 	session_start?: number | null;
 	session_request_count?: number;
 	paused?: boolean | number | null;
+	disabled?: boolean | number | null;
 	rate_limit_reset?: number | null;
 	rate_limit_status?: string | null;
 	rate_limit_remaining?: number | null;
@@ -415,6 +416,8 @@ export interface Account {
 	consecutive_rate_limits: number;
 	session_start: number | null;
 	session_request_count: number;
+	/** Operator exclusion. Only an explicit enable action clears it. */
+	disabled?: boolean;
 	paused: boolean;
 	rate_limit_reset: number | null;
 	rate_limit_status: string | null;
@@ -493,6 +496,8 @@ export interface AccountResponse {
 	totalRequests: number;
 	lastUsed: string | null;
 	created: string;
+	/** Operator exclusion. Only an explicit enable action clears it. */
+	disabled?: boolean;
 	paused: boolean;
 	/** Why the account is paused (e.g. "manual", "overage", "failure_threshold", "subscription_expired", "oauth_invalid_grant"); null when not paused or unknown. */
 	pauseReason?: string | null;
@@ -767,6 +772,8 @@ export interface AccountDisplay {
 	tokenStatus: "valid" | "expired";
 	rateLimitStatus: string;
 	sessionInfo: string;
+	/** Operator exclusion. Only an explicit enable action clears it. */
+	disabled?: boolean;
 	paused: boolean;
 	rate_limited_until?: number | null;
 	rate_limited_reason?: RateLimitReason | null;
@@ -788,6 +795,8 @@ export interface AccountListItem {
 	lastUsed: Date | null;
 	requestCount: number;
 	totalRequests: number;
+	/** Operator exclusion. Only an explicit enable action clears it. */
+	disabled?: boolean;
 	paused: boolean;
 	tokenStatus: "valid" | "expired";
 	rateLimitStatus: string;
@@ -886,6 +895,7 @@ export function toAccount(row: AccountRow): Account {
 		session_start: toNumOrNull(row.session_start),
 		session_request_count: toNum(row.session_request_count),
 		paused: !!row.paused,
+		disabled: !!row.disabled,
 		rate_limit_reset: toNumOrNull(row.rate_limit_reset),
 		rate_limit_status: row.rate_limit_status || null,
 		rate_limit_remaining: toNumOrNull(row.rate_limit_remaining),
@@ -959,6 +969,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 			: null,
 		created: new Date(account.created_at).toISOString(),
 		paused: account.paused,
+		disabled: !!account.disabled,
 		tokenStatus,
 		tokenExpiresAt: account.expires_at
 			? new Date(account.expires_at).toISOString()
@@ -1070,6 +1081,7 @@ export function toAccountDisplay(account: Account): AccountDisplay {
 		rateLimitStatus,
 		sessionInfo,
 		paused: account.paused,
+		disabled: !!account.disabled,
 		rate_limited_until: account.rate_limited_until,
 		session_start: account.session_start,
 		session_request_count: account.session_request_count,

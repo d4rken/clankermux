@@ -160,7 +160,7 @@ describe("Anthropic usage diagnosis", () => {
 		);
 		expect(f.events.filter((e) => e === "profile")).toHaveLength(4);
 	});
-	it("does not consume a profile check while the shared upstream backoff is active", async () => {
+	it("does not consume a profile check while the profile endpoint backoff is active", async () => {
 		const f = fixture();
 		const before = f.row.identity_subscription_checked_at;
 		f.deps.canFetchProfile = () => false;
@@ -174,6 +174,68 @@ describe("Anthropic usage diagnosis", () => {
 			f.deps,
 		);
 		expect(f.row.pause_reason).toBe("subscription_expired");
+	});
+	it("diagnoses an existing denial when usage is unavailable without recording recovery", async () => {
+		const f = fixture();
+		f.row.paused = true;
+		f.row.pause_reason = "usage_permission_denied";
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual(["profile", "identity"]);
+		expect(f.row.paused).toBe(true);
+		expect(f.row.pause_reason).toBe("subscription_expired");
+	});
+	it.each([
+		null,
+		"manual",
+		"oauth_invalid_grant",
+		"subscription_expired",
+	])("does not diagnose or change %s pauses based on unavailable usage", async (reason) => {
+		const f = fixture();
+		f.row.paused = reason !== null;
+		f.row.pause_reason = reason;
+		f.advance(ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual([]);
+		expect(f.row.pause_reason).toBe(reason);
+	});
+	it("keeps the denial when the independent profile check fails or is backed off", async () => {
+		const f = fixture();
+		f.row.paused = true;
+		f.row.pause_reason = "usage_permission_denied";
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
+		f.deps.canFetchProfile = () => false;
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual([]);
+		f.deps.canFetchProfile = () => true;
+		f.profile(null);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual(["profile"]);
+		expect(f.row.pause_reason).toBe("usage_permission_denied");
+	});
+	it("uses the routine cadence after a successful active-subscription diagnosis", async () => {
+		const f = fixture();
+		f.row.paused = true;
+		f.row.pause_reason = "usage_permission_denied";
+		f.row.identity_subscription_status = "active";
+		f.row.identity_profile_fetched_at = f.row.identity_subscription_checked_at!;
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual([]);
+		f.advance(ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual(["profile", "identity"]);
+	});
+	it("retries after five minutes when active profile evidence predates the latest attempt", async () => {
+		const f = fixture();
+		f.row.paused = true;
+		f.row.pause_reason = "usage_permission_denied";
+		f.row.identity_subscription_status = "active";
+		f.row.identity_profile_fetched_at =
+			f.row.identity_subscription_checked_at! - 1;
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
+		await observeAnthropicUsage(f.observation("unavailable", false), f.deps);
+		expect(f.events).toEqual(["profile", "identity"]);
 	});
 	it("recovers automatic expiry pauses on successful usage without needing profile evidence", async () => {
 		const f = fixture();

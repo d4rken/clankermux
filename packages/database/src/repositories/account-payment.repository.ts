@@ -50,7 +50,10 @@ export class AccountPaymentRepository extends BaseRepository<AccountPaymentRow> 
 				id, account_id, account_name, kind, paid_date, paid_at_ms,
 				amount_usd_micros, recorded_at, source, import_key, notes, deleted_at
 			)
-			VALUES (?, ?, ?, 'subscription', ?, ?, ?, ?, 'auto', NULL, NULL, NULL)
+			SELECT ?, ?, ?, 'subscription', ?, ?, ?, ?, 'auto', NULL, NULL, NULL
+			WHERE EXISTS (SELECT 1 FROM accounts WHERE id = ? AND disabled = 0
+			 AND COALESCE(CASE WHEN date(renewal_auto_start_date) = renewal_auto_start_date
+			 THEN renewal_auto_start_date END, '') <= ?)
 		`,
 			[
 				crypto.randomUUID(),
@@ -60,6 +63,8 @@ export class AccountPaymentRepository extends BaseRepository<AccountPaymentRow> 
 				localMidnightMsOf(dueDate),
 				amountUsdMicros,
 				now,
+				accountId,
+				dueDate,
 			],
 		);
 		return changes > 0;

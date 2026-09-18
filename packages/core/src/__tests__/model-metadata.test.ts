@@ -352,7 +352,7 @@ describe("published model metadata", () => {
 				{ provider: "anthropic", format: "anthropic" },
 				{ provider: "openrouter", format: "anthropic" },
 			]),
-		).toBeUndefined();
+		).toEqual({ mode: "unknown", expiry: "unavailable", source: "unknown" });
 		expect(
 			resolveModelCachePolicy(
 				"claude-opus-4-8",
@@ -368,7 +368,7 @@ describe("published model metadata", () => {
 					customEndpoint: "https://proxy.invalid",
 				},
 			]),
-		).toBeUndefined();
+		).toEqual({ mode: "unknown", expiry: "unavailable", source: "unknown" });
 	});
 
 	it("requires known models, native Anthropic ingress and at least one route", () => {
@@ -377,14 +377,14 @@ describe("published model metadata", () => {
 				resolveModelCachePolicy("claude-opus-4-8", [
 					{ provider: "anthropic", format },
 				]),
-			).toBeUndefined();
+			).toEqual({ mode: "unknown", expiry: "unavailable", source: "unknown" });
 		}
 		expect(resolveModelCachePolicy("claude-opus-4-8", [])).toBeUndefined();
 		expect(
 			resolveModelCachePolicy("claude-unknown", [
 				{ provider: "anthropic", format: "anthropic" },
 			]),
-		).toBeUndefined();
+		).toEqual({ mode: "unknown", expiry: "unavailable", source: "unknown" });
 		const direct = resolveModelCachePolicy("claude-opus-4-8", [
 			{ provider: "anthropic", format: "anthropic" },
 		]);

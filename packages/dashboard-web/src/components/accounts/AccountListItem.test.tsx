@@ -76,6 +76,7 @@ function render(account: Account): string {
 		<AccountListItem
 			account={account}
 			onPauseToggle={noop}
+			onDisabledToggle={noop}
 			onForceResetRateLimit={noop}
 			onRefreshUsage={async () => {}}
 			onRemove={noop}
@@ -272,4 +273,19 @@ describe("AccountListItem — OpenRouter details", () => {
 		expect(html).not.toContain("Refresh OpenRouter account details");
 		expect(html).not.toContain("OpenRouter account details unavailable");
 	});
+});
+
+it("keeps a disabled account manageable without current health warnings or usage actions", () => {
+	const html = render(
+		makeAccount({
+			disabled: true,
+			paused: true,
+			pauseReason: "subscription_expired",
+		}),
+	);
+	expect(html).toContain("Disabled");
+	expect(html).toContain(">Enable</button>");
+	expect(html).not.toContain("Recheck access");
+	expect(html).not.toContain("Subscription expired · Paused");
+	expect(html).toMatch(/disabled=""[^>]*title="Resume account"/);
 });

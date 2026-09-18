@@ -13,6 +13,8 @@ import type {
 import {
 	MAX_STRING_BYTES,
 	toPublicAccountsDto,
+	toPublicAvailabilityReason,
+	toPublicAvailabilityState,
 	toPublicRequestDoneDto,
 	toPublicStatusDto,
 	toPublicWindowForecastDto,
@@ -235,4 +237,15 @@ describe("public request cost provenance", () => {
 		expect(dto.costUsd).toBe(expectedCost);
 		expect(dto.costSource).toBe(expectedSource);
 	});
+});
+
+it("distinguishes payment problems, subscription expiry, manual pauses, and provider blocks", () => {
+	expect(toPublicAvailabilityState("payment_required", false)).toBe(
+		"payment_required",
+	);
+	expect(toPublicAvailabilityState("blocked", false)).toBe("blocked");
+	for (const reason of ["subscription_expired", "manual"] as const) {
+		expect(toPublicAvailabilityState("blocked", true)).toBe("paused");
+		expect(toPublicAvailabilityReason("blocked", true, reason)).toBe(reason);
+	}
 });

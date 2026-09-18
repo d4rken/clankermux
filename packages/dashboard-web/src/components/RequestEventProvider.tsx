@@ -88,7 +88,7 @@ const RequestEventContext = createContext<RequestEventContextValue | null>(
 );
 
 export function RequestEventProvider({ children }: { children: ReactNode }) {
-	const { data: accounts } = useAccounts();
+	const { data: accounts } = useAccounts(true);
 	const [windowMs, setWindowMsState] = useState(loadLiveWindow);
 
 	// Read through a ref so the store's normalizer always sees the CURRENT

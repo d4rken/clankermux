@@ -210,7 +210,7 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 				}>(
 					`
 					SELECT id, name, renewal_anchor, renewal_cadence, renewal_price_usd_micros
-					FROM accounts
+					FROM accounts WHERE disabled = 0
 				`,
 					[],
 				),

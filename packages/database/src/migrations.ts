@@ -45,6 +45,7 @@ export function ensureSchema(db: Database): void {
 			session_start INTEGER,
 			session_request_count INTEGER DEFAULT 0,
 			paused INTEGER DEFAULT 0,
+			disabled INTEGER NOT NULL DEFAULT 0,
 			rate_limit_reset INTEGER,
 			rate_limit_status TEXT,
 			rate_limit_remaining INTEGER,
@@ -1044,6 +1045,11 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 	column: string; // e.g. "my_field"
 	ddl: string; // full statement, e.g. "ALTER TABLE accounts ADD COLUMN my_field TEXT"
 }> = [
+	{
+		table: "accounts",
+		column: "disabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+	},
 	// ---------------------------------------------------------------------
 	// Restored 2026-08-23. These eight entries were deleted by 35b993f0
 	// ("remove legacy DB migration code"), which emptied this array on the

@@ -714,6 +714,7 @@ export function listLiveScopedFamiliesByClass(
 	accounts: AccountResponse[],
 	now: number,
 ): ReadonlyMap<string, LiveScopedFamily[]> {
+	accounts = accounts.filter((account) => !account.disabled);
 	const byClass = new Map<string, Map<ModelFamily, string>>();
 	for (const account of accounts) {
 		if (!account.usageData) continue;
@@ -984,6 +985,7 @@ export function computeFamilyWeeklyUsage(
 	accounts: AccountResponse[],
 	now: number,
 ): FamilyWeeklyUsage[] {
+	accounts = accounts.filter((account) => !account.disabled);
 	// Rows are keyed by account id, not pushed: ONE account can report several
 	// scoped windows that collapse onto the same family — getModelFamily() maps
 	// Mythos-class display names onto "fable". Left as a plain push, that account
@@ -1129,6 +1131,7 @@ export function computePoolUsage(
 	window: PoolWindow,
 	now: number,
 ): PoolUsageResult {
+	accounts = accounts.filter((account) => !account.disabled);
 	const fallback: PoolUsageFallback[] = [];
 	// Captured while iterating the accounts so the at-risk projection below can
 	// reach each contribution's server-side prediction. Keyed by account id —

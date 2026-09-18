@@ -70,6 +70,7 @@ interface AccountListItemProps {
 	// has not used this week as a labelled row instead of omitting it.
 	poolScopedFamilies?: readonly LiveScopedFamily[];
 	onForceAccount?: (account: Account) => void;
+	onDisabledToggle?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -122,6 +123,7 @@ export function AccountListItem({
 	poolScopedFamilies,
 	onForceAccount,
 	onPauseToggle,
+	onDisabledToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
 	onRemove,
@@ -235,18 +237,24 @@ export function AccountListItem({
 					>
 						<p className="font-medium max-w-full truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
-						<OAuthTokenStatusWithBoundary
-							accountName={account.name}
-							hasRefreshToken={account.hasRefreshToken}
-						/>
-						<AccountPausedChip account={account} status={status} />
-						<AccountRoutingChips status={status} />
+						{account.disabled ? (
+							<span className="text-xs text-muted-foreground">Disabled</span>
+						) : (
+							<>
+								<OAuthTokenStatusWithBoundary
+									accountName={account.name}
+									hasRefreshToken={account.hasRefreshToken}
+								/>
+								<AccountPausedChip account={account} status={status} />
+								<AccountRoutingChips status={status} />
+							</>
+						)}
 					</div>
 					<AccountIdentityLine
 						account={account}
 						className="break-words"
 						details={
-							status.showRenewalChip ? (
+							!account.disabled && status.showRenewalChip ? (
 								<AccountRenewalInfo account={account} status={status} inline />
 							) : undefined
 						}
@@ -263,7 +271,7 @@ export function AccountListItem({
 							variant="ghost"
 							size="sm"
 							className="h-8 gap-tight text-xs"
-							disabled={isRefreshingUsage}
+							disabled={account.disabled || isRefreshingUsage}
 							onClick={handleRefreshUsage}
 							title={
 								account.provider === "devin"
@@ -286,6 +294,7 @@ export function AccountListItem({
 					<Button
 						variant="ghost"
 						size="sm"
+						disabled={account.disabled}
 						onClick={() => onPauseToggle(account)}
 						title={account.paused ? "Resume account" : "Pause account"}
 					>
@@ -295,6 +304,20 @@ export function AccountListItem({
 							<Pause className="h-4 w-4" />
 						)}
 					</Button>
+					{onDisabledToggle && (
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => onDisabledToggle(account)}
+							title={
+								account.disabled
+									? "Enable account and recheck access"
+									: "Disable account: stop gateway activity and exclude from current statistics"
+							}
+						>
+							{account.disabled ? "Enable" : "Disable"}
+						</Button>
+					)}
 					{onForceAccount && (
 						<Button
 							variant="ghost"
@@ -302,6 +325,7 @@ export function AccountListItem({
 							className={
 								isForced ? "text-destructive-strong bg-destructive/10" : ""
 							}
+							disabled={account.disabled}
 							onClick={() => onForceAccount(account)}
 							title={
 								isForced
@@ -652,43 +676,47 @@ export function AccountListItem({
 			) : null}
 			{/* Status flags: their own group, a step away from the identity above
 			    and the quota bars below. */}
-			<AccountStatusChips
-				account={account}
-				status={status}
-				showAccountDetails={false}
-			/>
-			<AccountAccessNotice
-				account={account}
-				isChecking={isRefreshingUsage}
-				onRecheck={handleRefreshUsage}
-			/>
-			{account.provider === "openrouter" && !account.customEndpoint && (
-				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
-			)}
-			{(account.rateLimitReset ||
-				account.usageData ||
-				account.staleUsage ||
-				account.usageRateLimitedUntil ||
-				providerShowsCreditsBalance(account.provider)) && (
-				<RateLimitProgress
-					resetIso={account.rateLimitReset}
-					usageUtilization={account.usageUtilization}
-					usageWindow={account.usageWindow}
-					usageData={account.usageData}
-					staleUsage={account.staleUsage}
-					usageAsOfIso={account.usageAsOfIso}
-					usageRateLimitedUntil={account.usageRateLimitedUntil}
-					usageThrottledUntil={account.usageThrottledUntil}
-					usageThrottledWindows={account.usageThrottledWindows}
-					provider={account.provider}
-					showWeekly={providerShowsWeeklyUsage(account.provider)}
-					prediction={account.prediction}
-					burnAnchors={account.burnAnchors}
-					earliestResets={earliestResets}
-					latestResets={latestResets}
-					poolScopedFamilies={poolScopedFamilies}
-					compact
-				/>
+			{!account.disabled && (
+				<>
+					<AccountStatusChips
+						account={account}
+						status={status}
+						showAccountDetails={false}
+					/>
+					<AccountAccessNotice
+						account={account}
+						isChecking={isRefreshingUsage}
+						onRecheck={handleRefreshUsage}
+					/>
+					{account.provider === "openrouter" && !account.customEndpoint && (
+						<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
+					)}
+					{(account.rateLimitReset ||
+						account.usageData ||
+						account.staleUsage ||
+						account.usageRateLimitedUntil ||
+						providerShowsCreditsBalance(account.provider)) && (
+						<RateLimitProgress
+							resetIso={account.rateLimitReset}
+							usageUtilization={account.usageUtilization}
+							usageWindow={account.usageWindow}
+							usageData={account.usageData}
+							staleUsage={account.staleUsage}
+							usageAsOfIso={account.usageAsOfIso}
+							usageRateLimitedUntil={account.usageRateLimitedUntil}
+							usageThrottledUntil={account.usageThrottledUntil}
+							usageThrottledWindows={account.usageThrottledWindows}
+							provider={account.provider}
+							showWeekly={providerShowsWeeklyUsage(account.provider)}
+							prediction={account.prediction}
+							burnAnchors={account.burnAnchors}
+							earliestResets={earliestResets}
+							latestResets={latestResets}
+							poolScopedFamilies={poolScopedFamilies}
+							compact
+						/>
+					)}
+				</>
 			)}
 		</div>
 	);

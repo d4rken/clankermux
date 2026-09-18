@@ -69,6 +69,7 @@ export function startUsagePollingFor(
 	starters: UsagePollingStarters,
 	initialDelayMs = 0,
 ): boolean {
+	if (account.disabled) return false;
 	if (!supportsUsagePolling(account.provider)) {
 		log.debug(
 			`Not starting usage polling for ${account.name}: provider ${account.provider} has no pollable usage window`,

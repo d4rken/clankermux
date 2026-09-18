@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { resolveModelCachePolicy } from "@clankermux/core";
 import type { OpenAIRequest } from "@clankermux/openai-formats";
 import { makeAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
@@ -79,6 +80,23 @@ describe("OpenAICompatibleProvider Alibaba Features", () => {
 
 			// Call afterConvert to inject caching
 			provider.afterConvert(openaiBody);
+			expect(
+				resolveModelCachePolicy(openaiBody.model, [
+					{
+						provider: mockAccount.provider,
+						customEndpoint: mockAccount.custom_endpoint,
+						format: "openai",
+					},
+				]),
+			).toEqual({
+				mode: "explicit",
+				expiry: "unavailable",
+				source: "gateway-policy",
+				defaultTtlMs: 300_000,
+				refreshOnReuse: true,
+				ttlAnchor: "unknown",
+				ttlSemantics: "configured",
+			});
 
 			// Verify system message has cache_control
 			const systemMsg = openaiBody.messages[0];

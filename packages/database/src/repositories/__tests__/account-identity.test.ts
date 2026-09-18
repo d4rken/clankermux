@@ -40,6 +40,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			rate_limited_at INTEGER,
 			session_start INTEGER,
 			session_request_count INTEGER DEFAULT 0,
+			disabled INTEGER NOT NULL DEFAULT 0,
 			paused INTEGER DEFAULT 0,
 			rate_limit_reset INTEGER,
 			rate_limit_status TEXT,
@@ -597,12 +598,12 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		expect(account?.identity_subscription_status).toBe("active");
 	});
 
-	it("COALESCE-merges the subscription fields like the rest of the identity", async () => {
+	it("preserves subscription fields when a later token capture omits them", async () => {
 		insertAccount(db, "sub-7");
 		await repo.setAccountIdentityFromProfile("sub-7", withSubscription());
 		// A later capture without the organization block (the token envelope)
 		// must not erase what the profile fetch established.
-		await repo.setAccountIdentityFromProfile("sub-7", {
+		await repo.updateTokens("sub-7", "tok-2", 2_000, "refresh-2", {
 			externalAccountId: "ext-sub",
 			email: null,
 			organizationName: null,
@@ -613,6 +614,27 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		const account = await repo.findById("sub-7");
 		expect(account?.identity_subscription_status).toBe("active");
 		expect(account?.identity_subscription_started_at).toBe(SUB_START);
+	});
+
+	it("clears an omitted Anthropic profile status while preserving the subscription start and anchor", async () => {
+		insertAccount(db, "sub-7-profile");
+		await repo.setAccountIdentityFromProfile(
+			"sub-7-profile",
+			withSubscription(),
+		);
+		await repo.setAccountIdentityFromProfile("sub-7-profile", {
+			externalAccountId: "ext-sub",
+			email: null,
+			organizationName: null,
+			planTier: null,
+			rateLimitTier: null,
+		});
+
+		const account = await repo.findById("sub-7-profile");
+		expect(account?.identity_subscription_status).toBeNull();
+		expect(account?.identity_subscription_started_at).toBe(SUB_START);
+		expect(account?.renewal_anchor).toBe("2026-04-10");
+		expect(account?.renewal_anchor_source).toBe("derived");
 	});
 
 	it("records a status change (an expiring subscription is visible)", async () => {

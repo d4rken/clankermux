@@ -39,7 +39,7 @@ const WINDOW_PHRASES: Record<ErrorWindowKey, string> = {
 export function RecentErrorsCard() {
 	const { windowKey, setWindowKey, windowHours } = useErrorWindow();
 	const { data, isLoading, error } = useStats(undefined, windowHours);
-	const { data: accounts } = useAccounts();
+	const { data: accounts } = useAccounts(true);
 	const { dismiss, dismissMany, isDismissed } = useDismissedErrors();
 	const [selectedError, setSelectedError] = useState<RecentErrorGroup | null>(
 		null,

@@ -36,6 +36,22 @@ describe("instructionPathToRoot", () => {
 		).toBe("/home/u/repo");
 	});
 
+	it.each([
+		"/home/u/repo/.codex/worktrees/expiry-independent/.claude/CLAUDE.md",
+		"/home/u/repo/.codex/worktrees/expiry-independent/CLAUDE.md",
+		"/home/u/repo/.codex/worktrees/expiry-independent/.claude/rules/review.md",
+		"/home/u/repo/.codex/worktrees/outer/.claude/worktrees/inner/CLAUDE.md",
+		"/home/u/repo/.claude/worktrees/outer/.codex/worktrees/inner/CLAUDE.md",
+	])("collapses nested agent worktrees: %s", (path) => {
+		expect(instructionPathToRoot(path)).toBe("/home/u/repo");
+	});
+
+	it("does not treat other Codex directories as worktrees", () => {
+		expect(
+			instructionPathToRoot("/home/u/repo/.codex/examples/CLAUDE.md"),
+		).toBe("/home/u/repo/.codex/examples");
+	});
+
 	it("falls back to the containing directory for a root-level CLAUDE.md", () => {
 		expect(instructionPathToRoot("/home/u/repo/CLAUDE.md")).toBe(
 			"/home/u/repo",

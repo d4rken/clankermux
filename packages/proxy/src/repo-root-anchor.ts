@@ -17,13 +17,10 @@ import { isAncestorOrSame, toPathSegments } from "./project-path-match";
  *
  * Three rules make it trustworthy:
  *
- *  1. CUT AT THE FIRST `/.claude/`, not the last, and not just the filename.
- *     Instruction files live at `<root>/.claude/CLAUDE.md`, and `@`-imported
- *     rule files at `<root>/.claude/rules/*.md` — but a git worktree created
- *     under `<root>/.claude/worktrees/<name>` ALSO contains a
- *     `.claude/CLAUDE.md`, and cutting at its last `/.claude/` would name the
- *     worktree instead of the repository. Cutting at the first collapses every
- *     one of those forms onto the same root.
+ *  1. CUT AT THE FIRST `/.claude/` OR `/.codex/worktrees/`. Instruction
+ *     files and imported rules inside an agent worktree name the containing
+ *     repository, not the worktree. Taking the first marker also handles
+ *     nested worktrees created by different agents.
  *
  *  2. SHALLOWEST WINS. A monorepo can carry a directory-scoped instruction file
  *     deeper in the tree, and several rule files reduce to the same root, so
@@ -100,7 +97,7 @@ const ANCHOR_MARKER = "(project instructions";
  * Returns null for a path with no directory part, which cannot name a root.
  */
 export function instructionPathToRoot(path: string): string | null {
-	const marker = path.indexOf("/.claude/");
+	const marker = path.search(/\/(?:\.claude\/|\.codex\/worktrees\/)/);
 	if (marker > 0) return path.slice(0, marker);
 
 	const lastSlash = path.lastIndexOf("/");
