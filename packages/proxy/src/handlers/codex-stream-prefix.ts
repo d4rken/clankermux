@@ -33,6 +33,9 @@ const FAILURE_EVENTS: ReadonlySet<string> = new Set([
 	"response.failed",
 ]);
 
+/** Provider keepalives carry no generated content and must not commit a stream. */
+const KEEPALIVE_EVENTS: ReadonlySet<string> = new Set(["keepalive"]);
+
 /**
  * Prelude events observed in practice are `response.created` +
  * `response.in_progress`; the budget leaves room for one or two more rather than
@@ -40,13 +43,8 @@ const FAILURE_EVENTS: ReadonlySet<string> = new Set([
  */
 export const CODEX_PEEK_MAX_EVENTS = 4;
 export const CODEX_PEEK_MAX_BYTES = 256 * 1024;
-/**
- * Safety valve, not the normal exit. A healthy stream leaves the peek at its
- * first content event, and the prelude carries no content, so waiting here
- * cannot delay time-to-first-content. Measured over 93 prelude-only failures the
- * in-band error arrived at p50 1.8s / p90 5.8s from request start.
- */
-export const CODEX_PEEK_TIMEOUT_MS = 5_000;
+/** Maximum content-free wait; callers also cap it by the request's elapsed time. */
+export const CODEX_PEEK_TIMEOUT_MS = 90_000;
 
 export interface CodexStreamPeekOptions {
 	maxEvents?: number;
@@ -54,7 +52,10 @@ export interface CodexStreamPeekOptions {
 	timeoutMs?: number;
 }
 
-type SsePayload = StreamFailurePayload & { type?: unknown };
+type SsePayload = StreamFailurePayload & {
+	item?: { type?: unknown; content?: unknown; summary?: unknown };
+	type?: unknown;
+};
 
 type FrameVerdict =
 	/** Comment/keepalive: no event name and no payload. Keep reading. */
@@ -93,6 +94,17 @@ function classifyFrame(frame: string): FrameVerdict {
 	if (names.length === 0) return { kind: "skip" };
 	if (names.some((name) => FAILURE_EVENTS.has(name)))
 		return { kind: "failure", code: streamFailureCode(parsed ?? {}) };
+	if (names.every((name) => KEEPALIVE_EVENTS.has(name)))
+		return { kind: "skip" };
+	if (
+		names.every((name) => name === "response.output_item.added") &&
+		parsed?.item?.type === "reasoning" &&
+		[parsed.item.content, parsed.item.summary].every(
+			(value) =>
+				value === undefined || (Array.isArray(value) && value.length === 0),
+		)
+	)
+		return { kind: "prelude" };
 	if (names.every((name) => PRELUDE_EVENTS.has(name)))
 		return { kind: "prelude" };
 	return { kind: "commit" };
@@ -122,6 +134,7 @@ export async function peekCodexStreamPrefix(
 	const maxBytes = opts.maxBytes ?? CODEX_PEEK_MAX_BYTES;
 	const timeoutMs = opts.timeoutMs ?? CODEX_PEEK_TIMEOUT_MS;
 	if (
+		timeoutMs <= 0 ||
 		response.status !== 200 ||
 		!response.body ||
 		!response.headers

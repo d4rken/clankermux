@@ -526,10 +526,13 @@ function formatFamilyLabel(family: string): string {
  *
  * Pinned by the D8 case in `AccountStatusChips.test.tsx`.
  */
-const SELF_RESUMING_SUBSCRIPTION_PROVIDERS = new Set(["codex", "anthropic"]);
+const SELF_RESUMING_SUBSCRIPTION_PROVIDERS = new Set(["codex"]);
 
 /** Tooltip of the "Subscription expired" chip; the recovery clause is per provider. */
 function subscriptionExpiredTitle(provider: string): string {
+	if (provider === "anthropic") {
+		return "Anthropic denied usage access and its profile confirmed that the paid subscription has ended. Renew your subscription to restore access. Background checks continue, and this automatic pause clears when usage access returns.";
+	}
 	const cause =
 		"The provider refused this account because its subscription no longer covers the service — a lapsed plan, a cancelled subscription, or a seat removed from a team. It was auto-paused and no retries are scheduled against it.";
 	return SELF_RESUMING_SUBSCRIPTION_PROVIDERS.has(provider)

@@ -1,4 +1,5 @@
 import { Logger } from "@clankermux/logger";
+import type { AnthropicUsageObservation } from "@clankermux/providers";
 import type { Account, AccountIdentity } from "@clankermux/types";
 
 /**
@@ -12,6 +13,9 @@ import type { Account, AccountIdentity } from "@clankermux/types";
  */
 export const ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+export const ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS = 60_000;
+export const ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS = 5 * 60_000;
+
 export interface AnthropicSubscriptionRefreshDeps {
 	/**
 	 * Read the row. Called twice, both times for CURRENT state: once before the
@@ -21,6 +25,8 @@ export interface AnthropicSubscriptionRefreshDeps {
 	getAccount: (accountId: string) => Promise<Account | null>;
 	/** Fetch + normalize a profile identity; fails open (null on any error). */
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
+	/** An upstream backoff defers the check without consuming its claim. */
+	canFetchProfile?: () => boolean;
 	/**
 	 * Persist a captured identity through the shared identity write, as a
 	 * compare-and-swap on `expectedAccessToken`: the row must still hold the
@@ -41,16 +47,10 @@ export interface AnthropicSubscriptionRefreshDeps {
 	claimSubscriptionCheck: (
 		accountId: string,
 		nowMs: number,
+		throttleMs: number,
 	) => Promise<boolean>;
 	now?: () => number;
 	logger?: Logger;
-	/**
-	 * How the read is detached from the poll that resolved the token. The default
-	 * drops the (never-rejecting) promise on the floor, which is the point: the
-	 * poll must not wait on a profile read. Tests inject a collector so they can
-	 * await the read they triggered.
-	 */
-	detach?: (read: Promise<void>) => void;
 }
 
 /**
@@ -83,101 +83,52 @@ export function isAnthropicSubscriptionRefreshEligible(
 export function isAnthropicSubscriptionRefreshDue(
 	account: Account,
 	nowMs: number,
+	throttleMs = ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 ): boolean {
 	if (!isAnthropicSubscriptionRefreshEligible(account)) return false;
 	const checkedAt = account.identity_subscription_checked_at;
-	return (
-		checkedAt == null ||
-		nowMs - checkedAt >= ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS
-	);
+	return checkedAt == null || nowMs - checkedAt >= throttleMs;
 }
 
-/**
- * Re-read one Anthropic OAuth account's profile and persist what it reports, at
- * most once per {@link ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS}.
- *
- * Strictly additive, in the same sense as the Codex coordinator's subscription
- * capture: it never reports a failure to its caller, never touches credential
- * health, and never pauses or resumes anything. `accessToken` is the token the
- * caller resolved for this very moment — never one captured earlier, which is
- * the staleness that makes a read 401 against credentials that have since
- * rotated.
- *
- * The attempt is claimed BEFORE the fetch, and the claim is what stamps the
- * throttle — success and failure alike. Stamping only on success would re-issue
- * the profile GET on every 90s poll for an account whose profile endpoint is
- * failing, which is the load this throttle exists to prevent.
- */
+/** The claim throttles attempts, including failed reads, across restarts. */
 export async function refreshAnthropicSubscription(
 	accountId: string,
 	accessToken: string,
 	deps: AnthropicSubscriptionRefreshDeps,
+	options: { throttleMs?: number; isCurrent?: () => boolean } = {},
 ): Promise<void> {
 	const log = deps.logger ?? new Logger("AnthropicSubscriptionRefresh");
 	const nowMs = (deps.now ?? Date.now)();
-
+	const isCurrent = options.isCurrent ?? (() => true);
+	const throttleMs = Math.max(
+		ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS,
+		options.throttleMs ?? ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
+	);
 	try {
-		if (!accessToken) return;
+		if (!accessToken || !isCurrent()) return;
 		const account = await deps.getAccount(accountId);
-		if (!account) return;
-		// A read, so it cannot settle the question — but it is false on all but
-		// one poll in 240, and it keeps every account that can never be claimed
-		// away from the claim's write statement.
-		if (!isAnthropicSubscriptionRefreshDue(account, nowMs)) return;
-		// The claim settles it. Between the check above and this line a second
-		// invocation — a dashboard-driven refreshNow resolving a token while a
-		// poll's read is still in flight — can have taken the same window, and
-		// only one conditional UPDATE can change the row. The loser stops here
-		// having spent nothing.
-		if (!(await deps.claimSubscriptionCheck(accountId, nowMs))) return;
-
+		if (
+			!account ||
+			!isCurrent() ||
+			deps.canFetchProfile?.() === false ||
+			!isAnthropicSubscriptionRefreshDue(account, nowMs, throttleMs)
+		)
+			return;
+		if (
+			!(await deps.claimSubscriptionCheck(accountId, nowMs, throttleMs)) ||
+			!isCurrent()
+		)
+			return;
 		const identity = await deps.fetchProfile(accessToken);
-		if (!identity) {
-			// Fail-open: the read says nothing about the subscription, so only the
-			// claim's stamp stands — writing the empty state would erase what an
-			// earlier successful read observed.
-			log.debug(
-				`subscription refresh returned nothing for ${account.name} (retrying after the throttle)`,
-			);
-			return;
-		}
-		// The fetch above ran detached from the poll that resolved the token, and
-		// `usageCache.stopPolling` drops the token provider but cannot cancel a
-		// continuation already awaiting it. So re-read before writing: the account
-		// may have been deleted (the write would target a row that is gone) or had
-		// its provider changed (Anthropic identity onto a row that is no longer
-		// Anthropic).
-		//
-		// Bounded on purpose. The alternative — a cancellation signal threaded
-		// through `usageCache.startPolling` — widens a surface shared with zai,
-		// kilo and devin for a concern that is Anthropic's alone.
+		if (!identity || !isCurrent()) return;
 		const current = await deps.getAccount(accountId);
-		if (!current || !isAnthropicSubscriptionRefreshEligible(current)) {
-			log.debug(
-				`discarding subscription read for ${account.name}: no longer an Anthropic OAuth account`,
-			);
+		if (
+			!current ||
+			!isCurrent() ||
+			!isAnthropicSubscriptionRefreshEligible(current)
+		)
 			return;
-		}
-		// The write is a compare-and-swap on the token this profile was read with,
-		// because the re-check above cannot see a re-authentication: provider and
-		// refresh token are both still set afterwards, while the row may now hold
-		// a different Anthropic account's credentials — and then this identity is
-		// someone else's. An ordinary token rotation fails the same CAS, which is
-		// accepted: rejecting costs one skipped refresh cycle, accepting would
-		// reintroduce the overwrite.
-		//
-		// What remains uncovered is a read landing during shutdown teardown with
-		// the credentials unchanged, which writes the value it would have written
-		// moments earlier.
-		//
-		// Written through the identity COALESCE merge, so the Anthropic-gated
-		// renewal-anchor seeding still runs for an account that has no anchor. The
-		// merge cannot CLEAR a column: a status that changes (active → canceled)
-		// is a new non-null value and lands, a status the profile stops reporting
-		// altogether stays at its last observed value.
 		if (!(await deps.setIdentity(accountId, identity, accessToken))) {
-			// Not an error, and not a retry signal: the claim stays stamped, so the
-			// account is simply re-read once the window elapses.
 			log.debug(
 				`discarding subscription read for ${account.name}: credentials changed during the read`,
 			);
@@ -186,44 +137,56 @@ export async function refreshAnthropicSubscription(
 		log.debug(`refreshed subscription state for ${current.name}`);
 	} catch (err) {
 		log.warn(
-			`subscription refresh failed for account ${accountId}: ${
-				err instanceof Error ? err.message : String(err)
-			}`,
+			`subscription refresh failed for account ${accountId}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 }
 
-/**
- * Compose the usage poller's token provider with the throttled subscription
- * re-read.
- *
- * The token provider is the seam because it already has exactly the lifecycle
- * the read needs: it is invoked once per poll (so the read inherits the poll's
- * cadence and its boot stagger), it resolves a live token at that moment, and
- * `usageCache.stopPolling` drops it — so an account that stops polling stops
- * being read, with no second timer to keep in step.
- *
- * The read is detached rather than awaited: a slow or failing profile fetch
- * must not delay the usage poll, and {@link refreshAnthropicSubscription} never
- * rejects, so it cannot fail one either. A token-resolution failure is passed
- * through untouched — the poller's own `onTokenRefreshFailure` handling depends
- * on seeing it — and issues no read.
- */
-export function withAnthropicSubscriptionRefresh(
-	accountId: string,
-	tokenProvider: () => Promise<string>,
-	deps: AnthropicSubscriptionRefreshDeps,
-): () => Promise<string> {
-	const detach =
-		deps.detach ??
-		((read: Promise<void>) => {
-			void read;
+export interface AnthropicUsageObservationDeps
+	extends AnthropicSubscriptionRefreshDeps {
+	recordUsageAccess: (
+		accountId: string,
+		accessToken: string,
+		permissionDenied: boolean,
+	) => Promise<boolean>;
+}
+
+export async function observeAnthropicUsage(
+	observation: AnthropicUsageObservation,
+	deps: AnthropicUsageObservationDeps,
+): Promise<void> {
+	const { accountId, accessToken, outcome, firstPermissionDenial, isCurrent } =
+		observation;
+	if (!isCurrent()) return;
+	const log = deps.logger ?? new Logger("AnthropicSubscriptionRefresh");
+	try {
+		const changed = await deps.recordUsageAccess(
+			accountId,
+			accessToken,
+			outcome === "permission_denied",
+		);
+		if (!isCurrent()) return;
+		if (changed)
+			log.info(
+				`Account ${accountId}: usage access ${outcome === "success" ? "restored" : "denied"}`,
+			);
+		const current = await deps.getAccount(accountId);
+		const needsDiagnosis =
+			outcome === "permission_denied" &&
+			current?.paused &&
+			current.pause_reason === "usage_permission_denied";
+		await refreshAnthropicSubscription(accountId, accessToken, deps, {
+			isCurrent,
+			throttleMs:
+				firstPermissionDenial || (outcome === "success" && changed)
+					? ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS
+					: needsDiagnosis
+						? ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS
+						: ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 		});
-	return async () => {
-		const accessToken = await tokenProvider();
-		if (accessToken) {
-			detach(refreshAnthropicSubscription(accountId, accessToken, deps));
-		}
-		return accessToken;
-	};
+	} catch (err) {
+		log.warn(
+			`usage access diagnosis failed for account ${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 }

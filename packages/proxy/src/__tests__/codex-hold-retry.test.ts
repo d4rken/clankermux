@@ -185,7 +185,10 @@ function codexResponse(body: string): Response {
 	return new Response(body, { status: 200 });
 }
 
-type UpstreamStep = string | { status: number; body: string };
+type UpstreamStep =
+	| string
+	| { status: number; body: string }
+	| (() => Response);
 
 /**
  * Mocked upstream keyed by Authorization header: each bearer consumes its own
@@ -227,6 +230,7 @@ function installFetch(
 			consumed.set(auth, index + 1);
 			const step = steps[auth]?.[index] ?? healthySse;
 			if (typeof step === "string") return codexResponse(step);
+			if (typeof step === "function") return step();
 			return new Response(step.body, {
 				status: step.status,
 				headers: { "content-type": "application/json" },
@@ -304,6 +308,44 @@ describe("Codex in-band failure: hold and retry the same account", () => {
 		expect(body).toBe(healthySse);
 		expect(getCodexTransientFailureUntil(first.id)).not.toBeNull();
 	});
+
+	it("holds then fails over when overload arrives after five seconds and keepalives", async () => {
+		const { first, second } = makePair();
+		const calls: string[] = [];
+		const delayedFailure = () => {
+			let sentPrelude = false;
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					async pull(controller) {
+						const encoder = new TextEncoder();
+						if (!sentPrelude) {
+							sentPrelude = true;
+							controller.enqueue(
+								encoder.encode(
+									'event: response.created\ndata: {"type":"response.created"}\n\n' +
+										'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n' +
+										'event: keepalive\ndata: {"type":"keepalive"}\n\n' +
+										'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"reasoning","content":[],"encrypted_content":"opaque"}}\n\n',
+								),
+							);
+							return;
+						}
+						await new Promise((resolve) => setTimeout(resolve, 5_100));
+						controller.enqueue(encoder.encode(errorFirstSse));
+						controller.close();
+					},
+				}),
+			);
+		};
+		installFetch({ "Bearer first": [delayedFailure, delayedFailure] }, calls);
+
+		const res = await callHandleProxy(
+			makeRequest(),
+			makeContext([first, second]),
+		);
+		expect(await res.text()).toBe(healthySse);
+		expect(calls).toEqual(["Bearer first", "Bearer first", "Bearer second"]);
+	}, 20_000);
 
 	it("forwards the failure once every account has spent its retry", async () => {
 		const { first, second } = makePair();

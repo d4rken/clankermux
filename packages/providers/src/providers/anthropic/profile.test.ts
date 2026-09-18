@@ -73,3 +73,37 @@ describe("fetchAnthropicProfile", () => {
 		await expect(fetchAnthropicProfile("tok")).resolves.toBeNull();
 	});
 });
+
+describe("Anthropic profile Retry-After", () => {
+	it.each([
+		["120", 120_000],
+		[new Date(Date.UTC(2000, 0, 1) + 120_000).toUTCString(), 120_000],
+		["invalid", 60_000],
+	])("respects %s before another profile read", async (retryAfter, delayMs) => {
+		let now = Date.UTC(2000, 0, 1);
+		const clock = spyOn(Date, "now").mockImplementation(() => now);
+		const fetchSpy = spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(
+				new Response("throttled", {
+					status: 429,
+					headers: { "retry-after": String(retryAfter) },
+				}),
+			)
+			.mockResolvedValue(
+				Response.json({ organization: { subscription_status: "active" } }),
+			);
+		try {
+			expect(await fetchAnthropicProfile("first-token")).toBeNull();
+			now += Number(delayMs) - 1;
+			expect(await fetchAnthropicProfile("second-token")).toBeNull();
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			now += 1;
+			expect(await fetchAnthropicProfile("second-token")).toMatchObject({
+				subscriptionStatus: "active",
+			});
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+});

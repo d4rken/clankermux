@@ -3,6 +3,7 @@ export { AnthropicOAuthProvider } from "./oauth";
 export { isAnthropicOrgPermissionDenied } from "./org-permission-denied";
 export {
 	ANTHROPIC_PROFILE_ENDPOINT,
+	canFetchAnthropicProfile,
 	fetchAnthropicProfile,
 } from "./profile";
 export {

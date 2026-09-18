@@ -193,6 +193,9 @@ export interface PollingPolicy {
 	 * account-wide (Claude-Backup-2, 2026-08-02, 14.4h).
 	 */
 	initialDelayMs?: number;
+	onAnthropicUsageObservation?: (
+		observation: AnthropicUsageObservation,
+	) => Promise<void>;
 }
 
 /**
@@ -1103,6 +1106,14 @@ interface UsageCacheEntry {
 /**
  * In-memory cache for usage data per account
  */
+export interface AnthropicUsageObservation {
+	accountId: string;
+	accessToken: string;
+	outcome: "success" | "permission_denied";
+	firstPermissionDenial: boolean;
+	isCurrent: () => boolean;
+}
+
 class UsageCache {
 	private cache = new Map<string, UsageCacheEntry>();
 	private pollTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1128,6 +1139,12 @@ class UsageCache {
 	// signature. Drives the once-per-transition usagePermissionDenied /
 	// usageRecovered callbacks.
 	private usagePermissionDeniedAccounts = new Set<string>();
+	private anthropicUsageObservers = new Map<
+		string,
+		(observation: AnthropicUsageObservation) => Promise<void>
+	>();
+	private anthropicObservationTasks = new Map<string, Promise<void>>();
+	private anthropicObservationVersions = new Map<string, number>();
 	private usagePermissionDeniedCallbacks = new Map<
 		string,
 		(accountId: string) => void
@@ -1536,8 +1553,16 @@ class UsageCache {
 		const generation = (this.pollGenerations.get(accountId) ?? 0) + 1;
 		this.pollGenerations.set(accountId, generation);
 
-		// Reset failure count for fresh start
+		// Reset failure count and denial transition for this generation.
 		this.failureCounts.delete(accountId);
+		this.usagePermissionDeniedAccounts.delete(accountId);
+		if (policy?.onAnthropicUsageObservation)
+			this.anthropicUsageObservers.set(
+				accountId,
+				policy.onAnthropicUsageObservation,
+			);
+		else this.anthropicUsageObservers.delete(accountId);
+		this.anthropicObservationVersions.set(accountId, 0);
 
 		// Store the token provider (either a static token or a function)
 		const tokenProvider: AccessTokenProvider =
@@ -1678,6 +1703,11 @@ class UsageCache {
 	 * On success the failure streak is cleared and a backed-off poll loop is
 	 * re-armed to the healthy cadence — see {@link rearmAfterOnDemandSuccess}.
 	 */
+	async waitForAnthropicUsageObservation(accountId: string): Promise<void> {
+		const task = this.anthropicObservationTasks.get(accountId);
+		if (task) await task;
+	}
+
 	async refreshNow(accountId: string): Promise<boolean> {
 		const tokenProvider = this.tokenProviders.get(accountId);
 		if (!tokenProvider) {
@@ -1775,6 +1805,9 @@ class UsageCache {
 			this.capacityRestoredCallbacks.delete(accountId);
 			this.usagePermissionDeniedCallbacks.delete(accountId);
 			this.usageRecoveredCallbacks.delete(accountId);
+			this.anthropicUsageObservers.delete(accountId);
+			this.anthropicObservationTasks.delete(accountId);
+			this.anthropicObservationVersions.delete(accountId);
 			this.tokenRefreshFailureHandlers.delete(accountId);
 			this.usagePermissionDeniedAccounts.delete(accountId);
 			this.hasSucceededOnce.delete(accountId);
@@ -2139,6 +2172,37 @@ class UsageCache {
 				const result = await fetchUsageData(token);
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
+				const observer = this.anthropicUsageObservers.get(accountId);
+				if (
+					observer &&
+					(result.data || result.failureKind === "usage_permission_denied")
+				) {
+					const version =
+						(this.anthropicObservationVersions.get(accountId) ?? 0) + 1;
+					this.anthropicObservationVersions.set(accountId, version);
+					const observation = {
+						accountId,
+						accessToken: token,
+						outcome: result.data ? "success" : "permission_denied",
+						firstPermissionDenial:
+							!result.data &&
+							!this.usagePermissionDeniedAccounts.has(accountId),
+						isCurrent: () =>
+							this.isLiveFetchGeneration(
+								accountId,
+								generation,
+								tokenProvider,
+							) && this.anthropicObservationVersions.get(accountId) === version,
+					} satisfies AnthropicUsageObservation;
+					const task = Promise.resolve()
+						.then(() => observer(observation))
+						.catch((error) => {
+							log.warn(
+								`Usage observation callback failed for account ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						});
+					this.anthropicObservationTasks.set(accountId, task);
+				}
 				if (result.data) {
 					// Usage-access recovery: fire usageRecovered on the
 					// failure→success transition, and also on the FIRST success of this

@@ -96,7 +96,10 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // module) — see the module comment.
 import { createClientAbortResponse } from "./client-abort-response";
 import { applyCodexObservation } from "./codex-observation";
-import { peekCodexStreamPrefix } from "./codex-stream-prefix";
+import {
+	CODEX_PEEK_TIMEOUT_MS,
+	peekCodexStreamPrefix,
+} from "./codex-stream-prefix";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	hasAccountWideUnifiedRejection,
@@ -2750,7 +2753,14 @@ export async function proxyWithAccount(
 			!requestMeta.internal &&
 			response.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER) === "1"
 		) {
-			const prefixFailure = await peekCodexStreamPrefix(response, req.signal);
+			// Native requests cannot re-arm the client socket. Charge header waits,
+			// retry holds and earlier attempts against the same prelude deadline.
+			const prefixFailure = await peekCodexStreamPrefix(response, req.signal, {
+				timeoutMs: Math.max(
+					0,
+					CODEX_PEEK_TIMEOUT_MS - (Date.now() - requestMeta.timestamp),
+				),
+			});
 			if (prefixFailure) {
 				// A backend that fails in-band is usually serving again within
 				// seconds, and the sibling this would otherwise move to has a cold

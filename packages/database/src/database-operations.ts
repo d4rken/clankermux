@@ -1335,6 +1335,18 @@ OAuth tokens will need to be re-authenticated.
 		return this.accounts.pauseIfActive(accountId, reason, expectedRefreshToken);
 	}
 
+	async recordAnthropicUsageAccess(
+		accountId: string,
+		expectedAccessToken: string,
+		permissionDenied: boolean,
+	): Promise<boolean> {
+		return this.accounts.recordAnthropicUsageAccess(
+			accountId,
+			expectedAccessToken,
+			permissionDenied,
+		);
+	}
+
 	async resumeAccount(accountId: string): Promise<void> {
 		await this.accounts.resume(accountId);
 	}

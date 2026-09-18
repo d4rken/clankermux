@@ -35,6 +35,37 @@ interface AccountRenewalDialogProps {
 	onUseAutomaticRenewal: (accountId: string) => Promise<void>;
 }
 
+export function SubscriptionStatusSummary({ account }: { account: Account }) {
+	if (account.provider !== "anthropic") return null;
+	const fetchedAt = account.identityProfileFetchedAt;
+	const checkedAt = account.identitySubscriptionCheckedAt;
+	const checkUnconfirmed =
+		checkedAt != null && (fetchedAt == null || checkedAt > fetchedAt);
+	return (
+		<div className="mt-tight text-xs text-muted-foreground space-y-tight">
+			<p>
+				{account.identitySubscriptionStatus
+					? `Last known subscription status: ${account.identitySubscriptionStatus}.`
+					: "Subscription status: unknown. The provider has not reported a subscription status."}
+			</p>
+			{fetchedAt != null && (
+				<p>
+					Last successful check:{" "}
+					<time dateTime={new Date(fetchedAt).toISOString()}>
+						{new Date(fetchedAt).toLocaleString()}
+					</time>
+				</p>
+			)}
+			{checkUnconfirmed && (
+				<p>
+					Latest subscription check has not completed successfully. The current
+					subscription state is unverified.
+				</p>
+			)}
+		</div>
+	);
+}
+
 export function AccountRenewalDialog({
 	account,
 	isOpen,
@@ -116,6 +147,7 @@ export function AccountRenewalDialog({
 			anchorSource === "derived"
 				? `Subscription started ${subscriptionStart}. Saving confirms the estimate as a date of your own.`
 				: `Subscription started ${subscriptionStart}${
+						account?.provider !== "anthropic" &&
 						account?.identitySubscriptionStatus
 							? ` · ${account.identitySubscriptionStatus}`
 							: ""
@@ -211,6 +243,7 @@ export function AccountRenewalDialog({
 									{subscriptionNote}
 								</p>
 							)}
+							{account && <SubscriptionStatusSummary account={account} />}
 							{canUseAutomatic && (
 								<Button
 									type="button"

@@ -47,6 +47,7 @@ import {
 } from "@clankermux/openai-responses-adapter";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
+	canFetchAnthropicProfile,
 	extractCodexIdentity,
 	fetchAnthropicProfile,
 	fetchCodexModelCatalog,
@@ -105,10 +106,7 @@ import {
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
 import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
-import {
-	ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
-	withAnthropicSubscriptionRefresh,
-} from "./anthropic-subscription-refresh";
+import { observeAnthropicUsage } from "./anthropic-subscription-refresh";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -424,31 +422,9 @@ function startUsagePollingWithRefresh(
 	// Initial polling with token refresh
 	const pollWithRefresh = async () => {
 		try {
-			// Create a token provider function that gets a fresh token each time,
-			// composed with the throttled subscription re-read. Anthropic reports
-			// subscription state on the profile endpoint only, and it is mutable, so
-			// a capture taken at account-add goes stale. The read rides this poll's
-			// own lifecycle: ~6h throttled, detached (it can neither delay nor fail
-			// the poll), and gone as soon as stopPolling drops the token provider.
-			const tokenProvider = withAnthropicSubscriptionRefresh(
-				account.id,
-				createUsagePollingTokenProvider(account, proxyContext),
-				{
-					getAccount: (accountId) => proxyContext.dbOps.getAccount(accountId),
-					fetchProfile: fetchAnthropicProfile,
-					setIdentity: (accountId, identity, expectedAccessToken) =>
-						proxyContext.dbOps.setAccountIdentityFromProfile(
-							accountId,
-							identity,
-							expectedAccessToken,
-						),
-					claimSubscriptionCheck: (accountId, nowMs) =>
-						proxyContext.dbOps.claimAnthropicSubscriptionCheck(
-							accountId,
-							nowMs,
-							ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
-						),
-				},
+			const tokenProvider = createUsagePollingTokenProvider(
+				account,
+				proxyContext,
 			);
 
 			// Start usage polling with the token provider
@@ -457,104 +433,55 @@ function startUsagePollingWithRefresh(
 				tokenProvider,
 				account.provider,
 				intervalMs,
-				undefined, // customEndpoint
+				undefined,
 				(accountId) => {
-					// Usage window has rolled over — reset session tracking so the
-					// dashboard reflects the new window without waiting for the next request.
 					proxyContext.dbOps
 						.resetAccountSession(accountId, Date.now())
 						.catch((err) =>
 							logger.warn(
-								`Failed to reset session for account ${accountId} on window reset: ${err}`,
+								`Failed to reset session for account ${accountId}: ${err}`,
 							),
 						);
 				},
 				(evidence) =>
 					reportCapacityRestored(proxyContext.dbOps, logger, evidence),
-				(accountId) => {
-					// Usage endpoint denies access (403 permission_error), which may
-					// be an org policy or seat problem. Auto-pause to stop selecting and
-					// retrying a dead account. Guarded: never overwrites an existing
-					// pause (e.g. a manual one).
-					proxyContext.dbOps
-						.pauseAccountIfActive(accountId, "usage_permission_denied")
-						.then((pausedNow) => {
-							if (pausedNow) {
-								logger.warn(
-									`Auto-paused account ${account.name} (${accountId}): usage access denied (403 permission_error)`,
-								);
-							}
-						})
-						.catch((err) =>
-							logger.warn(
-								`Failed to auto-pause account ${accountId} on usage access denial: ${err}`,
-							),
-						);
-				},
-				(accountId) => {
-					// Usage fetch works again (fired on the failure→success transition
-					// and on the first success after a restart). Lift a
-					// usage-access pause (including legacy subscription_expired rows).
-					// Neither operation clears a request-path org_permission_denied
-					// cooldown: usage access does not prove Claude Code access.
-					Promise.all([
-						proxyContext.dbOps.resumeAccountIfPausedWithReason(
-							accountId,
-							"usage_permission_denied",
-						),
-						proxyContext.dbOps.resumeAccountIfPausedWithReason(
-							accountId,
-							"subscription_expired",
-						),
-					])
-						.then((results) => {
-							const resumedNow = results.some(Boolean);
-							if (resumedNow) {
-								logger.info(
-									`Auto-resumed account ${account.name} (${accountId}): usage endpoint reachable again`,
-								);
-							}
-						})
-						.catch((err) =>
-							logger.warn(
-								`Failed to auto-resume account ${accountId} after usage access recovery: ${err}`,
-							),
-						);
-				},
+				undefined,
+				undefined,
 				async (accountId, error) => {
-					// The refresh just failed this tick. Halt polling only if the
-					// account is paused AND the failure is terminal (refresh token
-					// rejected → needs a manual reauth, which restarts polling via the
-					// registered polling-restarter). Re-read live state; the captured
-					// `account` may be stale. See shouldStopPollingPausedAccount.
 					const current = await proxyContext.dbOps
 						.getAccount(accountId)
 						.catch(() => null);
 					return shouldStopPollingPausedAccount(current, error);
 				},
-				// Demand-aware cadence: poll recently-active Anthropic accounts at the
-				// configured active interval, back cold accounts off to the ~10-min
-				// idle cadence — to relieve the shared, aggressively-rate-limited
-				// /oauth/usage + /oauth/profile bucket. The proxy path calls
-				// usageCache.noteActivity() on real traffic (the primary, real-time
-				// activity signal + idle→active re-arm); getLastActivityMs is only a
-				// cold-start fallback that reads the CURRENT DB last_used (never the
-				// captured, soon-stale `account` snapshot) so an account busy right
-				// before a restart still polls actively before its next request.
-				//
-				// Tradeoff: for idle/paused accounts, subscription-expired recovery
-				// and seat-reassignment detection may now lag by up to the idle
-				// interval (~10 min). Acceptable — those are not latency-critical, and
-				// on-demand refresh (account-selector's refreshNow) covers real traffic.
 				{
 					demandAware: account.provider === "anthropic",
-					// Boot stagger: defers only the FIRST fetch. Registration is
-					// synchronous so the 429 ladder's on-demand refreshNow works from
-					// t=0 — deferring the whole startPolling call left refreshNow a
-					// silent no-op for `index * 5s` after every restart, and a 429 in
-					// that window got misclassified account-wide (Claude-Backup-2,
-					// 2026-08-02).
 					initialDelayMs: startupDelayMs,
+					onAnthropicUsageObservation: (observation) =>
+						observeAnthropicUsage(observation, {
+							getAccount: (accountId) =>
+								proxyContext.dbOps.getAccount(accountId),
+							fetchProfile: fetchAnthropicProfile,
+							canFetchProfile: canFetchAnthropicProfile,
+							setIdentity: (accountId, identity, expectedAccessToken) =>
+								proxyContext.dbOps.setAccountIdentityFromProfile(
+									accountId,
+									identity,
+									expectedAccessToken,
+								),
+							claimSubscriptionCheck: (accountId, nowMs, throttleMs) =>
+								proxyContext.dbOps.claimAnthropicSubscriptionCheck(
+									accountId,
+									nowMs,
+									throttleMs,
+								),
+							recordUsageAccess: (accountId, accessToken, permissionDenied) =>
+								proxyContext.dbOps.recordAnthropicUsageAccess(
+									accountId,
+									accessToken,
+									permissionDenied,
+								),
+							logger,
+						}),
 					getLastActivityMs: (accountId) =>
 						proxyContext.dbOps
 							.getAccount(accountId)
