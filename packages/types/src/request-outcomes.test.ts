@@ -16,6 +16,8 @@ describe("recorded request outcomes", () => {
 		["stream_truncated_mid_content", 200, "stream_failed", "failed"],
 		["native_responses_stream_failed", 200, "stream_failed", "failed"],
 		["native_responses_no_terminal", 200, "stream_failed", "failed"],
+		["native_responses_parse_error", 200, "stream_failed", "failed"],
+		["native_responses_parse_limit", 200, "stream_failed", "failed"],
 		["rate_limit_error", 200, "stream_limited", "failed"],
 		["overloaded_error", 200, "stream_limited", "failed"],
 		["provider_overloaded", 529, "provider_overloaded", "blocked"],

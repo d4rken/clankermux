@@ -215,6 +215,8 @@ const HISTORY_LABELS: Readonly<Record<string, StopCause>> = {
 	stream_truncated_mid_content: "stream_failed",
 	native_responses_stream_failed: "stream_failed",
 	native_responses_no_terminal: "stream_failed",
+	native_responses_parse_error: "stream_failed",
+	native_responses_parse_limit: "stream_failed",
 	rate_limit_error: "stream_limited",
 	overloaded_error: "stream_limited",
 	all_accounts_failed: "all_accounts_failed",
