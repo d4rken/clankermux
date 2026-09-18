@@ -2,6 +2,7 @@ export { AlibabaCodingPlanProvider } from "./alibaba-coding-plan/index";
 export {
 	AnthropicOAuthProvider,
 	AnthropicProvider,
+	canFetchAnthropicProfile,
 	fetchAnthropicProfile,
 	HARD_LIMIT_STATUSES,
 	isAnthropicHardLimitStatus,

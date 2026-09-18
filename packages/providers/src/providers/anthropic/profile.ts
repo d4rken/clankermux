@@ -11,6 +11,10 @@ export const ANTHROPIC_PROFILE_ENDPOINT =
 const REQUEST_TIMEOUT_MS = 5_000;
 let profileRateLimitedUntil = 0;
 
+export function canFetchAnthropicProfile(): boolean {
+	return Date.now() >= profileRateLimitedUntil;
+}
+
 function retryAfterMs(response: Response): number | null {
 	const value = response.headers.get("retry-after");
 	if (!value) return null;

@@ -47,6 +47,7 @@ import {
 } from "@clankermux/openai-responses-adapter";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
+	canFetchAnthropicProfile,
 	extractCodexIdentity,
 	fetchAnthropicProfile,
 	fetchCodexModelCatalog,
@@ -460,6 +461,7 @@ function startUsagePollingWithRefresh(
 							getAccount: (accountId) =>
 								proxyContext.dbOps.getAccount(accountId),
 							fetchProfile: fetchAnthropicProfile,
+							canFetchProfile: canFetchAnthropicProfile,
 							setIdentity: (accountId, identity, expectedAccessToken) =>
 								proxyContext.dbOps.setAccountIdentityFromProfile(
 									accountId,

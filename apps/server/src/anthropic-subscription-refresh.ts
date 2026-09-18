@@ -14,6 +14,7 @@ import type { Account, AccountIdentity } from "@clankermux/types";
 export const ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS = 60_000;
+export const ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS = 5 * 60_000;
 
 export interface AnthropicSubscriptionRefreshDeps {
 	/**
@@ -24,6 +25,8 @@ export interface AnthropicSubscriptionRefreshDeps {
 	getAccount: (accountId: string) => Promise<Account | null>;
 	/** Fetch + normalize a profile identity; fails open (null on any error). */
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
+	/** An upstream backoff defers the check without consuming its claim. */
+	canFetchProfile?: () => boolean;
 	/**
 	 * Persist a captured identity through the shared identity write, as a
 	 * compare-and-swap on `expectedAccessToken`: the row must still hold the
@@ -48,13 +51,6 @@ export interface AnthropicSubscriptionRefreshDeps {
 	) => Promise<boolean>;
 	now?: () => number;
 	logger?: Logger;
-	/**
-	 * How the read is detached from the poll that resolved the token. The default
-	 * drops the (never-rejecting) promise on the floor, which is the point: the
-	 * poll must not wait on a profile read. Tests inject a collector so they can
-	 * await the read they triggered.
-	 */
-	detach?: (read: Promise<void>) => void;
 }
 
 /**
@@ -114,6 +110,7 @@ export async function refreshAnthropicSubscription(
 		if (
 			!account ||
 			!isCurrent() ||
+			deps.canFetchProfile?.() === false ||
 			!isAnthropicSubscriptionRefreshDue(account, nowMs, throttleMs)
 		)
 			return;
@@ -173,12 +170,19 @@ export async function observeAnthropicUsage(
 			log.info(
 				`Account ${accountId}: usage access ${outcome === "success" ? "restored" : "denied"}`,
 			);
+		const current = await deps.getAccount(accountId);
+		const needsDiagnosis =
+			outcome === "permission_denied" &&
+			current?.paused &&
+			current.pause_reason === "usage_permission_denied";
 		await refreshAnthropicSubscription(accountId, accessToken, deps, {
 			isCurrent,
 			throttleMs:
 				firstPermissionDenial || (outcome === "success" && changed)
 					? ANTHROPIC_SUBSCRIPTION_RECHECK_INTERVAL_MS
-					: ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
+					: needsDiagnosis
+						? ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS
+						: ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 		});
 	} catch (err) {
 		log.warn(
