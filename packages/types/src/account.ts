@@ -319,6 +319,8 @@ export interface AccountIdentity {
 	 * `renewal_anchor_source` on the account row for how it is used.
 	 */
 	subscriptionStartedAt?: number | null;
+	/** True only when the Anthropic profile reported canceled + claude_free + no billing. */
+	anthropicSubscriptionExpired?: boolean;
 }
 
 /**

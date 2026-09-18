@@ -11,16 +11,14 @@ import {
 } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
-// Shared identity COALESCE-merge fragment. Each field is COALESCE'd against its
-// existing column so a null arriving piecemeal never erases a previously-captured
-// value. Used by both updateTokens (token-path capture) and
-// setAccountIdentityFromProfile (profile-fetch capture); keeping it in one place
-// guarantees the two paths can never drift.
-const IDENTITY_COALESCE_SET = `identity_external_id = COALESCE(?, identity_external_id),
+// Partial token captures preserve fields they do not report.
+const IDENTITY_FIELDS_SET = `identity_external_id = COALESCE(?, identity_external_id),
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
 				identity_plan_tier = COALESCE(?, identity_plan_tier),
-				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier)`;
+
+const IDENTITY_COALESCE_SET = `${IDENTITY_FIELDS_SET},
 				identity_subscription_status = COALESCE(?, identity_subscription_status),
 				identity_subscription_started_at = COALESCE(?, identity_subscription_started_at)`;
 
@@ -461,9 +459,9 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * profile fetch actually returned data; on a null (failed/rate-limited) fetch
 	 * the caller must skip the write so the account stays eligible next boot.
 	 *
-	 * Each identity field is COALESCE-merged so a null arriving in a later fetch
-	 * never erases a previously-captured value; `identity_captured_at` advances
-	 * whenever this write runs (it always carries identity).
+	 * Identity fields are COALESCE-merged except the mutable Anthropic
+	 * subscription status: a successful profile that omits it clears stale state.
+	 * The capture timestamp advances whenever this write runs.
 	 *
 	 * When `expectedAccessToken` is provided this becomes a compare-and-swap on
 	 * the access token, the same guard {@link updateTokens} applies to the
@@ -492,11 +490,23 @@ export class AccountRepository extends BaseRepository<Account> {
 		const changes = await this.writeIdentityWithTierHistory(
 			accountId,
 			`UPDATE accounts SET
-				${IDENTITY_COALESCE_SET},
+				${IDENTITY_FIELDS_SET},
+				identity_subscription_status = COALESCE(?, CASE WHEN provider = 'anthropic' THEN NULL ELSE identity_subscription_status END),
+				identity_subscription_started_at = COALESCE(?, identity_subscription_started_at),
+				pause_reason = CASE WHEN provider = 'anthropic' AND refresh_token IS NOT NULL AND refresh_token != ''
+					AND ? = 1 AND paused = 1 AND pause_reason = 'usage_permission_denied'
+					THEN 'subscription_expired' ELSE pause_reason END,
 				identity_captured_at = ?,
 				identity_profile_fetched_at = ?
 			WHERE id = ?${casClause}`,
-			[...identityBindParams(identity), now, now, accountId, ...casParams],
+			[
+				...identityBindParams(identity),
+				identity.anthropicSubscriptionExpired === true ? 1 : 0,
+				now,
+				now,
+				accountId,
+				...casParams,
+			],
 			identity,
 		);
 		return changes > 0;
@@ -976,6 +986,25 @@ export class AccountRepository extends BaseRepository<Account> {
 			[reason, accountId],
 		);
 		return changes > 0;
+	}
+
+	/** Record Anthropic usage access without overwriting manual or reauth pauses. */
+	async recordAnthropicUsageAccess(
+		accountId: string,
+		expectedAccessToken: string,
+		permissionDenied: boolean,
+	): Promise<boolean> {
+		const sql = permissionDenied
+			? `UPDATE accounts SET paused = 1, pause_reason = 'usage_permission_denied'
+			   WHERE id = ? AND provider = 'anthropic' AND refresh_token IS NOT NULL
+			     AND refresh_token != '' AND access_token = ? AND COALESCE(paused, 0) = 0`
+			: `UPDATE accounts SET paused = 0, pause_reason = NULL
+			   WHERE id = ? AND provider = 'anthropic' AND refresh_token IS NOT NULL
+			     AND refresh_token != '' AND access_token = ? AND paused = 1
+			     AND pause_reason IN ('usage_permission_denied', 'subscription_expired')`;
+		return (
+			(await this.runWithChanges(sql, [accountId, expectedAccessToken])) > 0
+		);
 	}
 
 	async resume(accountId: string): Promise<void> {

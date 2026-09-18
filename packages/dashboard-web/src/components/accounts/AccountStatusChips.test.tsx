@@ -315,6 +315,19 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 });
 
 describe("AccountStatusChips — expired suppresses renewal chip", () => {
+	it("explains that Anthropic expiry checks continue in the background", () => {
+		const html = render(
+			makeAccount({
+				provider: "anthropic",
+				paused: true,
+				pauseReason: "subscription_expired",
+			}),
+		);
+		expect(html).toContain("Background checks continue");
+		expect(html).toContain("pause clears when usage access returns");
+		expect(html).not.toContain("no retries are scheduled");
+	});
+
 	it("shows 'Subscription expired' and no renewal chip when expired with a past date", () => {
 		const html = render(
 			makeAccount({

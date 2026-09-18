@@ -580,3 +580,164 @@ describe("AccountRepository — setAccountIdentityFromProfile access-token CAS",
 		);
 	});
 });
+
+describe("Anthropic access and subscription diagnosis", () => {
+	let db: Database;
+	let repo: AccountRepository;
+	const expired: AccountIdentity = {
+		externalAccountId: "expired-account",
+		email: null,
+		organizationName: null,
+		planTier: "claude_free",
+		rateLimitTier: "ai",
+		subscriptionStatus: "canceled",
+		anthropicSubscriptionExpired: true,
+	};
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+		insertAccount(db, "expired", "anthropic", "rt", "at");
+	});
+	afterEach(() => db.close());
+	it("combines denied usage and a fresh lapsed profile into an expiry pause", async () => {
+		expect(await repo.recordAnthropicUsageAccess("expired", "at", true)).toBe(
+			true,
+		);
+		expect((await repo.findById("expired"))?.pause_reason).toBe(
+			"usage_permission_denied",
+		);
+		await repo.setAccountIdentityFromProfile("expired", expired, "at");
+		const row = await repo.findById("expired");
+		expect(row?.paused).toBe(true);
+		expect(row?.pause_reason).toBe("subscription_expired");
+		expect(row?.identity_subscription_status).toBe("canceled");
+	});
+	it("metadata alone never pauses an accessible account", async () => {
+		await repo.setAccountIdentityFromProfile("expired", expired, "at");
+		expect((await repo.findById("expired"))?.paused).toBe(false);
+	});
+	it("cancellation without a confirmed downgrade leaves the cause unconfirmed", async () => {
+		await repo.recordAnthropicUsageAccess("expired", "at", true);
+		await repo.setAccountIdentityFromProfile(
+			"expired",
+			{ ...expired, anthropicSubscriptionExpired: undefined, planTier: "max" },
+			"at",
+		);
+		expect((await repo.findById("expired"))?.pause_reason).toBe(
+			"usage_permission_denied",
+		);
+	});
+	it("successful usage resumes only automatic access pauses, without waiting for metadata", async () => {
+		await repo.recordAnthropicUsageAccess("expired", "at", true);
+		await repo.setAccountIdentityFromProfile("expired", expired, "at");
+		expect(await repo.recordAnthropicUsageAccess("expired", "at", false)).toBe(
+			true,
+		);
+		expect((await repo.findById("expired"))?.paused).toBe(false);
+		expect((await repo.findById("expired"))?.pause_reason).toBeNull();
+	});
+	it("an active profile never resumes an account whose usage remains denied", async () => {
+		await repo.recordAnthropicUsageAccess("expired", "at", true);
+		await repo.setAccountIdentityFromProfile(
+			"expired",
+			{
+				...expired,
+				anthropicSubscriptionExpired: undefined,
+				subscriptionStatus: "active",
+				planTier: "max",
+			},
+			"at",
+		);
+		expect((await repo.findById("expired"))?.pause_reason).toBe(
+			"usage_permission_denied",
+		);
+	});
+	it("never replaces or resumes a manual pause", async () => {
+		await repo.pause("expired", "manual");
+		expect(await repo.recordAnthropicUsageAccess("expired", "at", true)).toBe(
+			false,
+		);
+		await repo.setAccountIdentityFromProfile("expired", expired, "at");
+		expect(await repo.recordAnthropicUsageAccess("expired", "at", false)).toBe(
+			false,
+		);
+		expect((await repo.findById("expired"))?.pause_reason).toBe("manual");
+	});
+	it("rejects denial, recovery and profile results from replaced credentials", async () => {
+		expect(
+			await repo.recordAnthropicUsageAccess("expired", "old-token", true),
+		).toBe(false);
+		await repo.recordAnthropicUsageAccess("expired", "at", true);
+		expect(
+			await repo.setAccountIdentityFromProfile("expired", expired, "old-token"),
+		).toBe(false);
+		expect(
+			await repo.recordAnthropicUsageAccess("expired", "old-token", false),
+		).toBe(false);
+		expect((await repo.findById("expired"))?.pause_reason).toBe(
+			"usage_permission_denied",
+		);
+	});
+	it("does not promote a diagnosis after usage already recovered", async () => {
+		await repo.recordAnthropicUsageAccess("expired", "at", true);
+		await repo.recordAnthropicUsageAccess("expired", "at", false);
+		await repo.setAccountIdentityFromProfile("expired", expired, "at");
+		expect((await repo.findById("expired"))?.paused).toBe(false);
+	});
+	it("never applies Anthropic access transitions to another provider or API-key account", async () => {
+		insertAccount(db, "other", "codex", "rt", "at");
+		insertAccount(db, "key", "anthropic", "", "at");
+		for (const id of ["other", "key"]) {
+			expect(await repo.recordAnthropicUsageAccess(id, "at", true)).toBe(false);
+			await repo.pause(id, "usage_permission_denied");
+			await repo.setAccountIdentityFromProfile(id, expired, "at");
+			expect((await repo.findById(id))?.pause_reason).toBe(
+				"usage_permission_denied",
+			);
+			expect(await repo.recordAnthropicUsageAccess(id, "at", false)).toBe(
+				false,
+			);
+		}
+	});
+	it("clears missing status in a successful Anthropic profile while preserving partial token capture", async () => {
+		await repo.setAccountIdentityFromProfile(
+			"expired",
+			{ ...expired, subscriptionStatus: "active" },
+			"at",
+		);
+		await repo.updateTokens("expired", "at", NOW, "rt", {
+			...expired,
+			subscriptionStatus: null,
+		});
+		expect((await repo.findById("expired"))?.identity_subscription_status).toBe(
+			"active",
+		);
+		await repo.setAccountIdentityFromProfile(
+			"expired",
+			{
+				...expired,
+				subscriptionStatus: null,
+				anthropicSubscriptionExpired: undefined,
+			},
+			"at",
+		);
+		expect(
+			(await repo.findById("expired"))?.identity_subscription_status,
+		).toBeNull();
+	});
+	it("preserves missing status on other providers' partial profile captures", async () => {
+		insertAccount(db, "other", "codex", "rt", "at");
+		await repo.setAccountIdentityFromProfile(
+			"other",
+			{ ...expired, subscriptionStatus: "active" },
+			"at",
+		);
+		await repo.setAccountIdentityFromProfile(
+			"other",
+			{ ...expired, subscriptionStatus: null },
+			"at",
+		);
+		expect((await repo.findById("other"))?.identity_subscription_status).toBe(
+			"active",
+		);
+	});
+});

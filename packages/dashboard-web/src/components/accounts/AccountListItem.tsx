@@ -46,6 +46,7 @@ import {
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { Textarea } from "../ui/textarea";
+import { AccountAccessNotice } from "./AccountAccessNotice";
 import { AccountIdentityLine } from "./AccountIdentity";
 import {
 	AccountPausedChip,
@@ -146,6 +147,14 @@ export function AccountListItem({
 	onZaiReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
+	const handleRefreshUsage = async () => {
+		setIsRefreshingUsage(true);
+		try {
+			await onRefreshUsage(account);
+		} finally {
+			setIsRefreshingUsage(false);
+		}
+	};
 	const [isEditingNotes, setIsEditingNotes] = useState(false);
 	const [notesDraft, setNotesDraft] = useState("");
 	const [isSavingNotes, setIsSavingNotes] = useState(false);
@@ -255,14 +264,7 @@ export function AccountListItem({
 							size="sm"
 							className="h-8 gap-tight text-xs"
 							disabled={isRefreshingUsage}
-							onClick={async () => {
-								setIsRefreshingUsage(true);
-								try {
-									await onRefreshUsage(account);
-								} finally {
-									setIsRefreshingUsage(false);
-								}
-							}}
+							onClick={handleRefreshUsage}
 							title={
 								account.provider === "devin"
 									? "Refresh Devin account and usage metadata (does not consume inference quota)"
@@ -654,6 +656,11 @@ export function AccountListItem({
 				account={account}
 				status={status}
 				showAccountDetails={false}
+			/>
+			<AccountAccessNotice
+				account={account}
+				isChecking={isRefreshingUsage}
+				onRecheck={handleRefreshUsage}
 			/>
 			{account.provider === "openrouter" && !account.customEndpoint && (
 				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />

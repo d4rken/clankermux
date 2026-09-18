@@ -51,6 +51,26 @@ function makeAccount(overrides: Partial<AccountResponse> = {}): Account {
 
 const noop = () => {};
 
+describe("AccountListItem — Anthropic access diagnosis", () => {
+	it("shows expiry and its recovery action directly on the Accounts card", () => {
+		const html = render(
+			makeAccount({ paused: true, pauseReason: "subscription_expired" }),
+		);
+		expect(html).toContain("Subscription expired · Paused");
+		expect(html).toContain("Renew your subscription to restore access");
+		expect(html).toContain("Recheck access");
+	});
+
+	it("keeps an unconfirmed denial distinct from subscription expiry", () => {
+		const html = render(
+			makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+		);
+		expect(html).toContain("cause is unconfirmed");
+		expect(html).toContain("Recheck access");
+		expect(html).not.toContain("Subscription expired");
+	});
+});
+
 function render(account: Account): string {
 	return renderToStaticMarkup(
 		<AccountListItem
