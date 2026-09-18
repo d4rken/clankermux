@@ -4,6 +4,10 @@ import {
 } from "@clankermux/core";
 import { normalizeCodexInputUsage } from "@clankermux/providers";
 import {
+	type NativeJsonError,
+	NativeTerminalJson,
+} from "./native-terminal-json";
+import {
 	hashCreditToken,
 	refusalFallbackRegistry,
 } from "./refusal-fallback-registry";
@@ -102,6 +106,8 @@ export interface UsageState {
 	 * complete lines are processed; this holds the trailing partial.
 	 */
 	lineBuffer: string;
+	largeLine?: NativeTerminalJson;
+	parseError?: NativeJsonError;
 	/**
 	 * The most recent `event:` line's type, carried across chunks so an
 	 * `event:`/`data:` pair split over a boundary still associates correctly.
@@ -155,14 +161,7 @@ export interface UsageState {
 	 * That is not a success, however Bun-clean the close looked.
 	 */
 	sawMessageStart: boolean;
-	/**
-	 * True while we're discarding an overlong, newline-free line (see
-	 * `MAX_SSE_LINE_BYTES`). Once the `lineBuffer` exceeds the cap without a
-	 * terminating `\n`, the buffered content is dropped and this flag is set so
-	 * every subsequent chunk is discarded UNTIL the next `\n` resyncs parsing on
-	 * the following line. Bounds main-thread memory against an upstream that
-	 * never emits a newline (small leak / DoS guard).
-	 */
+	/** Skip an oversized non-data line until its newline restores framing. */
 	skippingOverlongLine: boolean;
 	/**
 	 * The provider's terminal `stop_reason`, raw and unfiltered — `end_turn`,
@@ -180,21 +179,14 @@ export interface UsageState {
 	refusalCategory: string | undefined;
 }
 
-/**
- * Cap on the decoded, not-yet-newline-terminated `lineBuffer`. A single SSE
- * line should never approach this — a `message_start` carrying a large system
- * prompt is the biggest legitimate line and stays well under 256KB. Anything
- * larger is treated as a runaway/never-terminated line: it is discarded and
- * skipped (not JSON-parsed) until the next newline resyncs the parser.
- */
+/** Threshold for switching from a buffered SSE line to selective JSON parsing. */
 export const MAX_SSE_LINE_BYTES = 256 * 1024;
 
 /**
- * Test/diagnostic accessor for the retained partial-line buffer length, used to
- * assert the buffer stays bounded under newline-free input.
+ * Upper bound on retained line/parser text for bounded-memory assertions.
  */
 export function getLineBufferLength(state: UsageState): number {
-	return state.lineBuffer.length;
+	return state.lineBuffer.length + (state.largeLine?.retainedCharacters ?? 0);
 }
 
 export function createUsageState(): UsageState {
@@ -670,7 +662,11 @@ function processLine(state: UsageState, rawLine: string, now: number): void {
 		return;
 	}
 	if (!parsed.data) return;
-	if (!parsed.data.startsWith("{")) return;
+	if (!parsed.data.startsWith("{")) {
+		if (responsesTerminalKindOf(state.currentEvent))
+			state.parseError ??= "native_responses_parse_error";
+		return;
+	}
 	// Guard per data line so a non-usage event (e.g. ping) isn't parsed.
 	//
 	// A terminal event must bypass it. The guard looks for `usage` / `message` /
@@ -697,7 +693,7 @@ function processLine(state: UsageState, rawLine: string, now: number): void {
 		);
 		applySseData(obj, state.currentEvent ?? "", state, now);
 	} catch {
-		// Silent — non-JSON or still-partial data line.
+		state.parseError ??= "native_responses_parse_error";
 	}
 }
 
@@ -716,43 +712,53 @@ export function feedChunk(
 	state.lastChunkTs = now;
 	state.streamedBytes += chunk.byteLength;
 
-	// Streaming decode reassembles multi-byte sequences across boundaries.
-	state.lineBuffer += state.decoder.decode(chunk, { stream: true });
+	feedDecoded(state, state.decoder.decode(chunk, { stream: true }), now);
+}
 
-	// Skip mode: we're inside an overlong, never-terminated line that was already
-	// discarded. Drop everything up to and including the next `\n` (which ends the
-	// runaway line) and resume normal parsing on the line after it. If no newline
-	// is in the buffer yet, discard it all and stay in skip mode.
-	if (state.skippingOverlongLine) {
-		const nl = state.lineBuffer.indexOf("\n");
-		if (nl === -1) {
-			state.lineBuffer = "";
-			return;
+function finishSseLine(state: UsageState, now: number): void {
+	if (state.largeLine) {
+		const parser = state.largeLine;
+		state.largeLine = undefined;
+		const obj = parser.finish();
+		if (parser.error) {
+			state.parseError ??= parser.error;
+			state.currentEvent = undefined;
+		} else if (obj)
+			applySseData(obj as SseParsed, state.currentEvent ?? "", state, now);
+	} else if (!state.skippingOverlongLine && state.lineBuffer) {
+		processLine(state, state.lineBuffer, now);
+	}
+	state.lineBuffer = "";
+	state.skippingOverlongLine = false;
+}
+
+function feedDecoded(state: UsageState, text: string, now: number): void {
+	let start = 0;
+	while (start < text.length) {
+		const newline = text.indexOf("\n", start);
+		const end = newline === -1 ? text.length : newline;
+		const piece = text.slice(start, end);
+		if (state.largeLine) state.largeLine.feed(piece);
+		else if (!state.skippingOverlongLine) {
+			const room = MAX_SSE_LINE_BYTES - state.lineBuffer.length;
+			state.lineBuffer += piece.slice(0, room);
+			if (piece.length > room) {
+				const prefix = state.lineBuffer.trimStart();
+				if (prefix.startsWith("data:")) {
+					state.largeLine = new NativeTerminalJson();
+					state.largeLine.feed(prefix.slice(5));
+					state.largeLine.feed(piece.slice(room));
+				} else {
+					state.skippingOverlongLine = true;
+					state.currentEvent = undefined;
+					state.parseError ??= "native_responses_parse_limit";
+				}
+				state.lineBuffer = "";
+			}
 		}
-		state.lineBuffer = state.lineBuffer.slice(nl + 1);
-		state.skippingOverlongLine = false;
-	}
-
-	// Process only complete lines; retain the trailing partial in lineBuffer.
-	let newlineIdx = state.lineBuffer.indexOf("\n");
-	while (newlineIdx !== -1) {
-		const rawLine = state.lineBuffer.slice(0, newlineIdx);
-		state.lineBuffer = state.lineBuffer.slice(newlineIdx + 1);
-		processLine(state, rawLine, now);
-		newlineIdx = state.lineBuffer.indexOf("\n");
-	}
-
-	// Cap guard: the trailing partial (no newline yet) must never grow without
-	// bound. If it exceeds the cap, the line is runaway/never-terminated — discard
-	// the buffered content and arm skip mode so following chunks are dropped until
-	// the next `\n`. We never JSON-parse a truncated overlong line.
-	if (state.lineBuffer.length > MAX_SSE_LINE_BYTES) {
-		state.lineBuffer = "";
-		state.skippingOverlongLine = true;
-		// Event context is lost with the discarded line — it may have been a
-		// partial `event:` line, so a later `data:` line without a fresh `event:`
-		// must not inherit the stale type and miscount tokens.
-		state.currentEvent = undefined;
+		if (newline === -1) break;
+		finishSseLine(state, now);
+		start = newline + 1;
 	}
 }
 
@@ -762,19 +768,8 @@ export function feedChunk(
  * newline; without this flush that final `message_delta` would be lost.
  */
 function flushLineBuffer(state: UsageState, now: number = Date.now()): void {
-	// Drain the streaming decoder (no-op if no bytes are pending).
-	const tail = state.decoder.decode();
-	if (tail) state.lineBuffer += tail;
-	// If we ended mid-discard of an overlong, never-terminated line, the buffered
-	// tail is part of that runaway line — drop it, never parse a truncated line.
-	if (state.skippingOverlongLine) {
-		state.lineBuffer = "";
-		return;
-	}
-	if (state.lineBuffer.length === 0) return;
-	const rawLine = state.lineBuffer;
-	state.lineBuffer = "";
-	processLine(state, rawLine, now);
+	feedDecoded(state, state.decoder.decode(), now);
+	finishSseLine(state, now);
 }
 
 /**
@@ -829,7 +824,8 @@ export type ResponsesTerminalKind = "completed" | "incomplete" | "failed";
 /** Recorder reasons a native stream can end on, other than successfully. */
 export type NativeResponsesEndReason =
 	| typeof NATIVE_RESPONSES_STREAM_FAILED
-	| typeof NATIVE_RESPONSES_NO_TERMINAL;
+	| typeof NATIVE_RESPONSES_NO_TERMINAL
+	| NativeJsonError;
 
 /**
  * Map an SSE event name to its terminal kind, or null when it is not a
@@ -922,7 +918,8 @@ export function expectsResponsesTerminal(opts: {
 }
 
 /**
- * Classify how a native Responses stream ended, once EOF is reached.
+ * Classify how a native Responses stream ended. A transport cut can leave
+ * partial JSON, so parser diagnostics apply only at clean EOF.
  *
  * Returns the recorder reason, or `null` when the stream ended cleanly (a
  * `response.completed` was seen) — which is also what a non-native stream
@@ -937,7 +934,11 @@ export function expectsResponsesTerminal(opts: {
  * `response.incomplete` is deliberately NOT a failure reason; see the switch.
  */
 export function classifyNativeResponsesEnd(
-	state: Pick<UsageState, "sawMessageStop" | "responsesTerminalKind">,
+	state: Pick<
+		UsageState,
+		"sawMessageStop" | "responsesTerminalKind" | "parseError"
+	>,
+	cleanEof = true,
 ): NativeResponsesEndReason | null {
 	if (state.sawMessageStop) return null;
 	switch (state.responsesTerminalKind) {
@@ -955,7 +956,10 @@ export function classifyNativeResponsesEnd(
 			return null;
 		// "completed" cannot reach here — it is what sets sawMessageStop.
 		default:
-			return NATIVE_RESPONSES_NO_TERMINAL;
+			return (
+				(cleanEof ? state.parseError : undefined) ??
+				NATIVE_RESPONSES_NO_TERMINAL
+			);
 	}
 }
 

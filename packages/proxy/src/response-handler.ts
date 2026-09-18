@@ -1437,7 +1437,7 @@ async function forwardToClientInner(
 								: (rateLimitSniffer.firedReason ??
 									usageState.sseErrorType ??
 									(mustSeeResponsesTerminal
-										? classifyNativeResponsesEnd(usageState)
+										? classifyNativeResponsesEnd(usageState, false)
 										: null) ??
 									"stream_read_error");
 					observeOutcome(

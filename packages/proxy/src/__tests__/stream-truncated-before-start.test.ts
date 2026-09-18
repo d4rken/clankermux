@@ -117,12 +117,19 @@ function makeCtx(finishCalls: FinishCall[], providerName = "anthropic") {
 	} as never;
 }
 
-/** An SSE stream of raw chunks that closes cleanly (Bun `done:true`). */
-function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
+/** Supply each raw chunk before a clean EOF or an upstream read failure. */
+function sseStream(
+	chunks: string[],
+	cutAfterChunks = false,
+): ReadableStream<Uint8Array> {
+	let index = 0;
 	return new ReadableStream({
-		start(controller) {
-			for (const c of chunks) controller.enqueue(enc.encode(c));
-			controller.close();
+		pull(controller) {
+			if (index < chunks.length)
+				controller.enqueue(enc.encode(chunks[index++]));
+			else if (cutAfterChunks)
+				controller.error(new Error("upstream read failed"));
+			else controller.close();
 		},
 	});
 }
@@ -149,6 +156,7 @@ async function runStream(
 		providerName?: string;
 		/** Sets x-clankermux-responses-native, as the Codex provider does. */
 		nativeMarker?: boolean;
+		cutAfterChunks?: boolean;
 	} = {},
 ): Promise<FinishCall[]> {
 	const finishCalls: FinishCall[] = [];
@@ -160,7 +168,7 @@ async function runStream(
 			account: makeAccount(),
 			requestHeaders: new Headers({ "content-type": "application/json" }),
 			requestBody: enc.encode("{}").buffer as ArrayBuffer,
-			response: new Response(sseStream(chunks), {
+			response: new Response(sseStream(chunks, options.cutAfterChunks), {
 				status: options.status ?? 200,
 				headers: {
 					"content-type": options.contentType ?? "text/event-stream",
@@ -176,7 +184,9 @@ async function runStream(
 		makeCtx(finishCalls, options.providerName),
 	);
 	// Drain so the single-reader passthrough runs the inline analytics.
-	await response.text();
+	if (options.cutAfterChunks)
+		await expect(response.text()).rejects.toThrow("upstream read failed");
+	else expect(await response.text()).toBe(chunks.join(""));
 	return finishCalls;
 }
 
@@ -575,4 +585,60 @@ describe("forwardToClient — premature SSE termination", () => {
 			clearProviderOverloadCooldown();
 		}
 	});
+});
+
+describe("large native terminal forwarding", () => {
+	for (const kind of ["completed", "failed", "incomplete"]) {
+		it(`forwards a large ${kind} event intact and records its outcome`, async () => {
+			const data = `event: response.${kind}\ndata: ${JSON.stringify({
+				type: `response.${kind}`,
+				response: {
+					usage: {
+						attribution: { detail: "x".repeat(600_000) },
+						input_tokens: 12345,
+						output_tokens: 67,
+					},
+				},
+			})}\n\n`;
+			const chunks = [RESPONSE_CREATED];
+			for (let i = 0; i < data.length; i += 8192)
+				chunks.push(data.slice(i, i + 8192));
+			const calls = await runStream(chunks, {
+				providerName: "codex",
+				nativeMarker: true,
+			});
+			expect(calls).toEqual([
+				{
+					outcome: kind === "failed" ? "error" : "success",
+					reason:
+						kind === "failed" ? "native_responses_stream_failed" : undefined,
+				},
+			]);
+		});
+	}
+	it("records invalid completion JSON as a parser error", async () => {
+		const calls = await runStream(
+			[
+				RESPONSE_CREATED,
+				'event: response.completed\ndata: {"type":"response.completed","response":',
+			],
+			{ providerName: "codex", nativeMarker: true },
+		);
+		expect(calls).toEqual([
+			{ outcome: "error", reason: "native_responses_parse_error" },
+		]);
+	});
+});
+
+it("keeps a read failure during a large terminal distinct from a parser error", async () => {
+	const partial = `event: response.completed\ndata: {"response":{"usage":{"attribution":"${"x".repeat(600_000)}`;
+	const chunks = [RESPONSE_CREATED];
+	for (let i = 0; i < partial.length; i += 8192)
+		chunks.push(partial.slice(i, i + 8192));
+	const calls = await runStream(chunks, {
+		providerName: "codex",
+		nativeMarker: true,
+		cutAfterChunks: true,
+	});
+	expect(calls).toEqual([{ outcome: "error", reason: undefined }]);
 });
