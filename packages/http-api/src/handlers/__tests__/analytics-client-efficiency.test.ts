@@ -48,6 +48,9 @@ interface SeedRow {
 	contextToolsChars?: number | null;
 	contextToolCount?: number | null;
 	contextMessagesChars?: number | null;
+	contextToolResultChars?: number | null;
+	contextMessageCount?: number | null;
+	project?: string | null;
 }
 
 function insertKey(id: string, name: string): void {
@@ -74,9 +77,10 @@ function insertRequest(row: SeedRow): void {
 			cost_usd, cost_source, input_tokens, cache_read_input_tokens,
 			cache_creation_input_tokens, output_tokens, billing_type, api_key_id,
 			api_key_name, client_harness, session_key, context_system_chars,
-			context_tools_chars, context_tool_count, context_messages_chars
+			context_tools_chars, context_tool_count, context_messages_chars,
+			context_tool_result_chars, context_message_count, project
 		) VALUES (?, ?, 'POST', '/v1/messages', 'acct-a', 200, ?, NULL, 500, 0, ?, 0,
-			?, ?, ?, ?, ?, ?, 'plan', ?, ?, ?, ?, ?, ?, ?, ?)`,
+			?, ?, ?, ?, ?, ?, 'plan', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			row.id,
 			NOW - HOUR,
@@ -96,6 +100,9 @@ function insertRequest(row: SeedRow): void {
 			row.contextToolsChars ?? null,
 			row.contextToolCount ?? null,
 			row.contextMessagesChars ?? null,
+			row.contextToolResultChars ?? null,
+			row.contextMessageCount ?? null,
+			row.project ?? null,
 		],
 	);
 }
@@ -374,6 +381,146 @@ describe("clientEfficiency — context coverage", () => {
 		expect(row.contextSystemCharsSum).toBe(1000);
 		expect(row.contextToolsCharsSum).toBe(2000);
 		expect(row.contextToolCountSum).toBe(7);
+	});
+});
+
+describe("clientEfficiency — context breakdown", () => {
+	const measured = {
+		apiKeyId: KEY_CC,
+		apiKeyName: "cc-key",
+		clientHarness: "claude-code",
+		contextSystemChars: 100,
+		contextToolsChars: 200,
+		contextMessagesChars: 1000,
+		contextToolResultChars: 600,
+		contextMessageCount: 8,
+	};
+
+	it("uses the same fully measured cohort for every sum and excludes tool results from other messages", async () => {
+		insertRequest({ id: "measured", ...measured });
+		insertRequest({
+			id: "unmeasured",
+			apiKeyId: KEY_CC,
+			apiKeyName: "cc-key",
+			clientHarness: "claude-code",
+		});
+		for (const field of [
+			"contextSystemChars",
+			"contextToolsChars",
+			"contextMessagesChars",
+			"contextToolResultChars",
+			"contextMessageCount",
+		] as const) {
+			insertRequest({ id: `missing-${field}`, ...measured, [field]: null });
+		}
+
+		const row = rowFor(await fetchSection(), KEY_CC, "claude-code");
+		expect(row.requests).toBe(7);
+		expect(row.contextCoveredRequests).toBe(5);
+		expect(row.contextSystemCharsSum).toBe(500);
+		expect(row.contextBreakdown).toEqual({
+			coveredRequests: 1,
+			systemCharsSum: 100,
+			toolsCharsSum: 200,
+			toolResultCharsSum: 600,
+			otherMessagesCharsSum: 400,
+			messageCountSum: 8,
+		});
+	});
+
+	it("counts measured zeros while keeping unmeasured groups uncovered", async () => {
+		insertRequest({
+			id: "zero",
+			...measured,
+			contextSystemChars: 0,
+			contextToolsChars: 0,
+			contextMessagesChars: 0,
+			contextToolResultChars: 0,
+			contextMessageCount: 0,
+		});
+		insertRequest({
+			id: "unknown",
+			apiKeyId: KEY_CODEX,
+			apiKeyName: "codex-key",
+			clientHarness: "codex",
+		});
+		const body = await fetchSection();
+		const sums = {
+			systemCharsSum: 0,
+			toolsCharsSum: 0,
+			toolResultCharsSum: 0,
+			otherMessagesCharsSum: 0,
+			messageCountSum: 0,
+		};
+		expect(rowFor(body, KEY_CC, "claude-code").contextBreakdown).toEqual({
+			coveredRequests: 1,
+			...sums,
+		});
+		expect(rowFor(body, KEY_CODEX, "codex").contextBreakdown).toEqual({
+			coveredRequests: 0,
+			...sums,
+		});
+	});
+
+	it("keeps measured sums separate for observed and inferred harness groups on one key", async () => {
+		insertProfile(KEY_CC, "codex");
+		insertRequest({ id: "observed", ...measured });
+		insertRequest({
+			id: "session",
+			...measured,
+			clientHarness: null,
+			sessionKey: `${KEY_CC}:session-1`,
+		});
+		insertRequest({
+			id: "declared",
+			...measured,
+			clientHarness: null,
+			contextMessagesChars: 1500,
+			contextToolResultChars: 500,
+			contextMessageCount: 12,
+		});
+		const body = await fetchSection();
+		expect(rowFor(body, KEY_CC, "claude-code").contextBreakdown).toEqual({
+			coveredRequests: 2,
+			systemCharsSum: 200,
+			toolsCharsSum: 400,
+			toolResultCharsSum: 1200,
+			otherMessagesCharsSum: 800,
+			messageCountSum: 16,
+		});
+		expect(rowFor(body, KEY_CC, "codex").contextBreakdown).toEqual({
+			coveredRequests: 1,
+			systemCharsSum: 100,
+			toolsCharsSum: 200,
+			toolResultCharsSum: 500,
+			otherMessagesCharsSum: 1000,
+			messageCountSum: 12,
+		});
+	});
+
+	it("applies model, project, key and status filters to the measured cohort", async () => {
+		const selected = {
+			...measured,
+			model: "shared-model",
+			project: "project-a",
+		};
+		insertRequest({ id: "selected", ...selected });
+		insertRequest({ id: "other-model", ...selected, model: "other-model" });
+		insertRequest({ id: "other-project", ...selected, project: "project-b" });
+		insertRequest({ id: "other-key", ...selected, apiKeyId: KEY_CODEX });
+		insertRequest({ id: "error", ...selected, success: false });
+		const body = await fetchSection(
+			`range=all&sections=clientEfficiency&models=shared-model&projects=project-a&apiKeys=${KEY_CC}&status=success`,
+		);
+		expect(body.clientEfficiency?.rows).toHaveLength(1);
+		expect(rowFor(body, KEY_CC, "claude-code").contextBreakdown).toEqual({
+			coveredRequests: 1,
+			systemCharsSum: 100,
+			toolsCharsSum: 200,
+			toolResultCharsSum: 600,
+			otherMessagesCharsSum: 400,
+			messageCountSum: 8,
+		});
 	});
 });
 

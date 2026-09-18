@@ -642,7 +642,15 @@
 				"contextTokensSum": 4500,
 				"contextToolsCharsSum": 25000,
 				"contextSystemCharsSum": 10000,
-				"contextToolCountSum": 0
+				"contextToolCountSum": 0,
+				"contextBreakdown": {
+					"coveredRequests": 5,
+					"systemCharsSum": 10000,
+					"toolsCharsSum": 25000,
+					"toolResultCharsSum": 40000,
+					"otherMessagesCharsSum": 60000,
+					"messageCountSum": 60
+				}
 			},
 			{
 				"apiKeyId": null,
@@ -665,7 +673,15 @@
 				"contextTokensSum": 1800,
 				"contextToolsCharsSum": 10000,
 				"contextSystemCharsSum": 4000,
-				"contextToolCountSum": 0
+				"contextToolCountSum": 0,
+				"contextBreakdown": {
+					"coveredRequests": 2,
+					"systemCharsSum": 4000,
+					"toolsCharsSum": 10000,
+					"toolResultCharsSum": 16000,
+					"otherMessagesCharsSum": 24000,
+					"messageCountSum": 24
+				}
 			},
 			{
 				"apiKeyId": "key-deleted-3",
@@ -688,7 +704,15 @@
 				"contextTokensSum": 900,
 				"contextToolsCharsSum": 5000,
 				"contextSystemCharsSum": 2000,
-				"contextToolCountSum": 0
+				"contextToolCountSum": 0,
+				"contextBreakdown": {
+					"coveredRequests": 1,
+					"systemCharsSum": 2000,
+					"toolsCharsSum": 5000,
+					"toolResultCharsSum": 8000,
+					"otherMessagesCharsSum": 12000,
+					"messageCountSum": 12
+				}
 			},
 			{
 				"apiKeyId": "key-renamed-2",
@@ -711,7 +735,15 @@
 				"contextTokensSum": 1800,
 				"contextToolsCharsSum": 7500,
 				"contextSystemCharsSum": 3000,
-				"contextToolCountSum": 0
+				"contextToolCountSum": 0,
+				"contextBreakdown": {
+					"coveredRequests": 2,
+					"systemCharsSum": 3000,
+					"toolsCharsSum": 7500,
+					"toolResultCharsSum": 9500,
+					"otherMessagesCharsSum": 19500,
+					"messageCountSum": 17
+				}
 			},
 			{
 				"apiKeyId": "key-live-1",
@@ -734,7 +766,15 @@
 				"contextTokensSum": 900,
 				"contextToolsCharsSum": 5000,
 				"contextSystemCharsSum": 2000,
-				"contextToolCountSum": 0
+				"contextToolCountSum": 0,
+				"contextBreakdown": {
+					"coveredRequests": 1,
+					"systemCharsSum": 2000,
+					"toolsCharsSum": 5000,
+					"toolResultCharsSum": 8000,
+					"otherMessagesCharsSum": 12000,
+					"messageCountSum": 12
+				}
 			}
 		]
 	},

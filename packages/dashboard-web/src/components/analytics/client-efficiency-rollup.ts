@@ -49,6 +49,7 @@ export interface ClientEfficiencyGroup {
 	contextToolsCharsSum: number;
 	contextSystemCharsSum: number;
 	contextToolCountSum: number;
+	contextBreakdown: NonNullable<ClientEfficiencyRow["contextBreakdown"]>;
 }
 
 /** The label shown when nothing identified the harness. */
@@ -84,6 +85,14 @@ function emptyAccumulator(key: string, label: string): Accumulator {
 		contextToolsCharsSum: 0,
 		contextSystemCharsSum: 0,
 		contextToolCountSum: 0,
+		contextBreakdown: {
+			coveredRequests: 0,
+			systemCharsSum: 0,
+			toolsCharsSum: 0,
+			toolResultCharsSum: 0,
+			otherMessagesCharsSum: 0,
+			messageCountSum: 0,
+		},
 		perHarness: new Map(),
 	};
 }
@@ -106,6 +115,16 @@ function add(target: Accumulator, row: ClientEfficiencyRow): void {
 	target.contextToolsCharsSum += row.contextToolsCharsSum;
 	target.contextSystemCharsSum += row.contextSystemCharsSum;
 	target.contextToolCountSum += row.contextToolCountSum;
+	if (row.contextBreakdown) {
+		const source = row.contextBreakdown;
+		const targetContext = target.contextBreakdown;
+		targetContext.coveredRequests += source.coveredRequests;
+		targetContext.systemCharsSum += source.systemCharsSum;
+		targetContext.toolsCharsSum += source.toolsCharsSum;
+		targetContext.toolResultCharsSum += source.toolResultCharsSum;
+		targetContext.otherMessagesCharsSum += source.otherMessagesCharsSum;
+		targetContext.messageCountSum += source.messageCountSum;
+	}
 	target.perHarness.set(
 		row.harness,
 		(target.perHarness.get(row.harness) ?? 0) + row.requests,

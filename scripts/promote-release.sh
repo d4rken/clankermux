@@ -3,14 +3,15 @@
 #
 # Production does NOT run from the development checkout. The
 # zz-release.conf systemd drop-in pins WorkingDirectory to a release
-# snapshot under .cache/releases/<sha>, so an unfinished working tree can
+# snapshot under .codex/worktrees/release-<sha> (or the legacy
+# .cache/releases/<sha>), so an unfinished working tree can
 # never reach production through a crash restart or a reboot. Nothing
 # promotes itself: a merge into main changes what WILL ship the next time
 # this script runs, and nothing about what is running now.
 #
 # What this does, in order:
 #   1. resolves the target commit (default: refs/heads/main)
-#   2. creates .cache/releases/<sha> as a detached worktree if it is missing,
+#   2. creates .codex/worktrees/release-<sha> as a detached worktree if it is missing,
 #      and refuses to reuse an existing one that has drifted from the commit
 #   3. installs dependencies and runs the GUARDED builds there, while the old
 #      release keeps serving — guarded so the markers exist and the
@@ -21,11 +22,11 @@
 #      version its own package.json declares, and then stayed up and serving
 #      for a settle window rather than merely reaching readiness once
 #
-# Rollback is the same command with the previous snapshot's sha. This script
-# prints it before switching and records it in .cache/releases/PREVIOUS, so a
-# failed promotion followed by a re-run does not lose it. Old snapshots are
+# Rollback is the same command with a verified snapshot's sha, printed before
+# switching. .cache/releases/LAST_VERIFIED changes only after verification
+# succeeds, so failed promotions preserve the rollback target. Old snapshots are
 # never deleted here; prune them by hand with
-# `git worktree remove .cache/releases/<sha>` once you no longer want them as
+# `git worktree remove .codex/worktrees/release-<sha>` once you no longer want them as
 # rollback targets. They are cheaper to keep than `du` on one of them
 # suggests: bun hardlinks node_modules from its global cache, so snapshots
 # share most of their content and removing one frees far less than its
@@ -58,8 +59,16 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=${1:-refs/heads/main}
 SHA=$(git -C "$ROOT" rev-parse --verify "${TARGET}^{commit}" 2>/dev/null) ||
 	die "cannot resolve $TARGET to a commit"
-RELEASE="$ROOT/.cache/releases/$SHA"
 RELEASES_DIR="$ROOT/.cache/releases"
+RELEASE="$ROOT/.codex/worktrees/release-$SHA"
+# Reuse old snapshots when rolling back; new worktrees follow the local policy.
+if [ -d "$RELEASES_DIR/$SHA" ]; then
+	RELEASE="$RELEASES_DIR/$SHA"
+fi
+mkdir -p "$RELEASES_DIR"
+if ! git -C "$ROOT" check-ignore -q .codex/worktrees/; then
+	printf '\n/.codex/worktrees/\n' >>"$ROOT/.git/info/exclude"
+fi
 
 VERIFIED_FILE="$RELEASES_DIR/LAST_VERIFIED"
 CURRENT=$(show WorkingDirectory)
@@ -76,6 +85,7 @@ fi
 if [ -z "$ROLLBACK" ]; then
 	case "$CURRENT" in
 	"$RELEASES_DIR"/?*) ROLLBACK=$(basename "$CURRENT") ;;
+	"$ROOT/.codex/worktrees/release-"?*) ROLLBACK=${CURRENT##*/release-} ;;
 	esac
 fi
 if [ "$ROLLBACK" = "$SHA" ]; then

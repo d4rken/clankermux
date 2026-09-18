@@ -8,6 +8,7 @@ import {
 	ClientModelEfficiencyPanel,
 	MissingSectionsNotice,
 } from "..";
+import { HarnessBreakdownPanel } from "../HarnessBreakdownPanel";
 import type { ClientEfficiencyTabProps } from "./types";
 
 export const CLIENT_SECTIONS: readonly AnalyticsSection[] = [
@@ -93,6 +94,12 @@ export function ClientEfficiencyTab(props: ClientEfficiencyTabProps) {
 			/>
 
 			<ClientEfficiencySummary
+				rows={rows}
+				truncated={analytics?.clientEfficiency?.truncated ?? false}
+				loading={loading}
+			/>
+
+			<HarnessBreakdownPanel
 				rows={rows}
 				truncated={analytics?.clientEfficiency?.truncated ?? false}
 				loading={loading}

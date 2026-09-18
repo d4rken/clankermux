@@ -24,7 +24,8 @@ stays forbidden, including curling that endpoint by hand.
 
 `clankermux.service` does **not** run from `/home/darken/clankermux`. The
 `zz-release.conf` systemd drop-in pins `WorkingDirectory` to a release snapshot
-under `.cache/releases/<sha>` — a detached worktree of one reviewed commit, with
+under `.codex/worktrees/release-<sha>` (legacy snapshots remain under
+`.cache/releases/<sha>`) — a detached worktree of one reviewed commit, with
 its own `node_modules`, built dashboard and inline DB workers. An unfinished
 working tree therefore cannot reach production through a crash restart, a
 watchdog restart or a reboot.
@@ -49,11 +50,15 @@ so the way back is always a release that actually came up rather than whatever
 the pin happens to name after a failure. A settle window is a sampled check,
 not a guarantee: a service that dies minutes later still passes it. It never
 deletes old
-snapshots; prune them by hand with `git worktree remove .cache/releases/<sha>`
+snapshots; prune them by hand with `git worktree remove .codex/worktrees/release-<sha>`
 once you no longer want them as rollback targets. Keeping several is cheap:
 bun hardlinks `node_modules` from its global cache, so five snapshots occupied
 712 MB together on 2026-09-07 despite each measuring ~500 MB alone, and
 removing one frees far less than its apparent size.
+
+Worktrees named `.codex/worktrees/release-*` are production snapshots. Never
+remove them during agent worktree cleanup; the active release and retained
+rollback targets must remain available.
 
 To check what is running, ask the serving process, not the repo and not the
 unit config. `WorkingDirectory` is only the pin systemd would use at the next
