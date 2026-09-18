@@ -163,7 +163,7 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		usageCache.delete("acc-oauth");
 	});
 
-	it("intercepts a transient 429 (x-should-retry) and records retryable_429 WITHOUT cycling model fallbacks", async () => {
+	it("intercepts a transient 429 (x-should-retry) and records retryable_429 without a second upstream dispatch", async () => {
 		const fetchCalls: string[] = [];
 		globalThis.fetch = mockFetch(
 			mock(async (input: RequestInfo | URL) => {
@@ -182,7 +182,7 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		const result = await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			// Account WITH model fallbacks configured — must NOT be cycled.
+			// This account receives only the initial upstream dispatch.
 			makeOAuthAnthropicAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
@@ -198,7 +198,7 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		);
 
 		expect(result).toBeNull();
-		// Exactly ONE upstream call — the early intercept fired before model cycling.
+		// Exactly one upstream call: the early intercept delegates retry scheduling.
 		expect(fetchCalls).toHaveLength(1);
 		expect(outcomes).toHaveLength(1);
 		expect(outcomes[0].kind).toBe("retryable_429");

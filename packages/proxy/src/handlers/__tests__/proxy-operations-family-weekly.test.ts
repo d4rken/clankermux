@@ -461,7 +461,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		// The residual gap after the registration fix (v2026.7.51): the cache is
 		// empty AND refreshNow fails (usage endpoint down / its own 429). Before
 		// this rung learned to read the response's unified headers, this exact
-		// input fell through to the model-fallback rung and copied the
+		// input fell through to the residual 429 rung and copied the
 		// claim-scoped retry-after (51811s = the fable weekly reset) into an
 		// account-wide lock (Claude-Backup-2, 2026-08-02, reason
 		// model_fallback_429 — not poller-releasable, so it stuck for 14.4h).
@@ -550,7 +550,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 	it("cold cache + dead endpoint + account-wide-shape headers: falls through to normal cooldown handling", async () => {
 		// Same evidence-starved state, but the headers report the account-wide 7d
 		// window itself rejecting: header evidence must NOT rescue this — the lock
-		// is truthful and the existing (model-fallback) path applies it.
+		// is truthful and the residual 429 path applies it.
 		const refreshSpy = mock(async () => false);
 		const originalRefreshNow = usageCache.refreshNow.bind(usageCache);
 		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
@@ -795,7 +795,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 		).toBeDefined();
 		expect(result).toBeNull();
-		expect(outcomes).toEqual(["other"]);
+		expect(outcomes).toEqual(["model_quota_exhausted"]);
 		expect(markCalls).toHaveLength(0);
 		expect(account.rate_limited_until).toBeNull();
 		expect(account.rate_limited_reason).toBeNull();

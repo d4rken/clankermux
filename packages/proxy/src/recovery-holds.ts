@@ -128,33 +128,13 @@ export function isOrdinaryAttemptFailure(
 	);
 }
 
-/**
- * Whether an ordinary failure may be held against the ACCOUNT for the rest of
- * the request, rather than only against the attempt that produced it.
- *
- * The exclusion set is keyed by account id alone, so a cause that stays
- * narrower than the account for the REST OF THIS REQUEST must stay out of it.
- * Exactly one kind does:
- *
- * - `other` is the catch-all, and family-weekly exhaustion is emitted through
- *   it — deliberately WITHOUT an account-wide cooldown (see the fail() call in
- *   proxy-operations.ts). The account can still serve every other family, so
- *   refusing it by id for the rest of the request would withhold capacity that
- *   was never exhausted.
- *
- * `model_not_found` and `model_not_entitled` are facts about the MODEL, and
- * they DO exclude the account, because the routing table resolves exactly one
- * target per account per request and nothing may substitute another model
- * behind it. The destination refused the only model it will ever be asked for
- * here, so model-scoped and account-scoped coincide for this request and a
- * re-attempt on wake can only reproduce the refusal.
- *
- * Erring toward NOT excluding is otherwise the safe direction: the cost is a
- * redundant retry on wake, whereas a wrong exclusion can refuse the only
- * account able to serve the request.
- */
+/** Model-scoped quota and unclassified failures cannot exclude an entire account. */
 export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
-	return isOrdinaryAttemptFailure(outcome) && outcome.kind !== "other";
+	return (
+		isOrdinaryAttemptFailure(outcome) &&
+		outcome.kind !== "other" &&
+		outcome.kind !== "model_quota_exhausted"
+	);
 }
 
 // Outcome of a burst hold once it has run. `served` carries the real upstream

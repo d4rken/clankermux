@@ -935,6 +935,10 @@ export function ensureSchema(db: Database): void {
 
 	// Performance indexes (covering/partial indexes for hot query paths)
 	// Routing policy is additive: retired combo/mapping storage remains inert.
+	db.run(`CREATE TABLE IF NOT EXISTS model_aliases (
+		id TEXT PRIMARY KEY, display_name TEXT NOT NULL, targets TEXT NOT NULL,
+		revision INTEGER NOT NULL CHECK(revision > 0)
+	)`);
 	db.run(`CREATE TABLE IF NOT EXISTS routing_rules (
 		id TEXT PRIMARY KEY, name TEXT NOT NULL,
 		enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), position INTEGER NOT NULL UNIQUE,
@@ -979,6 +983,17 @@ export function ensureSchema(db: Database): void {
 	);
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_snapshot_retention AFTER DELETE ON routing_attempts
       BEGIN DELETE FROM routing_snapshots WHERE id=OLD.route_snapshot_id AND NOT EXISTS(SELECT 1 FROM routing_attempts WHERE route_snapshot_id=OLD.route_snapshot_id); END`);
+
+	db.run(`CREATE TRIGGER IF NOT EXISTS model_alias_delete_guard BEFORE DELETE ON model_aliases
+		WHEN EXISTS(SELECT 1 FROM routing_rules WHERE target_kind='literal' AND target_model=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Model alias is referenced by routing rules'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS model_alias_client_delete_guard BEFORE DELETE ON model_aliases
+		WHEN EXISTS(SELECT 1 FROM client_profiles p, json_each(p.catalogues) c,
+			json_each(json_extract(c.value,'$.models')) m WHERE json_extract(m.value,'$.targetModel')=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Model alias is referenced by client catalogues'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS model_alias_account_delete_guard BEFORE DELETE ON accounts
+		WHEN EXISTS(SELECT 1 FROM model_aliases m, json_each(m.targets) t, json_each(json_extract(t.value,'$.accountIds')) a WHERE a.value=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Account is referenced by model aliases'); END`);
 
 	// Restrict reference deletion; SET NULL would silently broaden a policy.
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_account_delete_guard BEFORE DELETE ON accounts

@@ -61,6 +61,7 @@ import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RequestRecorder } from "./request-recorder";
 import {
+	getAliasRoutes,
 	getAttemptTarget,
 	getResolvedRoute,
 	RoutingPolicyError,
@@ -74,6 +75,8 @@ import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 import { resolveZeroAccountsOutcome } from "./zero-accounts-terminal";
 
 export type { ProxyContext } from "./handlers";
+
+import { handleAliasProxy } from "./model-alias-routing";
 
 const log = new Logger("Proxy");
 
@@ -265,6 +268,8 @@ export async function handleProxy(
 		retractIfNeverStarted(response.status);
 		return response;
 	} catch (error) {
+		// A later alias stage can reject after an earlier attempt staged a cache body.
+		cacheBodyStore.discardStaged(requestMeta.id);
 		if (error instanceof RoutingPolicyError) {
 			let route: ReturnType<typeof getResolvedRoute> | undefined;
 			try {
@@ -450,6 +455,18 @@ async function handleIngestedProxy(
 			apiKeyId,
 			apiKeyName,
 			requestBodyContext,
+		);
+	}
+
+	if (getAliasRoutes(requestMeta)) {
+		return handleAliasProxy(
+			ingressContext,
+			req,
+			url,
+			ctx,
+			apiKeyId,
+			apiKeyName,
+			attemptThroughProbeGate,
 		);
 	}
 

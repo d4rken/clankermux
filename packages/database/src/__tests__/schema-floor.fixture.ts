@@ -121,6 +121,12 @@ export interface PostFloorTableBaseline {
 export const POST_FLOOR_TABLE_BASELINES: Readonly<
 	Record<string, PostFloorTableBaseline>
 > = {
+	model_aliases: {
+		shipped: "2026-09-18",
+		commit: "model-alias-fallbacks",
+		columns: ["id", "display_name", "targets", "revision"],
+		source: "create-table-at-intro",
+	},
 	routing_rules: {
 		shipped: "2026-09-10",
 		commit: "routing-table",

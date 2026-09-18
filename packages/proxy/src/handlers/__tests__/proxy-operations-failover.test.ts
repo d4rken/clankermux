@@ -319,7 +319,7 @@ describe("proxyWithAccount — 429 failover", () => {
 		const result = await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			makeAccount(), // no model_fallbacks
+			makeAccount(),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -330,7 +330,7 @@ describe("proxyWithAccount — 429 failover", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null (failover) when both primary and fallback model return 429", async () => {
+	it("returns null (failover) when the resolved target returns a model-scoped 429", async () => {
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				jsonResponse(
@@ -469,7 +469,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("calls markAccountRateLimited with reason='model_fallback_429' on no-fallback 429", async () => {
+	it("calls markAccountRateLimited with reason='model_fallback_429' on a residual 429", async () => {
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				jsonResponse(
@@ -492,7 +492,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 		await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			makeAccount(), // no model_fallbacks
+			makeAccount(),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -518,8 +518,8 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 		expect(reasons).toContain("model_fallback_429");
 	});
 
-	it("calls markAccountRateLimited with reason='model_fallback_429' when the resolved target fails despite a legacy fallback array", async () => {
-		// All fetch calls return 429 — primary + every fallback model
+	it("calls markAccountRateLimited with reason='model_fallback_429' when the resolved target returns a model-scoped 429", async () => {
+		// The resolved target returns a model-scoped 429.
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				jsonResponse(
@@ -657,8 +657,6 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 		);
 	});
 });
-
-describe("getModelList — model_fallbacks merge", () => {});
 
 describe("proxyWithAccount — 529 failover", () => {
 	let originalFetch: typeof globalThis.fetch;

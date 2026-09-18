@@ -106,7 +106,7 @@ export async function resolveClientModelMetadata(
 			return candidateFor(request.targetModel, provider, entry);
 		}),
 	);
-	return reduce([...candidates, ...discoveredMetadata]);
+	return reduceClientModelMetadata([...candidates, ...discoveredMetadata]);
 }
 
 function candidateFor(
@@ -223,7 +223,10 @@ function tiersFrom(value: unknown): ClientModelCostTier[] | undefined {
 	return tiers.length ? tiers : undefined;
 }
 
-function reduce(candidates: ClientModelMetadata[]): ClientModelMetadata {
+export function reduceClientModelMetadata(
+	candidates: ClientModelMetadata[],
+): ClientModelMetadata {
+	if (!candidates.length) return {};
 	const metadata: ClientModelMetadata = {};
 	const windows = candidates.map((c) => c.contextWindow);
 	if (windows.every((w) => w !== undefined))

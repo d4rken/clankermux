@@ -6,6 +6,8 @@ import {
 	MODEL_DISPLAY_NAMES,
 	matchRoutingRule,
 	pricingCatalogueStatus,
+	reduceClientModelMetadata,
+	reduceModelCachePolicies,
 	resolveClientModelMetadata,
 	resolveModelCachePolicy,
 	resolveRoutingTarget,
@@ -53,6 +55,7 @@ import {
 	toApiKeyResponse,
 } from "@clankermux/types";
 import {
+	aliasCodexMetadata,
 	catalogueWithin,
 	readCodexEnvelope,
 	renderClientCatalogue,
@@ -468,81 +471,140 @@ export class ClientService {
 				// The live route, not the stored `targetModel`: a literal rule matching
 				// `any` or this model's family remaps the published id, and the stored
 				// value would then describe a route that no longer exists.
-				const target = resolveRoutingTarget(winning, model.id).upstreamModel;
-				const pool =
-					winning?.pool_kind === "accounts"
-						? (winning.pool_account_ids ?? [])
-						: null;
-				const providers = new Set<string>();
-				const cacheRoutes: Array<{
-					provider: string;
-					customEndpoint?: string | null;
-					format: ClientFormat;
-				}> = [];
-				const discoveredMetadata: ClientModelMetadata[] = [];
-				const nativeAccountIds: string[] = [];
-				let staleNativeRoute = false;
-				let unresolvedRoutes = false;
-				for (const account of accounts) {
-					if (pool && !pool.includes(account.id)) continue;
-					if (
-						winning?.pool_kind === "provider" &&
-						account.provider !== winning.pool_provider
-					)
-						continue;
-					const permission = permissions.get(account.id) ?? null;
-					if (isModelPermitted(permission, account.id, target, winning)) {
-						cacheRoutes.push({
-							provider: account.provider,
-							customEndpoint: account.custom_endpoint,
-							format,
-						});
-						const native = this.deps.permissions.discoveredMetadata(
-							account,
-							permission,
+				const routed = resolveRoutingTarget(winning, model.id).upstreamModel;
+				const alias = routed.startsWith("alias:")
+					? await this.deps.dbOps.modelAliases.get(routed)
+					: null;
+				if (routed.startsWith("alias:") && !alias)
+					return [model.id, {}] as const;
+				const targets = (
+					alias?.targets ?? [{ model: routed, accountIds: null }]
+				).filter(
+					(target) =>
+						!alias ||
+						accounts.some(
+							(account) =>
+								(!target.accountIds ||
+									target.accountIds.includes(account.id)) &&
+								(winning?.pool_kind !== "accounts" ||
+									winning.pool_account_ids?.includes(account.id)) &&
+								(winning?.pool_kind !== "provider" ||
+									winning.pool_provider === account.provider),
+						),
+				);
+				const targetMetadata = await Promise.all(
+					targets.map(async (aliasTarget) => {
+						const target = aliasTarget.model;
+						const pool =
+							winning?.pool_kind === "accounts"
+								? (winning.pool_account_ids ?? [])
+								: null;
+						const providers = new Set<string>();
+						const cacheRoutes: Array<{
+							provider: string;
+							customEndpoint?: string | null;
+							format: ClientFormat;
+						}> = [];
+						const discoveredMetadata: ClientModelMetadata[] = [];
+						const nativeAccountIds: string[] = [];
+						let staleNativeRoute = false;
+						let unresolvedRoutes = false;
+						for (const account of accounts) {
+							if (
+								aliasTarget.accountIds &&
+								!aliasTarget.accountIds.includes(account.id)
+							)
+								continue;
+							if (pool && !pool.includes(account.id)) continue;
+							if (
+								winning?.pool_kind === "provider" &&
+								account.provider !== winning.pool_provider
+							)
+								continue;
+							const permission = permissions.get(account.id) ?? null;
+							const permissionRule: RoutingRule | null = alias
+								? {
+										id: winning?.id ?? alias.id,
+										name: alias.displayName,
+										enabled: true,
+										position: 0,
+										match_api_key_id: id,
+										match_model_kind: "exact",
+										match_model_value: model.id,
+										pool_kind: aliasTarget.accountIds
+											? "accounts"
+											: (winning?.pool_kind ?? "inherit"),
+										pool_account_ids:
+											aliasTarget.accountIds ??
+											winning?.pool_account_ids ??
+											null,
+										pool_provider: winning?.pool_provider ?? null,
+										target_kind: "literal",
+										target_model: target,
+									}
+								: winning;
+							if (
+								isModelPermitted(permission, account.id, target, permissionRule)
+							) {
+								cacheRoutes.push({
+									provider: account.provider,
+									customEndpoint: account.custom_endpoint,
+									format,
+								});
+								const native = this.deps.permissions.discoveredMetadata(
+									account,
+									permission,
+								);
+								if (native) {
+									discoveredMetadata.push(native.models[target] ?? {});
+									nativeAccountIds.push(account.id);
+									staleNativeRoute ||= native.stale;
+								} else if (NATIVE_DISCOVERY_PROVIDERS.has(account.provider)) {
+									unresolvedRoutes = true;
+								} else providers.add(account.provider);
+							}
+							// Neither eligible nor dismissible: an account whose permissions were
+							// never read may or may not serve this model, so the whole alias goes
+							// unresolved rather than being described from the accounts we can see.
+							else if (!permission || permission.completeness === "unknown")
+								unresolvedRoutes = true;
+						}
+						if (!unresolvedRoutes && nativeAccountIds.length) {
+							nativeLoaded = true;
+							nativeStale ||= staleNativeRoute;
+						}
+						// Aliases share targets, and the pin and the rule pool are the same for
+						// most of them, so one catalogue resolution usually covers several.
+						const cacheKey = JSON.stringify([
+							target,
+							[...providers].sort(),
+							nativeAccountIds.sort(),
+							unresolvedRoutes,
+						]);
+						let work = resolved.get(cacheKey);
+						if (!work) {
+							if (providers.size && !unresolvedRoutes) lookups++;
+							work = resolveClientModelMetadata({
+								targetModel: target,
+								providers: [...providers],
+								discoveredMetadata,
+								unresolvedRoutes,
+							});
+							resolved.set(cacheKey, work);
+						}
+						const metadata = { ...(await work) };
+						const cachePolicy = resolveModelCachePolicy(
+							target,
+							cacheRoutes,
+							unresolvedRoutes,
 						);
-						if (native) {
-							discoveredMetadata.push(native.models[target] ?? {});
-							nativeAccountIds.push(account.id);
-							staleNativeRoute ||= native.stale;
-						} else if (NATIVE_DISCOVERY_PROVIDERS.has(account.provider)) {
-							unresolvedRoutes = true;
-						} else providers.add(account.provider);
-					}
-					// Neither eligible nor dismissible: an account whose permissions were
-					// never read may or may not serve this model, so the whole alias goes
-					// unresolved rather than being described from the accounts we can see.
-					else if (!permission || permission.completeness === "unknown")
-						unresolvedRoutes = true;
-				}
-				if (!unresolvedRoutes && nativeAccountIds.length) {
-					nativeLoaded = true;
-					nativeStale ||= staleNativeRoute;
-				}
-				// Aliases share targets, and the pin and the rule pool are the same for
-				// most of them, so one catalogue resolution usually covers several.
-				const cacheKey = JSON.stringify([
-					target,
-					[...providers].sort(),
-					nativeAccountIds.sort(),
-					unresolvedRoutes,
-				]);
-				let work = resolved.get(cacheKey);
-				if (!work) {
-					if (providers.size && !unresolvedRoutes) lookups++;
-					work = resolveClientModelMetadata({
-						targetModel: target,
-						providers: [...providers],
-						discoveredMetadata,
-						unresolvedRoutes,
-					});
-					resolved.set(cacheKey, work);
-				}
-				const metadata = { ...(await work) };
-				const cachePolicy = resolveModelCachePolicy(
-					target,
-					cacheRoutes,
-					unresolvedRoutes,
+						if (cachePolicy) metadata.cachePolicy = cachePolicy;
+						return metadata;
+					}),
+				);
+				const metadata = reduceClientModelMetadata(targetMetadata);
+				const cachePolicy = reduceModelCachePolicies(
+					targetMetadata.map((item) => item.cachePolicy),
 				);
 				if (cachePolicy) metadata.cachePolicy = cachePolicy;
 				return [model.id, metadata] as const;
@@ -569,6 +631,19 @@ export class ClientService {
 		if (!profile || !key || key.malformed)
 			throw new Error("Client catalogue not found");
 		const catalogue = structuredClone(profile.catalogues[format]);
+		const aliasModels = new Set<string>();
+		if (format === "codex") {
+			const rules = await this.deps.dbOps.routing.listRules();
+			for (const model of catalogue.models)
+				if (
+					model.targetModel.startsWith("alias:") ||
+					resolveRoutingTarget(
+						matchRoutingRule(rules, id, model.id),
+						model.id,
+					).upstreamModel.startsWith("alias:")
+				)
+					aliasModels.add(model.id);
+		}
 		if (format === "codex") {
 			const destinations = {
 				accountId: key.pinnedAccountId,
@@ -578,6 +653,7 @@ export class ClientService {
 			const scopeFor = this.scopeLookup(accounts);
 			await Promise.all(
 				catalogue.models.map(async (model) => {
+					if (aliasModels.has(model.id)) return;
 					const scope = scopeFor(model.accountIds);
 					if (model.metadataScope !== scope) delete model.codexMetadata;
 					const pins = model.accountIds
@@ -609,14 +685,26 @@ export class ClientService {
 				}),
 			);
 		}
-		const metadata = includeMetadata
-			? await catalogueWithin(
-					this.resolveModelMetadata(id, key, catalogue.models, format),
-					{ models: {}, catalogueLoaded: false, catalogueStale: false },
-					WIRE_METADATA_BUDGET_MS,
-				)
-			: undefined;
-		return renderClientCatalogue(catalogue, format, metadata?.models);
+		const metadata =
+			includeMetadata || aliasModels.size > 0
+				? await catalogueWithin(
+						this.resolveModelMetadata(id, key, catalogue.models, format),
+						{ models: {}, catalogueLoaded: false, catalogueStale: false },
+						WIRE_METADATA_BUDGET_MS,
+					)
+				: undefined;
+		if (format === "codex")
+			for (const model of catalogue.models)
+				if (aliasModels.has(model.id))
+					model.codexMetadata = aliasCodexMetadata(
+						model,
+						metadata?.models[model.id],
+					);
+		return renderClientCatalogue(
+			catalogue,
+			format,
+			includeMetadata ? metadata?.models : undefined,
+		);
 	}
 	private destinations(value: unknown): ClientDestinations {
 		if (!value || typeof value !== "object" || Array.isArray(value))
@@ -713,6 +801,21 @@ export class ClientService {
 					typeof m.display_name === "string" ? m.display_name : m.slug;
 				models.set(m.slug, entry);
 			}
+		for (const alias of await this.deps.dbOps.modelAliases.list()) {
+			const eligible = accounts.filter((account) =>
+				alias.targets.some(
+					(target) =>
+						!target.accountIds || target.accountIds.includes(account.id),
+				),
+			);
+			if (eligible.length)
+				models.set(alias.id, {
+					id: alias.id,
+					displayName: alias.displayName,
+					accountIds: eligible.map((account) => account.id),
+					codexMetadataAvailable: true,
+				});
+		}
 		return {
 			models: [...models.values()].sort((a, b) => a.id.localeCompare(b.id)),
 			accounts: rows.map(({ account, permissions }) => ({
@@ -732,6 +835,7 @@ export class ClientService {
 			.update(
 				JSON.stringify([
 					db.query("SELECT * FROM routing_rules ORDER BY id").all(),
+					db.query("SELECT * FROM model_aliases ORDER BY id").all(),
 					db
 						.query(
 							"SELECT id,name,pinned_account_id,pinned_providers,is_active FROM api_keys ORDER BY id",
@@ -858,7 +962,27 @@ export class ClientService {
 							`Claude Code requires a compatible alias for ${model.id}`,
 						);
 				}
-				if (format === "codex") {
+				const reusableAlias = model.targetModel.startsWith("alias:")
+					? await this.deps.dbOps.modelAliases.get(model.targetModel)
+					: null;
+				if (model.targetModel.startsWith("alias:") && !reusableAlias)
+					throw BadRequest(`Alias ${model.targetModel} does not exist`);
+				if (
+					reusableAlias &&
+					!reusableAlias.targets.some((target) =>
+						accounts.some(
+							(account) =>
+								(!model.accountIds || model.accountIds.includes(account.id)) &&
+								(!target.accountIds || target.accountIds.includes(account.id)),
+						),
+					)
+				)
+					throw BadRequest(
+						`Alias ${model.targetModel} has no allowed destination accounts`,
+					);
+				if (format === "codex" && reusableAlias) {
+					model.codexMetadata = aliasCodexMetadata(model);
+				} else if (format === "codex") {
 					const old = existing?.catalogues.codex.models.find(
 						(m) => m.id === model.id && m.targetModel === model.targetModel,
 					);
@@ -913,7 +1037,7 @@ export class ClientService {
 				}
 				catalogue[format].models.push(model);
 				if (model.id !== model.targetModel) {
-					if (!model.accountIds?.length)
+					if (!reusableAlias && !model.accountIds?.length)
 						throw BadRequest(`Choose upstream accounts for alias ${model.id}`);
 					const prior = aliasModels.get(model.id);
 					if (
@@ -949,7 +1073,9 @@ export class ClientService {
 			match_api_key_id: id,
 			match_model_kind: "exact" as const,
 			match_model_value: model.id,
-			pool_kind: "accounts" as const,
+			pool_kind: model.accountIds
+				? ("accounts" as const)
+				: ("inherit" as const),
 			pool_provider: null,
 			pool_account_ids: model.accountIds,
 			target_kind: "literal" as const,

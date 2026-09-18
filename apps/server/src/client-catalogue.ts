@@ -3,8 +3,51 @@ import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
 import type {
 	ClientCatalogue,
 	ClientFormat,
+	ClientModel,
+	ClientModelMetadata,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
+
+/**
+ * A reusable alias has no single model's prompt or optional API features.
+ * Supply Codex's required ModelInfo fields using neutral client configuration;
+ * only substantiated common limits/modalities describe the backends. Keep this
+ * independent of cached metadata belonging to any one target.
+ * Wire schema: codex-rs/protocol/src/openai_models.rs, ModelInfo (0.149+).
+ */
+export function aliasCodexMetadata(
+	model: Pick<ClientModel, "targetModel" | "displayName">,
+	metadata?: ClientModelMetadata,
+): Record<string, unknown> {
+	return {
+		slug: model.targetModel,
+		display_name: model.displayName,
+		description: "Model alias with ordered availability fallbacks",
+		base_instructions: "You are a coding assistant.",
+		supported_reasoning_levels: [],
+		default_reasoning_level: null,
+		shell_type: "shell_command",
+		visibility: "list",
+		supported_in_api: true,
+		priority: 0,
+		availability_nux: null,
+		upgrade: null,
+		supports_reasoning_summaries: false,
+		supports_reasoning_summary_parameter: false,
+		support_verbosity: false,
+		default_verbosity: null,
+		apply_patch_tool_type: null,
+		truncation_policy: { mode: "bytes", limit: 10000 },
+		experimental_supported_tools: [],
+		input_modalities: metadata?.inputModalities ?? ["text"],
+		...(metadata?.contextWindow === undefined
+			? {}
+			: {
+					context_window: metadata.contextWindow,
+					max_context_window: metadata.contextWindow,
+				}),
+	};
+}
 
 export function renderClientCatalogue(
 	catalogue: ClientCatalogue,

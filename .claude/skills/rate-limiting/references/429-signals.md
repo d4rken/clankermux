@@ -35,8 +35,8 @@ Evidence source: `[ProxyOperations] Account X received 429 — headers: {...}`
 | `weekly_exhausted_429` | 429 + fresh account-wide weekly ≥100%, or trusted rejecting 7d claim | **yes, by construction** |
 | `session_exhausted_429` | 429 + fresh 5h session ≥100%, or trusted rejecting 5h claim (weekly not binding) | **yes, by construction** |
 | `upstream_429_with_reset` | default whenever *any* `resetTime` exists | **NO** — see the trap below |
-| `model_fallback_429` | burst intercept **and** the no-fallback path | ambiguous |
-| `all_models_exhausted_429` | every fallback model 429'd | ambiguous |
+| `model_fallback_429` | burst intercept **and** residual 429 cooldown (historical reason name) | ambiguous |
+| `all_models_exhausted_429` | historical account-level model-list exhaustion; retained for old records | ambiguous |
 | `upstream_429_no_reset_probe_cooldown` | 429 with no reset | no |
 | `upstream_529_overloaded_with_reset` / `_no_reset` | provider overload | no |
 | `out_of_credits` | overage header; long floor, bypasses backoff cap | billing |

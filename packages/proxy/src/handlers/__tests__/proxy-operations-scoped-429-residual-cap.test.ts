@@ -301,15 +301,9 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 	});
 
 	it.each([
-		{ fallbacks: false, scope: "7d_oi" },
-		{ fallbacks: true, scope: "7d_oi" },
-		{ fallbacks: false, scope: "5h_unknown" },
-		{ fallbacks: true, scope: "5h_unknown" },
-		// `fallbacks` no longer selects anything — the account field it used to set
-		// is gone from `Account` — but it still names the four cases.
-	])("unknown-family scoped rejection has no cooldown: %j", async ({
-		scope,
-	}) => {
+		"7d_oi",
+		"5h_unknown",
+	])("unknown-family scoped rejection has no cooldown: %s", async (scope) => {
 		const headers = Object.fromEntries(
 			Object.entries(scopedIncidentHeaders()).map(([key, value]) => [
 				key.replace("7d_oi", scope),
@@ -335,7 +329,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		expect(routingAttempts(ctx)).toHaveLength(1);
-		expect(routingAttempts(ctx)[0]?.error).toBe("other");
+		expect(routingAttempts(ctx)[0]?.error).toBe("model_quota_exhausted");
 		expect(auditCalls).toHaveLength(0);
 		// The scoped projection also keeps the persisted meta honest: the 5h
 		// claim's own pair, never the summary rejected + weekly epoch.
@@ -409,7 +403,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		);
 	});
 
-	it("all-models-exhausted rung is capped too (custom-endpoint scoped shape, 24h)", async () => {
+	it("untrusted custom-endpoint scoped rejection is capped at 24h", async () => {
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				rl429({ ...scopedIncidentHeaders(), "retry-after": "2592000" }),

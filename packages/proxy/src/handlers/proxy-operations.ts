@@ -1,4 +1,5 @@
 import {
+	AppError,
 	accountWideExhaustionFor,
 	getModelFamily,
 	isCodexSubscriptionLapse,
@@ -249,6 +250,7 @@ export type ProxyAttemptOutcome =
 			cooldownUntil?: number;
 	  }
 	| { kind: "hard_429"; cooldownUntil?: number }
+	| { kind: "model_quota_exhausted" }
 	| { kind: "auth" }
 	| { kind: "org_permission_denied" }
 	| { kind: "overload_529"; cooldownUntil?: number }
@@ -258,7 +260,8 @@ export type ProxyAttemptOutcome =
 	/** The model exists, but the account plan cannot serve it. */
 	| { kind: "model_not_entitled" }
 	| { kind: "server_error"; status: number }
-	| { kind: "network_error" }
+	| { kind: "network_error"; beforeDispatch?: boolean }
+	| { kind: "invalid_request" }
 	| { kind: "other" };
 
 /**
@@ -1003,10 +1006,10 @@ function prepareNativeBody(
  * ## Why it wraps the fetch instead of sitting on the forwarding path
  *
  * The capture used to live at the two terminal forwarding sites, which is after
- * the retry/model-cycling/thinking-signature/cache-control/stale-token branches
+ * the retry/thinking-signature/cache-control/stale-token branches
  * have already inspected, replaced or DISCARDED the response. The attempts those
  * branches throw away are exactly the ones the series exists to record — a 429
- * that triggered model cycling, a 401 that triggered a token refresh — so the
+ * that triggered account failover, a 401 that triggered a token refresh — so the
  * shapes worth having were the shapes systematically missing. Routing every
  * `makeProxyRequest` result through here means an attempt is recorded because it
  * HAPPENED, not because it survived.
@@ -1414,8 +1417,8 @@ export async function proxyWithAccount(
 		};
 		if (nativeBodyText !== null) {
 			// Use a copy of the prepared headers: the shared `headers` object is
-			// reused by the translated-body retry paths below (thinking-signature,
-			// model cycling), which must NOT carry the native flag.
+			// reused by the translated-body thinking-signature retry path below,
+			// which must NOT carry the native flag.
 			const nativeHeaders = new Headers(headers);
 			nativeHeaders.set(NATIVE_RESPONSES_REQUEST_HEADER, "1");
 			requestInit.headers = nativeHeaders;
@@ -2158,7 +2161,7 @@ export async function proxyWithAccount(
 						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present${headerFamilyExclusion ? "; live scoped header evidence" : ""}) — failing over WITHOUT account-wide cooldown`,
 					);
 					return await fail(
-						{ kind: "other" },
+						{ kind: "model_quota_exhausted" },
 						rawResponse,
 						undefined,
 						"family_weekly_exhausted_429",
@@ -2280,7 +2283,8 @@ export async function proxyWithAccount(
 			}
 			if (isZaiOverloadResponse(rawResponse))
 				return await finishZaiOverload(rawResponse);
-			// No fallback models configured — fail over to the next account.
+			// This resolved target exhausted the account; the orchestrator selects
+			// the next eligible account or explicitly configured alias target.
 			// Every branch below fails over, 429 and model rejection alike: a
 			// sibling may have headroom, and a sibling may be authorized for the
 			// model string this one refused. What the client finally sees when the
@@ -2365,7 +2369,7 @@ export async function proxyWithAccount(
 
 				return await fail(
 					cooldownUntil === null
-						? { kind: "other" }
+						? { kind: "model_quota_exhausted" }
 						: { kind: "hard_429", cooldownUntil },
 					rawResponse,
 				);
@@ -3069,7 +3073,17 @@ export async function proxyWithAccount(
 		// `fail()` also settles the overload-probe lease as "abandoned" and records
 		// the outcome, so it must run BEFORE the client-abort terminal below — the
 		// disconnect changes the request's verdict, not this attempt's cleanup.
-		const failed = await fail({ kind: "network_error" }, liveUpstream);
+		const outcome: ProxyAttemptOutcome =
+			err instanceof AppError &&
+			(err.statusCode === 401 || err.statusCode === 403)
+				? { kind: "auth" }
+				: err instanceof ValidationError
+					? { kind: "invalid_request" }
+					: {
+							kind: "network_error",
+							...(!attemptAudit.id ? { beforeDispatch: true } : {}),
+						};
+		const failed = await fail(outcome, liveUpstream);
 
 		// Client disconnect: the throw is the upstream fetch reacting to the
 		// client's own signal, so return the terminal 499 rather than signalling
@@ -3125,14 +3139,14 @@ function createForcedAccountUnavailableResponse(
  * Composes the SAME low-level upstream call + response recording the normal
  * path uses, but HARD-BYPASSES every fallback/retry/cooldown/null branch that
  * `proxyWithAccount` contains (thinking-signature + cache-control pre-retries,
- * model-fallback cycling, 401→null, 529→null/cooldown, processProxyResponse
+ * 401→null, 529→null/cooldown, processProxyResponse
  * rate-limit cooldown+failover, mid-stream cooldown sniffer). Invariants:
  *
  *   - Resolves the access token via the same `getValidAccessToken` path. If it
  *     THROWS (expired/unrefreshable token), returns a local 502 error Response —
  *     never null, never failover.
- *   - Sends exactly ONE upstream request (applying the account's model mapping
- *     exactly as the normal path does, via the combo-style model override).
+ *   - Sends exactly ONE upstream request using the frozen routing target
+ *     for the forced account, exactly as the normal path does.
  *   - Returns the upstream Response AS-IS for ANY status (200/4xx/429/529/5xx).
  *     Never converts a non-2xx into null. Never triggers cross-account failover.
  *   - Does NOT mark rate_limited_until / provider-overload cooldown /
@@ -3148,7 +3162,7 @@ function createForcedAccountUnavailableResponse(
  * @param requestMeta   Request metadata (routing already set by caller)
  * @param requestBodyBuffer Buffered request body
  * @param ctx           The proxy context
- * @param modelOverride Optional model override (combo slot); usually null
+ * @param modelOverride Legacy parameter; replaced by the frozen routing target
  * @param apiKeyId      Optional API key id for tracking
  * @param apiKeyName    Optional API key name for tracking
  * @param requestBodyContext Optional pre-parsed request body context
@@ -3342,7 +3356,7 @@ export async function proxyForcedAccount(
 			getDevinRequestProvenance(transformedRequest);
 
 		// Exactly ONE upstream request. No thinking-signature / cache-control
-		// pre-retries, no model-fallback cycling. The CLIENT's signal is threaded
+		// pre-retries. The CLIENT's signal is threaded
 		// in (composed with the internal timeout inside makeProxyRequest) so a
 		// disconnect tears the upstream request down instead of letting it run to
 		// completion for a client that has gone.

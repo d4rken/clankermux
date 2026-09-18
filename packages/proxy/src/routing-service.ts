@@ -1,4 +1,5 @@
 import {
+	isModelAliasId,
 	isModelPermitted,
 	matchRoutingRule,
 	resolveRoutingTarget,
@@ -7,6 +8,7 @@ import type {
 	Account,
 	AccountModelPermissions,
 	RequestMeta,
+	RoutingRule,
 } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
 import { AccountModelPermissionService } from "./account-model-permissions";
@@ -18,7 +20,9 @@ import {
 	buildResolvedRoute,
 	destinationExclusionReason,
 	getResolvedRoute,
+	installAliasRoutes,
 	installResolvedRoute,
+	type ResolvedRoute,
 	RoutingPolicyError,
 	routeAccountLabel,
 } from "./resolved-route";
@@ -102,6 +106,92 @@ export async function initializeRequestRoute(
 		maintenance?.purpose === "keepalive"
 			? model
 			: resolveRoutingTarget(winning, model).upstreamModel;
+	if (!maintenance && isModelAliasId(target)) {
+		const alias = await ctx.dbOps.modelAliases.get(target);
+		if (!alias) throw new RoutingPolicyError(`Unknown model alias "${target}"`);
+		const stages: ResolvedRoute[] = [];
+		const service = getModelPermissionService(ctx);
+		for (const [targetIndex, destination] of alias.targets.entries()) {
+			const stagePool = pool.filter(
+				(a) => !destination.accountIds || destination.accountIds.includes(a.id),
+			);
+			if (!stagePool.length) continue;
+			const stageRule: RoutingRule = {
+				id: winning?.id ?? alias.id,
+				name: winning?.name ?? alias.displayName,
+				enabled: true,
+				position: 0,
+				match_api_key_id: null,
+				match_model_kind: "exact",
+				match_model_value: model,
+				pool_kind: destination.accountIds
+					? "accounts"
+					: (winning?.pool_kind ?? "inherit"),
+				pool_provider: destination.accountIds
+					? null
+					: (winning?.pool_provider ?? null),
+				pool_account_ids:
+					destination.accountIds ?? winning?.pool_account_ids ?? null,
+				target_kind: "literal",
+				target_model: destination.model,
+			};
+			const permissions = new Map<string, AccountModelPermissions>();
+			await Promise.all(
+				stagePool.map(async (a) =>
+					permissions.set(a.id, await service.permissions(a)),
+				),
+			);
+			const missing = stagePool.filter(
+				(a) =>
+					!isModelPermitted(
+						permissions.get(a.id) ?? null,
+						a.id,
+						destination.model,
+						stageRule,
+					),
+			);
+			if (missing.length) {
+				await service.refreshMisses(missing);
+				await Promise.all(
+					missing.map(async (a) =>
+						permissions.set(a.id, await service.permissions(a)),
+					),
+				);
+			}
+			const suppressedPairs = new Set<string>();
+			await Promise.all(
+				stagePool.map(async (a) => {
+					const p = permissions.get(a.id);
+					if (
+						p &&
+						(await ctx.dbOps.routing.isModelSuppressed(
+							a.id,
+							p.scope,
+							destination.model,
+							Date.now(),
+						))
+					)
+						suppressedPairs.add(JSON.stringify([a.id, destination.model]));
+				}),
+			);
+			stages.push(
+				buildResolvedRoute({
+					...restrictions,
+					accounts: stagePool,
+					rules: [stageRule],
+					requestedModel: model,
+					apiKeyId,
+					permissions,
+					priorExclusions,
+					suppressedPairs,
+					chatRequirements: getChatContext(meta)?.requirements,
+					alias: { id: alias.id, revision: alias.revision, targetIndex },
+				}),
+			);
+		}
+		installAliasRoutes(meta, stages);
+		return;
+	}
 	const service = getModelPermissionService(ctx);
 	const permissions = new Map<string, AccountModelPermissions>();
 	const read = async () => {

@@ -114,6 +114,7 @@ export {
 } from "./constants";
 export { isDebugEnabled, readEnv } from "./env";
 export {
+	AppError,
 	isInvalidGrantMessage,
 	logError,
 	ModelNotServedError,
@@ -166,6 +167,7 @@ export {
 	weeklyRedEligible,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
+export { isModelAliasId, validateModelAlias } from "./model-alias";
 export {
 	type BodyMeasurement,
 	type ContentBlockMeasurement,
@@ -196,6 +198,8 @@ export {
 export {
 	type ModelCachePolicyRoute,
 	type ModelMetadataRequest,
+	reduceClientModelMetadata,
+	reduceModelCachePolicies,
 	resolveClientModelMetadata,
 	resolveModelCachePolicy,
 } from "./model-metadata";

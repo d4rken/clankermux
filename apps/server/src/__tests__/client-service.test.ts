@@ -76,6 +76,75 @@ describe("client service integration", () => {
 	let service: ClientService;
 	let permissions: AccountModelPermissionService;
 	let currentRaw: ReturnType<typeof raw> | null;
+	it("publishes reusable aliases in every dialect without requiring account pins", async () => {
+		await dbOps.modelAliases.save({
+			id: "alias:good",
+			displayName: "Good",
+			revision: 0,
+			targets: [
+				{ model: "gpt-real", accountIds: ["c"] },
+				{ model: "other", accountIds: ["d"] },
+			],
+		});
+		const draft = blank();
+		for (const format of ["openai", "anthropic", "codex"] as const)
+			draft.catalogues[format].models = [
+				{
+					id: "good",
+					displayName: "Good",
+					targetModel: "alias:good",
+					accountIds: null,
+				},
+			];
+		const review = await service.review(draft);
+		expect(review.aliasRules).toHaveLength(1);
+		expect(review.aliasRules[0]).toMatchObject({
+			target_model: "alias:good",
+			pool_kind: "inherit",
+		});
+		const { client } = await service.commit(review.token);
+		const discovery = await (
+			await service.wire(client.apiKeyId, "codex")
+		).json();
+		expect(discovery.models[0]).toMatchObject({
+			slug: "good",
+			supports_reasoning_summaries: false,
+			supported_reasoning_levels: [],
+		});
+		expect(discovery.models[0].base_instructions).not.toContain("gpt-real");
+		expect(discovery.models[0].context_window).toBeUndefined();
+		expect(
+			(await service.suggestions(draft.destinations)).models,
+		).toContainEqual({
+			id: "alias:good",
+			displayName: "Good",
+			accountIds: ["c", "d"],
+			codexMetadataAvailable: true,
+		});
+	});
+	it("rejects missing reusable aliases and invalidates review after alias edits", async () => {
+		const draft = blank();
+		draft.catalogues.openai.models = [
+			{
+				id: "good",
+				displayName: "Good",
+				targetModel: "alias:good",
+				accountIds: null,
+			},
+		];
+		await expect(service.review(draft)).rejects.toThrow("Alias alias:good");
+		await dbOps.modelAliases.save({
+			id: "alias:good",
+			displayName: "Good",
+			revision: 0,
+			targets: [{ model: "gpt-real", accountIds: null }],
+		});
+		const review = await service.review(draft);
+		const alias = await dbOps.modelAliases.get("alias:good");
+		if (!alias) throw new Error("Missing alias fixture");
+		await dbOps.modelAliases.save({ ...alias, displayName: "Changed" });
+		await expect(service.commit(review.token)).rejects.toThrow();
+	});
 	/**
 	 * A `model_overrides` row as a pre-2026.9.52 database already holds one.
 	 *
@@ -1118,6 +1187,14 @@ describe("client service integration", () => {
 			},
 			"openai-compatible": {
 				models: {
+					"fast-backup": {
+						id: "fast-backup",
+						name: "Fast backup",
+						limit: { context: 100_000, output: 32_000 },
+						reasoning: false,
+						modalities: { input: ["text"] },
+						cost: { input: 1, output: 2 },
+					},
 					"gpt-6-astra": {
 						id: "gpt-6-astra",
 						name: "Astra via compatible provider",
@@ -1185,6 +1262,57 @@ describe("client service integration", () => {
 			if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
 			else process.env.XDG_CACHE_HOME = originalCacheHome;
 			rmSync(cacheDir, { recursive: true, force: true });
+		});
+
+		it("publishes the shared limits of every fallback and refreshes them after alias edits", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["fast-backup"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:good",
+				displayName: "Good",
+				revision: 0,
+				targets: [
+					{ model: "gpt-6-astra", accountIds: ["c"] },
+					{ model: "fast-backup", accountIds: ["d"] },
+				],
+			});
+			const draft = blank();
+			for (const format of ["openai", "codex"] as const)
+				draft.catalogues[format].models = [
+					{
+						id: "good",
+						displayName: "Good",
+						targetModel: alias.id,
+						accountIds: null,
+					},
+				];
+			const id = (await create(draft)).client.apiKeyId;
+			expect((await service.modelMetadata(id, "openai")).models.good).toEqual({
+				contextWindow: 100_000,
+				maxOutputTokens: 32_000,
+				reasoning: false,
+				inputModalities: ["text"],
+			});
+			const before = await (await service.wire(id, "codex")).json();
+			expect(before.models[0]).toMatchObject({
+				slug: "good",
+				context_window: 100_000,
+				input_modalities: ["text"],
+			});
+			const pinnedDraft = structuredClone(draft);
+			pinnedDraft.name = "Pinned alias";
+			pinnedDraft.destinations.accountId = "c";
+			const pinnedId = (await create(pinnedDraft)).client.apiKeyId;
+			expect(
+				(await service.modelMetadata(pinnedId, "openai")).models.good
+					?.contextWindow,
+			).toBe(872_000);
+			await dbOps.modelAliases.save({
+				...alias,
+				targets: alias.targets.slice(0, 1),
+			});
+			const after = await (await service.wire(id, "codex")).json();
+			expect(after.models[0].context_window).toBe(872_000);
 		});
 
 		it("enriches only this client's aliases and resolves cache policy per endpoint and dialect", async () => {

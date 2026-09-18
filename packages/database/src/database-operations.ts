@@ -75,6 +75,7 @@ import {
 import { CodexWindowObservationRepository } from "./repositories/codex-window-observation.repository";
 import { InternalDispatchSpendRepository } from "./repositories/internal-dispatch-spend.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
+import { ModelAliasRepository } from "./repositories/model-alias.repository";
 import {
 	type ModelOverrideDialect,
 	ModelOverrideRepository,
@@ -483,6 +484,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 	// Repositories
 	readonly routing: RoutingRepository;
+	readonly modelAliases: ModelAliasRepository;
 	private accounts: AccountRepository;
 	private requests: RequestRepository;
 	private oauth: OAuthRepository;
@@ -578,6 +580,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 		this.clients = new ClientRepository(this.adapter);
 		this.routing = retrying(new RoutingRepository(this.adapter), "routing");
+		this.modelAliases = retrying(
+			new ModelAliasRepository(this.adapter),
+			"modelAliases",
+		);
 		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
 		this.requests = retrying(new RequestRepository(this.adapter), "requests");
 		this.oauth = retrying(new OAuthRepository(this.adapter), "oauth");

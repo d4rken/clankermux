@@ -50,7 +50,13 @@ export interface AuthorizedTarget extends ResolvedRoutingTarget {
 export function routeAccountLabel(account: Account): string {
 	return `${account.name || account.id} (${account.provider})`;
 }
+export interface AliasRouteEvidence {
+	id: string;
+	revision: number;
+	targetIndex: number;
+}
 export interface BuildRouteInput {
+	alias?: AliasRouteEvidence;
 	accounts: readonly Account[];
 	rules: readonly RoutingRule[];
 	requestedModel: string;
@@ -74,8 +80,22 @@ export interface BuildRouteInput {
 /** Private maps never escape: Object.freeze alone would not freeze a Map's entries. */
 export class ResolvedRoute {
 	readonly requestedModel: string;
+	readonly admissionError: RoutingPolicyError | undefined;
 	readonly ruleId: string | null;
-	readonly snapshot: string;
+	readonly alias: AliasRouteEvidence | undefined;
+	readonly #snapshot: string;
+	#aliasReason: string | null = null;
+	get snapshot(): string {
+		return this.alias
+			? JSON.stringify({
+					...JSON.parse(this.#snapshot),
+					alias: { ...this.alias, reason: this.#aliasReason },
+				})
+			: this.#snapshot;
+	}
+	setAliasReason(reason: string | null): void {
+		this.#aliasReason = reason;
+	}
 	readonly maintenance: BuildRouteInput["maintenance"];
 	readonly #rule: RoutingRule | null;
 	readonly #targets: Map<string, Readonly<AuthorizedTarget>>;
@@ -83,7 +103,9 @@ export class ResolvedRoute {
 		input: BuildRouteInput,
 		rule: RoutingRule | null,
 		targets: Map<string, AuthorizedTarget>,
+		admissionError?: RoutingPolicyError,
 	) {
+		this.admissionError = admissionError;
 		this.#rule = rule ? structuredClone(rule) : null;
 		this.requestedModel = input.requestedModel;
 		this.ruleId = rule?.id ?? null;
@@ -93,7 +115,8 @@ export class ResolvedRoute {
 		this.#targets = new Map(
 			[...targets].map(([id, target]) => [id, Object.freeze({ ...target })]),
 		);
-		this.snapshot = JSON.stringify({
+		this.alias = input.alias ? Object.freeze({ ...input.alias }) : undefined;
+		this.#snapshot = JSON.stringify({
 			requestedModel: input.requestedModel,
 			rule,
 			pin: input.pin,
@@ -281,6 +304,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 					);
 		error.routeSnapshot = new ResolvedRoute(input, winning, targets).snapshot;
 		error.ruleId = winning?.id ?? null;
+		if (input.alias) return new ResolvedRoute(input, winning, targets, error);
 		throw error;
 	}
 	return new ResolvedRoute(input, winning, targets);
@@ -294,6 +318,35 @@ function describeExclusions(reasons: readonly string[]): string {
 	return ` Excluded: ${shown.join("; ")}${rest ? `; and ${rest} more account(s)` : ""}.`;
 }
 const routes = new WeakMap<RequestMeta, ResolvedRoute>();
+const aliasStages = new WeakMap<RequestMeta, readonly ResolvedRoute[]>();
+export function installAliasRoutes(
+	meta: RequestMeta,
+	stages: readonly ResolvedRoute[],
+): void {
+	if (!stages.length)
+		throw new RoutingPolicyError("Alias has no permitted destinations");
+	if (stages[0].admissionError) throw stages[0].admissionError;
+	installResolvedRoute(meta, stages[0]);
+	aliasStages.set(meta, Object.freeze([...stages]));
+}
+export function getAliasRoutes(
+	meta: RequestMeta,
+): readonly ResolvedRoute[] | undefined {
+	return aliasStages.get(meta);
+}
+export function selectAliasRoute(
+	meta: RequestMeta,
+	route: ResolvedRoute,
+	reason: string | null,
+): void {
+	if (!aliasStages.get(meta)?.includes(route))
+		throw new RoutingPolicyError(
+			"Alias target is outside the frozen routing plan",
+		);
+	route.setAliasReason(reason);
+	routes.set(meta, route);
+	if (route.admissionError) throw route.admissionError;
+}
 export function installResolvedRoute(
 	meta: RequestMeta,
 	route: ResolvedRoute,

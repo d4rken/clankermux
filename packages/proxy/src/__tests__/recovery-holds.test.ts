@@ -862,12 +862,11 @@ describe("isAccountWideFailure", () => {
 	// keyed by ACCOUNT ID, so a failure whose real cause is one model or one
 	// family must not exclude the account for the rest of the request.
 	it("excludes failures whose cause is narrower than the account", () => {
-		// A fact about the model the attempt sent; a combo fallback can go on to
-		// wait for a different model's breaker on the same account.
+		// A refused fixed target cannot recover just by waiting.
 		expect(isAccountWideFailure({ kind: "model_not_found" })).toBe(true);
-		// The catch-all, through which family-weekly exhaustion is reported —
-		// deliberately without an account-wide cooldown at its fail() site.
+		// Scoped quota and unclassified failures do not prove account exhaustion.
 		expect(isAccountWideFailure({ kind: "other" })).toBe(false);
+		expect(isAccountWideFailure({ kind: "model_quota_exhausted" })).toBe(false);
 	});
 
 	it("still excludes what the hold is waiting on", () => {

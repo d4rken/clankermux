@@ -33,7 +33,7 @@ reprobe (transient only; live quota/credit depletion falls through)
                                it can read the 429's own scoped unified headers,
                                e.g. `7d_oi` rejected while 5h/7d show headroom)
   → transparent burst-retry   (classify429Transient → hold & re-probe)
-  → model fallback / no-fallback / all-models-exhausted
+  → residual 429 cooldown / account failover
   → response-processor generic path
 ```
 
@@ -45,9 +45,14 @@ claims, never the scoped summary retry-after. Invalid claim resets use adaptive
 backoff (30s up to 5min) under the same quota reason, not a synthetic
 server-directed deadline. Auto-refresh primes use the same live evidence while
 keeping their request-history suppression; keepalive cooldown exemptions remain. Cache-only exhaustion retains its
-existing `extractCooldownUntil` deadline. Model fallbacks and generic response
+existing `extractCooldownUntil` deadline. Residual 429 handling and generic response
 processing use the same live-claim resolver; mixed rejection does not memoize a
 model family from an ambiguous scoped claim.
+
+Explicit model aliases can advance to their next configured target after the
+current target exhausts its eligible accounts. That decision belongs to request
+orchestration; `proxyWithAccount` sends one resolved model and does not cycle
+legacy account-level model lists. Concrete model IDs retain strict selection.
 
 `classify429Transient`:
 

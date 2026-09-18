@@ -14,6 +14,7 @@ export * from "./conversation";
 export * from "./internal-dispatch-spend";
 export * from "./logging";
 export * from "./memory-snapshot";
+export * from "./model-alias";
 export * from "./native-responses";
 export * from "./openrouter";
 export * from "./payment";

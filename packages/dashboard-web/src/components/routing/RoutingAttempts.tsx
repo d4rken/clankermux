@@ -59,6 +59,46 @@ function ReasoningEffortAdaptationLine({
 	);
 }
 
+const ALIAS_REASONS: Record<string, string> = {
+	quota_exhausted: "quota exhausted",
+	rate_limited: "rate limited",
+	provider_overloaded: "provider overloaded",
+	temporarily_unavailable: "temporarily unavailable",
+	pool_unavailable: "no eligible account available",
+	conversation_affinity: "continuing with this conversation's backend",
+};
+function AliasDecisionLine({ snapshot }: { snapshot: string | null }) {
+	if (!snapshot) return null;
+	try {
+		const parsed: unknown = JSON.parse(snapshot);
+		if (!parsed || typeof parsed !== "object" || !("alias" in parsed))
+			return null;
+		const alias = parsed.alias;
+		if (
+			!alias ||
+			typeof alias !== "object" ||
+			!("id" in alias) ||
+			typeof alias.id !== "string" ||
+			!("targetIndex" in alias) ||
+			typeof alias.targetIndex !== "number" ||
+			!Number.isSafeInteger(alias.targetIndex) ||
+			alias.targetIndex < 0
+		)
+			return null;
+		const reason =
+			"reason" in alias && typeof alias.reason === "string"
+				? (ALIAS_REASONS[alias.reason] ?? alias.reason)
+				: "preferred target";
+		return (
+			<p>
+				Model alias: {alias.id} · target {alias.targetIndex + 1} · {reason}
+			</p>
+		);
+	} catch {
+		return null;
+	}
+}
+
 export function RoutingAttemptList({
 	attempts,
 }: {
@@ -101,6 +141,7 @@ export function RoutingAttemptList({
 							{attempt.reported_model ?? "Not reported"}
 						</dd>
 					</dl>
+					<AliasDecisionLine snapshot={attempt.route_snapshot} />
 					<ReasoningEffortAdaptationLine attempt={attempt} />
 					{attempt.error && <p>{attempt.error}</p>}
 					<details>

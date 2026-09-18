@@ -1692,7 +1692,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 		} catch (error) {
 			if (
 				error instanceof Error &&
-				/referenced by routing rules|referenced by routing rules or API key destinations/.test(
+				/referenced by routing rules|referenced by model aliases/.test(
 					error.message,
 				)
 			) {
