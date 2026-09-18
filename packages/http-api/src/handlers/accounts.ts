@@ -2768,6 +2768,8 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 			clearAccountRefreshCache(accountId);
 			const pollingRestarted = await restartUsagePollingForAccount(accountId);
 			const cacheRefreshed = await usageCache.refreshNow(accountId);
+			// Management waits for the diagnosis so the next account read includes
+			// its pause reason; request routing only awaits the usage result.
 			await usageCache.waitForAnthropicUsageObservation(accountId);
 
 			log.info(

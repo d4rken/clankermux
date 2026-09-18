@@ -106,7 +106,11 @@ import {
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
 import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
-import { observeAnthropicUsage } from "./anthropic-subscription-refresh";
+import { AnthropicSubscriptionDiagnosis } from "./anthropic-subscription-diagnosis";
+import {
+	type AnthropicSubscriptionRefreshDeps,
+	observeAnthropicUsage,
+} from "./anthropic-subscription-refresh";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -289,6 +293,8 @@ let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let usageSnapshotSampler: UsageSnapshotSampler | null = null;
 let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
+let anthropicSubscriptionDiagnosis: AnthropicSubscriptionDiagnosis | null =
+	null;
 let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
 	null;
 let quotaDriftScheduler: QuotaDriftScheduler | null = null;
@@ -406,6 +412,28 @@ function reportCapacityRestored(
 	);
 }
 
+function anthropicSubscriptionRefreshDeps(
+	proxyContext: ProxyContext,
+): AnthropicSubscriptionRefreshDeps {
+	return {
+		getAccount: (accountId) => proxyContext.dbOps.getAccount(accountId),
+		fetchProfile: fetchAnthropicProfile,
+		canFetchProfile: canFetchAnthropicProfile,
+		setIdentity: (accountId, identity, expectedAccessToken) =>
+			proxyContext.dbOps.setAccountIdentityFromProfile(
+				accountId,
+				identity,
+				expectedAccessToken,
+			),
+		claimSubscriptionCheck: (accountId, nowMs, throttleMs) =>
+			proxyContext.dbOps.claimAnthropicSubscriptionCheck(
+				accountId,
+				nowMs,
+				throttleMs,
+			),
+	};
+}
+
 /**
  * Start usage polling for an account with automatic token refresh
  */
@@ -458,22 +486,7 @@ function startUsagePollingWithRefresh(
 					initialDelayMs: startupDelayMs,
 					onAnthropicUsageObservation: (observation) =>
 						observeAnthropicUsage(observation, {
-							getAccount: (accountId) =>
-								proxyContext.dbOps.getAccount(accountId),
-							fetchProfile: fetchAnthropicProfile,
-							canFetchProfile: canFetchAnthropicProfile,
-							setIdentity: (accountId, identity, expectedAccessToken) =>
-								proxyContext.dbOps.setAccountIdentityFromProfile(
-									accountId,
-									identity,
-									expectedAccessToken,
-								),
-							claimSubscriptionCheck: (accountId, nowMs, throttleMs) =>
-								proxyContext.dbOps.claimAnthropicSubscriptionCheck(
-									accountId,
-									nowMs,
-									throttleMs,
-								),
+							...anthropicSubscriptionRefreshDeps(proxyContext),
 							recordUsageAccess: (accountId, accessToken, permissionDenied) =>
 								proxyContext.dbOps.recordAnthropicUsageAccess(
 									accountId,
@@ -1667,6 +1680,14 @@ Available endpoints:
 		);
 	}
 
+	anthropicSubscriptionDiagnosis = new AnthropicSubscriptionDiagnosis({
+		...anthropicSubscriptionRefreshDeps(proxyContext),
+		getAccounts: () => dbOps.getAllAccounts(),
+		getAccessToken: (account) =>
+			createUsagePollingTokenProvider(account, proxyContext)(),
+	});
+	anthropicSubscriptionDiagnosis.start();
+
 	// Start usage polling for Anthropic accounts with token refresh (regardless of paused status)
 	const anthropicAccounts = accounts.filter((a) => a.provider === "anthropic");
 	if (anthropicAccounts.length > 0) {
@@ -1994,6 +2015,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (cacheKeepaliveSnapshotSampler) {
 			cacheKeepaliveSnapshotSampler.stop();
 			cacheKeepaliveSnapshotSampler = null;
+		}
+		if (anthropicSubscriptionDiagnosis) {
+			anthropicSubscriptionDiagnosis.stop();
+			anthropicSubscriptionDiagnosis = null;
 		}
 		if (subscriptionPaymentRecorder) {
 			subscriptionPaymentRecorder.stop();
