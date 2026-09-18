@@ -33,6 +33,27 @@ function sseResponse(
 	return new Response(stream, { status: init.status ?? 200, headers });
 }
 
+function delayedSseResponse(
+	chunks: readonly string[],
+	delayMs: number,
+): Response {
+	let index = 0;
+	const stream = new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			if (index >= chunks.length) {
+				controller.close();
+				return;
+			}
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+			controller.enqueue(encoder.encode(chunks[index++]));
+		},
+	});
+	return new Response(stream, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 /** Emits `prefix`, then never produces another byte and never ends. */
 function hangingSseResponse(prefix: string): Response {
 	let sent = false;
@@ -141,9 +162,51 @@ describe("peekCodexStreamPrefix — detection", () => {
 
 		expect(await peekCodexStreamPrefix(response)).toBe("server_error");
 	});
+
+	it("ignores provider keepalive events while waiting for a failure", async () => {
+		const response = sseResponse([
+			CREATED,
+			IN_PROGRESS,
+			...Array.from({ length: 8 }, () =>
+				frame("keepalive", { type: "keepalive" }),
+			),
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+
+		expect(await peekCodexStreamPrefix(response)).toBe("server_error");
+	});
+
+	it("detects a delayed prelude failure", async () => {
+		const response = delayedSseResponse(
+			[
+				CREATED,
+				IN_PROGRESS,
+				frame("keepalive", { type: "keepalive" }),
+				frame("error", { type: "error", error: { type: "server_error" } }),
+			],
+			30,
+		);
+
+		expect(
+			await peekCodexStreamPrefix(response, undefined, { timeoutMs: 200 }),
+		).toBe("server_error");
+	});
 });
 
 describe("peekCodexStreamPrefix — no detection", () => {
+	it("does not let a keepalive event name mask content in its payload", async () => {
+		const response = sseResponse([
+			CREATED,
+			frame("keepalive", {
+				type: "response.output_text.delta",
+				delta: "hello",
+			}),
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+
+		expect(await peekCodexStreamPrefix(response)).toBeNull();
+	});
+
 	it("commits once content has streamed, even with an error in the same chunk", async () => {
 		const response = sseResponse([
 			CREATED +
@@ -211,6 +274,16 @@ describe("peekCodexStreamPrefix — no detection", () => {
 });
 
 describe("peekCodexStreamPrefix — bounds", () => {
+	it("does not read when the prelude budget is already spent", async () => {
+		const response = sseResponse([
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+
+		expect(
+			await peekCodexStreamPrefix(response, undefined, { timeoutMs: 0 }),
+		).toBeNull();
+	});
+
 	it("gives up after the event budget", async () => {
 		const preludes = Array.from({ length: CODEX_PEEK_MAX_EVENTS + 1 }, () =>
 			frame("response.in_progress", { type: "response.in_progress" }),
