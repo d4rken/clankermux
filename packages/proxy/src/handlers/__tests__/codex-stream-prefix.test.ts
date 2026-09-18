@@ -191,15 +191,75 @@ describe("peekCodexStreamPrefix — detection", () => {
 			await peekCodexStreamPrefix(response, undefined, { timeoutMs: 200 }),
 		).toBe("server_error");
 	});
+
+	it("skips an encrypted reasoning item before a delayed failure", async () => {
+		const response = sseResponse([
+			CREATED,
+			IN_PROGRESS,
+			frame("response.output_item.added", {
+				type: "response.output_item.added",
+				item: { type: "reasoning", content: [], encrypted_content: "opaque" },
+			}),
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+
+		expect(await peekCodexStreamPrefix(response)).toBe("server_error");
+	});
 });
 
 describe("peekCodexStreamPrefix — no detection", () => {
+	for (const field of ["content", "summary"]) {
+		it(`commits on reasoning with nonempty ${field}`, async () => {
+			const response = sseResponse([
+				CREATED,
+				frame("response.output_item.added", {
+					type: "response.output_item.added",
+					item: {
+						type: "reasoning",
+						[field]: [{ type: "text", text: "Reasoning" }],
+					},
+				}),
+				frame("error", { type: "error", error: { type: "server_error" } }),
+			]);
+			expect(await peekCodexStreamPrefix(response)).toBeNull();
+		});
+	}
+
+	it("commits on a reasoning delta after a content-free reasoning item", async () => {
+		const response = sseResponse([
+			CREATED,
+			frame("response.output_item.added", {
+				type: "response.output_item.added",
+				item: { type: "reasoning", content: [] },
+			}),
+			frame("response.reasoning_summary_text.delta", {
+				type: "response.reasoning_summary_text.delta",
+				delta: "Reasoning",
+			}),
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+		expect(await peekCodexStreamPrefix(response)).toBeNull();
+	});
+
 	it("does not let a keepalive event name mask content in its payload", async () => {
 		const response = sseResponse([
 			CREATED,
 			frame("keepalive", {
 				type: "response.output_text.delta",
 				delta: "hello",
+			}),
+			frame("error", { type: "error", error: { type: "server_error" } }),
+		]);
+
+		expect(await peekCodexStreamPrefix(response)).toBeNull();
+	});
+
+	it("commits on a non-reasoning output item before a failure", async () => {
+		const response = sseResponse([
+			CREATED,
+			frame("response.output_item.added", {
+				type: "response.output_item.added",
+				item: { type: "function_call", call_id: "call_1" },
 			}),
 			frame("error", { type: "error", error: { type: "server_error" } }),
 		]);

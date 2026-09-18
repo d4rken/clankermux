@@ -52,7 +52,10 @@ export interface CodexStreamPeekOptions {
 	timeoutMs?: number;
 }
 
-type SsePayload = StreamFailurePayload & { type?: unknown };
+type SsePayload = StreamFailurePayload & {
+	item?: { type?: unknown; content?: unknown; summary?: unknown };
+	type?: unknown;
+};
 
 type FrameVerdict =
 	/** Comment/keepalive: no event name and no payload. Keep reading. */
@@ -93,6 +96,15 @@ function classifyFrame(frame: string): FrameVerdict {
 		return { kind: "failure", code: streamFailureCode(parsed ?? {}) };
 	if (names.every((name) => KEEPALIVE_EVENTS.has(name)))
 		return { kind: "skip" };
+	if (
+		names.every((name) => name === "response.output_item.added") &&
+		parsed?.item?.type === "reasoning" &&
+		[parsed.item.content, parsed.item.summary].every(
+			(value) =>
+				value === undefined || (Array.isArray(value) && value.length === 0),
+		)
+	)
+		return { kind: "prelude" };
 	if (names.every((name) => PRELUDE_EVENTS.has(name)))
 		return { kind: "prelude" };
 	return { kind: "commit" };
