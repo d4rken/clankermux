@@ -460,6 +460,82 @@ describe("translateAnthropicStreamToResponses", () => {
 		expect(lastEvent.event).toBe("response.completed");
 	});
 
+	test("ignores deltas for intentionally omitted blocks without warning", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", {
+							message: { id: "msg_thinking", usage: {} },
+						}),
+						sseEvent("content_block_start", {
+							index: 0,
+							content_block: { type: "thinking", thinking: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 0,
+							delta: { type: "thinking_delta", thinking: "internal" },
+						}),
+						sseEvent("content_block_stop", { index: 0 }),
+						sseEvent("content_block_start", {
+							index: 1,
+							content_block: { type: "text", text: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 1,
+							delta: { type: "text_delta", text: "visible" },
+						}),
+						sseEvent("content_block_stop", { index: 1 }),
+						sseEvent("message_stop", {}),
+					]),
+					"resp_thinking",
+					"test-model",
+				),
+			);
+
+			expect(warning).not.toHaveBeenCalledWith(
+				"content_block_delta for unknown block index 0",
+			);
+			expect(warning).not.toHaveBeenCalledWith(
+				"content_block_stop for unknown block index 0",
+			);
+			expect(
+				events.find((event) => event.event === "response.output_text.delta")
+					?.data,
+			).toMatchObject({ output_index: 0, delta: "visible" });
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("warns when a delta has no preceding block start", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			await translateAnthropicStreamToResponses(
+				makeAnthropicStream([
+					sseEvent("message_start", { message: { usage: {} } }),
+					sseEvent("content_block_delta", {
+						index: 0,
+						delta: { type: "text_delta", text: "orphan" },
+					}),
+					sseEvent("message_stop", {}),
+				]),
+				"resp_orphan",
+				"test-model",
+			).text();
+			expect(warning).toHaveBeenCalledWith(
+				"content_block_delta for unknown block index 0",
+			);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	test("mixed text + tool — both message and function_call items emitted in order", async () => {
 		const events = [
 			sseEvent("message_start", {

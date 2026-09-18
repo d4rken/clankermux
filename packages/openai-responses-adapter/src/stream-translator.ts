@@ -18,6 +18,7 @@ interface State {
 	outputIndex: number;
 	sequenceNumber: number;
 	blockIndexToOutput: Map<number, number>;
+	ignoredBlockIndices: Set<number>;
 	textByBlock: Map<number, string>;
 	toolByBlock: Map<
 		number,
@@ -123,9 +124,11 @@ function processEvent(
 		// Incrementing unconditionally (e.g. for "thinking" blocks) leaves gaps in
 		// output_index that confuse clients expecting a contiguous sequence.
 		if (contentBlock.type !== "text" && contentBlock.type !== "tool_use") {
+			state.ignoredBlockIndices.add(blockIndex);
 			return;
 		}
 
+		state.ignoredBlockIndices.delete(blockIndex);
 		const outputIdx = state.outputIndex++;
 		state.blockIndexToOutput.set(blockIndex, outputIdx);
 
@@ -201,6 +204,7 @@ function processEvent(
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
+			if (state.ignoredBlockIndices.has(blockIndex)) return;
 			log.warn(`content_block_delta for unknown block index ${blockIndex}`);
 			return;
 		}
@@ -250,6 +254,7 @@ function processEvent(
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
+			if (state.ignoredBlockIndices.has(blockIndex)) return;
 			log.warn(`content_block_stop for unknown block index ${blockIndex}`);
 			return;
 		}
@@ -512,6 +517,7 @@ export function translateAnthropicStreamToResponses(
 		outputIndex: 0,
 		sequenceNumber: 0,
 		blockIndexToOutput: new Map(),
+		ignoredBlockIndices: new Set(),
 		textByBlock: new Map(),
 		toolByBlock: new Map(),
 		usage: { input_tokens: 0, output_tokens: 0 },
