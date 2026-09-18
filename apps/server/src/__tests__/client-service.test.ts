@@ -1224,7 +1224,11 @@ describe("client service integration", () => {
 			expect(JSON.stringify(enriched)).not.toContain("accountIds");
 			expect(await dbOps.clients.getProfile(id)).toEqual(before);
 			const openai = await (await service.wire(id, "openai", true)).json();
-			expect(openai.data[0].clankermux.cachePolicy).toBeUndefined();
+			expect(openai.data[0].clankermux.cachePolicy).toEqual({
+				mode: "unknown",
+				expiry: "unavailable",
+				source: "unknown",
+			});
 			// A configured custom host does not inherit the official provider's TTL.
 			sql
 				.query(
@@ -1233,8 +1237,28 @@ describe("client service integration", () => {
 				.run();
 			await discovered("d", ["claude-haiku-4-5-20251001"]);
 			const custom = await (await service.wire(id, "anthropic", true)).json();
-			expect(custom.data[0].clankermux.cachePolicy).toBeUndefined();
+			expect(custom.data[0].clankermux.cachePolicy).toEqual({
+				mode: "unknown",
+				expiry: "unavailable",
+				source: "unknown",
+			});
 		});
+		it("publishes Codex cache capability for a discovered Astra alias without claiming API retention", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			const id = await astraClient(["c"], { accountId: "c", providers: null });
+			const native = await (await service.wire(id, "openai")).json();
+			expect(native.data[0].clankermux).toBeUndefined();
+			const enriched = await (await service.wire(id, "openai", true)).json();
+			expect(enriched.data[0].clankermux.cachePolicy).toEqual({
+				mode: "implicit",
+				expiry: "unavailable",
+				source: "gateway-policy",
+			});
+			expect(enriched.data.map((model: { id: string }) => model.id)).toEqual([
+				"gpt-6-astra",
+			]);
+		});
+
 		it("serves the native catalogue with empty metadata when enrichment stalls", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			const id = await astraClient(["c"], { accountId: "c", providers: null });
@@ -1297,6 +1321,11 @@ describe("client service integration", () => {
 				}) as unknown as typeof fetch;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.swe).toEqual({
+					cachePolicy: {
+						mode: "unknown",
+						expiry: "unavailable",
+						source: "unknown",
+					},
 					contextWindow: 200_000,
 					maxOutputTokens: 64_000,
 					reasoning: true,
@@ -1355,11 +1384,21 @@ describe("client service integration", () => {
 				const id = (await create(draft)).client.apiKeyId;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.pooled).toEqual({
+					cachePolicy: {
+						mode: "unknown",
+						expiry: "unavailable",
+						source: "unknown",
+					},
 					contextWindow: 100_000,
 					maxOutputTokens: 32_000,
 					inputModalities: ["text"],
 				});
 				expect(result.models.large).toEqual({
+					cachePolicy: {
+						mode: "unknown",
+						expiry: "unavailable",
+						source: "unknown",
+					},
 					contextWindow: 200_000,
 					maxOutputTokens: 64_000,
 					inputModalities: ["text", "image"],
@@ -1420,6 +1459,11 @@ describe("client service integration", () => {
 				}) as unknown as typeof fetch;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.swe).toEqual({
+					cachePolicy: {
+						mode: "unknown",
+						expiry: "unavailable",
+						source: "unknown",
+					},
 					contextWindow: 262_000,
 					maxOutputTokens: 128_000,
 				});
@@ -1490,6 +1534,11 @@ describe("client service integration", () => {
 			// Both accounts serve the model, so both routes count.
 			const pooled = await service.modelMetadata(id, "openai");
 			expect(pooled.models["gpt-6-astra"]).toEqual({
+				cachePolicy: {
+					mode: "implicit",
+					expiry: "unavailable",
+					source: "gateway-policy",
+				},
 				contextWindow: 200_000,
 				maxOutputTokens: 64_000,
 				reasoning: false,
@@ -1504,6 +1553,11 @@ describe("client service integration", () => {
 			});
 			const narrowed = await service.modelMetadata(id, "openai");
 			expect(narrowed.models["gpt-6-astra"]).toEqual({
+				cachePolicy: {
+					mode: "implicit",
+					expiry: "unavailable",
+					source: "gateway-policy",
+				},
 				contextWindow: 872_000,
 				maxOutputTokens: 128_000,
 				reasoning: true,
@@ -1561,6 +1615,11 @@ describe("client service integration", () => {
 			// entirely and its unread permissions say nothing about this alias.
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				cachePolicy: {
+					mode: "implicit",
+					expiry: "unavailable",
+					source: "gateway-policy",
+				},
 				contextWindow: 872_000,
 				maxOutputTokens: 128_000,
 				reasoning: true,
@@ -1587,6 +1646,11 @@ describe("client service integration", () => {
 				.run("d");
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				cachePolicy: {
+					mode: "implicit",
+					expiry: "unavailable",
+					source: "gateway-policy",
+				},
 				contextWindow: 872_000,
 				maxOutputTokens: 128_000,
 				reasoning: true,
