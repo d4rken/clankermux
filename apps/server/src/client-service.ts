@@ -740,7 +740,7 @@ export class ClientService {
 					(
 						db
 							.query(
-								"SELECT id,provider,custom_endpoint,api_key,identity_external_id,identity_email,identity_organization_name,identity_plan_tier FROM accounts ORDER BY id",
+								"SELECT id,provider,custom_endpoint,api_key,identity_external_id,identity_email,identity_organization_name,identity_plan_tier FROM accounts WHERE disabled = 0 ORDER BY id",
 							)
 							.all() as Account[]
 					).map((a) => [a.id, modelPermissionScope(a)]),

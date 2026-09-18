@@ -123,7 +123,7 @@ export class StatsRepository {
 	 */
 	async getActiveAccountCount(): Promise<number> {
 		const result = await this.adapter.get<{ count: unknown }>(
-			"SELECT COUNT(*) as count FROM accounts WHERE request_count > 0",
+			"SELECT COUNT(*) as count FROM accounts WHERE disabled = 0 AND request_count > 0",
 		);
 		return Number(result?.count) || 0;
 	}

@@ -70,7 +70,7 @@ export function createUsageScopedHistoryHandler(context: APIContext) {
 		getScopedSnapshots: (opts) => scopedSnapshots.getBucketedSnapshots(opts),
 		getLatestScopedSnapshotsBefore: (beforeMs, lookbackMs) =>
 			scopedSnapshots.getLatestSnapshotsBefore(beforeMs, lookbackMs),
-		getAllAccounts: () => accounts.findAll(),
+		getAllAccounts: () => accounts.findAll(true),
 	});
 }
 

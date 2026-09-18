@@ -337,7 +337,7 @@ export function RequestsTab() {
 	);
 	const { data: totalMatching } = useRequestsCount(queryParams, filtersActive);
 
-	const { data: accounts } = useAccounts();
+	const { data: accounts } = useAccounts(true);
 	const { data: configuredApiKeys } = useApiKeys();
 	const { data: knownProjects } = useRequestProjects();
 	const zaiAccountNames = new Set(

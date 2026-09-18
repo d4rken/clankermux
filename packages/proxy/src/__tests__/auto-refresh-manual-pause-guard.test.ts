@@ -91,6 +91,7 @@ function seedDb(): Database {
 			rate_limit_reset INTEGER,
 			custom_endpoint TEXT,
 			paused INTEGER,
+			disabled INTEGER NOT NULL DEFAULT 0,
 			auto_pause_on_overage_enabled INTEGER,
 			pause_reason TEXT,
 			auto_refresh_enabled INTEGER,
@@ -120,6 +121,8 @@ function seedDb(): Database {
 	for (const [name, paused, overage, reason] of rows) {
 		insert.run(name, name, paused, overage, reason);
 	}
+	insert.run("disabled", "disabled", 0, 1, null);
+	db.run("UPDATE accounts SET disabled = 1 WHERE id = 'disabled'");
 	return db;
 }
 

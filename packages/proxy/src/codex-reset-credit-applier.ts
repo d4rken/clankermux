@@ -99,6 +99,7 @@ export type ResetCreditApplyDecision =
 	| {
 			action: "skip";
 			reason:
+				| "account-disabled"
 				| "toggle-disabled"
 				| "not-codex"
 				| "needs-reauth"
@@ -169,6 +170,7 @@ export function decideResetCreditAction(inputs: {
 	account: Pick<
 		Account,
 		| "provider"
+		| "disabled"
 		| "codex_auto_apply_reset_credits_enabled"
 		| "codex_auto_apply_reset_on_weekly_limit_enabled"
 		| "pause_reason"
@@ -190,6 +192,8 @@ export function decideResetCreditAction(inputs: {
 	/** Current time in ms. */
 	now: number;
 }): ResetCreditApplyDecision {
+	if (inputs.account.disabled)
+		return { action: "skip", reason: "account-disabled" };
 	const {
 		account,
 		credits,

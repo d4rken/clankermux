@@ -25,6 +25,7 @@ interface AccountListProps {
 	sortMode: AccountListSortMode;
 	forcedAccountId?: string | null;
 	onForceAccount?: (account: Account) => void;
+	onDisabledToggle?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
 	onRefreshUsage: (account: Account) => Promise<void>;
@@ -57,6 +58,7 @@ export function AccountList({
 	forcedAccountId,
 	onForceAccount,
 	onPauseToggle,
+	onDisabledToggle,
 	onForceResetRateLimit,
 	onRefreshUsage,
 	onRemove,
@@ -101,16 +103,18 @@ export function AccountList({
 	const resetExtremes = useMemo(
 		() =>
 			computeWindowResetExtremes(
-				(accounts ?? []).map((account) => ({
-					resetIso: account.rateLimitReset,
-					usageUtilization: account.usageUtilization,
-					usageWindow: account.usageWindow,
-					usageData: account.usageData,
-					staleUsage: account.staleUsage,
-					usageRateLimitedUntil: account.usageRateLimitedUntil,
-					provider: account.provider,
-					showWeekly: providerShowsWeeklyUsage(account.provider),
-				})),
+				(accounts ?? [])
+					.filter((account) => !account.disabled)
+					.map((account) => ({
+						resetIso: account.rateLimitReset,
+						usageUtilization: account.usageUtilization,
+						usageWindow: account.usageWindow,
+						usageData: account.usageData,
+						staleUsage: account.staleUsage,
+						usageRateLimitedUntil: account.usageRateLimitedUntil,
+						provider: account.provider,
+						showWeekly: providerShowsWeeklyUsage(account.provider),
+					})),
 				now,
 			),
 		[accounts, now],
@@ -136,7 +140,9 @@ export function AccountList({
 
 	// Order only — the two memos above read every account either way, so neither
 	// depends on this and neither has to be recomputed when the picker moves.
-	const rows = sortAccountList(accounts, sortMode, now);
+	const rows = sortAccountList(accounts, sortMode, now).sort(
+		(a, b) => Number(!!a.disabled) - Number(!!b.disabled),
+	);
 
 	// One step wider than the widest gap INSIDE a card (`space-y-row`), so the
 	// boundary between two accounts always reads as larger than any boundary
@@ -156,6 +162,7 @@ export function AccountList({
 					}
 					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
+					onDisabledToggle={onDisabledToggle}
 					onForceResetRateLimit={onForceResetRateLimit}
 					onRefreshUsage={onRefreshUsage}
 					onRemove={onRemove}

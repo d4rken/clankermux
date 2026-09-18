@@ -8,17 +8,20 @@ export async function refreshOpenRouterAccountMetadata(
 	account: {
 		id: string;
 		provider: string;
+		disabled?: boolean;
 		api_key?: string | null;
 		custom_endpoint?: string | null;
 	},
 ): Promise<OpenRouterAccountMetadata | null> {
 	if (
+		account.disabled ||
 		account.provider !== "openrouter" ||
 		!account.api_key ||
 		account.custom_endpoint
 	)
 		return null;
 	try {
+		if ((await dbOps.getAccount(account.id))?.disabled) return null;
 		const metadata = await fetchOpenRouterMetadata(account.api_key);
 		if (!metadata) return null;
 		await dbOps

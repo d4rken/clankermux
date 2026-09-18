@@ -330,7 +330,7 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 				status: "refreshed",
 				accessToken: "at-survivor",
 			});
-			expect(ctx.getAccountSpy).not.toHaveBeenCalled();
+			expect(ctx.getAccountSpy).toHaveBeenCalledTimes(1); // Disable preflight only.
 		});
 
 		it("adopts the authoritative row on a CAS miss with nothing pending", async () => {
@@ -456,6 +456,7 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 						return persistCalls === 1 ? persistGate : true;
 					},
 					getAccount: async () => {
+						if (persistCalls === 0) return null; // Disable preflight succeeds.
 						throw new Error("database is locked");
 					},
 				},
@@ -487,8 +488,8 @@ for (const providerLabel of ["Qwen", "Codex"] as const) {
 			expect(entry?.accessToken).toBe("at-minted-C");
 			expect(entry?.refreshToken).toBe("C");
 			expect(entry?.attemptedRefreshToken).toBe("B");
-			// Only the ownership check read the row; no adopt-authoritative re-read.
-			expect(ctx.getAccountSpy).toHaveBeenCalledTimes(1);
+			// Disable preflight and ownership check; no adopt-authoritative re-read.
+			expect(ctx.getAccountSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("does NOT pause on an invalid_grant that replayed a stale generation", async () => {

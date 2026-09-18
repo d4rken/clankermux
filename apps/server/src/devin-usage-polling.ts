@@ -62,7 +62,7 @@ export function startDevinUsagePolling(
 		account.id,
 		async () => {
 			const current = await db.getAccount(account.id);
-			if (current?.provider !== "devin" || !current.api_key)
+			if (current?.provider !== "devin" || current.disabled || !current.api_key)
 				throw new Error("Devin account credentials unavailable");
 			// The endpoint is captured by this poll generation. Account edits restart it.
 			if ((current.custom_endpoint ?? null) !== endpoint)

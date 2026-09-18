@@ -116,6 +116,7 @@ export async function refreshAnthropicSubscription(
 		const account = await deps.getAccount(accountId);
 		if (
 			!account ||
+			account.disabled ||
 			!isCurrent() ||
 			deps.canFetchProfile?.() === false ||
 			!isAnthropicSubscriptionRefreshDue(account, nowMs, throttleMs)

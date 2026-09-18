@@ -1321,7 +1321,7 @@ export default async function startServer(options?: {
 		getApiKey: (accountId) =>
 			dbOps
 				.getAccount(accountId)
-				.then((a) => a?.api_key ?? null)
+				.then((a) => (a?.disabled ? null : (a?.api_key ?? null)))
 				.catch(() => null),
 		intervalMs: () => config.getUsagePollIntervalMs(),
 	};
@@ -1370,7 +1370,7 @@ export default async function startServer(options?: {
 	void dbOps
 		.getAdapter()
 		.query<{ id: string; name: string }>(
-			"SELECT id, name FROM accounts WHERE provider = 'codex'",
+			"SELECT id, name FROM accounts WHERE disabled = 0 AND provider = 'codex'",
 		)
 		.then(async (accounts) => {
 			for (const account of accounts) {
@@ -1421,7 +1421,7 @@ export default async function startServer(options?: {
 			dbOps
 				.getAdapter()
 				.query<PolledCodexAccount>(
-					"SELECT id, name, access_token, refresh_token, last_used, custom_endpoint FROM accounts WHERE provider = 'codex'",
+					"SELECT id, name, access_token, refresh_token, last_used, custom_endpoint FROM accounts WHERE disabled = 0 AND provider = 'codex'",
 				),
 		readUsage: (accountId) => codexSpendCoordinator.readUsageStatus(accountId),
 		peekObservedAtMs: (accountId) =>

@@ -620,6 +620,9 @@ export async function refreshAccessTokenSafe(
 	account: Account,
 	ctx: ProxyContext,
 ): Promise<string> {
+	if (account.disabled || (await ctx.dbOps.getAccount(account.id))?.disabled) {
+		throw new Error("Account is disabled");
+	}
 	// Join an in-progress refresh BEFORE consulting the coalesce cache: an active
 	// refresh yields the freshest result, so a caller holding an older token joins
 	// it rather than being served a possibly-stale (or already-rejected) cached
@@ -1615,6 +1618,9 @@ export async function getValidAccessToken(
 	account: Account,
 	ctx: ProxyContext,
 ): Promise<string> {
+	if (account.disabled) {
+		throw new Error("Account is disabled");
+	}
 	// For API key providers, return the API key directly without OAuth token refresh logic
 	if (
 		account.provider === "openai-compatible" ||

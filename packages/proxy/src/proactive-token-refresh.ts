@@ -39,7 +39,7 @@ export interface ProactiveRefreshRow {
 export type ProactiveRefreshOutcome =
 	| {
 			status: "skipped";
-			reason: "pending-rotation" | "in-flight" | "coalesced";
+			reason: "pending-rotation" | "in-flight" | "coalesced" | "disabled";
 	  }
 	| { status: "refreshed"; accessToken: string }
 	| { status: "failed"; error: unknown };
@@ -68,6 +68,8 @@ export async function refreshProactiveAccountToken({
 	providerLabel,
 	proxyContext,
 }: ProactiveTokenRefreshParams): Promise<ProactiveRefreshOutcome> {
+	if ((await proxyContext.dbOps.getAccount(row.id))?.disabled)
+		return { status: "skipped", reason: "disabled" };
 	// Skip if a refresh is already in-flight for this account (deduplication).
 	// Checked BEFORE the flush below: that refresh owns this account's next
 	// anchor-keyed write, so flushing underneath it would race its own persist.

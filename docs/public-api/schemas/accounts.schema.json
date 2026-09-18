@@ -120,6 +120,7 @@
         "rate_limited",
         "usage_exhausted",
         "blocked",
+        "payment_required",
         "other"
       ],
       "description": "Whether an account can be routed to, and why not.\n\nORTHOGONAL to  {@link  PublicCredentialStateDto } : a valid credential on a rate-limited account and an expired credential on an idle one are different situations, and the deployed shape's single `health` axis could express neither. `other` is not a bug bucket — it is the honest answer when the provider reported a rate-limit status our vocabulary has not been taught. Reporting `available` there is exactly how `rejected` went unnoticed once."

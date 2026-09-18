@@ -94,7 +94,7 @@ export class OAuthFlow {
 
 		// Check if account already exists (unless skipAccountCheck is true for re-authentication)
 		if (!skipAccountCheck) {
-			const existingAccounts = await this.dbOps.getAllAccounts();
+			const existingAccounts = await this.dbOps.getAllAccounts(true);
 			if (existingAccounts.some((a) => a.name === name)) {
 				throw new Error(`Account with name '${name}' already exists`);
 			}

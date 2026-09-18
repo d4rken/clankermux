@@ -159,6 +159,7 @@ export function destinationExclusionReason(
 	input: DestinationRestrictions,
 	rule: RoutingRule | null,
 ): string | null {
+	if (account.disabled) return "account is disabled";
 	if (!isAccountAllowedByPin(input.pin ?? null, account))
 		return "excluded by the API key's destinations";
 	if (

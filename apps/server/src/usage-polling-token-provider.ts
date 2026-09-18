@@ -34,6 +34,7 @@ export function createUsagePollingTokenProvider(
 		// consumed refresh token on the next refresh — so each field is adopted
 		// only when the DB copy is not older.
 		const currentAccount = await proxyContext.dbOps.getAccount(account.id);
+		if (currentAccount?.disabled) throw new Error("Account is disabled");
 		if (currentAccount) {
 			const dbIssuedAt = currentAccount.refresh_token_issued_at ?? null;
 			const memIssuedAt = account.refresh_token_issued_at ?? null;

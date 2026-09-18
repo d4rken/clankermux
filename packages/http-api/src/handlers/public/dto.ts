@@ -106,6 +106,7 @@ export type PublicAvailabilityState =
 	| "rate_limited"
 	| "usage_exhausted"
 	| "blocked"
+	| "payment_required"
 	| "other";
 
 /**
@@ -136,8 +137,9 @@ export function toPublicAvailabilityState(
 		case "usage_exhausted":
 			return "usage_exhausted";
 		case "blocked":
-		case "payment_required":
 			return "blocked";
+		case "payment_required":
+			return "payment_required";
 		default:
 			// Includes the internal `unknown` cause and anything added later.
 			return "other";

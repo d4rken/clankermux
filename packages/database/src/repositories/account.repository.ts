@@ -264,13 +264,14 @@ export class AccountRepository extends BaseRepository<Account> {
 		});
 	}
 
-	async findAll(): Promise<Account[]> {
+	async findAll(includeDisabled = false): Promise<Account[]> {
 		const rows = await this.query<AccountRow>(`
 			SELECT
 				id, name, provider, api_key, refresh_token, access_token,
 				expires_at, created_at, last_used, request_count, total_requests,
 				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
+				COALESCE(disabled, 0) as disabled,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
@@ -305,6 +306,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
 			FROM accounts
+			WHERE ${includeDisabled ? "1 = 1" : "disabled = 0"}
 			ORDER BY priority DESC
 		`);
 		return rows.map(toAccount);
@@ -318,6 +320,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				expires_at, created_at, last_used, request_count, total_requests,
 				rate_limited_until, rate_limited_reason, rate_limited_at, session_start, session_request_count,
 				COALESCE(paused, 0) as paused,
+				COALESCE(disabled, 0) as disabled,
 				rate_limit_reset, rate_limit_status, rate_limit_remaining,
 				COALESCE(priority, 0) as priority,
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
@@ -833,6 +836,31 @@ export class AccountRepository extends BaseRepository<Account> {
 		return changes > 0;
 	}
 
+	async setDisabled(
+		accountId: string,
+		disabled: boolean,
+		enabledOn: string,
+	): Promise<boolean> {
+		// Preserve pause/health and renewal configuration. Moving the ledger floor
+		// on enable prevents catch-up invoices for the disabled period.
+		return (
+			(await this.runWithChanges(
+				`UPDATE accounts SET disabled = ?,
+			 renewal_auto_start_date = CASE WHEN ? = 0 THEN
+			   MAX(COALESCE(renewal_auto_start_date, ?), ?) ELSE renewal_auto_start_date END
+			 WHERE id = ? AND disabled != ?`,
+				[
+					disabled ? 1 : 0,
+					disabled ? 1 : 0,
+					enabledOn,
+					enabledOn,
+					accountId,
+					disabled ? 1 : 0,
+				],
+			)) > 0
+		);
+	}
+
 	async pause(accountId: string, reason = "manual"): Promise<void> {
 		await this.run(
 			`UPDATE accounts SET paused = 1, pause_reason = ? WHERE id = ?`,
@@ -1344,7 +1372,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			SELECT id, name, renewal_anchor, renewal_cadence,
 			       renewal_price_usd_micros, renewal_auto_start_date,
 			       COALESCE(paused, 0) as paused
-			FROM accounts
+			FROM accounts WHERE disabled = 0
 		`,
 		);
 	}
@@ -1366,7 +1394,7 @@ export class AccountRepository extends BaseRepository<Account> {
 	 */
 	async hasAccountsForProvider(provider: string): Promise<boolean> {
 		const result = await this.get<{ count: number }>(
-			`SELECT COUNT(*) as count FROM accounts WHERE provider = ?`,
+			`SELECT COUNT(*) as count FROM accounts WHERE disabled = 0 AND provider = ?`,
 			[provider],
 		);
 		return result ? result.count > 0 : false;

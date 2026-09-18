@@ -75,7 +75,7 @@ export function createUsageHistoryHandler(context: APIContext) {
 		getUsageSnapshots: (opts) => usageSnapshots.getSnapshots(opts),
 		getLatestSnapshotsBefore: (beforeMs, lookbackMs) =>
 			usageSnapshots.getLatestSnapshotsBefore(beforeMs, lookbackMs),
-		getAllAccounts: () => accounts.findAll(),
+		getAllAccounts: () => accounts.findAll(true),
 	});
 }
 

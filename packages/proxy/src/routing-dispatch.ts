@@ -119,6 +119,8 @@ export async function sendAuthorizedRequest(
 				"Chat capability boundary changed before dispatch",
 			);
 		const current = await ctx.dbOps.getAccount(account.id);
+		if (current?.disabled)
+			throw new RoutingPolicyError("Account was disabled before dispatch");
 		if (!current || !route.target(current))
 			throw new RoutingPolicyError(
 				"Destination identity changed before dispatch",

@@ -201,10 +201,14 @@ export const useTriggerIntegrityCheck = () => {
 	});
 };
 
-export const useAccounts = () => {
+export const useAccounts = (includeDisabled = false) => {
 	return useQuery({
 		queryKey: queryKeys.accounts(),
 		queryFn: () => api.getAccounts(),
+		select: (accounts) =>
+			includeDisabled
+				? accounts
+				: accounts.filter((account) => !account.disabled),
 		staleTime: 20000, // Consider data fresh for 20 seconds
 		refetchInterval: 60000, // Refresh every minute for usage data
 		refetchIntervalInBackground: false, // Don't refresh when tab is not focused

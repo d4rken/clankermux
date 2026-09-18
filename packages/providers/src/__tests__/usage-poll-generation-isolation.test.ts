@@ -127,4 +127,30 @@ describe("UsageCache — superseded fetches cannot corrupt the live generation",
 		expect(usageCache.get(ACCOUNT)).not.toBeNull();
 		expect(failureCount(ACCOUNT)).toBeUndefined();
 	});
+	it("stopping polling for disable prevents an in-flight success from restoring usage", async () => {
+		let started!: () => void;
+		const began = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let release!: () => void;
+		const responseGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				started();
+				await responseGate;
+				return healthyResponse();
+			}),
+		);
+		usageCache.startPolling(ACCOUNT, async () => "token", "anthropic", 60000);
+		await began;
+		const pending = usageCache.refreshNow(ACCOUNT);
+		usageCache.stopPolling(ACCOUNT);
+		usageCache.delete(ACCOUNT);
+		release();
+		await pending;
+		expect(usageCache.get(ACCOUNT)).toBeNull();
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
 });

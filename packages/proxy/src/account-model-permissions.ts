@@ -138,6 +138,7 @@ export class AccountModelPermissionService {
 		]).finally(() => clearTimeout(timer));
 	}
 	refresh(account: Account, manual = false): Promise<void> {
+		if (account.disabled) return Promise.resolve();
 		const scope = modelPermissionScope(account);
 		const key = `${account.id}:${scope}`;
 		const pending = this.inFlight.get(key);
@@ -152,6 +153,10 @@ export class AccountModelPermissionService {
 		return work;
 	}
 	private async discover(account: Account, scope: string): Promise<void> {
+		const current = (await this.deps.listAccounts()).find(
+			(a) => a.id === account.id,
+		);
+		if (!current || current.disabled) return;
 		const key = `${account.id}:${scope}`;
 		const controller = new AbortController();
 		this.controllers.add(controller);
