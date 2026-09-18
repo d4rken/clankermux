@@ -160,3 +160,36 @@ it.each([
 		).toBe(tier);
 	}
 });
+
+describe("expired Anthropic subscription profile", () => {
+	// Sanitized organization fields observed after the paid subscription ended.
+	const organization = {
+		organization_type: "claude_free",
+		billing_type: "none",
+		rate_limit_tier: "default_claude_ai",
+		seat_tier: null,
+		subscription_status: "canceled",
+		subscription_created_at: "2026-02-18T20:25:09.125860Z",
+	};
+	it("captures the observed downgrade as expiry evidence", () => {
+		expect(extractAnthropicIdentity({ organization })).toMatchObject({
+			planTier: "claude_free",
+			subscriptionStatus: "canceled",
+			anthropicSubscriptionExpired: true,
+		});
+	});
+	it("requires all three fields, not cancellation or free access alone", () => {
+		for (const override of [
+			{ organization_type: "claude_max" },
+			{ subscription_status: "active" },
+			{ subscription_status: null },
+			{ billing_type: "stripe_subscription" },
+			{ billing_type: undefined },
+		])
+			expect(
+				extractAnthropicIdentity({
+					organization: { ...organization, ...override },
+				})?.anthropicSubscriptionExpired,
+			).not.toBe(true);
+	});
+});

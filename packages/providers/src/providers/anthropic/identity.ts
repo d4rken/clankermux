@@ -72,7 +72,8 @@ function isoToEpochMs(value: unknown): number | null {
 /**
  * Normalize `organization.subscription_status` ("active", "canceled", …) to a
  * lowercase token. Values are passed through rather than mapped: an unknown
- * status is still worth displaying, and nothing routes on this field.
+ * status is still worth displaying; only the explicit expired-profile
+ * combination is used to explain a usage-access pause.
  */
 function normalizeSubscriptionStatus(value: unknown): string | null {
 	const raw = nullableString(value);
@@ -128,6 +129,11 @@ export function extractAnthropicIdentity(
 	const subscriptionStartedAt = isoToEpochMs(
 		organization?.subscription_created_at,
 	);
+	const billingType = nullableString(organization?.billing_type)?.toLowerCase();
+	const anthropicSubscriptionExpired =
+		planTier === "claude_free" &&
+		subscriptionStatus === "canceled" &&
+		billingType === "none";
 
 	return {
 		externalAccountId,
@@ -137,5 +143,8 @@ export function extractAnthropicIdentity(
 		rateLimitTier,
 		subscriptionStatus,
 		subscriptionStartedAt,
+		...(anthropicSubscriptionExpired
+			? { anthropicSubscriptionExpired: true }
+			: {}),
 	};
 }

@@ -2768,6 +2768,7 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 			clearAccountRefreshCache(accountId);
 			const pollingRestarted = await restartUsagePollingForAccount(accountId);
 			const cacheRefreshed = await usageCache.refreshNow(accountId);
+			await usageCache.waitForAnthropicUsageObservation(accountId);
 
 			log.info(
 				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted}, cache refreshed: ${cacheRefreshed})`,

@@ -9,7 +9,6 @@ import {
 	type AnthropicSubscriptionRefreshDeps,
 	isAnthropicSubscriptionRefreshDue,
 	refreshAnthropicSubscription,
-	withAnthropicSubscriptionRefresh,
 } from "./anthropic-subscription-refresh";
 
 const NOW = 1_800_000_000_000;
@@ -507,119 +506,5 @@ describe("refreshAnthropicSubscription", () => {
 				now: () => NOW,
 			}),
 		).resolves.toBeUndefined();
-	});
-});
-
-describe("withAnthropicSubscriptionRefresh", () => {
-	it("reads with the token this invocation resolved, not the stored copy", async () => {
-		// The row holds a token that a refresh has already superseded — exactly
-		// the staleness a snapshot-captured token reintroduces.
-		const store = fakeStore(
-			makeAccount({
-				access_token: "t-stale",
-				identity_subscription_checked_at: null,
-			}),
-		);
-		const reads: Array<Promise<void>> = [];
-		const provider = withAnthropicSubscriptionRefresh(
-			"acc-1",
-			async () => "t-fresh",
-			{
-				...store.deps(async () => ACTIVE),
-				detach: (read) => {
-					reads.push(read);
-				},
-			},
-		);
-
-		expect(await provider()).toBe("t-fresh");
-		await Promise.all(reads);
-
-		expect(store.fetches).toEqual(["t-fresh"]);
-	});
-
-	it("resolves each read's token afresh across the throttle boundary", async () => {
-		const store = fakeStore(
-			makeAccount({ identity_subscription_checked_at: null }),
-		);
-		const tokens = ["t-first", "t-second"];
-		let now = NOW;
-		const reads: Array<Promise<void>> = [];
-		const provider = withAnthropicSubscriptionRefresh(
-			"acc-1",
-			async () => tokens.shift() ?? "exhausted",
-			{
-				...store.deps(
-					async () => ACTIVE,
-					() => now,
-				),
-				detach: (read) => {
-					reads.push(read);
-				},
-			},
-		);
-
-		await provider();
-		now = NOW + ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS;
-		await provider();
-		await Promise.all(reads);
-
-		expect(store.fetches).toEqual(["t-first", "t-second"]);
-	});
-
-	it("returns the token without waiting for the read to settle", async () => {
-		const store = fakeStore(
-			makeAccount({ identity_subscription_checked_at: null }),
-		);
-		const provider = withAnthropicSubscriptionRefresh(
-			"acc-1",
-			async () => "t-live",
-			{
-				// A read that never settles must not hold up the poll that resolved
-				// this token.
-				...store.deps(() => new Promise<AccountIdentity | null>(() => {})),
-			},
-		);
-
-		expect(await provider()).toBe("t-live");
-	});
-
-	it("still returns the token when the read throws", async () => {
-		const store = fakeStore(
-			makeAccount({ identity_subscription_checked_at: null }),
-		);
-		const reads: Array<Promise<void>> = [];
-		const provider = withAnthropicSubscriptionRefresh(
-			"acc-1",
-			async () => "t-live",
-			{
-				...store.deps(async () => {
-					throw new Error("network down");
-				}),
-				detach: (read) => {
-					reads.push(read);
-				},
-			},
-		);
-
-		expect(await provider()).toBe("t-live");
-		await Promise.all(reads);
-	});
-
-	it("propagates a token-resolution failure untouched, and issues no read", async () => {
-		const store = fakeStore(
-			makeAccount({ identity_subscription_checked_at: null }),
-		);
-		const provider = withAnthropicSubscriptionRefresh(
-			"acc-1",
-			async () => {
-				throw new Error("refresh rejected");
-			},
-			store.deps(async () => ACTIVE),
-		);
-
-		// The poller's own onTokenRefreshFailure handling depends on seeing this.
-		await expect(provider()).rejects.toThrow("refresh rejected");
-		expect(store.fetches).toEqual([]);
 	});
 });
