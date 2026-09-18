@@ -1292,6 +1292,11 @@ describe("client service integration", () => {
 				maxOutputTokens: 32_000,
 				reasoning: false,
 				inputModalities: ["text"],
+				cachePolicy: {
+					mode: "unknown",
+					expiry: "unavailable",
+					source: "unknown",
+				},
 			});
 			const before = await (await service.wire(id, "codex")).json();
 			expect(before.models[0]).toMatchObject({
