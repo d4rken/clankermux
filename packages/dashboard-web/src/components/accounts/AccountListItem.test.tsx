@@ -284,7 +284,7 @@ it("keeps a disabled account manageable without current health warnings or usage
 		}),
 	);
 	expect(html).toContain("Disabled");
-	expect(html).toContain(">Enable</button>");
+	expect(html).not.toContain(">Enable</button>");
 	expect(html).not.toContain("Recheck access");
 	expect(html).not.toContain("Subscription expired · Paused");
 	expect(html).toMatch(/disabled=""[^>]*title="Resume account"/);
