@@ -1,6 +1,10 @@
-import type { ModelAlias, ModelAliasTarget } from "@clankermux/types";
+import type {
+	ClientSuggestions,
+	ModelAlias,
+	ModelAliasTarget,
+} from "@clankermux/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { api } from "../../api";
 import { useAccounts } from "../../hooks/queries";
 import { Button } from "../ui/button";
@@ -26,6 +30,16 @@ export function ModelAliases() {
 	const aliases = useModelAliases();
 	const accounts = useAccounts();
 	const [draft, setDraft] = useState<ModelAlias | null>(null);
+	const suggestionsId = useId();
+	const suggestions = useQuery({
+		queryKey: ["model-alias-suggestions"],
+		queryFn: () =>
+			api.post<{ data: ClientSuggestions }>("/api/clients/suggestions", {
+				destinations: { accountId: null, providers: null },
+				refresh: false,
+			}),
+		enabled: draft !== null,
+	});
 	const mutation = useMutation({
 		mutationFn: async ({
 			alias,
@@ -207,6 +221,16 @@ export function ModelAliases() {
 										}
 									/>
 								</label>
+								{suggestions.isPending ? (
+									<p role="status" className="text-sm text-muted-foreground">
+										Loading model suggestions…
+									</p>
+								) : suggestions.isError ? (
+									<p role="status" className="text-sm text-muted-foreground">
+										Model suggestions unavailable. You can still enter a model
+										ID.
+									</p>
+								) : null}
 								{draft.targets.map((target, index) => (
 									<fieldset
 										// biome-ignore lint/suspicious/noArrayIndexKey: controlled rows represent positions in the target order
@@ -220,6 +244,8 @@ export function ModelAliases() {
 											Concrete model ID
 											<Input
 												id={`alias-target-${index}`}
+												list={`${suggestionsId}-${index}`}
+												autoComplete="off"
 												required
 												maxLength={256}
 												pattern="(?!alias:).*"
@@ -229,6 +255,22 @@ export function ModelAliases() {
 												}
 											/>
 										</label>
+										<datalist id={`${suggestionsId}-${index}`}>
+											{suggestions.data?.data.models
+												.filter(
+													(model) =>
+														!model.id.startsWith("alias:") &&
+														(target.accountIds === null ||
+															model.accountIds.some((id) =>
+																target.accountIds?.includes(id),
+															)),
+												)
+												.map((model) => (
+													<option key={model.id} value={model.id}>
+														{model.displayName}
+													</option>
+												))}
+										</datalist>
 										<label className="flex gap-2 text-sm">
 											<input
 												type="checkbox"
