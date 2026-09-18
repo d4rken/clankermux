@@ -8,8 +8,10 @@ import {
 	pricingCatalogueStatus,
 	reduceClientModelMetadata,
 	reduceModelCachePolicies,
+	reduceModelCacheRetentions,
 	resolveClientModelMetadata,
 	resolveModelCachePolicy,
+	resolveModelCacheRetention,
 	resolveRoutingTarget,
 	validateRoutingRule,
 } from "@clankermux/core";
@@ -599,6 +601,11 @@ export class ClientService {
 							unresolvedRoutes,
 						);
 						if (cachePolicy) metadata.cachePolicy = cachePolicy;
+						metadata.cacheRetention = resolveModelCacheRetention(
+							target,
+							cacheRoutes,
+							unresolvedRoutes,
+						);
 						return metadata;
 					}),
 				);
@@ -607,6 +614,9 @@ export class ClientService {
 					targetMetadata.map((item) => item.cachePolicy),
 				);
 				if (cachePolicy) metadata.cachePolicy = cachePolicy;
+				metadata.cacheRetention = reduceModelCacheRetentions(
+					targetMetadata.map((item) => item.cacheRetention),
+				);
 				return [model.id, metadata] as const;
 			}),
 		);

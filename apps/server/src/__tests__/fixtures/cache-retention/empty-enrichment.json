@@ -1,0 +1,12 @@
+{
+	"object": "list",
+	"data": [
+		{
+			"id": "friendly",
+			"object": "model",
+			"created": 1700000000,
+			"owned_by": "clankermux",
+			"clankermux": {}
+		}
+	]
+}

@@ -27,6 +27,10 @@ export {
 	reduceModelCachePolicies,
 	resolveModelCachePolicy,
 } from "./model-cache-policy";
+export {
+	reduceModelCacheRetentions,
+	resolveModelCacheRetention,
+} from "./model-cache-retention";
 
 export interface ModelMetadataRequest {
 	targetModel: string;

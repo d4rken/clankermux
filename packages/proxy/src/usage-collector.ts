@@ -304,6 +304,7 @@ interface SseParsed {
 			input_tokens?: number;
 			output_tokens?: number;
 			input_tokens_details?: {
+				cache_write_tokens?: number;
 				cached_tokens?: number;
 				cache_creation_input_tokens?: number;
 			};
@@ -513,20 +514,27 @@ function applySseData(
 		if (usage) {
 			captureReportedCharge(state, usage);
 			const inputTokenDetails = usage.input_tokens_details;
+			const cacheWrites =
+				inputTokenDetails?.cache_write_tokens ??
+				inputTokenDetails?.cache_creation_input_tokens;
 			if (typeof usage.input_tokens === "number") {
 				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
-				// additive semantics so inputTokens excludes cache reads. Without
+				// additive semantics so inputTokens excludes cache reads and writes. Without
 				// this, cost estimation double-charges the cached tokens (once at
 				// the input rate, once at the cache_read rate), because
 				// estimateCostUSD sums inputTokens and cacheReadInputTokens.
 				const normalizedInput = normalizeCodexInputUsage(
 					usage.input_tokens,
 					inputTokenDetails?.cached_tokens,
+					cacheWrites,
 				);
 				state.inputTokens = normalizedInput.inputTokens;
-				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens ?? 0;
+				state.cacheCreationInputTokens =
+					normalizedInput.cacheCreationInputTokens ?? 0;
 			} else if (
 				typeof inputTokenDetails?.cached_tokens === "number" &&
+				Number.isFinite(inputTokenDetails.cached_tokens) &&
 				inputTokenDetails.cached_tokens >= 0
 			) {
 				// No total to normalize against, but a valid cached count is still
@@ -542,11 +550,12 @@ function applySseData(
 				state.providerReportedOutput = true;
 			}
 			if (
-				typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
-				inputTokenDetails.cache_creation_input_tokens >= 0
+				typeof usage.input_tokens !== "number" &&
+				typeof cacheWrites === "number" &&
+				Number.isFinite(cacheWrites) &&
+				cacheWrites >= 0
 			) {
-				state.cacheCreationInputTokens =
-					inputTokenDetails.cache_creation_input_tokens;
+				state.cacheCreationInputTokens = cacheWrites;
 			}
 		}
 		// Only a COMPLETED response is the Codex analogue of `message_stop`.

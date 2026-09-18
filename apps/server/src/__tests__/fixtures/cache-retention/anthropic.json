@@ -1,0 +1,38 @@
+{
+	"data": [
+		{
+			"type": "model",
+			"id": "friendly",
+			"display_name": "Friendly model",
+			"created_at": "2026-01-01T00:00:00Z",
+			"clankermux": {
+				"contextWindow": 12345,
+				"cachePolicy": {
+					"mode": "implicit",
+					"expiry": "unavailable",
+					"source": "gateway-policy"
+				},
+				"cacheRetention": {
+					"basis": "inferred",
+					"retentionMs": 1800000,
+					"semantics": "minimum",
+					"confidence": "low",
+					"anchor": "request_start",
+					"anchorBasis": "assumed",
+					"refreshOnReuse": true,
+					"refreshBasis": "assumed",
+					"sources": [
+						{
+							"url": "https://developers.openai.com/api/docs/guides/prompt-caching",
+							"note": "OpenAI API minimum for GPT-5.6 and later."
+						}
+					],
+					"note": "API retention is an inferred default for Codex subscriptions; applicability is unverified."
+				}
+			}
+		}
+	],
+	"has_more": false,
+	"first_id": "friendly",
+	"last_id": "friendly"
+}

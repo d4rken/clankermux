@@ -218,6 +218,59 @@ describe("Chat ingress request contract", () => {
 	});
 });
 describe("Chat ingress responses", () => {
+	for (const stream of [false, true]) {
+		it(`preserves cache write evidence and missing reads (stream=${stream})`, async () => {
+			for (const reads of [undefined, null, 0, 20, -1, "invalid"]) {
+				const upstream =
+					event("message_start", {
+						message: {
+							model: "actual-model",
+							usage: {
+								input_tokens: 5,
+								output_tokens: 0,
+								cache_read_input_tokens: null,
+								cache_creation_input_tokens: null,
+							},
+						},
+					}) +
+					event("message_delta", {
+						delta: { stop_reason: "end_turn" },
+						usage: {
+							output_tokens: 2,
+							cache_creation_input_tokens: 10,
+							cache_read_input_tokens: reads,
+						},
+					}) +
+					event("message_stop");
+				const res = await run(
+					{
+						...input,
+						stream,
+						stream_options: stream ? { include_usage: true } : undefined,
+					},
+					response(upstream),
+				);
+				const payload = stream
+					? (await res.text())
+							.split("\n")
+							.filter((line) => line.startsWith("data: {"))
+							.map((line) => JSON.parse(line.slice(6)))
+							.at(-1)
+					: await res.json();
+				const validRead =
+					typeof reads === "number" && reads >= 0 ? reads : undefined;
+				expect(payload.usage).toEqual({
+					prompt_tokens: 15 + (validRead ?? 0),
+					completion_tokens: 2,
+					total_tokens: 17 + (validRead ?? 0),
+					prompt_tokens_details: {
+						cache_write_tokens: 10,
+						...(validRead !== undefined ? { cached_tokens: validRead } : {}),
+					},
+				});
+			}
+		});
+	}
 	it("returns JSON text, upstream model, and cache-inclusive usage", async () => {
 		const res = await run(input);
 		expect(res.status).toBe(200);

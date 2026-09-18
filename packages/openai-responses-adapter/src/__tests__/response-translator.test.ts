@@ -19,6 +19,57 @@ function makeBaseResponse(
 }
 
 describe("translateAnthropicResponseToResponses", () => {
+	test("omits unknown nullable Anthropic cache counters", () => {
+		const response = translateAnthropicResponseToResponses(
+			makeBaseResponse({
+				usage: {
+					input_tokens: 5,
+					output_tokens: 2,
+					cache_creation_input_tokens: null,
+					cache_read_input_tokens: null,
+				},
+			}),
+			"resp_unknown",
+			"model",
+		);
+		expect(response.usage).toEqual({
+			input_tokens: 5,
+			output_tokens: 2,
+			total_tokens: 7,
+		});
+	});
+	test("keeps missing cache reads distinct from explicit zero and ignores malformed evidence", () => {
+		for (const reads of [
+			undefined,
+			null,
+			0,
+			-1,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		]) {
+			const response = translateAnthropicResponseToResponses(
+				makeBaseResponse({
+					usage: {
+						input_tokens: 5,
+						output_tokens: 2,
+						cache_creation_input_tokens: 10,
+						cache_read_input_tokens: reads,
+					},
+				}),
+				"resp_write",
+				"model",
+			);
+			expect(response.usage).toEqual({
+				input_tokens: 15,
+				output_tokens: 2,
+				total_tokens: 17,
+				input_tokens_details: {
+					cache_write_tokens: 10,
+					...(reads === 0 ? { cached_tokens: 0 } : {}),
+				},
+			});
+		}
+	});
 	test("includes cache reads and writes in total input while identifying them separately", () => {
 		const response = translateAnthropicResponseToResponses(
 			makeBaseResponse({

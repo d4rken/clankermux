@@ -200,8 +200,10 @@ export {
 	type ModelMetadataRequest,
 	reduceClientModelMetadata,
 	reduceModelCachePolicies,
+	reduceModelCacheRetentions,
 	resolveClientModelMetadata,
 	resolveModelCachePolicy,
+	resolveModelCacheRetention,
 } from "./model-metadata";
 export {
 	CLAUDE_MODEL_IDS,
@@ -299,6 +301,14 @@ export {
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ScopedFamilyLimit,
 } from "./scoped-limits";
+export {
+	type CacheEstimateContext,
+	type CacheEstimateRequest,
+	type CacheUsageEvidence,
+	readCacheUsage,
+	SessionCacheEstimate,
+	type SessionCacheEstimateState,
+} from "./session-cache-estimate";
 export * from "./strategy";
 export {
 	isCodexSubscriptionLapse,

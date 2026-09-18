@@ -40,6 +40,53 @@ function sseEvent(type: string, data: unknown): string {
 }
 
 describe("translateAnthropicStreamToResponses", () => {
+	test("does not invent cache misses when only writes are reported", async () => {
+		for (const reads of [undefined, null, 0, -1]) {
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", {
+							message: {
+								usage: {
+									input_tokens: 5,
+									output_tokens: 0,
+									cache_read_input_tokens: null,
+									cache_creation_input_tokens: null,
+								},
+							},
+						}),
+						sseEvent("message_delta", {
+							usage: {
+								output_tokens: 2,
+								cache_creation_input_tokens: 10,
+								cache_read_input_tokens: reads,
+							},
+						}),
+						sseEvent("message_stop", {}),
+					]),
+					"resp_write",
+					"model",
+				),
+			);
+			expect(events.at(-1)?.data).toMatchObject({
+				response: {
+					usage: {
+						input_tokens: 15,
+						output_tokens: 2,
+						total_tokens: 17,
+						input_tokens_details: { cache_write_tokens: 10 },
+					},
+				},
+			});
+			const data = events.at(-1)?.data as {
+				response: { usage: { input_tokens_details: object } };
+			};
+			expect(data.response.usage.input_tokens_details).toEqual({
+				cache_write_tokens: 10,
+				...(reads === 0 ? { cached_tokens: 0 } : {}),
+			});
+		}
+	});
 	for (const terminal of ["message_stop", "error"] as const) {
 		test(`merges final input and cache counts before ${terminal}`, async () => {
 			const events = await collectSseEvents(

@@ -178,22 +178,25 @@ const documentRemovalMarker = (mediaType: string | undefined) => {
 	return `[${label ? `${label} ` : ""}document removed: not supported on this backend]`;
 };
 
-const _normalizeUsage = (value: unknown): Record<string, number> => {
+const _normalizeUsage = (value: unknown): Record<string, number | null> => {
 	const usage =
 		typeof value === "object" && value !== null
 			? (value as Record<string, unknown>)
 			: {};
 	const getNumber = (field: string) => {
 		const candidate = usage[field];
-		return typeof candidate === "number" && Number.isFinite(candidate)
+		return typeof candidate === "number" &&
+			Number.isFinite(candidate) &&
+			candidate >= 0
 			? candidate
-			: 0;
+			: undefined;
 	};
 	return {
-		input_tokens: getNumber("input_tokens"),
-		output_tokens: getNumber("output_tokens"),
-		cache_read_input_tokens: getNumber("cache_read_input_tokens"),
-		cache_creation_input_tokens: getNumber("cache_creation_input_tokens"),
+		input_tokens: getNumber("input_tokens") ?? 0,
+		output_tokens: getNumber("output_tokens") ?? 0,
+		cache_read_input_tokens: getNumber("cache_read_input_tokens") ?? null,
+		cache_creation_input_tokens:
+			getNumber("cache_creation_input_tokens") ?? null,
 	};
 };
 
@@ -409,8 +412,8 @@ interface StreamState {
 	hasSentTerminalEvents: boolean;
 	inputTokens: number;
 	outputTokens: number;
-	cacheReadInputTokens: number;
-	cacheCreationInputTokens: number;
+	cacheReadInputTokens?: number;
+	cacheCreationInputTokens?: number;
 	// Anthropic clients expect stop_reason=tool_use when the assistant emitted a tool call.
 	sawToolUse: boolean;
 	contextWindow: ContextWindow | null;
@@ -1365,22 +1368,20 @@ export class CodexProvider extends BaseProvider {
 			| undefined;
 		// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
 		// additive semantics so the context-window gauge's input_tokens excludes
-		// cache reads instead of double-counting them.
+		// cache reads and writes instead of double-counting them.
 		const normalizedInput = normalizeCodexInputUsage(
 			inputTokens,
 			inputTokenDetails?.cached_tokens,
+			inputTokenDetails?.cache_write_tokens ??
+				inputTokenDetails?.cache_creation_input_tokens,
 		);
 
 		return {
 			current_usage: {
 				input_tokens: normalizedInput.inputTokens,
-				cache_read_input_tokens: normalizedInput.cacheReadInputTokens,
+				cache_read_input_tokens: normalizedInput.cacheReadInputTokens ?? 0,
 				cache_creation_input_tokens:
-					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
-					Number.isFinite(inputTokenDetails.cache_creation_input_tokens) &&
-					inputTokenDetails.cache_creation_input_tokens >= 0
-						? inputTokenDetails.cache_creation_input_tokens
-						: 0,
+					normalizedInput.cacheCreationInputTokens ?? 0,
 			},
 			context_window_size: contextWindowSize,
 		};
@@ -1908,8 +1909,8 @@ export class CodexProvider extends BaseProvider {
 			hasSentTerminalEvents: false,
 			inputTokens: 0,
 			outputTokens: 0,
-			cacheReadInputTokens: 0,
-			cacheCreationInputTokens: 0,
+			cacheReadInputTokens: undefined,
+			cacheCreationInputTokens: undefined,
 			contextWindow: null,
 			functionCallBlocks: new Map(),
 			sawToolUse: false,
@@ -1977,8 +1978,8 @@ export class CodexProvider extends BaseProvider {
 				usage: {
 					input_tokens: 0,
 					output_tokens: 0,
-					cache_read_input_tokens: 0,
-					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: null,
+					cache_creation_input_tokens: null,
 				},
 				message: {
 					id: state.messageId,
@@ -1991,8 +1992,8 @@ export class CodexProvider extends BaseProvider {
 					usage: {
 						input_tokens: 0,
 						output_tokens: 0,
-						cache_read_input_tokens: 0,
-						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: null,
+						cache_creation_input_tokens: null,
 					},
 				},
 			});
@@ -2591,6 +2592,7 @@ export class CodexProvider extends BaseProvider {
 							output_tokens?: number;
 							input_tokens_details?: {
 								cached_tokens?: number;
+								cache_write_tokens?: number;
 								cache_creation_input_tokens?: number;
 							};
 					  }
@@ -2598,19 +2600,16 @@ export class CodexProvider extends BaseProvider {
 
 				// Extract cache fields from input_tokens_details (Codex format).
 				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
-				// additive semantics so input_tokens excludes cache reads instead of
+				// additive semantics so input_tokens excludes cache reads and writes instead of
 				// double-counting them (our estimateCostUSD charges input_tokens and
 				// cache_read_input_tokens additively).
 				const inputTokenDetails = usage?.input_tokens_details;
 				const normalizedInput = normalizeCodexInputUsage(
 					usage?.input_tokens,
 					inputTokenDetails?.cached_tokens,
+					inputTokenDetails?.cache_write_tokens ??
+						inputTokenDetails?.cache_creation_input_tokens,
 				);
-				const cacheCreation =
-					typeof inputTokenDetails?.cache_creation_input_tokens === "number" &&
-					inputTokenDetails.cache_creation_input_tokens >= 0
-						? inputTokenDetails.cache_creation_input_tokens
-						: 0;
 
 				state.inputTokens =
 					usage?.input_tokens !== undefined
@@ -2618,7 +2617,8 @@ export class CodexProvider extends BaseProvider {
 						: state.inputTokens;
 				state.outputTokens = usage?.output_tokens || state.outputTokens;
 				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
-				state.cacheCreationInputTokens = cacheCreation;
+				state.cacheCreationInputTokens =
+					normalizedInput.cacheCreationInputTokens;
 				state.contextWindow = this.extractContextWindow(resp, usage);
 				// Incomplete Chat turns retain partial arguments from every open call.
 				// Successful terminals with unfinished calls were rejected above.
@@ -2683,8 +2683,8 @@ export class CodexProvider extends BaseProvider {
 					usage: {
 						input_tokens: number;
 						output_tokens: number;
-						cache_read_input_tokens: number;
-						cache_creation_input_tokens: number;
+						cache_read_input_tokens: number | null;
+						cache_creation_input_tokens: number | null;
 					};
 					context_window?: ContextWindow;
 				} = {
@@ -2696,8 +2696,8 @@ export class CodexProvider extends BaseProvider {
 					usage: {
 						input_tokens: state.inputTokens,
 						output_tokens: state.outputTokens,
-						cache_read_input_tokens: state.cacheReadInputTokens,
-						cache_creation_input_tokens: state.cacheCreationInputTokens,
+						cache_read_input_tokens: state.cacheReadInputTokens ?? null,
+						cache_creation_input_tokens: state.cacheCreationInputTokens ?? null,
 					},
 				};
 				// A refusal carries the Anthropic `stop_details` envelope so the

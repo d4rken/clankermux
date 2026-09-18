@@ -5,6 +5,10 @@ import type {
 } from "@clankermux/types";
 import { renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
+import anthropicRetentionFixture from "./fixtures/cache-retention/anthropic.json";
+import codexRetentionFixture from "./fixtures/cache-retention/codex.json";
+import emptyRetentionFixture from "./fixtures/cache-retention/empty-enrichment.json";
+import openaiRetentionFixture from "./fixtures/cache-retention/openai.json";
 
 const catalogue: ClientCatalogue = {
 	defaultModel: null,
@@ -12,6 +16,7 @@ const catalogue: ClientCatalogue = {
 		{
 			id: "friendly",
 			displayName: "Friendly model",
+			createdAt: "2026-01-01T00:00:00Z",
 			targetModel: "real-model",
 			accountIds: ["a"],
 			codexMetadata: {
@@ -74,6 +79,68 @@ describe("client catalogue serving", () => {
 			expect(JSON.stringify(enriched)).not.toContain("accountIds");
 		}
 	});
+	it("matches sanitized retention fixtures without changing native response fields", async () => {
+		const metadata: ClientModelMetadataMap = {
+			friendly: {
+				contextWindow: 12345,
+				cachePolicy: {
+					mode: "implicit",
+					expiry: "unavailable",
+					source: "gateway-policy",
+				},
+				cacheRetention: {
+					basis: "inferred",
+					retentionMs: 1_800_000,
+					semantics: "minimum",
+					confidence: "low",
+					anchor: "request_start",
+					anchorBasis: "assumed",
+					refreshOnReuse: true,
+					refreshBasis: "assumed",
+					sources: [
+						{
+							url: "https://developers.openai.com/api/docs/guides/prompt-caching",
+							note: "OpenAI API minimum for GPT-5.6 and later.",
+						},
+					],
+					note: "API retention is an inferred default for Codex subscriptions; applicability is unverified.",
+				},
+			},
+			privateModel: { contextWindow: 999999 },
+		};
+		for (const [format, fixture] of [
+			["openai", openaiRetentionFixture],
+			["anthropic", anthropicRetentionFixture],
+			["codex", codexRetentionFixture],
+		] as const) {
+			const body = await renderClientCatalogue(
+				catalogue,
+				format,
+				metadata,
+			).json();
+			expect(body).toEqual(fixture);
+			const rows = body.data ?? body.models;
+			expect(rows).toHaveLength(1);
+			for (const key of [
+				"accountIds",
+				"customEndpoint",
+				"providerKinds",
+				"thinkingLevels",
+				"sessionCache",
+				"estimatedExpiresAt",
+			]) {
+				expect(JSON.stringify(body)).not.toContain(`"${key}"`);
+			}
+			delete rows[0].clankermux;
+			expect(body).toEqual(
+				await renderClientCatalogue(catalogue, format).json(),
+			);
+		}
+		expect(await renderClientCatalogue(catalogue, "openai", {}).json()).toEqual(
+			emptyRetentionFixture,
+		);
+	});
+
 	it("opts in only for clankermux_metadata=1", async () => {
 		const seen: unknown[] = [];
 		const deps: ModelsRouteDeps = {

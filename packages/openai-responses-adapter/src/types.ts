@@ -213,7 +213,7 @@ export interface ResponsesUsage {
 	output_tokens: number;
 	total_tokens: number;
 	input_tokens_details?: {
-		cached_tokens: number;
+		cached_tokens?: number;
 		cache_write_tokens?: number;
 	};
 }
@@ -325,8 +325,8 @@ export interface AnthropicToolUseResponseContent {
 export interface AnthropicUsage {
 	input_tokens: number;
 	output_tokens: number;
-	cache_creation_input_tokens?: number;
-	cache_read_input_tokens?: number;
+	cache_creation_input_tokens?: number | null;
+	cache_read_input_tokens?: number | null;
 }
 
 // ============================================================

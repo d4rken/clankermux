@@ -20,43 +20,40 @@ const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60;
 const SEVEN_DAY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 
 export interface NormalizedCodexInputUsage {
-	/** Total context occupied upstream, including cached tokens. */
+	/** Total context occupied upstream, including cache reads and writes. */
 	totalInputTokens: number;
 	/** Anthropic's additive, uncached input token field. */
 	inputTokens: number;
-	cacheReadInputTokens: number;
+	cacheReadInputTokens?: number;
+	cacheCreationInputTokens?: number;
 }
 
 /**
- * Convert Codex's cache-inclusive input total to Anthropic's additive usage
- * fields. OpenAI's Responses API `usage.input_tokens` counts cached tokens
- * toward the total; Anthropic's `input_tokens` is additive and excludes tokens
- * already reported via `cache_read_input_tokens`. Copying the inclusive total
- * into both fields double-counts cached tokens for clients and for any billing
- * derived from Anthropic-shaped usage (our `estimateCostUSD` charges
- * `input_tokens` and `cache_read_input_tokens` additively).
+ * Convert cache-inclusive Responses input to additive Anthropic usage. Preserve
+ * absent cache counters: an unreported read is not an observed cache miss.
+ * Clamp reads to total input, then writes to the remaining input, so malformed
+ * upstream counters cannot inflate the additive total.
  */
 export function normalizeCodexInputUsage(
 	totalInputTokens: unknown,
 	cachedTokens: unknown,
+	cacheWriteTokens?: unknown,
 ): NormalizedCodexInputUsage {
-	const total =
-		typeof totalInputTokens === "number" &&
-		Number.isFinite(totalInputTokens) &&
-		totalInputTokens >= 0
-			? totalInputTokens
-			: 0;
-	const cached =
-		typeof cachedTokens === "number" &&
-		Number.isFinite(cachedTokens) &&
-		cachedTokens >= 0
-			? Math.min(cachedTokens, total)
-			: 0;
-
+	const count = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) && value >= 0
+			? value
+			: undefined;
+	const total = count(totalInputTokens) ?? 0;
+	const read = count(cachedTokens);
+	const write = count(cacheWriteTokens);
+	const cached = read === undefined ? undefined : Math.min(read, total);
+	const creation =
+		write === undefined ? undefined : Math.min(write, total - (cached ?? 0));
 	return {
 		totalInputTokens: total,
-		inputTokens: total - cached,
+		inputTokens: total - (cached ?? 0) - (creation ?? 0),
 		cacheReadInputTokens: cached,
+		cacheCreationInputTokens: creation,
 	};
 }
 

@@ -95,18 +95,19 @@ Client keys can request model metadata with
 `GET /wire/anthropic/v1/models?clankermux_metadata=1`. The native list shape is
 preserved, with a `clankermux` object on each returned model. It contains the
 known context/output limits, modalities, reasoning support, pricing, and
-optional `cachePolicy`. Only that client's published aliases are returned;
-no management credentials are needed. Missing fields mean unknown, and an
-unavailable metadata lookup returns an empty object without replacing the list.
+optional `cachePolicy` and advisory `cacheRetention`. Only that client's published
+aliases are returned; no management credentials are needed. Missing fields mean
+unknown, and an unavailable metadata lookup returns an empty object without
+replacing the list.
 
 Cache policy describes the eligible routes, not the warmth of a conversation.
-Discovery reports verified explicit or automatic caching per provider, endpoint,
-and model. Codex models report automatic caching with expiration unavailable;
-direct OpenAI API routes can report a documented minimum without claiming it
-applies to subscriptions. Unknown routes never inherit another route's TTL.
-See [cache-policy coverage and client semantics](docs/public-api/cache-policy.md)
-for the provider matrix, timing rules, and sources. Session state stays separate
-from model metadata, and cache creation alone is not evidence of expiry.
+Discovery also provides `cacheRetention` with sourced or explicitly assumed
+retention estimates for every enriched model. Codex Astra gets an inferred
+30-minute window; models without numerical evidence get a labelled five-minute
+display heuristic. These estimates do not change verified policy or cache
+bridging. See [cache-policy coverage and client semantics](docs/public-api/cache-policy.md)
+for timing rules, request evidence, and sources. Session state stays in client
+memory. An elapsed estimate means uncertain warmth, not proven expiry.
 
 Accounts can be **paused** to stop routing temporarily, or **disabled** to keep
 an account saved without operating it. Disable stops routing, polling, token
