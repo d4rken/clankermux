@@ -1561,7 +1561,8 @@ export default async function startServer(options?: {
 			handleModelsRoute(
 				url,
 				{
-					getClientCatalog: (keyId, format) => clients.wire(keyId, format),
+					getClientCatalog: (keyId, format, includeMetadata) =>
+						clients.wire(keyId, format, includeMetadata),
 				},
 				apiKeyId,
 				dialect,

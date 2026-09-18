@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { ClientCatalogue } from "@clankermux/types";
+import type {
+	ClientCatalogue,
+	ClientModelMetadataMap,
+} from "@clankermux/types";
 import { renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
 
@@ -43,6 +46,63 @@ describe("client catalogue serving", () => {
 		});
 		expect(catalogue.models[0]?.codexMetadata?.slug).toBe("real-model");
 	});
+	it("adds opt-in metadata only to returned aliases in each native shape", async () => {
+		const metadata: ClientModelMetadataMap = {
+			friendly: {
+				contextWindow: 200000,
+				cachePolicy: {
+					mode: "explicit",
+					expiry: "estimated",
+					source: "gateway-policy",
+					defaultTtlMs: 300000,
+					ttlAnchor: "request_start",
+					ttlSemantics: "minimum",
+				},
+			},
+			privateModel: { contextWindow: 999999 },
+		};
+		for (const format of ["openai", "anthropic", "codex"] as const) {
+			const original = await renderClientCatalogue(catalogue, format).json();
+			const response = renderClientCatalogue(catalogue, format, metadata);
+			const enriched = await response.json();
+			const rows = enriched.data ?? enriched.models;
+			expect(rows).toHaveLength(1);
+			expect(rows[0].clankermux).toEqual(metadata.friendly);
+			delete rows[0].clankermux;
+			expect(enriched).toEqual(original);
+			expect(response.headers.get("cache-control")).toBe("private, no-store");
+			expect(JSON.stringify(enriched)).not.toContain("accountIds");
+		}
+	});
+	it("opts in only for clankermux_metadata=1", async () => {
+		const seen: unknown[] = [];
+		const deps: ModelsRouteDeps = {
+			getClientCatalog: async (key, format, includeMetadata) => {
+				seen.push([key, format, includeMetadata]);
+				return renderClientCatalogue(catalogue, format);
+			},
+		};
+		for (const dialect of ["openai", "anthropic"] as const) {
+			for (const query of [
+				"",
+				"?clankermux_metadata=0",
+				"?clankermux_metadata=true",
+				"?clankermux_metadata=1",
+			])
+				await handleModelsRoute(
+					new URL(`http://test/v1/models${query}`),
+					deps,
+					"key-a",
+					dialect,
+				);
+		}
+		expect(seen).toEqual(
+			["openai", "anthropic"].flatMap((format) =>
+				[false, false, false, true].map((flag) => ["key-a", format, flag]),
+			),
+		);
+	});
+
 	it("uses only selected IDs in the fallback when Codex metadata is unknown", async () => {
 		expect(
 			await renderClientCatalogue(
@@ -128,6 +188,24 @@ describe("client catalogue serving", () => {
 		}
 		expect(seen).toEqual(["codex", "codex", "codex", "codex", "codex"]);
 	});
+	it("allows optional enrichment time beyond a successful slow catalogue read", async () => {
+		const response = await handleModelsRoute(
+			new URL("http://test/v1/models?clankermux_metadata=1"),
+			{
+				getClientCatalog: async () => {
+					await new Promise((resolve) => setTimeout(resolve, 2100));
+					return renderClientCatalogue(catalogue, "openai", {});
+				},
+			},
+			"key-a",
+			"openai",
+		);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			data: [{ id: "friendly", clankermux: {} }],
+		});
+	});
+
 	it("fails explicitly when a scoped catalogue cannot be read", async () => {
 		const deps: ModelsRouteDeps = {
 			getClientCatalog: async () => {

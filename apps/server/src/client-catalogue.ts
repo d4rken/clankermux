@@ -1,10 +1,15 @@
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
-import type { ClientCatalogue, ClientFormat } from "@clankermux/types";
+import type {
+	ClientCatalogue,
+	ClientFormat,
+	ClientModelMetadataMap,
+} from "@clankermux/types";
 
 export function renderClientCatalogue(
 	catalogue: ClientCatalogue,
 	format: ClientFormat,
+	metadata?: ClientModelMetadataMap,
 ): Response {
 	const headers = { "Cache-Control": "private, no-store" };
 	if (format === "codex") {
@@ -16,6 +21,7 @@ export function renderClientCatalogue(
 				...model.codexMetadata,
 				slug: model.id,
 				display_name: model.displayName,
+				...(metadata ? { clankermux: metadata[model.id] ?? {} } : {}),
 			}));
 			return Response.json({ ...catalogue.envelope, models }, { headers });
 		}
@@ -26,6 +32,7 @@ export function renderClientCatalogue(
 			id: model.id,
 			display_name: model.displayName,
 			created_at: model.createdAt ?? ANTHROPIC_BUNDLED_MODEL_CREATED_AT,
+			...(metadata ? { clankermux: metadata[model.id] ?? {} } : {}),
 		}));
 		return Response.json(
 			{
@@ -39,6 +46,7 @@ export function renderClientCatalogue(
 	}
 	const response = handleModelsRequest(
 		catalogue.models.map((model) => model.id),
+		metadata,
 	);
 	response.headers.set("Cache-Control", "private, no-store");
 	return response;

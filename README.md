@@ -84,6 +84,41 @@ hints. These remain available when payload storage is disabled.
 
 ## Integrations
 
+Client keys can request model metadata with
+`GET /wire/openai/v1/models?clankermux_metadata=1` or
+`GET /wire/anthropic/v1/models?clankermux_metadata=1`. The native list shape is
+preserved, with a `clankermux` object on each returned model. It contains the
+known context/output limits, modalities, reasoning support, pricing, and
+optional `cachePolicy`. Only that client's published aliases are returned;
+no management credentials are needed. Missing fields mean unknown, and an
+unavailable metadata lookup returns an empty object without replacing the list.
+
+Cache policy describes the eligible routes, not the warmth of a conversation.
+Initially, known Claude models on direct Anthropic/Claude Console routes using
+the Anthropic format publish:
+
+```json
+{
+  "mode": "explicit",
+  "defaultTtlMs": 300000,
+  "supportedTtlMs": [300000, 3600000],
+  "refreshOnReuse": true,
+  "expiry": "estimated",
+  "source": "gateway-policy",
+  "ttlAnchor": "request_start",
+  "ttlSemantics": "minimum"
+}
+```
+
+Custom endpoints, unsupported formats, and unresolved or conflicting routes
+omit the policy. `defaultTtlMs` is the provider's minimum lifetime for cache-enabled requests without an
+explicit TTL; it does not prove a write occurred or describe a gateway-promoted
+request's actual TTL. Clients must use the effective TTL when known, and keep
+session observations in memory separately. A typical retention period cannot
+support an expiry countdown. Cache creation alone is not evidence of expiry;
+first writes and changed prefixes also create cache entries.
+
+
 * [Public widget API](docs/public-api/README.md) for external displays and
   applets, with JSON Schemas and example payloads.
 * [Clankermux Usage for Cinnamon](https://github.com/d4rken/clankermux-mint-applet),

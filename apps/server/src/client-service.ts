@@ -7,6 +7,7 @@ import {
 	matchRoutingRule,
 	pricingCatalogueStatus,
 	resolveClientModelMetadata,
+	resolveModelCachePolicy,
 	resolveRoutingTarget,
 	validateRoutingRule,
 } from "@clankermux/core";
@@ -99,6 +100,8 @@ const BULK_MAX_ALIAS_WRITES = 500;
  * snippet that looks complete.
  */
 const MODEL_METADATA_BUDGET_MS = 8_000;
+/** Optional wire enrichment must fit inside the models route's catalogue budget. */
+const WIRE_METADATA_BUDGET_MS = 1_000;
 
 /** One client's reviewed outcome, ready to be written. */
 interface PreparedDraft {
@@ -419,7 +422,12 @@ export class ClientService {
 		if (!profile || !key || key.malformed)
 			throw new Error("Client catalogue not found");
 		return catalogueWithin(
-			this.resolveModelMetadata(id, key, profile.catalogues[format].models),
+			this.resolveModelMetadata(
+				id,
+				key,
+				profile.catalogues[format].models,
+				format,
+			),
 			{ models: {}, catalogueLoaded: false, catalogueStale: false },
 			MODEL_METADATA_BUDGET_MS,
 		);
@@ -428,6 +436,7 @@ export class ClientService {
 		id: string,
 		key: { pinnedAccountId: string | null; pinnedProviders: string[] | null },
 		models: ClientModel[],
+		format: ClientFormat,
 	): Promise<ClientModelMetadataResponse> {
 		const rules = await this.deps.dbOps.routing.listRules();
 		const accounts = await this.accounts({
@@ -465,6 +474,11 @@ export class ClientService {
 						? (winning.pool_account_ids ?? [])
 						: null;
 				const providers = new Set<string>();
+				const cacheRoutes: Array<{
+					provider: string;
+					customEndpoint?: string | null;
+					format: ClientFormat;
+				}> = [];
 				const discoveredMetadata: ClientModelMetadata[] = [];
 				const nativeAccountIds: string[] = [];
 				let staleNativeRoute = false;
@@ -478,6 +492,11 @@ export class ClientService {
 						continue;
 					const permission = permissions.get(account.id) ?? null;
 					if (isModelPermitted(permission, account.id, target, winning)) {
+						cacheRoutes.push({
+							provider: account.provider,
+							customEndpoint: account.custom_endpoint,
+							format,
+						});
 						const native = this.deps.permissions.discoveredMetadata(
 							account,
 							permission,
@@ -519,7 +538,14 @@ export class ClientService {
 					});
 					resolved.set(cacheKey, work);
 				}
-				return [model.id, await work] as const;
+				const metadata = { ...(await work) };
+				const cachePolicy = resolveModelCachePolicy(
+					target,
+					cacheRoutes,
+					unresolvedRoutes,
+				);
+				if (cachePolicy) metadata.cachePolicy = cachePolicy;
+				return [model.id, metadata] as const;
 			}),
 		);
 		// Read once the lookups are done rather than per lookup: they all consult
@@ -533,7 +559,11 @@ export class ClientService {
 			catalogueStale: nativeStale || (lookups > 0 && status.stale),
 		};
 	}
-	async wire(id: string, format: ClientFormat): Promise<Response> {
+	async wire(
+		id: string,
+		format: ClientFormat,
+		includeMetadata = false,
+	): Promise<Response> {
 		const profile = await this.deps.dbOps.clients.getProfile(id);
 		const key = await this.deps.dbOps.getApiKeyPin(id);
 		if (!profile || !key || key.malformed)
@@ -579,7 +609,14 @@ export class ClientService {
 				}),
 			);
 		}
-		return renderClientCatalogue(catalogue, format);
+		const metadata = includeMetadata
+			? await catalogueWithin(
+					this.resolveModelMetadata(id, key, catalogue.models, format),
+					{ models: {}, catalogueLoaded: false, catalogueStale: false },
+					WIRE_METADATA_BUDGET_MS,
+				)
+			: undefined;
+		return renderClientCatalogue(catalogue, format, metadata?.models);
 	}
 	private destinations(value: unknown): ClientDestinations {
 		if (!value || typeof value !== "object" || Array.isArray(value))

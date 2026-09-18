@@ -1,3 +1,5 @@
+import type { ClientModelMetadataMap } from "@clankermux/types";
+
 // Fallback model list for GET /v1/models, in OpenAI's Models-list shape.
 //
 // This is NOT what the Codex CLI reads. Codex asks the same route for something
@@ -52,6 +54,7 @@ const MODEL_CREATED = 1_700_000_000;
  */
 export function handleModelsRequest(
 	ids: readonly string[] = CODEX_MODELS,
+	metadata?: ClientModelMetadataMap,
 ): Response {
 	const body = {
 		object: "list",
@@ -60,6 +63,7 @@ export function handleModelsRequest(
 			object: "model",
 			created: MODEL_CREATED,
 			owned_by: "clankermux",
+			...(metadata ? { clankermux: metadata[id] ?? {} } : {}),
 		})),
 	};
 	return new Response(JSON.stringify(body), {

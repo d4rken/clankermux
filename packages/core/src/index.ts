@@ -194,8 +194,10 @@ export {
 	SAFETY_MARGIN,
 } from "./model-mappings";
 export {
+	type ModelCachePolicyRoute,
 	type ModelMetadataRequest,
 	resolveClientModelMetadata,
+	resolveModelCachePolicy,
 } from "./model-metadata";
 export {
 	CLAUDE_MODEL_IDS,

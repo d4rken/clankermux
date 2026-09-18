@@ -1,10 +1,13 @@
 import type {
+	ClientFormat,
 	ClientModelCost,
 	ClientModelCostTier,
 	ClientModelMetadata,
+	ModelCachePolicy,
 } from "@clankermux/types";
 import { PROVIDER_NAMES } from "@clankermux/types";
 import { resolveModelMaxContextWindow } from "./model-mappings";
+import { CLAUDE_MODEL_IDS } from "./models";
 import { type CatalogueLookupResult, lookupCatalogueEntry } from "./pricing";
 
 type CatalogueEntry = NonNullable<CatalogueLookupResult["entry"]>;
@@ -21,6 +24,46 @@ const ANTHROPIC_REACHABLE_CONTEXT = 200_000;
 
 const INPUT_MODALITIES = ["text", "image"] as const;
 type InputModality = (typeof INPUT_MODALITIES)[number];
+
+export interface ModelCachePolicyRoute {
+	provider: string;
+	customEndpoint?: string | null;
+	format: ClientFormat;
+}
+
+/** Unknown routes cannot inherit another route's cache retention policy. */
+export function resolveModelCachePolicy(
+	targetModel: string,
+	routes: ModelCachePolicyRoute[],
+	unresolvedRoutes = false,
+): ModelCachePolicy | undefined {
+	if (
+		unresolvedRoutes ||
+		!routes.length ||
+		!(Object.values(CLAUDE_MODEL_IDS) as string[]).includes(targetModel)
+	)
+		return undefined;
+	const policies = routes.map((route): ModelCachePolicy | undefined => {
+		if (
+			route.format !== "anthropic" ||
+			route.customEndpoint ||
+			(route.provider !== PROVIDER_NAMES.ANTHROPIC &&
+				route.provider !== PROVIDER_NAMES.CLAUDE_CONSOLE_API)
+		)
+			return undefined;
+		return {
+			mode: "explicit",
+			defaultTtlMs: 300_000,
+			supportedTtlMs: [300_000, 3_600_000],
+			refreshOnReuse: true,
+			expiry: "estimated",
+			source: "gateway-policy",
+			ttlAnchor: "request_start",
+			ttlSemantics: "minimum",
+		};
+	});
+	return reduceModelCachePolicies(policies);
+}
 
 export interface ModelMetadataRequest {
 	targetModel: string;
@@ -211,4 +254,56 @@ function reduce(candidates: ClientModelMetadata[]): ClientModelMetadata {
 	)
 		metadata.cost = costs[0];
 	return metadata;
+}
+
+export function reduceModelCachePolicies(
+	candidates: Array<ModelCachePolicy | undefined>,
+): ModelCachePolicy | undefined {
+	if (!candidates.length || candidates.some((policy) => !policy))
+		return undefined;
+	const policies = candidates as ModelCachePolicy[];
+	const first = policies[0];
+	const policy: ModelCachePolicy = {
+		mode: policies.every((p) => p.mode === first.mode) ? first.mode : "unknown",
+		expiry: "unavailable",
+		source: policies.every((p) => p.source === "gateway-policy")
+			? "gateway-policy"
+			: "unknown",
+	};
+	if (policy.mode === "unknown" || policy.source === "unknown") return policy;
+	for (const key of [
+		"defaultTtlMs",
+		"refreshOnReuse",
+		"ttlAnchor",
+		"ttlSemantics",
+	] as const) {
+		if (
+			first[key] !== undefined &&
+			policies.every((p) => p[key] === first[key])
+		)
+			Object.assign(policy, { [key]: first[key] });
+	}
+	const supported = policies.map((p) => p.supportedTtlMs);
+	const firstSupported = supported[0];
+	if (
+		firstSupported !== undefined &&
+		supported.every((ttls): ttls is number[] => ttls !== undefined)
+	) {
+		const shared = [...new Set(firstSupported)].filter((ttl) =>
+			supported.every((ttls) => ttls.includes(ttl)),
+		);
+		if (shared.length) policy.supportedTtlMs = shared.sort((a, b) => a - b);
+	}
+	// A typical retention period cannot support a countdown to expiry.
+	if (
+		policies.every((p) => p.expiry === "estimated") &&
+		(policy.mode === "explicit" || policy.mode === "implicit") &&
+		(policy.ttlAnchor === "request_start" ||
+			policy.ttlAnchor === "request_end") &&
+		(policy.ttlSemantics === "configured" ||
+			policy.ttlSemantics === "minimum") &&
+		(policy.defaultTtlMs !== undefined || policy.supportedTtlMs?.length)
+	)
+		policy.expiry = "estimated";
+	return policy;
 }
