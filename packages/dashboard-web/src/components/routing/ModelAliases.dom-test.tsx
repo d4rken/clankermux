@@ -1,5 +1,5 @@
 import { afterEach, expect, it, mock, spyOn } from "bun:test";
-import type { ModelAlias } from "@clankermux/types";
+import type { ClientSuggestions, ModelAlias } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -34,9 +34,62 @@ async function click(label: string) {
 	await act(async () => button.click());
 	await settle();
 }
+const suggestions: ClientSuggestions = {
+	models: [
+		{
+			id: "fable",
+			displayName: "Fable",
+			accountIds: ["a", "b"],
+			codexMetadataAvailable: false,
+		},
+		{
+			id: "gpt-6-astra",
+			displayName: "GPT-6 Astra",
+			accountIds: ["a"],
+			codexMetadataAvailable: true,
+		},
+		{
+			id: "fast-only",
+			displayName: "Fast",
+			accountIds: ["b"],
+			codexMetadataAvailable: false,
+		},
+		{
+			id: "alias:good-model",
+			displayName: "Good model",
+			accountIds: ["a", "b"],
+			codexMetadataAvailable: true,
+		},
+	],
+	accounts: [],
+};
+function options(index: number): string[] {
+	const input = document.getElementById(`alias-target-${index}`);
+	const list = input?.getAttribute("list");
+	expect(list).toBeTruthy();
+	return [
+		...(document.getElementById(list ?? "")?.querySelectorAll("option") ?? []),
+	].map((option) => option.value);
+}
+async function typeModel(index: number, value: string) {
+	const input = document.getElementById(
+		`alias-target-${index}`,
+	) as HTMLInputElement;
+	await act(async () => {
+		Object.getOwnPropertyDescriptor(
+			HTMLInputElement.prototype,
+			"value",
+		)?.set?.call(input, value);
+		input.dispatchEvent(new Event("input", { bubbles: true }));
+	});
+}
 async function mount() {
 	spyOn(api, "get").mockResolvedValue({ data: [alias] });
-	spyOn(api, "getAccounts").mockResolvedValue([]);
+	spyOn(api, "getAccounts").mockResolvedValue([
+		{ id: "a", name: "First account", provider: "codex" },
+		{ id: "b", name: "Second account", provider: "anthropic" },
+	] as never);
+	spyOn(api, "post").mockResolvedValue({ data: suggestions });
 	client = new QueryClient({
 		defaultOptions: {
 			queries: { retry: false, gcTime: 0 },
@@ -91,5 +144,54 @@ it("deletes with the displayed revision", async () => {
 	expect(remove).toHaveBeenCalledWith("/api/model-aliases/alias%3Agood-model", {
 		body: JSON.stringify({ revision: 4 }),
 		headers: { "Content-Type": "application/json" },
+	});
+});
+
+it("loads concrete model suggestions only when the editor opens and scopes them per target", async () => {
+	await mount();
+	expect(api.post).not.toHaveBeenCalled();
+	await click("Edit Good model");
+	expect(api.post).toHaveBeenCalledWith("/api/clients/suggestions", {
+		destinations: { accountId: null, providers: null },
+		refresh: false,
+	});
+	expect(options(0)).toEqual(["fable", "gpt-6-astra", "fast-only"]);
+	expect(options(1)).toEqual(["fable", "gpt-6-astra"]);
+	const secondAccount = [...document.querySelectorAll("label")]
+		.find((label) => label.textContent?.trim() === "Second account (anthropic)")
+		?.querySelector<HTMLInputElement>("input");
+	if (!secondAccount) throw new Error("Missing account checkbox");
+	await act(async () => secondAccount.click());
+	expect(options(1)).toContain("fast-only");
+	await click("Move target 2 up");
+	expect(options(0)).toContain("fast-only");
+	expect(
+		(document.getElementById("alias-target-0") as HTMLInputElement).value,
+	).toBe("gpt-6-astra");
+});
+
+it("offers suggestions for new aliases and added fallback inputs", async () => {
+	await mount();
+	await click("Add alias");
+	expect(options(0)).toEqual(["fable", "gpt-6-astra", "fast-only"]);
+	await click("Add fallback");
+	expect(options(1)).toEqual(options(0));
+	await typeModel(1, "fast-only");
+	expect(
+		(document.getElementById("alias-target-1") as HTMLInputElement).value,
+	).toBe("fast-only");
+});
+
+it("allows an unlisted model to be saved when suggestions fail", async () => {
+	await mount();
+	spyOn(api, "post").mockRejectedValue(new Error("Discovery unavailable"));
+	const save = spyOn(api, "put").mockResolvedValue({ data: alias });
+	await click("Edit Good model");
+	expect(document.body.textContent).toContain("Model suggestions unavailable");
+	await typeModel(0, "custom-model-id");
+	await click("Save alias");
+	expect(save).toHaveBeenCalledWith("/api/model-aliases/alias%3Agood-model", {
+		...alias,
+		targets: [{ model: "custom-model-id", accountIds: null }, alias.targets[1]],
 	});
 });
