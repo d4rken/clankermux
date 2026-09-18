@@ -4,6 +4,7 @@ import type { AnthropicUsageObservation } from "@clankermux/providers";
 import { makeAccount } from "@clankermux/test-support";
 import type { AccountIdentity } from "@clankermux/types";
 import {
+	ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS,
 	ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 	type AnthropicUsageObservationDeps,
 	observeAnthropicUsage,
@@ -132,7 +133,7 @@ describe("Anthropic usage diagnosis", () => {
 		await observeAnthropicUsage(f.observation(), f.deps);
 		expect(f.row.pause_reason).toBe("usage_permission_denied");
 	});
-	it("throttles repeated rechecks for a minute and ordinary failures for six hours", async () => {
+	it("throttles manual rechecks and retries unresolved diagnoses after five minutes", async () => {
 		const f = fixture();
 		f.profile(null);
 		await observeAnthropicUsage(f.observation(), f.deps);
@@ -146,12 +147,33 @@ describe("Anthropic usage diagnosis", () => {
 		expect(f.events.filter((e) => e === "profile")).toHaveLength(1);
 		await observeAnthropicUsage(f.observation(), f.deps);
 		expect(f.events.filter((e) => e === "profile")).toHaveLength(2);
-		f.advance(ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS);
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
 		await observeAnthropicUsage(
 			f.observation("permission_denied", false),
 			f.deps,
 		);
 		expect(f.events.filter((e) => e === "profile")).toHaveLength(3);
+		f.advance(ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS);
+		await observeAnthropicUsage(
+			f.observation("permission_denied", false),
+			f.deps,
+		);
+		expect(f.events.filter((e) => e === "profile")).toHaveLength(4);
+	});
+	it("does not consume a profile check while the shared upstream backoff is active", async () => {
+		const f = fixture();
+		const before = f.row.identity_subscription_checked_at;
+		f.deps.canFetchProfile = () => false;
+		await observeAnthropicUsage(f.observation(), f.deps);
+		expect(f.row.identity_subscription_checked_at).toBe(before);
+		expect(f.events).toEqual(["denied"]);
+		f.advance(ANTHROPIC_SUBSCRIPTION_DIAGNOSIS_RETRY_MS);
+		f.deps.canFetchProfile = () => true;
+		await observeAnthropicUsage(
+			f.observation("permission_denied", false),
+			f.deps,
+		);
+		expect(f.row.pause_reason).toBe("subscription_expired");
 	});
 	it("recovers automatic expiry pauses on successful usage without needing profile evidence", async () => {
 		const f = fixture();
