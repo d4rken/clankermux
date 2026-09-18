@@ -324,7 +324,8 @@ describe("Codex in-band failure: hold and retry the same account", () => {
 								encoder.encode(
 									'event: response.created\ndata: {"type":"response.created"}\n\n' +
 										'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n' +
-										'event: keepalive\ndata: {"type":"keepalive"}\n\n',
+										'event: keepalive\ndata: {"type":"keepalive"}\n\n' +
+										'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"reasoning","content":[],"encrypted_content":"opaque"}}\n\n',
 								),
 							);
 							return;
