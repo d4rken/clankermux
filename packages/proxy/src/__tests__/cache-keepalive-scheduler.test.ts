@@ -530,6 +530,49 @@ describe("CacheKeepaliveScheduler", () => {
 			scheduler.stop();
 		});
 
+		it("drops a budget-thinking slot instead of replaying it", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedSessionEntry("acc-think", "session-thinking", {
+				bodyText:
+					'{"model":"claude-opus-4-5","max_tokens":32000,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}]}',
+			});
+			expect(sessionCacheStore.getSize()).toBe(1);
+
+			const before = bridgeStats.snapshot();
+			await capturedCallback?.();
+			const after = bridgeStats.snapshot();
+
+			expect(mockDispatchProxyRequest).not.toHaveBeenCalled();
+			// Dropped, not failed: a retained slot would be re-picked every tick, and
+			// counting it as a failure would blame the account for a policy skip.
+			expect(sessionCacheStore.getSize()).toBe(0);
+			expect(after.failures).toBe(before.failures);
+
+			scheduler.stop();
+		});
+
+		it("replays a slot whose thinking carries no token budget", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+
+			seedSessionEntry("acc-adaptive", "session-adaptive", {
+				bodyText:
+					'{"model":"claude-opus-4-5","max_tokens":32000,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}]}',
+			});
+
+			await capturedCallback?.();
+
+			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
+			const decoded = JSON.parse(await capturedDispatchCalls[0].req.text());
+			expect(decoded.max_tokens).toBe(1);
+
+			scheduler.stop();
+		});
+
 		it("stops an unknown replay without claiming a hit or resume saving", async () => {
 			const { config } = makeConfig(true);
 			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);

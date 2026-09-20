@@ -620,6 +620,11 @@ class SessionCacheStore {
 		slot.keepaliveCount = 0;
 	}
 
+	/** Drop one slot that policy says must never be replayed. */
+	evictSession(accountId: string, sessionKey: string): void {
+		this.deleteKey(SessionCacheStore.key(accountId, sessionKey));
+	}
+
 	/** Remove all slots belonging to an account (e.g. account deleted). */
 	evictAccount(accountId: string): void {
 		for (const [key, slot] of this.slots) {
