@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { resolveClientModelMetadata } from "@clankermux/core";
 import type {
 	ClientCatalogue,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
-import { renderClientCatalogue } from "../client-catalogue";
+import { aliasCodexMetadata, renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
 import anthropicRetentionFixture from "./fixtures/cache-retention/anthropic.json";
 import codexRetentionFixture from "./fixtures/cache-retention/codex.json";
@@ -28,6 +29,69 @@ const catalogue: ClientCatalogue = {
 	],
 };
 describe("client catalogue serving", () => {
+	it("omits unknown Codex alias efforts while preserving the published entry", async () => {
+		const model = { ...catalogue.models[0], targetModel: "alias:unknown" };
+		for (const metadata of [
+			undefined,
+			{},
+			{ supportedReasoningEfforts: ["low", "medium"] as const },
+		]) {
+			const supported = metadata?.supportedReasoningEfforts;
+			const known = supported !== undefined;
+			const info = aliasCodexMetadata(
+				model,
+				supported === undefined
+					? metadata
+					: { supportedReasoningEfforts: [...supported] },
+			);
+			const body = await renderClientCatalogue(
+				{ defaultModel: null, models: [{ ...model, codexMetadata: info }] },
+				"codex",
+			).json();
+			expect(body.models).toHaveLength(1);
+			const entry = body.models[0];
+			expect(entry.slug).toBe("friendly");
+			expect(entry.base_instructions).toBe("You are a coding assistant.");
+			expect(entry.supports_reasoning_summaries).toBe(false);
+			expect(entry.supports_reasoning_summary_parameter).toBe(false);
+			if (known) {
+				expect(
+					entry.supported_reasoning_levels.map(
+						(level: { effort: string }) => level.effort,
+					),
+				).toEqual(["low", "medium"]);
+				expect(entry.default_reasoning_level).toBe("low");
+			} else {
+				expect(entry).not.toHaveProperty("supported_reasoning_levels");
+				expect(entry).not.toHaveProperty("default_reasoning_level");
+			}
+		}
+	});
+
+	it("does not publish efforts for unmapped future GPT variants", async () => {
+		for (const targetModel of [
+			"gpt-5-future",
+			"gpt-6-future",
+			"gpt-6-astra-future-2027-01-01",
+		]) {
+			const metadata = await resolveClientModelMetadata({
+				targetModel,
+				providers: ["codex"],
+			});
+			expect(metadata).not.toHaveProperty("supportedReasoningEfforts");
+			const model = { ...catalogue.models[0], targetModel: "alias:future" };
+			model.codexMetadata = aliasCodexMetadata(model, metadata);
+			const body = await renderClientCatalogue(
+				{ defaultModel: null, models: [model] },
+				"codex",
+				{ friendly: metadata },
+			).json();
+			expect(body.models[0]).not.toHaveProperty("supported_reasoning_levels");
+			expect(body.models[0].clankermux).not.toHaveProperty(
+				"supportedReasoningEfforts",
+			);
+		}
+	});
 	it("renders the three wire shapes without mixing metadata", async () => {
 		expect(
 			await renderClientCatalogue(catalogue, "openai").json(),

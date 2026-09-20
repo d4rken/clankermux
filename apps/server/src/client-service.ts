@@ -648,7 +648,7 @@ export class ClientService {
 			throw new Error("Client catalogue not found");
 		const catalogue = structuredClone(profile.catalogues[format]);
 		const aliasModels = new Set<string>();
-		if (format === "codex") {
+		{
 			const rules = await this.deps.dbOps.routing.listRules();
 			for (const model of catalogue.models)
 				if (

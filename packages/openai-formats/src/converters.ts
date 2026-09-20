@@ -87,6 +87,7 @@ export function convertAnthropicRequestToOpenAI(
 		{
 			sourceModel: anthropicData.model,
 			targetModel: mappedModel,
+			provider: _account?.provider,
 		},
 	);
 	if (reasoningResolution.downgrades.length > 0) {
