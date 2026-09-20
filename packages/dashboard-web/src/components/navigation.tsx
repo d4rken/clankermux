@@ -171,10 +171,15 @@ export function Navigation() {
 		<>
 			{/* Mobile header */}
 			<div className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b px-4 flex items-center justify-between">
-				<div className="flex items-center gap-row">
+				<Link
+					to="/"
+					aria-label="ClankerMux overview"
+					className="flex items-center gap-row"
+					onClick={() => setIsMobileMenuOpen(false)}
+				>
 					<BrandMark className="h-5 w-5 text-primary" />
 					<span className="display-face font-semibold text-lg">ClankerMux</span>
-				</div>
+				</Link>
 				<div className="flex items-center gap-item">
 					<ThemeToggle />
 					<Button
@@ -215,7 +220,12 @@ export function Navigation() {
 				<div className="flex h-full flex-col">
 					{/* Logo */}
 					<div className="p-4 pb-3">
-						<div className="flex items-center gap-row">
+						<Link
+							to="/"
+							aria-label="ClankerMux overview"
+							className="flex items-center gap-row"
+							onClick={() => setIsMobileMenuOpen(false)}
+						>
 							<BrandMark className="h-6 w-6 shrink-0 text-primary" />
 							<div>
 								<h1 className="display-face font-semibold text-lg">
@@ -225,7 +235,7 @@ export function Navigation() {
 									Coding-agent gateway
 								</p>
 							</div>
-						</div>
+						</Link>
 					</div>
 
 					<Separator />
