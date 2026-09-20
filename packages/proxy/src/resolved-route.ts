@@ -1,6 +1,7 @@
 import {
 	isAccountAllowedByPin,
 	isModelPermitted,
+	isRoutingPinValid,
 	matchRoutingRule,
 	type RoutingPin,
 	resolveRoutingTarget,
@@ -208,12 +209,7 @@ export function destinationExclusionReason(
 export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	if (!input.requestedModel?.trim())
 		throw new RoutingPolicyError("Inference requests require a model");
-	if (
-		input.pin &&
-		(input.pin.accountId === "" ||
-			(input.pin.providers !== null &&
-				(!input.pin.providers.length || input.pin.accountId !== null)))
-	)
+	if (input.pin && !isRoutingPinValid(input.pin))
 		throw new RoutingPolicyError("Invalid API key destinations");
 	const winning = input.maintenance
 		? null

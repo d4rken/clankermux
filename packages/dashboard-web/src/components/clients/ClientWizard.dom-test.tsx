@@ -627,6 +627,38 @@ describe("new client setup defaults", () => {
 		expect(select("Application").disabled).toBe(false);
 	});
 
+	it("configures provider exclusions and sends them through discovery and review", async () => {
+		await mountNew();
+		await click("Next");
+		await choose("Allowed destinations", "excluded");
+		const excluded = [...document.querySelectorAll("label")].find(
+			(label) => label.textContent?.trim() === "openai-compatible",
+		);
+		const checkbox = excluded?.querySelector<HTMLInputElement>(
+			'input[type="checkbox"]',
+		);
+		if (!checkbox) throw new Error("Missing provider exclusion checkbox");
+		await act(async () => checkbox.click());
+		expect(checkbox.checked).toBe(false);
+		await act(async () => checkbox.click());
+		await click("Next");
+		expect(suggestionBodies.at(-1)).toEqual({
+			destinations: {
+				accountId: null,
+				providers: null,
+				excludedProviders: ["openai-compatible"],
+			},
+			refresh: false,
+		});
+		await choose("Default model for setup", "new");
+		await click("Review");
+		expect(reviewed?.destinations).toEqual({
+			accountId: null,
+			providers: null,
+			excludedProviders: ["openai-compatible"],
+		});
+	});
+
 	it("reseeds from the new destinations rather than the cached suggestions", async () => {
 		await mountNew(RICH);
 		await click("Next");

@@ -10,11 +10,11 @@ export interface ApiKeyRow {
 	last_used: number | null;
 	usage_count: number;
 	is_active: boolean | number;
-	// Optional routing constraint: pin the key to one backend account
-	// (pinned_account_id, takes precedence) or to a class of providers
-	// (pinned_providers, a JSON array string). NULL = no constraint.
+	// Mutually exclusive account, provider allow-list, or provider exclusion list.
+	// Provider lists are JSON arrays; NULL means no constraint.
 	pinned_account_id: string | null;
 	pinned_providers: string | null;
+	excluded_providers?: string | null;
 }
 
 // Domain model - used throughout the application
@@ -31,6 +31,7 @@ export interface ApiKey {
 	// allow-list of provider names, or null when unset / unparseable.
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
+	excludedProviders?: string[] | null;
 }
 
 // API response type - what clients receive (excluding sensitive data)
@@ -44,6 +45,7 @@ export interface ApiKeyResponse {
 	isActive: boolean;
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
+	excludedProviders?: string[] | null;
 }
 
 // API key generation result
@@ -268,6 +270,11 @@ export function toApiKey(row: ApiKeyRow): ApiKey {
 		isActive: !!row.is_active,
 		pinnedAccountId: row.pinned_account_id ?? null,
 		pinnedProviders: parsePinnedProviders(row.pinned_providers),
+		// Preserve malformed exclusions as an invalid constraint, never unrestricted.
+		excludedProviders:
+			row.excluded_providers == null
+				? null
+				: (parsePinnedProviders(row.excluded_providers) ?? []),
 	};
 }
 
@@ -282,5 +289,6 @@ export function toApiKeyResponse(apiKey: ApiKey): ApiKeyResponse {
 		isActive: apiKey.isActive,
 		pinnedAccountId: apiKey.pinnedAccountId,
 		pinnedProviders: apiKey.pinnedProviders,
+		excludedProviders: apiKey.excludedProviders ?? null,
 	};
 }

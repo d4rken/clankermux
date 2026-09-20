@@ -3,6 +3,7 @@
 export {
 	isAccountAllowedByPin,
 	isPinActive,
+	isRoutingPinValid,
 	type RoutingPin,
 } from "./api-key-pin";
 export {

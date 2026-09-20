@@ -100,6 +100,7 @@ export interface ClientProfile {
 export interface ClientDestinations {
 	accountId: string | null;
 	providers: string[] | null;
+	excludedProviders?: string[] | null;
 }
 export interface ClientDraft {
 	id?: string;

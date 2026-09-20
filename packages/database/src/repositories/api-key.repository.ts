@@ -1,3 +1,4 @@
+import { isRoutingPinValid } from "@clankermux/core";
 import {
 	type ApiKey,
 	type ApiKeyRow,
@@ -15,7 +16,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
 				last_used, usage_count, is_active,
-				pinned_account_id, pinned_providers
+				pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			ORDER BY created_at DESC
 		`);
@@ -30,7 +31,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
 				last_used, usage_count, is_active,
-				pinned_account_id, pinned_providers
+				pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			WHERE is_active = 1
 			ORDER BY created_at DESC
@@ -47,7 +48,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
 				last_used, usage_count, is_active,
-				pinned_account_id, pinned_providers
+				pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			WHERE id = ?
 		`,
@@ -66,7 +67,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
 				last_used, usage_count, is_active,
-				pinned_account_id, pinned_providers
+				pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			WHERE hashed_key = ? AND is_active = 1
 		`,
@@ -84,13 +85,15 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 	async findRawPinById(id: string): Promise<{
 		pinnedAccountId: string | null;
 		pinnedProvidersRaw: string | null;
+		excludedProvidersRaw: string | null;
 	} | null> {
 		const row = await this.get<{
 			pinned_account_id: string | null;
 			pinned_providers: string | null;
+			excluded_providers: string | null;
 		}>(
 			`
-			SELECT pinned_account_id, pinned_providers
+			SELECT pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			WHERE id = ?
 		`,
@@ -101,6 +104,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			? {
 					pinnedAccountId: row.pinned_account_id ?? null,
 					pinnedProvidersRaw: row.pinned_providers ?? null,
+					excludedProvidersRaw: row.excluded_providers ?? null,
 				}
 			: null;
 	}
@@ -114,7 +118,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 			SELECT
 				id, name, hashed_key, prefix_last_8, created_at,
 				last_used, usage_count, is_active,
-				pinned_account_id, pinned_providers
+				pinned_account_id, pinned_providers, excluded_providers
 			FROM api_keys
 			WHERE name = ?
 		`,
@@ -163,10 +167,15 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		const db = this.adapter.getSQLiteDb();
 		const account = apiKey.pinned_account_id ?? null;
 		const raw = apiKey.pinned_providers ?? null;
+		const excludedRaw = apiKey.excluded_providers ?? null;
 		if (
-			account === "" ||
-			(account !== null && raw !== null) ||
-			(raw !== null && !parsePinnedProviders(raw)?.length)
+			!isRoutingPinValid({
+				accountId: account,
+				providers: parsePinnedProviders(raw),
+				excludedProviders: parsePinnedProviders(excludedRaw),
+			}) ||
+			(raw !== null && !parsePinnedProviders(raw)) ||
+			(excludedRaw !== null && !parsePinnedProviders(excludedRaw))
 		)
 			throw new Error("Invalid API key destinations");
 		if (account && !db.query("SELECT id FROM accounts WHERE id=?").get(account))
@@ -174,8 +183,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		db.query(`
 		INSERT INTO api_keys (
 			id, name, hashed_key, prefix_last_8, created_at,
-			last_used, is_active, pinned_account_id, pinned_providers, setup_key
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			last_used, is_active, pinned_account_id, pinned_providers, excluded_providers, setup_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).run(
 			...[
 				apiKey.id,
@@ -187,6 +196,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 				apiKey.is_active,
 				apiKey.pinned_account_id ?? null,
 				apiKey.pinned_providers ?? null,
+				apiKey.excluded_providers ?? null,
 				apiKey.setup_key ?? null,
 			],
 		);
@@ -217,15 +227,17 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		id: string,
 		pinnedAccountId: string | null,
 		pinnedProviders: string | null,
+		excludedProviders: string | null = null,
 	): Promise<boolean> {
 		const changes = await this.runWithChanges(
 			`
 			UPDATE api_keys
 			SET pinned_account_id = ?,
-				pinned_providers = ?
+				pinned_providers = ?,
+				excluded_providers = ?
 			WHERE id = ?
 		`,
-			[pinnedAccountId, pinnedProviders, id],
+			[pinnedAccountId, pinnedProviders, excludedProviders, id],
 		);
 
 		return changes > 0;

@@ -15,6 +15,30 @@ const meta = (patch: Partial<RequestMeta> = {}): RequestMeta => ({
 	...patch,
 });
 describe("API key destination intersection before strategy", () => {
+	it("excludes providers from strategy candidates and rejects forced excluded accounts", async () => {
+		const ctx = makeContext([a, c, o]);
+		const select = mock((accounts: (typeof a)[]) => accounts);
+		ctx.strategy.select = select;
+		const pin = {
+			accountId: null,
+			providers: null,
+			excludedProviders: ["anthropic"],
+		};
+		expect(
+			(await selectAccountsForRequest(meta({ pin }), ctx)).map((x) => x.id),
+		).toEqual([c.id, o.id]);
+		expect(select.mock.calls[0][0].map((x) => x.id)).toEqual([c.id, o.id]);
+		await expect(
+			selectAccountsForRequest(
+				meta({
+					pin,
+					headers: new Headers({ "x-clankermux-account-id": a.id }),
+				}),
+				ctx,
+			),
+		).rejects.toThrow();
+	});
+
 	it("selects only an explicitly pinned account", async () => {
 		const ctx = makeContext([a, c, o]);
 		const m = meta({ pin: { accountId: c.id, providers: null } });

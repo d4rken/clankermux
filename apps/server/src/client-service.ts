@@ -198,6 +198,7 @@ export class ClientService {
 			await this.accounts({
 				accountId: key.pinnedAccountId,
 				providers: key.pinnedProviders,
+				excludedProviders: key.excludedProviders ?? null,
 			}),
 		);
 		const [rawResult, anthropic, anthropicOverrides, openaiOverrides] =
@@ -439,7 +440,11 @@ export class ClientService {
 	}
 	private async resolveModelMetadata(
 		id: string,
-		key: { pinnedAccountId: string | null; pinnedProviders: string[] | null },
+		key: {
+			pinnedAccountId: string | null;
+			pinnedProviders: string[] | null;
+			excludedProviders?: string[] | null;
+		},
 		models: ClientModel[],
 		format: ClientFormat,
 	): Promise<ClientModelMetadataResponse> {
@@ -447,6 +452,7 @@ export class ClientService {
 		const accounts = await this.accounts({
 			accountId: key.pinnedAccountId,
 			providers: key.pinnedProviders,
+			excludedProviders: key.excludedProviders ?? null,
 		});
 		// Stored rows only. Discovery is never triggered from here: opening a setup
 		// dialog must not put requests on the operator's accounts.
@@ -658,6 +664,7 @@ export class ClientService {
 			const destinations = {
 				accountId: key.pinnedAccountId,
 				providers: key.pinnedProviders,
+				excludedProviders: key.excludedProviders ?? null,
 			};
 			const accounts = await this.accounts(destinations);
 			const scopeFor = this.scopeLookup(accounts);
@@ -719,7 +726,11 @@ export class ClientService {
 	private destinations(value: unknown): ClientDestinations {
 		if (!value || typeof value !== "object" || Array.isArray(value))
 			throw BadRequest("Choose upstream destinations");
-		const { accountId, providers } = value as ClientDestinations;
+		const {
+			accountId,
+			providers,
+			excludedProviders = null,
+		} = value as ClientDestinations;
 		if (
 			(accountId !== null &&
 				(typeof accountId !== "string" || !accountId.trim())) ||
@@ -729,12 +740,25 @@ export class ClientService {
 					providers.some(
 						(p) => typeof p !== "string" || !isKnownProvider(p),
 					))) ||
-			(accountId !== null && providers !== null)
+			(excludedProviders !== null &&
+				(!Array.isArray(excludedProviders) ||
+					!excludedProviders.length ||
+					excludedProviders.some(
+						(p) => typeof p !== "string" || !isKnownProvider(p),
+					))) ||
+			[accountId, providers, excludedProviders].filter((v) => v !== null)
+				.length > 1
 		)
-			throw BadRequest("Choose all accounts, one account, or a provider list");
+			throw BadRequest(
+				"Choose all providers, one account, only selected providers, or all except selected providers",
+			);
 		return {
 			accountId,
 			providers: providers === null ? null : [...new Set(providers)].sort(),
+			excludedProviders:
+				excludedProviders === null
+					? null
+					: [...new Set(excludedProviders)].sort(),
 		};
 	}
 	private async accounts(destinations: ClientDestinations): Promise<Account[]> {
@@ -848,7 +872,7 @@ export class ClientService {
 					db.query("SELECT * FROM model_aliases ORDER BY id").all(),
 					db
 						.query(
-							"SELECT id,name,pinned_account_id,pinned_providers,is_active FROM api_keys ORDER BY id",
+							"SELECT id,name,pinned_account_id,pinned_providers,excluded_providers,is_active FROM api_keys ORDER BY id",
 						)
 						.all(),
 					(
@@ -912,7 +936,9 @@ export class ClientService {
 		const pinUnchanged =
 			existingKey?.pinnedAccountId === draft.destinations.accountId &&
 			JSON.stringify(existingKey?.pinnedProviders?.slice().sort() ?? null) ===
-				JSON.stringify(draft.destinations.providers);
+				JSON.stringify(draft.destinations.providers) &&
+			JSON.stringify(existingKey?.excludedProviders?.slice().sort() ?? null) ===
+				JSON.stringify(draft.destinations.excludedProviders ?? null);
 		const catalogue = emptyCatalogues();
 		catalogue.codex.envelope = existing?.catalogues.codex.envelope;
 		const aliasModels = new Map<string, ClientModel>();
@@ -1113,6 +1139,9 @@ export class ClientService {
 				draft.destinations.providers === null
 					? null
 					: JSON.stringify(draft.destinations.providers),
+				draft.destinations.excludedProviders == null
+					? null
+					: JSON.stringify(draft.destinations.excludedProviders),
 			);
 		// The same checks the write path runs, run here instead of inside the
 		// commit transaction.
@@ -1190,6 +1219,10 @@ export class ClientService {
 				last_used: null,
 				is_active: 1,
 				pinned_account_id: draft.destinations.accountId,
+				excluded_providers:
+					draft.destinations.excludedProviders == null
+						? null
+						: JSON.stringify(draft.destinations.excludedProviders),
 				pinned_providers:
 					draft.destinations.providers === null
 						? null
@@ -1216,6 +1249,7 @@ export class ClientService {
 			profile.apiKeyId,
 			draft.destinations.accountId,
 			draft.destinations.providers,
+			draft.destinations.excludedProviders ?? null,
 		);
 		const remaining = db
 			.query("SELECT id FROM routing_rules ORDER BY position")
@@ -1420,6 +1454,7 @@ export class ClientService {
 				destinations: {
 					accountId: key.pinnedAccountId,
 					providers: key.pinnedProviders,
+					excludedProviders: key.excludedProviders ?? null,
 				},
 				catalogues: structuredClone(profile.catalogues),
 			};

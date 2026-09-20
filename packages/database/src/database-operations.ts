@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import type { RuntimeConfig } from "@clankermux/config";
 import {
 	type Disposable,
+	isRoutingPinValid,
 	PAUSE_REASON_NEEDS_REAUTH,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
@@ -2444,10 +2445,12 @@ OAuth tokens will need to be re-authenticated.
 		isActive: boolean;
 		pinnedAccountId?: string | null;
 		pinnedProviders?: string[] | null;
+		excludedProviders?: string[] | null;
 	}): Promise<void> {
 		const profile = await this.clientInitializer?.(apiKey.id, {
 			accountId: apiKey.pinnedAccountId ?? null,
 			providers: apiKey.pinnedProviders ?? null,
+			excludedProviders: apiKey.excludedProviders ?? null,
 		});
 		await this.apiKeys.create(
 			{
@@ -2460,6 +2463,9 @@ OAuth tokens will need to be re-authenticated.
 				last_used: apiKey.lastUsed || null,
 				is_active: apiKey.isActive ? 1 : 0,
 				pinned_account_id: apiKey.pinnedAccountId ?? null,
+				excluded_providers: apiKey.excludedProviders
+					? JSON.stringify(apiKey.excludedProviders)
+					: null,
 				pinned_providers: apiKey.pinnedProviders
 					? JSON.stringify(apiKey.pinnedProviders)
 					: null,
@@ -2480,13 +2486,8 @@ OAuth tokens will need to be re-authenticated.
 	async getApiKeyPin(id: string): Promise<{
 		pinnedAccountId: string | null;
 		pinnedProviders: string[] | null;
-		/**
-		 * True when pinned_providers is stored as a non-empty value that does not
-		 * parse to a valid provider allow-list (corruption / manual tampering).
-		 * The routing layer must FAIL CLOSED on this rather than treat the key as
-		 * unpinned — silently dropping a pin could route a Codex-pinned key to a
-		 * Claude account (ban risk + wrong model).
-		 */
+		excludedProviders?: string[] | null;
+		/** Invalid stored selectors must fail closed in routing. */
 		malformed: boolean;
 	} | null> {
 		const raw = await this.apiKeys.findRawPinById(id);
@@ -2494,17 +2495,25 @@ OAuth tokens will need to be re-authenticated.
 			return null;
 		}
 		const pinnedProviders = parsePinnedProviders(raw.pinnedProvidersRaw);
+		const excludedProviders = parsePinnedProviders(raw.excludedProvidersRaw);
 		// Only NULL and "" are legitimate "no providers pin" states (the write
 		// path clears to NULL). ANY other stored value that fails to parse to a
 		// valid allow-list — whitespace-only, "[]", malformed JSON, wrong shape —
 		// is corruption/tampering and must fail closed, not route unpinned.
 		const malformed =
-			raw.pinnedProvidersRaw != null &&
-			raw.pinnedProvidersRaw !== "" &&
-			pinnedProviders === null;
+			(raw.pinnedProvidersRaw != null &&
+				raw.pinnedProvidersRaw !== "" &&
+				pinnedProviders === null) ||
+			(raw.excludedProvidersRaw != null && excludedProviders === null) ||
+			!isRoutingPinValid({
+				accountId: raw.pinnedAccountId,
+				providers: pinnedProviders,
+				excludedProviders,
+			});
 		return {
 			pinnedAccountId: raw.pinnedAccountId,
 			pinnedProviders,
+			excludedProviders,
 			malformed,
 		};
 	}
@@ -2517,11 +2526,13 @@ OAuth tokens will need to be re-authenticated.
 		id: string,
 		pinnedAccountId: string | null,
 		pinnedProviders: string[] | null,
+		excludedProviders: string[] | null = null,
 	): Promise<boolean> {
 		return this.routing.updateApiKeyDestinations(
 			id,
 			pinnedAccountId,
 			pinnedProviders,
+			excludedProviders,
 		);
 	}
 

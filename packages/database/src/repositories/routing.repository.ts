@@ -1,6 +1,7 @@
 import {
 	isAccountAllowedByPin,
 	isModelAliasId,
+	isRoutingPinValid,
 	validateRoutingRule,
 } from "@clankermux/core";
 import type {
@@ -115,13 +116,19 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		if (r.match_api_key_id !== null) {
 			const key = db
 				.query(
-					"SELECT pinned_account_id,pinned_providers FROM api_keys WHERE id=?",
+					"SELECT pinned_account_id,pinned_providers,excluded_providers FROM api_keys WHERE id=?",
 				)
 				.get(r.match_api_key_id) as {
 				pinned_account_id: string | null;
 				pinned_providers: string | null;
+				excluded_providers: string | null;
 			};
-			this.assertPinCompatible(r, key.pinned_account_id, key.pinned_providers);
+			this.assertPinCompatible(
+				r,
+				key.pinned_account_id,
+				key.pinned_providers,
+				key.excluded_providers,
+			);
 		}
 
 		db.query(`INSERT INTO routing_rules (id,name,enabled,position,match_api_key_id,match_model_kind,match_model_value,pool_kind,pool_provider,pool_account_ids,target_kind,target_model)
@@ -146,17 +153,26 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		r: RoutingRule,
 		accountId: string | null,
 		rawProviders: string | null,
+		rawExcludedProviders: string | null = null,
 	): void {
 		const providers = parsePinnedProviders(rawProviders);
+		const excludedProviders = parsePinnedProviders(rawExcludedProviders);
+		const pin = { accountId, providers, excludedProviders };
 		if (
 			(rawProviders !== null && !providers) ||
-			(accountId !== null && providers !== null)
+			(rawExcludedProviders !== null && !excludedProviders) ||
+			!isRoutingPinValid(pin)
 		)
 			throw new Error("Key destinations are invalid");
-		if (r.pool_kind === "inherit" || (accountId === null && providers === null))
+		if (
+			r.pool_kind === "inherit" ||
+			(accountId === null && providers === null && excludedProviders === null)
+		)
 			return;
-		if (r.pool_kind === "provider" && providers !== null) {
-			if (!providers.includes(r.pool_provider ?? ""))
+		if (r.pool_kind === "provider" && accountId === null) {
+			if (
+				!isAccountAllowedByPin(pin, { id: "", provider: r.pool_provider ?? "" })
+			)
 				throw new Error(`Rule ${r.name} conflicts with API key destinations`);
 			return;
 		}
@@ -167,7 +183,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		if (
 			!accounts.some(
 				(a) =>
-					isAccountAllowedByPin({ accountId, providers }, a) &&
+					isAccountAllowedByPin(pin, a) &&
 					(r.pool_kind === "provider"
 						? a.provider === r.pool_provider
 						: r.pool_account_ids?.includes(a.id)),
@@ -179,6 +195,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		keyId: string,
 		accountId: string | null,
 		providers: string[] | null,
+		excludedProviders: string[] | null = null,
 	): Promise<void> {
 		for (const r of await this.listRules())
 			if (r.match_api_key_id === keyId)
@@ -186,6 +203,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 					r,
 					accountId,
 					providers === null ? null : JSON.stringify(providers),
+					excludedProviders === null ? null : JSON.stringify(excludedProviders),
 				);
 	}
 
@@ -193,21 +211,24 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		id: string,
 		accountId: string | null,
 		providers: string[] | null,
+		excludedProviders: string[] | null = null,
 	): Promise<boolean> {
 		return this.adapter.runTransaction(() =>
-			this.updateDestinationsInTransaction(id, accountId, providers),
+			this.updateDestinationsInTransaction(
+				id,
+				accountId,
+				providers,
+				excludedProviders,
+			),
 		);
 	}
 	updateDestinationsInTransaction(
 		id: string,
 		accountId: string | null,
 		providers: string[] | null,
+		excludedProviders: string[] | null = null,
 	): boolean {
-		if (
-			(accountId !== null && providers !== null) ||
-			(providers !== null &&
-				(!providers.length || providers.some((p) => !isKnownProvider(p))))
-		)
+		if (!isRoutingPinValid({ accountId, providers, excludedProviders }))
 			throw new Error("Invalid API key destinations");
 		const db = this.adapter.getSQLiteDb();
 		if (
@@ -230,15 +251,17 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				}),
 				accountId,
 				providers === null ? null : JSON.stringify(providers),
+				excludedProviders === null ? null : JSON.stringify(excludedProviders),
 			);
 		return (
 			db
 				.query(
-					"UPDATE api_keys SET pinned_account_id=?,pinned_providers=? WHERE id=?",
+					"UPDATE api_keys SET pinned_account_id=?,pinned_providers=?,excluded_providers=? WHERE id=?",
 				)
 				.run(
 					accountId,
 					providers === null ? null : JSON.stringify(providers),
+					excludedProviders === null ? null : JSON.stringify(excludedProviders),
 					id,
 				).changes > 0
 		);

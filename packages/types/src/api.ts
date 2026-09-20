@@ -95,8 +95,12 @@ export interface RequestMeta {
 	comboName?: string | null;
 	/** Internal routing telemetry persisted with the request for optimization analysis */
 	routing?: RequestRoutingMeta;
-	/** Resolved per-key routing pin from the authenticated API key (Feature: API-key→account/class pin). */
-	pin?: { accountId: string | null; providers: string[] | null } | null;
+	/** Destination restrictions from the authenticated API key. */
+	pin?: {
+		accountId: string | null;
+		providers: string[] | null;
+		excludedProviders?: string[] | null;
+	} | null;
 	/** Set when a pin strict-fails account selection; handleProxy returns a terminal pinned_target_unavailable error. */
 	pinFailure?: { code: string; message: string } | null;
 	/**

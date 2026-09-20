@@ -108,6 +108,74 @@ describe("createApiKeyPinHandler", () => {
 		});
 	});
 
+	it("creates, persists and clears provider exclusions", async () => {
+		const generate = createApiKeysGenerateHandler(dbOps);
+		const created = await generate(
+			makeRequest({ name: "exclude", excludedProviders: ["anthropic"] }),
+		);
+		expect(created.status).toBe(201);
+		const { data } = await created.json();
+		expect(await dbOps.getApiKeyPin(data.id)).toMatchObject({
+			excludedProviders: ["anthropic"],
+			malformed: false,
+		});
+		const updated = await handler(
+			makeRequest({ excludedProviders: ["anthropic", "anthropic", "codex"] }),
+			data.id,
+		);
+		expect(updated.status).toBe(200);
+		expect((await updated.json()).data.excludedProviders).toEqual([
+			"anthropic",
+			"codex",
+		]);
+		expect(
+			(await handler(makeRequest({ providers: ["codex"] }), data.id)).status,
+		).toBe(200);
+		expect((await dbOps.getApiKey(data.id))?.excludedProviders).toBeNull();
+	});
+
+	it("rejects malformed and mixed exclusions without clearing a saved restriction", async () => {
+		const id = await insertApiKey(dbOps, "restricted");
+		await handler(makeRequest({ excludedProviders: ["anthropic"] }), id);
+		for (const body of [
+			{ excludedProviders: [] },
+			{ excludedProviders: "anthropic" },
+			{ excludedProviders: ["unknown"] },
+			{ excludedProviders: [42] },
+			{ excludedProviders: ["anthropic"], providers: ["codex"] },
+			{ excludedProviders: ["anthropic"], accountId: "account" },
+		]) {
+			expect((await handler(makeRequest(body), id)).status).toBe(400);
+			expect((await dbOps.getApiKey(id))?.excludedProviders).toEqual([
+				"anthropic",
+			]);
+			expect(
+				(
+					await createApiKeysGenerateHandler(dbOps)(
+						makeRequest({ name: "bad", ...body }),
+					)
+				).status,
+			).toBe(400);
+		}
+	});
+
+	it("fails closed for corrupt or conflicting stored exclusions", async () => {
+		const id = await insertApiKey(dbOps, "corrupt");
+		for (const raw of ["", "broken", "[]", "[42]", '["unknown"]']) {
+			await dbOps
+				.getAdapter()
+				.run("UPDATE api_keys SET excluded_providers=? WHERE id=?", [raw, id]);
+			expect((await dbOps.getApiKeyPin(id))?.malformed).toBe(true);
+		}
+		await dbOps
+			.getAdapter()
+			.run(
+				"UPDATE api_keys SET excluded_providers=?,pinned_providers=? WHERE id=?",
+				['["anthropic"]', '["codex"]', id],
+			);
+		expect((await dbOps.getApiKeyPin(id))?.malformed).toBe(true);
+	});
+
 	it("account mode: pins the key to a valid account", async () => {
 		const keyId = await insertApiKey(dbOps, "key1");
 		const accountId = await insertAccount(dbOps, "acc1");

@@ -392,7 +392,8 @@ export function ensureSchema(db: Database): void {
 			usage_count INTEGER DEFAULT 0,
 			is_active INTEGER DEFAULT 1,
 			pinned_account_id TEXT,
-			pinned_providers TEXT
+			pinned_providers TEXT,
+			excluded_providers TEXT DEFAULT NULL
 		)
 	`);
 
@@ -1120,6 +1121,11 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "api_keys",
 		column: "pinned_providers",
 		ddl: "ALTER TABLE api_keys ADD COLUMN pinned_providers TEXT",
+	},
+	{
+		table: "api_keys",
+		column: "excluded_providers",
+		ddl: "ALTER TABLE api_keys ADD COLUMN excluded_providers TEXT DEFAULT NULL",
 	},
 	// Recoverable credential for management setup exports, separate from auth hashes.
 	{

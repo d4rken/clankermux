@@ -304,7 +304,10 @@ describe("routing table through the real proxy", () => {
 		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
 	});
 
-	it("does not count on a provider outside the client key's destinations", async () => {
+	it.each([
+		"allow",
+		"exclude",
+	])("does not count outside the client key's %s destinations", async (mode) => {
 		const account = makeAccount({
 			id: "disallowed-count",
 			provider: "openrouter",
@@ -315,7 +318,8 @@ describe("routing table through the real proxy", () => {
 		]);
 		ctx.dbOps.getApiKeyPin = mock(async () => ({
 			pinnedAccountId: null,
-			pinnedProviders: ["codex"],
+			pinnedProviders: mode === "allow" ? ["codex"] : null,
+			excludedProviders: mode === "exclude" ? ["openrouter"] : null,
 			malformed: false,
 		}));
 		const fetchMock = mock(async () => {

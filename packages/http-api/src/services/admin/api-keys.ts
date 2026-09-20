@@ -5,6 +5,7 @@ import {
 	type ApiKeyGenerationResult,
 	type ApiKeyResponse,
 	apiKeyLookupSuffix,
+	type ClientDestinations,
 	NodeCryptoUtils,
 	toApiKeyResponse,
 } from "@clankermux/types";
@@ -29,7 +30,7 @@ async function mintNewSecret(): Promise<{
 export async function generateApiKey(
 	dbOps: DatabaseOperations,
 	name: string,
-	destinations?: { accountId: string | null; providers: string[] | null },
+	destinations?: ClientDestinations,
 ): Promise<ApiKeyGenerationResult> {
 	// Validate name
 	if (!name || name.trim().length === 0) {
@@ -64,6 +65,7 @@ export async function generateApiKey(
 		isActive: true,
 		pinnedAccountId: destinations?.accountId ?? null,
 		pinnedProviders: destinations?.providers ?? null,
+		excludedProviders: destinations?.excludedProviders ?? null,
 	});
 
 	return {

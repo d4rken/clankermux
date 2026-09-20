@@ -83,6 +83,12 @@ Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
 for the OpenAI Responses and Chat Completions APIs.
 
+In the client's **Allowed destinations** step, choose all providers, only selected
+providers, all except selected providers, or one account. For example, excluding
+`anthropic` blocks Anthropic OAuth while allowing other providers, including ones
+you add later. Claude API-key accounts (`claude-console-api`) are a separate
+provider. These restrictions also apply to explicit account requests and fallbacks.
+
 Claude Code 2.1.273 or newer can send extra request diagnostics when launched
 with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Request Details shows the request
 class and agent type; its Metadata tab also shows tool-duration and compaction

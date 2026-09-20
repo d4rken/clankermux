@@ -61,6 +61,7 @@ export async function initializeRequestRoute(
 		meta.pin = {
 			accountId: pin.pinnedAccountId,
 			providers: pin.pinnedProviders,
+			excludedProviders: pin.excludedProviders ?? null,
 		};
 	}
 	const headerAccountId = meta.headers?.get("x-clankermux-account-id") ?? null;

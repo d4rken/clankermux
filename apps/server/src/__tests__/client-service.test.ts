@@ -76,6 +76,48 @@ describe("client service integration", () => {
 	let service: ClientService;
 	let permissions: AccountModelPermissionService;
 	let currentRaw: ReturnType<typeof raw> | null;
+	it("preserves exclusions through review, commit and bulk catalogue edits", async () => {
+		const draft = blank();
+		draft.destinations.excludedProviders = ["codex", "codex"];
+		const review = await service.review(draft);
+		expect(review.draft.destinations.excludedProviders).toEqual(["codex"]);
+		const { client } = await service.commit(review.token);
+		expect(client.key.excludedProviders).toEqual(["codex"]);
+		expect(
+			(await service.suggestions(review.draft.destinations)).models.flatMap(
+				(m) => m.accountIds,
+			),
+		).not.toContain("c");
+		const bulk = await service.bulkReview({
+			clientIds: [client.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "add",
+				models: [
+					{
+						id: "other",
+						displayName: "Other",
+						targetModel: "other",
+						accountIds: null,
+					},
+				],
+			},
+		});
+		await service.bulkCommit(bulk.token);
+		expect((await dbOps.getApiKey(client.apiKeyId))?.excludedProviders).toEqual(
+			["codex"],
+		);
+	});
+
+	it("invalidates a review when exclusions change outside the client editor", async () => {
+		const { client } = await service.commit(
+			(await service.review(blank())).token,
+		);
+		const review = await service.review(edit(client));
+		await dbOps.updateApiKeyPin(client.apiKeyId, null, null, ["anthropic"]);
+		await expect(service.commit(review.token)).rejects.toThrow();
+	});
+
 	it("publishes reusable aliases in every dialect without requiring account pins", async () => {
 		await dbOps.modelAliases.save({
 			id: "alias:good",

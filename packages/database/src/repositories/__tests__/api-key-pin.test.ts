@@ -78,6 +78,7 @@ describe("api_keys schema — pin columns", () => {
 
 		expect(cols).toContain("pinned_account_id");
 		expect(cols).toContain("pinned_providers");
+		expect(cols).toContain("excluded_providers");
 	});
 
 	it("new keys default both pin columns to NULL", () => {
@@ -109,6 +110,27 @@ describe("ApiKeyRepository.updatePin", () => {
 
 	afterEach(() => {
 		db.close();
+	});
+
+	it("round-trips exclusions through every repository lookup and preserves malformed constraints", async () => {
+		insertApiKey(db, "excluded");
+		await repo.updatePin("excluded", null, null, '["anthropic"]');
+		for (const key of [
+			await repo.findById("excluded"),
+			await repo.findByName("excluded"),
+			await repo.findByHashedKey("hash-excluded"),
+			...(await repo.findAll()),
+			...(await repo.findActive()),
+		]) {
+			expect(key?.excludedProviders).toEqual(["anthropic"]);
+		}
+		expect((await repo.findRawPinById("excluded"))?.excludedProvidersRaw).toBe(
+			'["anthropic"]',
+		);
+		await repo.updatePin("excluded", null, null, "broken");
+		expect((await repo.findById("excluded"))?.excludedProviders).toEqual([]);
+		await repo.updatePin("excluded", null, null);
+		expect((await repo.findById("excluded"))?.excludedProviders).toBeNull();
 	});
 
 	it("pins an exact account id and clears providers", async () => {

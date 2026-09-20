@@ -258,7 +258,10 @@ describe("GET /api/runway", () => {
 		expect(body.accounts.map((a) => a.id)).toContain("codex-2");
 	});
 
-	it("scopes a provider-pinned key to that provider's accounts", async () => {
+	it.each([
+		"allow",
+		"exclude",
+	])("scopes a key to accounts permitted by its %s provider list", async (mode) => {
 		usageCache.set("codex-1", SPENT());
 		usageCache.set("anthropic-1", HEALTHY());
 
@@ -269,7 +272,12 @@ describe("GET /api/runway", () => {
 					makeAccount({ id: "anthropic-1", name: "Claude" }),
 				],
 				keys: [
-					makeKey({ id: "k1", name: "codex-only", pinnedProviders: ["codex"] }),
+					makeKey({
+						id: "k1",
+						name: "codex-only",
+						pinnedProviders: mode === "allow" ? ["codex"] : null,
+						excludedProviders: mode === "exclude" ? ["anthropic"] : null,
+					}),
 				],
 			}),
 		);
@@ -278,7 +286,8 @@ describe("GET /api/runway", () => {
 		expect(body.keys[0].eligibleAccountIds).toEqual(["codex-1"]);
 		expect(body.keys[0].pin).toEqual({
 			accountId: null,
-			providers: ["codex"],
+			providers: mode === "allow" ? ["codex"] : null,
+			excludedProviders: mode === "exclude" ? ["anthropic"] : null,
 		});
 		expect(body.keys[0].outcome.kind).toBe("out-now");
 		expect(body.worstKeyId).toBe("k1");
