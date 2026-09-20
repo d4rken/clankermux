@@ -45,6 +45,18 @@ const KEEPALIVE_CONCURRENCY = 4;
 const KEEPALIVE_TICK_SECONDS = 60;
 
 /**
+ * The positive `thinking.budget_tokens` of a budget-thinking body, else null.
+ * Anthropic requires `max_tokens` to exceed this budget, so such a body cannot
+ * carry the one-token keepalive patch.
+ */
+function thinkingBudgetTokens(body: Record<string, unknown>): number | null {
+	const thinking = body.thinking;
+	if (typeof thinking !== "object" || thinking === null) return null;
+	const budget = (thinking as { budget_tokens?: unknown }).budget_tokens;
+	return typeof budget === "number" && budget > 0 ? budget : null;
+}
+
+/**
  * Parse the first `cache_creation_input_tokens` value from a keepalive response.
  *
  * Works for both response shapes the proxy may return: a JSON envelope (the
@@ -293,23 +305,41 @@ export class CacheKeepaliveScheduler {
 		// (the proxy skips staging synthetic keepalive replays).
 		replayHeaders.set("x-clankermux-keepalive", "true");
 
-		log.debug(
-			`Replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey} (${slot.body.length} bytes)`,
-		);
-
 		// Patch max_tokens to 1 to minimize quota consumption — the keepalive only
 		// needs to warm the cache. Do NOT touch tools/tool_choice: altering the
 		// cached prefix would guarantee a cache miss. Invalid JSON → send as-is.
 		let bodyToSend: BodyInit = new Uint8Array(slot.body);
+		let bodyJson: Record<string, unknown> | null = null;
 		try {
-			const bodyJson = JSON.parse(new TextDecoder().decode(slot.body));
-			if (typeof bodyJson === "object" && bodyJson !== null) {
-				bodyJson.max_tokens = 1;
-				bodyToSend = JSON.stringify(bodyJson);
-			}
+			const parsed: unknown = JSON.parse(new TextDecoder().decode(slot.body));
+			if (typeof parsed === "object" && parsed !== null)
+				bodyJson = parsed as Record<string, unknown>;
 		} catch {
 			// Body isn't valid JSON — skip patching and use original.
 		}
+		if (bodyJson) {
+			const budget = thinkingBudgetTokens(bodyJson);
+			if (budget !== null) {
+				// Drop rather than fail: the slot can never be replayed, so retaining
+				// it would re-pick it every tick, and a failure would charge the
+				// account's backoff for what is a policy decision.
+				log.debug(
+					`Cache warming ${slot.accountId}:${slot.sessionKey}: dropping slot, thinking budget ${budget} forbids the one-token replay`,
+				);
+				sessionCacheStore.evictSession(
+					slot.accountId,
+					slot.sessionKey,
+					dispatchedActivityTs,
+				);
+				return;
+			}
+			bodyJson.max_tokens = 1;
+			bodyToSend = JSON.stringify(bodyJson);
+		}
+
+		log.debug(
+			`Replaying cache warming keepalive for ${slot.accountId}:${slot.sessionKey} (${slot.body.length} bytes)`,
+		);
 
 		// Dispatch in-process through the proxy pipeline. The URL is only for
 		// handleProxy's parsing — routing is driven by x-clankermux-account-id.
