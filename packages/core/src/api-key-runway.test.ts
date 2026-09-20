@@ -86,6 +86,14 @@ function byId(runways: KeyRunway[], id: string | null): KeyRunway {
 }
 
 describe("computeApiKeyRunways", () => {
+	it("leaves excluded providers out of capacity estimates", () => {
+		const keys = [mkKey({ excludedProviders: ["anthropic"] })];
+		const allowed = spent("codex-1", "codex");
+		expect(
+			computeApiKeyRunways(keys, [allowed, healthy("claude")], NOW),
+		).toEqual(computeApiKeyRunways(keys, [allowed], NOW));
+	});
+
 	it("excludes paused accounts from capacity, causes and pace headroom", () => {
 		const active = spent("codex-1", "codex");
 		const paused = { ...healthy("codex-2", "codex"), paused: true };
@@ -129,7 +137,11 @@ describe("computeApiKeyRunways", () => {
 
 		const pinned = byId(runways, "k1");
 		expect(pinned.eligibleAccountIds).toEqual(["acc-1"]);
-		expect(pinned.pin).toEqual({ accountId: "acc-1", providers: null });
+		expect(pinned.pin).toEqual({
+			accountId: "acc-1",
+			providers: null,
+			excludedProviders: null,
+		});
 		expect(pinned.outcome.kind).toBe("out-now");
 
 		// The unpinned key still has the healthy account to fall back on.
@@ -154,6 +166,7 @@ describe("computeApiKeyRunways", () => {
 		expect(runways[0].pin).toEqual({
 			accountId: null,
 			providers: ["codex"],
+			excludedProviders: null,
 		});
 		expect(runways[0].outcome.kind).toBe("out-now");
 	});

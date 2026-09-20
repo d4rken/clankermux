@@ -30,13 +30,23 @@ export const FORMAT_LABELS: Record<ClientFormat, string> = {
  */
 export const needsClaudeAlias = (id: string) => !/claude|anthropic/i.test(id);
 export const destinationsLabel = (
-	key: { pinnedAccountId: string | null; pinnedProviders: string[] | null },
+	key: {
+		pinnedAccountId: string | null;
+		pinnedProviders: string[] | null;
+		excludedProviders?: string[] | null;
+	},
 	accounts: { id: string; name: string }[],
 ) =>
 	key.pinnedAccountId
 		? (accounts.find((a) => a.id === key.pinnedAccountId)?.name ??
 			"Unavailable account")
-		: (key.pinnedProviders?.join(", ") ?? "All accounts");
+		: key.pinnedProviders
+			? key.pinnedProviders.join(", ")
+			: key.excludedProviders?.length
+				? `All except ${key.excludedProviders.join(", ")}`
+				: key.excludedProviders
+					? "Invalid provider exclusions"
+					: "All providers";
 export const preferredFormat = (
 	application: ClientApplication,
 ): ClientFormat =>

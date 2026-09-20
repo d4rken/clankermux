@@ -1,4 +1,4 @@
-import { isAccountAvailable } from "@clankermux/core";
+import { isAccountAvailable, isPinActive } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
@@ -125,7 +125,7 @@ export async function selectAccountsForRequest(
 	meta.pinFailure = null;
 	if (!singleton) {
 		const selected = await getOrderedAccounts(meta, ctx);
-		if (!selected.length && meta.pin?.providers?.length)
+		if (!selected.length && isPinActive(meta.pin))
 			meta.pinFailure = {
 				code: "pinned_no_available_account",
 				message: "No allowed destination is currently available",

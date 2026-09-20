@@ -29,6 +29,32 @@ describe("routing storage", () => {
 		repo = new RoutingRepository(new BunSqlAdapter(db));
 	});
 	afterEach(() => db.close());
+	it("rejects excluded provider rules and incompatible destination changes atomically", async () => {
+		db.run(
+			"INSERT INTO api_keys(id,name,hashed_key,prefix_last_8,created_at,excluded_providers) VALUES('k','k','hash','abcdefgh',1,?)",
+			['["anthropic"]'],
+		);
+		await expect(
+			repo.saveRule({
+				...rule("blocked", 0),
+				match_api_key_id: "k",
+				pool_kind: "provider",
+				pool_provider: "anthropic",
+			}),
+		).rejects.toThrow("conflicts");
+		await repo.saveRule({
+			...rule("allowed", 0),
+			match_api_key_id: "k",
+			pool_kind: "provider",
+			pool_provider: "codex",
+		});
+		await expect(
+			repo.updateApiKeyDestinations("k", null, null, ["codex"]),
+		).rejects.toThrow("conflicts");
+		expect(
+			db.query("SELECT excluded_providers FROM api_keys WHERE id='k'").get(),
+		).toEqual({ excluded_providers: '["anthropic"]' });
+	});
 	it("swaps unique positions atomically and rejects incomplete reorder", async () => {
 		await repo.saveRule(rule("a", 0));
 		await repo.saveRule(rule("b", 1));

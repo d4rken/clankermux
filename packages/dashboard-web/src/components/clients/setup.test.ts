@@ -4,7 +4,34 @@ import {
 	type ClientSetupModel,
 	clientSetup,
 	clientSetupExports,
+	destinationsLabel,
 } from "./setup";
+
+it("labels provider exclusion destinations and invalid empty exclusions", () => {
+	const accounts = [{ id: "a", name: "Anthropic", provider: "anthropic" }];
+	expect(
+		destinationsLabel(
+			{
+				pinnedAccountId: null,
+				pinnedProviders: null,
+				excludedProviders: ["anthropic"],
+			},
+			accounts,
+		),
+	).toBe("All except anthropic");
+	expect(
+		destinationsLabel(
+			{ pinnedAccountId: null, pinnedProviders: null, excludedProviders: [] },
+			accounts,
+		),
+	).toBe("Invalid provider exclusions");
+	expect(
+		destinationsLabel(
+			{ pinnedAccountId: null, pinnedProviders: null },
+			accounts,
+		),
+	).toBe("All providers");
+});
 
 const model = (
 	id: string,

@@ -337,8 +337,12 @@ export interface RunwayKeyEntry {
 	keyId: string | null;
 	keyName: string;
 	isActive: boolean;
-	/** The key's routing pin. Both fields null / empty means unpinned. */
-	pin: { accountId: string | null; providers: string[] | null };
+	/** The key's routing restrictions; omitted or null selectors mean unrestricted. */
+	pin: {
+		accountId: string | null;
+		providers: string[] | null;
+		excludedProviders?: string[] | null;
+	};
 	/**
 	 * The accounts this key may route to. Ids rather than a count: a consumer
 	 * that wants the count can take `.length`, but the ids cannot be recovered

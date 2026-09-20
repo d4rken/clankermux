@@ -25,7 +25,12 @@ import { eligibleRouteAccounts } from "./routing-service";
  * request state it mutates belongs to its caller.
  */
 
-import { codexAccountFitsRequestUnmargined, NETWORK } from "@clankermux/core";
+import {
+	codexAccountFitsRequestUnmargined,
+	isAccountAllowedByPin,
+	isPinActive,
+	NETWORK,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
@@ -193,13 +198,10 @@ export async function resolveZeroAccountsOutcome(
 		(requestMeta.pinFailure.code === "pinned_no_available_account" ||
 			requestMeta.pinFailure.code === "pinned_account_unavailable") &&
 		activePin &&
-		(activePin.accountId ||
-			(activePin.providers && activePin.providers.length > 0))
+		isPinActive(activePin)
 	) {
 		const isPinAllowed = (a: Account): boolean =>
-			activePin.accountId
-				? a.id === activePin.accountId
-				: (activePin.providers ?? []).includes(a.provider);
+			isAccountAllowedByPin(activePin, a);
 		const nowMs = Date.now();
 		let hasHoldCandidate = false;
 		try {

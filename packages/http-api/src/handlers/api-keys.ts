@@ -51,6 +51,7 @@ export function createApiKeysGenerateHandler(dbOps: DatabaseOperations) {
 
 			const accountId = body.accountId ?? null;
 			const providers = body.providers ?? null;
+			const excludedProviders = body.excludedProviders ?? null;
 			if (
 				(accountId !== null &&
 					(typeof accountId !== "string" || !accountId.trim())) ||
@@ -60,16 +61,24 @@ export function createApiKeysGenerateHandler(dbOps: DatabaseOperations) {
 						providers.some(
 							(p: unknown) => typeof p !== "string" || !isKnownProvider(p),
 						))) ||
-				(accountId !== null && providers !== null)
+				(excludedProviders !== null &&
+					(!Array.isArray(excludedProviders) ||
+						!excludedProviders.length ||
+						excludedProviders.some(
+							(p: unknown) => typeof p !== "string" || !isKnownProvider(p),
+						))) ||
+				[accountId, providers, excludedProviders].filter((v) => v !== null)
+					.length > 1
 			)
 				throw BadRequest(
-					"Choose one account, a nonempty provider list, or Unrestricted",
+					"Choose one account, only selected providers, all except selected providers, or Unrestricted",
 				);
 			if (accountId !== null && !(await dbOps.getAccount(accountId)))
 				throw BadRequest("Destination account does not exist");
 			const result = await generateApiKey(dbOps, name.trim(), {
 				accountId,
 				providers,
+				excludedProviders,
 			});
 			const response: ApiKeyGenerationResult = {
 				id: result.id,
@@ -155,8 +164,12 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 
 			// A pin is a security-sensitive routing constraint, so a malformed body
 			// must NOT silently clear it. Invalid JSON / a non-object body → 400.
-			// An explicit JSON object with no accountId/providers (or `null`) clears.
-			let body: { accountId?: unknown; providers?: unknown };
+			// An explicit object with all destination selectors omitted or null clears.
+			let body: {
+				accountId?: unknown;
+				providers?: unknown;
+				excludedProviders?: unknown;
+			};
 			try {
 				const parsed = await req.json();
 				// Only a JSON object is a valid request. Clearing is an explicit
@@ -168,7 +181,11 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 					parsed !== null &&
 					!Array.isArray(parsed)
 				) {
-					body = parsed as { accountId?: unknown; providers?: unknown };
+					body = parsed as {
+						accountId?: unknown;
+						providers?: unknown;
+						excludedProviders?: unknown;
+					};
 				} else {
 					return errorResponse(
 						BadRequest("Request body must be a JSON object."),
@@ -191,20 +208,23 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 					BadRequest("accountId must be a non-empty string, null, or omitted."),
 				);
 			}
-			if (
-				body.providers !== undefined &&
-				body.providers !== null &&
-				!(
-					Array.isArray(body.providers) &&
-					body.providers.length > 0 &&
-					body.providers.every((p) => typeof p === "string")
-				)
-			) {
-				return errorResponse(
-					BadRequest(
-						"providers must be a non-empty array of strings, null, or omitted.",
-					),
-				);
+			for (const field of ["providers", "excludedProviders"] as const) {
+				const value = body[field];
+				if (
+					value !== undefined &&
+					value !== null &&
+					!(
+						Array.isArray(value) &&
+						value.length > 0 &&
+						value.every((p) => typeof p === "string")
+					)
+				) {
+					return errorResponse(
+						BadRequest(
+							`${field} must be a non-empty array of strings, null, or omitted.`,
+						),
+					);
+				}
 			}
 
 			const hasAccount =
@@ -212,10 +232,16 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 			const hasProviders =
 				Array.isArray(body.providers) && body.providers.length > 0;
 
-			// accountId and providers are mutually exclusive on the wire.
-			if (hasAccount && hasProviders) {
+			const hasExclusions =
+				Array.isArray(body.excludedProviders) &&
+				body.excludedProviders.length > 0;
+			if (
+				[hasAccount, hasProviders, hasExclusions].filter(Boolean).length > 1
+			) {
 				return errorResponse(
-					BadRequest("Specify either accountId or providers, not both."),
+					BadRequest(
+						"Specify only one of accountId, providers, or excludedProviders.",
+					),
 				);
 			}
 
@@ -228,8 +254,10 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 					);
 				}
 				await dbOps.updateApiKeyPin(apiKey.id, accountId, null);
-			} else if (hasProviders) {
-				const requested = body.providers as unknown[];
+			} else if (hasProviders || hasExclusions) {
+				const requested = (
+					hasProviders ? body.providers : body.excludedProviders
+				) as unknown[];
 				const invalid: string[] = [];
 				const valid: string[] = [];
 				const seen = new Set<string>();
@@ -251,9 +279,14 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 						),
 					);
 				}
-				await dbOps.updateApiKeyPin(apiKey.id, null, valid);
+				await dbOps.updateApiKeyPin(
+					apiKey.id,
+					null,
+					hasProviders ? valid : null,
+					hasExclusions ? valid : null,
+				);
 			} else {
-				// Both absent/null/empty → clear the pin.
+				// All selectors absent or null clear the pin.
 				await dbOps.updateApiKeyPin(apiKey.id, null, null);
 			}
 

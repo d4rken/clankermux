@@ -71,6 +71,7 @@ const strategySelect = (accs: Account[]) => {
 type PinCfg = {
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
+	excludedProviders?: string[] | null;
 };
 
 function makeSimpleContext(accounts: Account[], pin: PinCfg): ProxyContext {
@@ -310,14 +311,32 @@ describe("pin-transient hold", () => {
 		clearProviderOverloadCooldown();
 	});
 
-	it("holds and serves once a transiently rate-limited pinned account recovers", async () => {
+	it.each([
+		"allow",
+		"exclude",
+	])("holds and serves once an account permitted by %s providers recovers", async (mode) => {
 		const anthropic = makeAccount({
 			id: "opus-1",
 			name: "Opus",
 			provider: "anthropic",
 			rate_limited_until: Date.now() + 200,
 		});
-		const ctx = makeFullContext([anthropic], CLASS_PIN);
+		const excluded = makeAccount({ id: "codex-excluded", provider: "codex" });
+		const ctx = makeFullContext(
+			[anthropic, excluded],
+			mode === "allow"
+				? CLASS_PIN
+				: {
+						pinnedAccountId: null,
+						pinnedProviders: null,
+						excludedProviders: ["codex"],
+					},
+		);
+		const candidateIds: string[][] = [];
+		ctx.strategy.select = mock((accounts: Account[]) => {
+			candidateIds.push(accounts.map((a) => a.id));
+			return strategySelect(accounts);
+		});
 
 		const response = await callHandleProxy(
 			makeRequest(),
@@ -326,6 +345,8 @@ describe("pin-transient hold", () => {
 		);
 
 		expect(response.status).toBe(200);
+		expect(candidateIds.length).toBeGreaterThan(1);
+		expect(candidateIds.every((ids) => !ids.includes(excluded.id))).toBe(true);
 	});
 
 	it("holds and serves for a 529-overloaded pinned account (upstream_529 reset)", async () => {
@@ -374,7 +395,10 @@ describe("pin-transient hold", () => {
 		expect(error.type).toBe("pinned_no_available_account");
 	});
 
-	it("never routes a pinned key to a disallowed (codex) account, even on a long wall", async () => {
+	it.each([
+		"allow",
+		"exclude",
+	])("never routes a %s-restricted key to a disallowed account, even on a long wall", async (mode) => {
 		const anthropic = makeAccount({
 			id: "opus-1",
 			name: "Opus",
@@ -387,7 +411,16 @@ describe("pin-transient hold", () => {
 			provider: "codex",
 			api_key: "cx-key",
 		});
-		const ctx = makeSimpleContext([anthropic, codex], CLASS_PIN);
+		const ctx = makeSimpleContext(
+			[anthropic, codex],
+			mode === "allow"
+				? CLASS_PIN
+				: {
+						pinnedAccountId: null,
+						pinnedProviders: null,
+						excludedProviders: ["codex"],
+					},
+		);
 
 		const response = await callHandleProxy(
 			makeRequest(),

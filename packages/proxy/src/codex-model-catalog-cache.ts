@@ -1,6 +1,7 @@
 import {
 	isAccountAllowedByPin,
 	isPinActive,
+	isRoutingPinValid,
 	type RoutingPin,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
@@ -8,7 +9,7 @@ import {
 	type fetchCodexModelCatalog,
 	readChatgptAccountId,
 } from "@clankermux/providers";
-import { type Account, isKnownProvider } from "@clankermux/types";
+import type { Account } from "@clankermux/types";
 
 const log = new Logger("CodexModelCatalogCache");
 
@@ -72,6 +73,7 @@ export interface CodexModelCatalogCacheDeps {
 	getApiKeyPin: (apiKeyId: string) => Promise<{
 		pinnedAccountId: string | null;
 		pinnedProviders: string[] | null;
+		excludedProviders?: string[] | null;
 		malformed: boolean;
 	} | null>;
 	getAccessToken: (account: Account) => Promise<string>;
@@ -154,17 +156,14 @@ export class CodexModelCatalogCache {
 	}
 
 	async getForPin(pin: RoutingPin): Promise<CodexModelCatalogEntry | null> {
-		if (
-			(pin.accountId && pin.providers) ||
-			(pin.providers &&
-				(!pin.providers.length || !pin.providers.every(isKnownProvider)))
-		)
-			return null;
+		if (!isRoutingPinValid(pin)) return null;
 		const key = pin.accountId
 			? `account:${pin.accountId}`
 			: pin.providers
 				? `providers:${JSON.stringify([...pin.providers].sort())}`
-				: "";
+				: pin.excludedProviders
+					? `excluded:${JSON.stringify([...pin.excludedProviders].sort())}`
+					: "";
 		return this.getScope({ kind: "allowed", key, pin });
 	}
 
@@ -262,22 +261,24 @@ export class CodexModelCatalogCache {
 		const pin: RoutingPin = {
 			accountId: raw.pinnedAccountId,
 			providers: raw.pinnedProviders,
+			excludedProviders: raw.excludedProviders ?? null,
 		};
+		if (pin.excludedProviders != null && !isRoutingPinValid(pin))
+			return { kind: "refused" };
 		if (!isPinActive(pin)) return { kind: "allowed", key: "", pin: null };
 
+		if (!isRoutingPinValid(pin)) return { kind: "refused" };
+		if (pin.excludedProviders)
+			return {
+				kind: "allowed",
+				key: `excluded:${JSON.stringify([...pin.excludedProviders].sort())}`,
+				pin,
+			};
 		if (pin.accountId) {
 			return { kind: "allowed", key: `account:${pin.accountId}`, pin };
 		}
 
 		const providers = [...(pin.providers ?? [])];
-		// The stored list is only checked for "non-empty array of strings", so a
-		// tampered row can hold anything. Refuse names we do not know rather than
-		// key on them: the encoding below must be injective, and a value like
-		// "anthropic,codex" is exactly the sort of thing that collapses two
-		// distinct pins onto one cache entry.
-		if (!providers.every((name) => isKnownProvider(name))) {
-			return { kind: "refused" };
-		}
 
 		// JSON, not a comma join: `["a","b"]` and `["a,b"]` join identically, and
 		// a shared key would serve one pin's catalog to the other.

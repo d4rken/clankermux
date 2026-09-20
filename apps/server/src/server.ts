@@ -1249,7 +1249,7 @@ export default async function startServer(options?: {
 	stopModelPermissions = () => modelPermissions.stop();
 	for (const key of await dbOps.getApiKeys()) {
 		const pin = await dbOps.getApiKeyPin(key.id);
-		if (pin?.malformed || (pin?.pinnedAccountId && pin.pinnedProviders?.length))
+		if (pin?.malformed)
 			log.warn(
 				`API key "${key.name}" has invalid destinations and will reject inference until corrected`,
 			);

@@ -28,5 +28,9 @@ export function describePinTarget(
 	if (pin.providers && pin.providers.length > 0) {
 		return `Pinned → ${pin.providers.join(", ")}`;
 	}
+	if (pin.excludedProviders && pin.excludedProviders.length > 0) {
+		return `Pinned → All except ${pin.excludedProviders.join(", ")}`;
+	}
+	if (pin.excludedProviders) return "Pinned → Invalid provider exclusions";
 	return "Unpinned";
 }

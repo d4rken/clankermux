@@ -571,6 +571,7 @@ export function computeApiKeyRunways(
 		const pin: RoutingPin = {
 			accountId: key.pinnedAccountId,
 			providers: key.pinnedProviders,
+			excludedProviders: key.excludedProviders ?? null,
 		};
 		return {
 			keyId: key.id,

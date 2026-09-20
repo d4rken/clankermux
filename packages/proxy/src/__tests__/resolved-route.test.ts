@@ -46,6 +46,19 @@ const build = (patch: Partial<Parameters<typeof buildResolvedRoute>[0]> = {}) =>
 		...patch,
 	});
 describe("resolved route authority", () => {
+	it("provider exclusions constrain explicit routing rules and forced accounts", () => {
+		const pin = {
+			accountId: null,
+			providers: null,
+			excludedProviders: ["codex"],
+		};
+		expect(() => build({ pin })).toThrow();
+		expect(() => build({ pin, forcedAccountId: c.id })).toThrow();
+		expect(() => build({ pin: { ...pin, accountId: c.id } })).toThrow(
+			"Invalid API key destinations",
+		);
+	});
+
 	it("intersects every destination restriction before admission", () => {
 		const route = build();
 		expect(route.accountIds()).toEqual(["c"]);

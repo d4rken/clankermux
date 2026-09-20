@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { isAccountAllowedByPin, isPinActive } from "./api-key-pin";
+import {
+	isAccountAllowedByPin,
+	isPinActive,
+	isRoutingPinValid,
+} from "./api-key-pin";
 
 const anthropicAccount = { id: "acc-1", provider: "anthropic" };
 const codexAccount = { id: "acc-2", provider: "codex" };
@@ -56,5 +60,45 @@ describe("isAccountAllowedByPin", () => {
 		const pin = { accountId: "acc-1", providers: ["codex"] };
 		expect(isAccountAllowedByPin(pin, anthropicAccount)).toBe(true);
 		expect(isAccountAllowedByPin(pin, codexAccount)).toBe(false);
+	});
+});
+
+describe("provider exclusions", () => {
+	const pin = {
+		accountId: null,
+		providers: null,
+		excludedProviders: ["anthropic"],
+	};
+	it("excludes only the selected provider and admits new providers", () => {
+		expect(isPinActive(pin)).toBe(true);
+		expect(isAccountAllowedByPin(pin, anthropicAccount)).toBe(false);
+		for (const provider of [
+			"codex",
+			"claude-console-api",
+			"openrouter",
+			"future-provider",
+		])
+			expect(isAccountAllowedByPin(pin, { id: provider, provider })).toBe(true);
+	});
+	it("does not let an account pin bypass an exclusion", () => {
+		expect(
+			isAccountAllowedByPin(
+				{ ...pin, accountId: anthropicAccount.id },
+				anthropicAccount,
+			),
+		).toBe(false);
+	});
+	it("validates exclusive destination modes and provider names", () => {
+		expect(isRoutingPinValid(pin)).toBe(true);
+		expect(isRoutingPinValid({ accountId: null, providers: null })).toBe(true);
+		for (const invalid of [
+			{ ...pin, accountId: "acc-1" },
+			{ ...pin, providers: ["codex"] },
+			{ ...pin, excludedProviders: [] },
+			{ ...pin, excludedProviders: ["unknown-provider"] },
+		]) {
+			expect(isRoutingPinValid(invalid)).toBe(false);
+			expect(isAccountAllowedByPin(invalid, codexAccount)).toBe(false);
+		}
 	});
 });

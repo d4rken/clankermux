@@ -26,6 +26,7 @@ function account(overrides: Partial<Account> = {}): Account {
 type Pin = {
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
+	excludedProviders?: string[] | null;
 	malformed: boolean;
 };
 
@@ -74,6 +75,44 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("CodexModelCatalogCache", () => {
+	test("exclusion scopes cannot reuse an unrestricted cached catalogue", async () => {
+		const { cache, fetchCalls } = harness({
+			getApiKeyPin: async () => ({
+				pinnedAccountId: null,
+				pinnedProviders: null,
+				excludedProviders: ["codex"],
+				malformed: false,
+			}),
+		});
+		expect(await cache.get(null)).not.toBeNull();
+		expect(await cache.get("denied")).toBeNull();
+		expect(
+			await cache.getForPin({
+				accountId: null,
+				providers: null,
+				excludedProviders: ["codex"],
+			}),
+		).toBeNull();
+		expect(fetchCalls).toHaveLength(1);
+	});
+	test("exclusions admit other providers and reject mixed or invalid policies", async () => {
+		const { cache, fetchCalls } = harness();
+		const pin = {
+			accountId: null,
+			providers: null,
+			excludedProviders: ["anthropic"],
+		};
+		expect(await cache.getForPin(pin)).not.toBeNull();
+		expect(await cache.getForPin({ ...pin, providers: ["codex"] })).toBeNull();
+		expect(
+			await cache.getForPin({
+				...pin,
+				excludedProviders: ["unknown-provider"],
+			}),
+		).toBeNull();
+		expect(fetchCalls).toHaveLength(1);
+	});
+
 	test("fetches once and serves the body verbatim", async () => {
 		const { cache, fetchCalls } = harness({
 			results: [

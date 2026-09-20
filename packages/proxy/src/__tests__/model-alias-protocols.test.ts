@@ -177,12 +177,16 @@ it("exhausts Anthropic then applies OpenRouter's own Messages endpoint, authenti
 	});
 });
 
-it("keeps API-key destination restrictions when a cross-provider fallback is available", async () => {
+it.each([
+	"allow",
+	"exclude",
+])("keeps %s provider restrictions when a cross-provider fallback is available", async (mode) => {
 	const { ctx, primary, backupModel } = await setup("openrouter");
 	Object.assign(ctx.dbOps, {
 		getApiKeyPin: async () => ({
 			pinnedAccountId: null,
-			pinnedProviders: ["anthropic"],
+			pinnedProviders: mode === "allow" ? ["anthropic"] : null,
+			excludedProviders: mode === "exclude" ? ["openrouter"] : null,
 			malformed: false,
 		}),
 	});
@@ -290,4 +294,27 @@ it.each([
 		},
 	});
 	expect(nativeDispatch?.body.messages).toBeUndefined();
+});
+
+it("skips an excluded primary provider and uses an allowed alias target", async () => {
+	const { ctx, backupModel } = await setup("openrouter");
+	Object.assign(ctx.dbOps, {
+		getApiKeyPin: async () => ({
+			pinnedAccountId: null,
+			pinnedProviders: null,
+			excludedProviders: ["anthropic"],
+			malformed: false,
+		}),
+	});
+	const sent = mockUpstreams(() => messageSuccess(backupModel));
+	const req = messagesRequest();
+	const response = await handleProxy(
+		req,
+		new URL(req.url),
+		ctx,
+		"excluding-client",
+	);
+	expect(response.status).toBe(200);
+	await response.text();
+	expect(sent.map(({ body }) => body.model)).toEqual([backupModel]);
 });

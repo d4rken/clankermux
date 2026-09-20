@@ -48,6 +48,9 @@ export function draftFor(client?: ClientView): ClientDraft {
 				destinations: {
 					accountId: client.key.pinnedAccountId,
 					providers: client.key.pinnedProviders,
+					...(client.key.excludedProviders
+						? { excludedProviders: client.key.excludedProviders }
+						: {}),
 				},
 				catalogues: structuredClone(client.catalogues),
 			}
@@ -205,14 +208,24 @@ export function ClientWizard({
 			? "account"
 			: draft.destinations.providers !== null
 				? "providers"
-				: "all";
-	const providers = [...new Set(accounts.map((a) => a.provider))].sort();
+				: draft.destinations.excludedProviders != null
+					? "excluded"
+					: "all";
+	const providers = [
+		...new Set([
+			...accounts.map((a) => a.provider),
+			...(draft.destinations.providers ?? []),
+			...(draft.destinations.excludedProviders ?? []),
+		]),
+	].sort();
 	const eligible = accounts.filter(
 		(a) =>
 			mode === "all" ||
 			(mode === "account"
 				? a.id === draft.destinations.accountId
-				: draft.destinations.providers?.includes(a.provider)),
+				: mode === "providers"
+					? draft.destinations.providers?.includes(a.provider)
+					: !draft.destinations.excludedProviders?.includes(a.provider)),
 	);
 	const eligibleIds = new Set(eligible.map((a) => a.id));
 	const conflicts = Object.entries(draft.catalogues).flatMap(([f, c]) =>
@@ -241,7 +254,11 @@ export function ClientWizard({
 				: r.pool_kind === "provider" &&
 					(mode === "account"
 						? !eligible.some((a) => a.provider === r.pool_provider)
-						: !draft.destinations.providers?.includes(r.pool_provider ?? ""))),
+						: mode === "providers"
+							? !draft.destinations.providers?.includes(r.pool_provider ?? "")
+							: draft.destinations.excludedProviders?.includes(
+									r.pool_provider ?? "",
+								))),
 	);
 	/**
 	 * Destinations are only recorded for an alias. An entry published under its
@@ -423,6 +440,9 @@ export function ClientWizard({
 				? {
 						accountId: source.key.pinnedAccountId,
 						providers: source.key.pinnedProviders,
+						...(source.key.excludedProviders
+							? { excludedProviders: source.key.excludedProviders }
+							: {}),
 					}
 				: draft.destinations;
 			const catalogues = copy.catalogues
@@ -649,21 +669,31 @@ export function ClientWizard({
 										...draft,
 										destinations:
 											e.target.value === "all"
-												? { accountId: null, providers: null }
+												? {
+														accountId: null,
+														providers: null,
+													}
 												: e.target.value === "account"
 													? {
 															accountId: accounts[0]?.id ?? "",
 															providers: null,
 														}
-													: {
-															accountId: null,
-															providers: providers.slice(0, 1),
-														},
+													: e.target.value === "excluded"
+														? {
+																accountId: null,
+																providers: null,
+																excludedProviders: providers.slice(0, 1),
+															}
+														: {
+																accountId: null,
+																providers: providers.slice(0, 1),
+															},
 									})
 								}
 							>
-								<option value="all">All accounts</option>
-								<option value="providers">Selected providers</option>
+								<option value="all">All providers</option>
+								<option value="providers">Only selected providers</option>
+								<option value="excluded">All except selected providers</option>
 								<option value="account">One account</option>
 							</select>
 						</label>
@@ -715,6 +745,43 @@ export function ClientWizard({
 																	provider,
 																]
 															: (draft.destinations.providers?.filter(
+																	(p) => p !== provider,
+																) ?? []),
+													},
+												})
+											}
+										/>
+										{provider}
+									</label>
+								))}
+							</fieldset>
+						)}
+						{mode === "excluded" && (
+							<fieldset className="flex flex-wrap gap-group">
+								<legend className="mb-2 text-sm">Excluded providers</legend>
+								{providers.map((provider) => (
+									<label key={provider} className="flex gap-2 items-center">
+										<input
+											type="checkbox"
+											disabled={busy}
+											checked={
+												draft.destinations.excludedProviders?.includes(
+													provider,
+												) ?? false
+											}
+											onChange={(e) =>
+												setDraft({
+													...draft,
+													destinations: {
+														accountId: null,
+														providers: null,
+														excludedProviders: e.target.checked
+															? [
+																	...(draft.destinations.excludedProviders ??
+																		[]),
+																	provider,
+																]
+															: (draft.destinations.excludedProviders?.filter(
 																	(p) => p !== provider,
 																) ?? []),
 													},
@@ -1220,8 +1287,13 @@ export function ClientWizard({
 									? accounts.find(
 											(a) => a.id === review.draft.destinations.accountId,
 										)?.name
-									: (review.draft.destinations.providers?.join(", ") ??
-										"All accounts")}
+									: review.draft.destinations.providers
+										? review.draft.destinations.providers.join(", ")
+										: review.draft.destinations.excludedProviders?.length
+											? `All except ${review.draft.destinations.excludedProviders.join(", ")}`
+											: review.draft.destinations.excludedProviders
+												? "Invalid provider exclusions"
+												: "All providers"}
 							</p>
 						</div>
 						{Object.entries(review.draft.catalogues).map(([f, c]) => (
