@@ -71,7 +71,8 @@ jobs:
       # (dist/embedded.ts, dist/manifest.json), so any test that reaches the
       # server module needs them present or it fails to collect.
       - run: bun run build:dashboard
-      - run: bun test
+      # SQLite fixture setup/cleanup can exceed Bun's 5s default on hosted disks.
+      - run: bun test --timeout 30000
       # Separate lane, separate process: happy-dom's globals are process-wide
       # (they replace fetch/Request/Response/URL among others) and must not be
       # installed for the proxy suite, so the DOM tests cannot share the run
