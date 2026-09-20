@@ -326,7 +326,11 @@ export class CacheKeepaliveScheduler {
 				log.debug(
 					`Cache warming ${slot.accountId}:${slot.sessionKey}: dropping slot, thinking budget ${budget} forbids the one-token replay`,
 				);
-				sessionCacheStore.evictSession(slot.accountId, slot.sessionKey);
+				sessionCacheStore.evictSession(
+					slot.accountId,
+					slot.sessionKey,
+					dispatchedActivityTs,
+				);
 				return;
 			}
 			bodyJson.max_tokens = 1;

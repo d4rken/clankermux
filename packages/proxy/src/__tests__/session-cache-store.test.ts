@@ -680,3 +680,37 @@ describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x in
 		expect(sessionCacheStore.getAllSlots()[0].spentUsd).toBeCloseTo(0.625, 10);
 	});
 });
+
+describe("evictSession", () => {
+	it("drops the slot it was selected against", () => {
+		register({ sessionKey: "evictable" });
+		const stamp = sessionCacheStore.getAllSlots()[0].lastActivityTs;
+
+		sessionCacheStore.evictSession("acc-1", "evictable", stamp);
+
+		expect(sessionCacheStore.getSize()).toBe(0);
+		expect(sessionCacheStore.getTotalBytes()).toBe(0);
+	});
+
+	it("keeps a slot a real turn re-registered after selection", () => {
+		register({ sessionKey: "raced" });
+		const stale = sessionCacheStore.getAllSlots()[0].lastActivityTs;
+		// A real turn replaces the slot object while the caller still holds the one
+		// it selected before its jitter delay.
+		register({ sessionKey: "raced" });
+		const fresh = sessionCacheStore.getAllSlots()[0];
+		(fresh as { lastActivityTs: number }).lastActivityTs = stale + 1;
+
+		sessionCacheStore.evictSession("acc-1", "raced", stale);
+
+		expect(sessionCacheStore.getSize()).toBe(1);
+		expect(sessionCacheStore.getAllSlots()[0].lastActivityTs).toBe(stale + 1);
+	});
+
+	it("is a no-op for a session that has no slot", () => {
+		expect(() =>
+			sessionCacheStore.evictSession("acc-1", "absent", Date.now()),
+		).not.toThrow();
+		expect(sessionCacheStore.getSize()).toBe(0);
+	});
+});

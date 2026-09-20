@@ -620,9 +620,22 @@ class SessionCacheStore {
 		slot.keepaliveCount = 0;
 	}
 
-	/** Drop one slot that policy says must never be replayed. */
-	evictSession(accountId: string, sessionKey: string): void {
-		this.deleteKey(SessionCacheStore.key(accountId, sessionKey));
+	/**
+	 * Drop one slot that policy says must never be replayed.
+	 *
+	 * Same stale-outcome guard as {@link recordKeepaliveFailure}: register()
+	 * REPLACES the slot object, so a caller holding one selected before a jitter
+	 * delay would otherwise delete a fresh slot a real turn created meanwhile.
+	 */
+	evictSession(
+		accountId: string,
+		sessionKey: string,
+		expectedLastActivityTs: number,
+	): void {
+		const key = SessionCacheStore.key(accountId, sessionKey);
+		const slot = this.slots.get(key);
+		if (!slot || slot.lastActivityTs !== expectedLastActivityTs) return;
+		this.deleteKey(key);
 	}
 
 	/** Remove all slots belonging to an account (e.g. account deleted). */
