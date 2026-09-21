@@ -78,47 +78,8 @@ export function startIntegrityScheduler(
 		return () => {};
 	}
 
-	const runQuick = async () => {
-		if (!dbOps.markIntegrityCheckRunning("quick")) {
-			logger.debug("Skipping quick check — another check is already running");
-			return;
-		}
-		logger.debug("Running quick integrity check...");
-		const { result, error } = await runCheckLocked(dbOps, "quick");
-		if (result === "ok") {
-			logger.debug("Quick integrity check passed");
-		} else if (result === "skipped") {
-			logger.warn(
-				`Quick integrity check skipped: ${error}; will retry next tick`,
-			);
-		} else {
-			logger.error(`Quick integrity check FAILED: ${error}`);
-			logger.error(
-				"Database corruption detected. Check database integrity from the dashboard (Overview → Storage / Integrity) or review these server logs for details.",
-			);
-		}
-	};
-
-	const runFull = async () => {
-		if (!dbOps.markIntegrityCheckRunning("full")) {
-			logger.debug("Skipping full check — another check is already running");
-			return;
-		}
-		logger.info("Running full integrity check...");
-		const { result, error } = await runCheckLocked(dbOps, "full");
-		if (result === "ok") {
-			logger.info("Full integrity check passed");
-		} else if (result === "skipped") {
-			logger.warn(
-				`Full integrity check skipped: ${error}; will retry next tick`,
-			);
-		} else {
-			logger.error(`Full integrity check FAILED: ${error}`);
-			logger.error(
-				"Database corruption detected. Check database integrity from the dashboard (Overview → Storage / Integrity) or review these server logs for details.",
-			);
-		}
-	};
+	const runQuick = () => runScheduledIntegrityCheck(dbOps, "quick", logger);
+	const runFull = () => runScheduledIntegrityCheck(dbOps, "full", logger);
 
 	const handles: ReturnType<typeof setTimeout>[] = [];
 	const intervals: ReturnType<typeof setInterval>[] = [];
@@ -156,21 +117,31 @@ export function startIntegrityScheduler(
 }
 
 /**
- * Defensive ceiling on the DB size we'll attempt a *full* integrity check on.
+ * Defensive ceiling on the DB size an AUTOMATIC integrity check will scan.
  * Our full check completes in ~tens of seconds even at 15 GiB (well under the
  * 10-min = 600 s worker cap), so this is NOT a normal-operation gate — it's
- * headroom against pathological growth where a full `integrity_check` could
- * exceed the worker timeout. Sizing: at a pessimistic ~4 s/GiB, 64 GiB ≈ 256 s
- * — comfortably under the 600 s cap — and it's >4× our current ~15 GiB, so a
- * healthy green stays reachable across realistic growth while still guarding
- * the genuinely pathological case. Set it too low and the surface pins
- * permanently amber, because a quick `ok` never clears a full skip. Above the
- * ceiling we run the (much cheaper) quick check instead and mark the full
- * probe `skipped`, so the surface stays honest (amber "couldn't complete")
- * rather than falsely red. Deliberately a fixed inline constant — no env var
- * (single-operator deploy-from-source).
+ * headroom against pathological growth where a check could exceed the worker
+ * timeout. Sizing: at a pessimistic ~4 s/GiB, 64 GiB ≈ 256 s — comfortably
+ * under the 600 s cap — and it's >4× our current ~15 GiB, so a healthy green
+ * stays reachable across realistic growth while still guarding the genuinely
+ * pathological case. Set it too low and the surface pins permanently amber,
+ * because a skip never clears to ok on its own.
+ *
+ * It governs BOTH timer-driven kinds. `quick_check` is cheaper per page than
+ * `integrity_check`, but it still walks every b-tree page and the freelist, so
+ * it reads essentially the whole file — substituting it above the ceiling
+ * would only change which whole-file scan runs on a timer. Above the ceiling
+ * the scheduled probe records `skipped` (amber "couldn't complete", never a
+ * green verdict) and scans nothing.
+ *
+ * On-demand checks ignore it entirely: an operator asking for a scan has
+ * chosen to pay for it, and leaving no way to check a large database would be
+ * worse than the scan.
+ *
+ * Deliberately a fixed inline constant — no env var (single-operator
+ * deploy-from-source).
  */
-const FULL_CHECK_MAX_DB_BYTES = 64 * 1024 ** 3;
+const AUTOMATIC_CHECK_MAX_DB_BYTES = 64 * 1024 ** 3;
 
 /**
  * Map a worker/runner result to the `(result, detail)` pair
@@ -214,12 +185,16 @@ function mapVerdict(
  * timeout / worker exception / defensive size-skip maps to `skipped`, which
  * preserves the last verified verdict rather than falsely flagging corruption.
  *
+ * `trigger` decides whether {@link AUTOMATIC_CHECK_MAX_DB_BYTES} applies: a
+ * timer-driven check is skipped above it, an operator-triggered one is not.
+ *
  * Records the result and (implicitly) releases the mutex via
  * `recordIntegrityResult`.
  */
 async function runCheckLocked(
 	dbOps: DatabaseOperations,
 	kind: "quick" | "full",
+	trigger: "scheduled" | "on-demand",
 ): Promise<{ result: "ok" | "corrupt" | "skipped"; error: string | null }> {
 	try {
 		const dbPath = dbOps.getResolvedDbPath();
@@ -252,41 +227,25 @@ async function runCheckLocked(
 			return { result, error: result === "corrupt" ? out : null };
 		}
 
-		// Size-skip (full only): on a pathologically large DB a full
-		// integrity_check could exceed the worker timeout. Run a quick check
-		// instead — while still holding the mutex we already claimed (do NOT
-		// re-claim) — and mark the full probe skipped. `statSync` failure just
-		// falls through to the normal full-worker path.
-		if (kind === "full") {
+		// Size ceiling, timer-driven checks only: on a pathologically large DB a
+		// scan could exceed the worker timeout, and both kinds read essentially
+		// the whole file. Record `skipped` while still holding the mutex we
+		// already claimed (do NOT re-claim) and scan nothing. A `statSync`
+		// failure just falls through to the normal worker path.
+		if (trigger === "scheduled") {
 			let dbBytes: number | null = null;
 			try {
 				dbBytes = statSync(dbPath).size;
 			} catch {
 				dbBytes = null;
 			}
-			if (dbBytes !== null && dbBytes > FULL_CHECK_MAX_DB_BYTES) {
+			if (dbBytes !== null && dbBytes > AUTOMATIC_CHECK_MAX_DB_BYTES) {
 				const gib = (dbBytes / 1024 ** 3).toFixed(1);
-				const ceilingGiB = (FULL_CHECK_MAX_DB_BYTES / 1024 ** 3).toFixed(0);
-				const quickResult = await runIntegrityCheckInWorker(dbPath, {
-					kind: "quick",
-				});
-				const mappedQuick = mapVerdict(quickResult);
-				const skipReason = `DB ${gib}GiB exceeds full-check ceiling ${ceilingGiB}GiB — ran quick check instead`;
-				// Record both synchronously (no await between) so the collapsed
-				// status reflects the quick verdict + full skip atomically.
-				dbOps.recordIntegrityResult(
-					"quick",
-					mappedQuick.result,
-					mappedQuick.detail,
+				const ceilingGiB = (AUTOMATIC_CHECK_MAX_DB_BYTES / 1024 ** 3).toFixed(
+					0,
 				);
-				dbOps.recordIntegrityResult("full", "skipped", skipReason);
-				// If the substitute quick check PROVED corruption, surface that as
-				// the outcome (correct ERROR log + honest on-demand return) rather
-				// than a benign "skipped" — the collapsed status is already corrupt
-				// via the records above, but the awaited return/log must agree.
-				if (mappedQuick.result === "corrupt") {
-					return { result: "corrupt", error: mappedQuick.detail };
-				}
+				const skipReason = `DB ${gib}GiB exceeds the automatic-check ceiling ${ceilingGiB}GiB — trigger a check from the dashboard to scan anyway`;
+				dbOps.recordIntegrityResult(kind, "skipped", skipReason);
 				return { result: "skipped", error: skipReason };
 			}
 		}
@@ -302,6 +261,45 @@ async function runCheckLocked(
 		const msg = String(error);
 		dbOps.recordIntegrityResult(kind, "skipped", msg);
 		return { result: "skipped", error: msg };
+	}
+}
+
+/**
+ * Run one TIMER-driven probe: claim the mutex, run the check, log the outcome.
+ *
+ * Separate entry point from {@link runIntegrityCheckOnDemand} because the two
+ * triggers differ on {@link AUTOMATIC_CHECK_MAX_DB_BYTES}: this one is skipped
+ * above the ceiling, an operator-triggered one is not.
+ */
+export async function runScheduledIntegrityCheck(
+	dbOps: DatabaseOperations,
+	kind: "quick" | "full",
+	logger: Logger = new Logger("IntegrityScheduler"),
+): Promise<void> {
+	const label = kind === "quick" ? "Quick" : "Full";
+	if (!dbOps.markIntegrityCheckRunning(kind)) {
+		logger.debug(`Skipping ${kind} check — another check is already running`);
+		return;
+	}
+	// A full check is rare and slow enough to be worth an info line; a quick
+	// one runs four times as often and stays at debug.
+	const announce = (message: string) => {
+		if (kind === "quick") logger.debug(message);
+		else logger.info(message);
+	};
+	announce(`Running ${kind} integrity check...`);
+	const { result, error } = await runCheckLocked(dbOps, kind, "scheduled");
+	if (result === "ok") {
+		announce(`${label} integrity check passed`);
+	} else if (result === "skipped") {
+		logger.warn(
+			`${label} integrity check skipped: ${error}; will retry next tick`,
+		);
+	} else {
+		logger.error(`${label} integrity check FAILED: ${error}`);
+		logger.error(
+			"Database corruption detected. Check database integrity from the dashboard (Overview → Storage / Integrity) or review these server logs for details.",
+		);
 	}
 }
 
@@ -326,7 +324,7 @@ export async function runIntegrityCheckOnDemand(
 	if (!dbOps.markIntegrityCheckRunning(kind)) {
 		return { ok: false, reason: "already-running" };
 	}
-	const { result, error } = await runCheckLocked(dbOps, kind);
+	const { result, error } = await runCheckLocked(dbOps, kind, "on-demand");
 	return { ok: true, result, error };
 }
 
@@ -358,6 +356,6 @@ export function startFullIntegrityCheckBackground(
 	}
 	// Fire-and-forget. `runCheckLocked` catches its own errors and
 	// always calls `recordIntegrityResult` to release the mutex.
-	void runCheckLocked(dbOps, "full");
+	void runCheckLocked(dbOps, "full", "on-demand");
 	return { ok: true };
 }
