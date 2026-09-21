@@ -640,5 +640,10 @@ it("keeps a read failure during a large terminal distinct from a parser error", 
 		nativeMarker: true,
 		cutAfterChunks: true,
 	});
-	expect(calls).toEqual([{ outcome: "error", reason: undefined }]);
+	// Not `native_responses_parse_error`: `classifyNativeResponsesEnd`'s
+	// cleanEof=false arm withholds the parse error, because the frame was cut in
+	// transit rather than delivered malformed.
+	expect(calls).toEqual([
+		{ outcome: "error", reason: "native_responses_no_terminal" },
+	]);
 });
