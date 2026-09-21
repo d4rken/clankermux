@@ -160,10 +160,14 @@ export interface RetentionGetResponse {
 	 */
 	payloadMaxMb: number;
 	requestDays: number;
+	/** Retention for the sanitized raw header sets in `request_headers`. */
+	headerDays: number;
 	usageSnapshotDays: number;
 	memorySnapshotDays: number;
 	cacheKeepaliveSnapshotDays: number;
 	storePayloads: boolean;
+	/** Independent of storePayloads — headers survive a payload drop. */
+	storeHeaders: boolean;
 }
 
 export interface RetentionSetRequest {
@@ -172,10 +176,12 @@ export interface RetentionSetRequest {
 	/** Byte budget for stored payloads in MEGABYTES; 0 disables it. */
 	payloadMaxMb?: number;
 	requestDays?: number;
+	headerDays?: number;
 	usageSnapshotDays?: number;
 	memorySnapshotDays?: number;
 	cacheKeepaliveSnapshotDays?: number;
 	storePayloads?: boolean;
+	storeHeaders?: boolean;
 }
 
 // Project-attribution rules. Shared rather than re-declared client-side: a
@@ -224,6 +230,7 @@ export interface StorageUsageType {
 	key:
 		| "payloads"
 		| "requests"
+		| "headers"
 		| "usage_snapshots"
 		| "usage_scoped_snapshots"
 		| "unified_claim_observations"

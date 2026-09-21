@@ -174,6 +174,11 @@ export type IncrementalVacuumRequest =
 			 * PROVIDER_WINDOW_OBSERVATION_RETENTION_MS.
 			 */
 			providerWindowObservationCutoff: number;
+			/**
+			 * Cutoff for `request_headers`, aged by `created_at`. Operator-set via
+			 * header_retention_days — see getHeaderRetentionDays() in config.
+			 */
+			headerCutoff: number;
 			// Byte budget for retained payload CONTENT (not file size); 0 disables
 			// the size pass. Applied on top of payloadCutoff — whichever rule
 			// deletes more wins.
@@ -202,6 +207,8 @@ export type CleanupCounts = {
 	removedCodexWindowObservations: number;
 	/** Raw OpenAI-compatible bucket readings. */
 	removedOpenAiBucketObservations: number;
+	/** Sanitized header sets, aged by `created_at` on their own control. */
+	removedHeaders: number;
 };
 
 export type IncrementalVacuumResult =
@@ -439,7 +446,12 @@ export async function deleteBatched(
  * free string: the column name is interpolated into SQL, so the set of legal
  * values is fixed here rather than trusted from a call site.
  */
-type TimeColumn = "sampled_at" | "observed_at" | "started_at" | "until_at";
+type TimeColumn =
+	| "sampled_at"
+	| "observed_at"
+	| "started_at"
+	| "until_at"
+	| "created_at";
 
 /**
  * Best-effort BATCHED delete of aged rows from a time-series table by its own
@@ -526,6 +538,7 @@ async function runCleanup(
 	unifiedSummaryObservationCutoff: number,
 	internalDispatchSpendCutoff: number,
 	providerWindowObservationCutoff: number,
+	headerCutoff: number,
 	payloadMaxBytes: number,
 ): Promise<void> {
 	let db: Database | undefined;
@@ -663,6 +676,17 @@ async function runCleanup(
 			"observed_at",
 		);
 
+		// Sanitized header sets, aged by `created_at` on the operator's
+		// header_retention_days. Batched for the same reason as the claim series:
+		// it carries one ~2.2 KB row per request, so a window change can queue
+		// millions of deletes on one tick.
+		const removedHeaders = await tryDeleteSnapshotsBatched(
+			db,
+			"request_headers",
+			headerCutoff,
+			"created_at",
+		);
+
 		// Precomputed quota-drift payloads: keep the most recent few, drop the
 		// rest. Age is the wrong rule here — a scheduler that has been down for a
 		// week must not have its one surviving result aged out from under the
@@ -756,6 +780,7 @@ async function runCleanup(
 				removedInternalDispatchSpend,
 				removedCodexWindowObservations,
 				removedOpenAiBucketObservations,
+				removedHeaders,
 			},
 		} satisfies IncrementalVacuumResult);
 	} catch (err) {
@@ -784,6 +809,7 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 			request.unifiedSummaryObservationCutoff,
 			request.internalDispatchSpendCutoff,
 			request.providerWindowObservationCutoff,
+			request.headerCutoff,
 			request.payloadMaxBytes,
 		);
 	} else {

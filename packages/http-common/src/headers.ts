@@ -73,40 +73,101 @@ export function sanitizeProxyHeaders(original: Headers): Headers {
 }
 
 /**
- * Removes hop-by-hop + compression negotiation headers and sensitive auth
- * headers from the ORIGINAL client request before it is persisted for
- * analytics.
+ * Credentials and stable identifiers that must never reach storage, on EITHER
+ * side of the exchange. One list for both sanitizers on purpose: they used to
+ * carry separate hand-maintained sets, and the request side gained names the
+ * response side never did. A stored header set now outlives its payload by
+ * months, so a name missing from one list is a credential kept for a quarter.
  *
- * Removes: accept-encoding, content-encoding, transfer-encoding, content-length,
- * authorization, x-api-key, cookie, and stable client identity headers.
+ * Several of these travel in both directions — a client sends
+ * `x-codex-session-id` and upstream echoes it, `authorization` is a request
+ * credential while `set-cookie` is its response-side counterpart — so the
+ * split was never along the request/response line anyway.
+ *
+ * `proxy-authorization` is on the RFC 9110 hop-by-hop list above, but neither
+ * sanitizer calls {@link stripHopByHopHeaders}; it is named here so it cannot
+ * depend on that.
+ */
+const STORAGE_IDENTITY_HEADERS = [
+	// Credentials.
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"cookie",
+	"set-cookie",
+	"set-cookie2",
+	// Stable client/session/turn identifiers.
+	"x-claude-code-session-id",
+	"thread-id",
+	"session-id",
+	// Underscore spelling, not a typo: the Codex CLI sends both, and
+	// `Headers.delete` matches the exact name.
+	"session_id",
+	"x-client-request-id",
+	"x-codex-installation-id",
+	"x-codex-window-id",
+	"x-codex-turn-state",
+	"x-codex-session-id",
+	"x-codex-conversation-id",
+	"chatgpt-account-id",
+	"traceparent",
+	"tracestate",
+] as const;
+
+/**
+ * Compression/framing headers invalidated by Bun's automatic decompression:
+ * the stored value would describe a body that no longer exists in that form.
+ */
+const STORAGE_FRAMING_HEADERS = [
+	"accept-encoding",
+	"content-encoding",
+	"content-length",
+	"transfer-encoding",
+] as const;
+
+/**
+ * Removes credentials, stable identity headers, and compression negotiation
+ * headers from the ORIGINAL client request before it is persisted for
+ * analytics. Storage only — nothing on the forwarding path calls this, so a
+ * name added here is dropped from the archive, not from the upstream request.
  */
 export function sanitizeRequestHeaders(original: Headers): Headers {
 	const h = new Headers(original);
-	h.delete("accept-encoding");
-	h.delete("content-encoding");
-	h.delete("content-length");
-	h.delete("transfer-encoding");
-	// Strip sensitive auth headers from persisted payloads
-	h.delete("authorization");
-	h.delete("x-api-key");
-	h.delete("cookie");
-	// Strip stable client/session identifiers from persisted request payloads.
-	h.delete("x-claude-code-session-id");
-	h.delete("thread-id");
-	h.delete("session-id");
-	h.delete("x-client-request-id");
-	h.delete("x-codex-installation-id");
-	h.delete("x-codex-window-id");
-	h.delete("x-codex-turn-state");
-	h.delete("chatgpt-account-id");
-	h.delete("traceparent");
-	h.delete("tracestate");
-	// Strip internal routing/probe headers from persisted request payloads.
+	for (const name of STORAGE_FRAMING_HEADERS) h.delete(name);
+	for (const name of STORAGE_IDENTITY_HEADERS) h.delete(name);
+	// Internal routing/probe headers: meaningful to this proxy, noise in an archive.
 	h.delete("x-clankermux-account-id");
 	h.delete("x-clankermux-bypass-session");
 	h.delete("x-clankermux-keepalive");
 	h.delete("x-clankermux-auto-refresh");
 	h.delete("x-clankermux-skip-cache");
+	return h;
+}
+
+/**
+ * Response headers that are pure volume for analytics: a per-response unique
+ * value nothing aggregates over. Measured on 300 live payloads, these four
+ * cost 562 bytes of the 1882-byte average response header set — a fifth of it,
+ * and the reason a stored header set never dedupes against its neighbours.
+ */
+const STORAGE_NOISE_RESPONSE_HEADERS = [
+	"report-to",
+	"traceresponse",
+	"cf-ray",
+	"nel",
+] as const;
+
+/**
+ * Sanitizes UPSTREAM response headers before they are persisted for analytics.
+ * Distinct from {@link sanitizeProxyHeaders}, which prepares headers to send to
+ * the client and must keep things a client needs (cookies, trace ids) that a
+ * long-lived archive must not hold.
+ */
+export function sanitizeResponseHeadersForStorage(original: Headers): Headers {
+	const h = new Headers(original);
+	for (const name of STORAGE_IDENTITY_HEADERS) h.delete(name);
+	for (const name of STORAGE_NOISE_RESPONSE_HEADERS) h.delete(name);
+	for (const name of STORAGE_FRAMING_HEADERS) h.delete(name);
 	return h;
 }
 

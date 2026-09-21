@@ -106,6 +106,7 @@ function makeContext(accounts: Account[]): {
 			saved.push(data);
 		}),
 		saveRequestRouting: mock(async () => {}),
+		saveRequestHeaders: mock(async () => {}),
 		saveRequestToolCalls: mock(async () => {}),
 		encryptPayloadForStorage: mock(async (json: string) => json),
 		updateRequestUsage: mock(async () => {}),

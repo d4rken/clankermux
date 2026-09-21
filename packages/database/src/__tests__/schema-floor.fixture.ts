@@ -214,6 +214,17 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "executed",
 	},
+	request_headers: {
+		shipped: "2026-09-21",
+		commit: "header-retention",
+		columns: [
+			"request_id",
+			"request_headers",
+			"response_headers",
+			"created_at",
+		],
+		source: "create-table-at-intro",
+	},
 	request_tool_calls: {
 		shipped: "2026-06-10",
 		commit: "3493369e",

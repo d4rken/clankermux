@@ -246,6 +246,28 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_request_routing_affinity ON request_routing(affinity_key_hash, created_at DESC) WHERE affinity_key_hash IS NOT NULL`,
 	);
 
+	// Sanitized raw header sets, split out of the payload envelope so they can
+	// outlive it. The envelope is governed by payload_retention_hours (24h by
+	// default) and a byte budget that evicts oldest-first; headers are ~0.3% of
+	// its bytes and are the part long-range client/provider analytics reads, so
+	// they get their own table and their own retention control.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS request_headers (
+			request_id TEXT PRIMARY KEY,
+			request_headers TEXT,
+			response_headers TEXT,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Serves the age-cutoff DELETE. The retention pass is the only query that
+	// scans this table by time; everything else looks a row up by request_id,
+	// which the primary key already covers.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_request_headers_created_at ON request_headers(created_at)`,
+	);
+
 	// Create request_tool_calls table for per-request tool-call analytics
 	// (one row per distinct tool used in the request's final message).
 	db.run(`

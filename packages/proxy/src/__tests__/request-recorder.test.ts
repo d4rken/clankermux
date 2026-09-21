@@ -48,7 +48,12 @@ interface SaveRequestCall {
 	fallbackFromModel: string | null | undefined;
 }
 
-type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
+type EnqueuedKind =
+	| "request"
+	| "routing"
+	| "headers"
+	| "tool_calls"
+	| "payload";
 
 class FakeDbOps {
 	saveRequestCalls: SaveRequestCall[] = [];
@@ -140,6 +145,13 @@ class FakeDbOps {
 		this.order.push("routing");
 		if (this.failRouting) throw new Error("saveRequestRouting failed");
 		this.saveRoutingCalls.push(data);
+	}
+
+	saveHeadersCalls: Record<string, unknown>[] = [];
+
+	async saveRequestHeaders(data: Record<string, unknown>): Promise<void> {
+		this.order.push("headers");
+		this.saveHeadersCalls.push(data);
 	}
 
 	async saveRequestToolCalls(
@@ -427,6 +439,7 @@ interface Harness {
 	emitted: RequestResponse[];
 	timers: FakeTimers;
 	storePayloads: { value: boolean };
+	storeHeaders: { value: boolean };
 	droppedMetadata: { count: number };
 	/** Drain the writer's queue + microtasks so DB calls/order are observable. */
 	flush: () => Promise<void>;
@@ -447,6 +460,7 @@ function makeHarness(
 	const emitted: RequestResponse[] = [];
 	const timers = new FakeTimers();
 	const storePayloads = { value: true };
+	const storeHeaders = { value: true };
 	const droppedMetadata = { count: 0 };
 
 	const recorder = new RequestRecorder({
@@ -454,6 +468,7 @@ function makeHarness(
 		asyncWriter: writer as never,
 		emitSummaryEvent: (r: RequestResponse) => emitted.push(r),
 		getStorePayloads: () => storePayloads.value,
+		getStoreHeaders: () => storeHeaders.value,
 		now: timers.now,
 		scheduleTimer: timers.schedule,
 		clearTimer: timers.clear,
@@ -479,6 +494,7 @@ function makeHarness(
 		emitted,
 		timers,
 		storePayloads,
+		storeHeaders,
 		droppedMetadata,
 		flush: async () => {
 			// Drain the FIFO queue, then yield a couple of microtask turns so any
@@ -849,7 +865,12 @@ describe("RequestRecorder — FK-ordered persistence", () => {
 		h.recorder.finishTransport("req-1", "success");
 		await h.flush();
 
-		expect(h.writer.order).toEqual(["request", "routing", "payload"]);
+		expect(h.writer.order).toEqual([
+			"request",
+			"routing",
+			"headers",
+			"payload",
+		]);
 		expect(h.dbOps.saveRoutingCalls.length).toBe(1);
 		expect(h.dbOps.saveRoutingCalls[0].requestId).toBe("req-1");
 		expect(h.dbOps.saveRoutingCalls[0].failoverAttempts).toBe(0);
@@ -861,7 +882,7 @@ describe("RequestRecorder — FK-ordered persistence", () => {
 		h.recorder.attachUsageSummary("req-1", makeSummary());
 		h.recorder.finishTransport("req-1", "success");
 		await h.flush();
-		expect(h.writer.order).toEqual(["request", "payload"]);
+		expect(h.writer.order).toEqual(["request", "headers", "payload"]);
 		expect(h.dbOps.saveRoutingCalls.length).toBe(0);
 	});
 });
@@ -902,6 +923,7 @@ describe("RequestRecorder — tool-call stats persistence", () => {
 			"request",
 			"routing",
 			"tool_calls",
+			"headers",
 			"payload",
 		]);
 		expect(h.dbOps.saveToolCallsCalls.length).toBe(1);
@@ -916,7 +938,12 @@ describe("RequestRecorder — tool-call stats persistence", () => {
 		h.recorder.finishTransport("req-1", "success");
 		await h.flush();
 
-		expect(h.writer.order).toEqual(["request", "tool_calls", "payload"]);
+		expect(h.writer.order).toEqual([
+			"request",
+			"tool_calls",
+			"headers",
+			"payload",
+		]);
 		expect(h.dbOps.saveToolCallsCalls.length).toBe(1);
 	});
 
@@ -928,7 +955,7 @@ describe("RequestRecorder — tool-call stats persistence", () => {
 		await h.flush();
 
 		expect(h.dbOps.saveToolCallsCalls.length).toBe(0);
-		expect(h.writer.order).toEqual(["request", "payload"]);
+		expect(h.writer.order).toEqual(["request", "headers", "payload"]);
 	});
 
 	it("does not call saveRequestToolCalls for an empty stats array", async () => {
@@ -958,7 +985,7 @@ describe("RequestRecorder — payload drop under pressure", () => {
 		// Drop recorded with the estimated byte count (positive).
 		expect(h.writer.recordedDrops[0]).toBeGreaterThan(0);
 		// Metadata still written: order is request only (no payload).
-		expect(h.writer.order).toEqual(["request"]);
+		expect(h.writer.order).toEqual(["request", "headers"]);
 	});
 });
 
@@ -980,6 +1007,53 @@ describe("RequestRecorder — payload storage disabled", () => {
 		expect(h.writer.payloadEnqueues.length).toBe(0);
 		// Disabled storage never even estimates a payload drop.
 		expect(h.writer.recordedDrops.length).toBe(0);
+	});
+
+	// The whole reason header capture has its own switch: the long-range series
+	// must not develop holes when payloads stop being stored.
+	it("still stores the header sets", async () => {
+		const h = makeHarness();
+		h.storePayloads.value = false;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.savePayloadCalls.length).toBe(0);
+		expect(h.dbOps.saveHeadersCalls.length).toBe(1);
+		expect(h.dbOps.saveHeadersCalls[0]).toEqual({
+			requestId: "req-1",
+			requestHeaders: { "content-type": "application/json" },
+			responseHeaders: {},
+			createdAt: 1_700_000_000_000,
+		});
+	});
+});
+
+describe("RequestRecorder — header storage", () => {
+	it("writes the header row only after the request row it points at", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveHeadersCalls.length).toBe(1);
+		expect(h.dbOps.order.indexOf("headers")).toBeGreaterThan(
+			h.dbOps.order.indexOf("request"),
+		);
+	});
+
+	it("writes nothing when header storage is disabled", async () => {
+		const h = makeHarness();
+		h.storeHeaders.value = false;
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls.length).toBe(1);
+		expect(h.dbOps.saveHeadersCalls.length).toBe(0);
 	});
 });
 
@@ -1365,7 +1439,12 @@ describe("RequestRecorder — recordSynthetic", () => {
 			"error",
 		);
 		await h.flush();
-		expect(h.writer.order).toEqual(["request", "routing", "payload"]);
+		expect(h.writer.order).toEqual([
+			"request",
+			"routing",
+			"headers",
+			"payload",
+		]);
 	});
 });
 
@@ -2006,7 +2085,7 @@ describe("RequestRecorder — payload ordering and reservation", () => {
 
 		// Same job, strict order: the request row is written first, the payload
 		// is published afterwards — never the other way round.
-		expect(h.writer.order).toEqual(["request", "payload"]);
+		expect(h.writer.order).toEqual(["request", "headers", "payload"]);
 		expect(h.writer.published).toHaveLength(1);
 		expect(h.writer.outstandingReservations).toBe(0);
 	});

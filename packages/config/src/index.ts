@@ -59,6 +59,8 @@ export interface ConfigData {
 	/** Byte budget for stored payloads, in MEGABYTES. 0 disables the budget. */
 	payload_max_mb?: number;
 	request_retention_days?: number;
+	header_retention_days?: number;
+	store_headers?: boolean;
 	usage_snapshot_retention_days?: number;
 	memory_snapshot_retention_days?: number;
 	store_payloads?: boolean;
@@ -411,6 +413,53 @@ export class Config extends EventEmitter {
 		this.set("request_retention_days", clamped);
 	}
 
+	/**
+	 * Retention for `request_headers` — the sanitized raw header sets, kept for
+	 * long-range client and provider analytics.
+	 *
+	 * The default is 90 days rather than the 3650 its sibling
+	 * `request_retention_days` uses, because this table grows with request
+	 * volume times header-set size rather than with a fixed per-request row:
+	 * measured at ~2.2 KB per request after sanitization, a decade of it is
+	 * ~150 GB. 90 days also matches
+	 * UNIFIED_CLAIM_OBSERVATION_RETENTION_MS, so a join from a stored header set
+	 * to the typed rate-limit series it was captured with cannot half-orphan.
+	 */
+	getHeaderRetentionDays(): number {
+		const fromEnv = process.env.HEADER_RETENTION_DAYS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 1, 3650);
+		}
+		const fromFile = this.data.header_retention_days;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
+		return 90;
+	}
+
+	setHeaderRetentionDays(days: number): void {
+		const clamped = this.clamp(days, 1, 3650);
+		this.set("header_retention_days", clamped);
+	}
+
+	/**
+	 * Whether sanitized request/response header sets are persisted.
+	 *
+	 * Deliberately independent of `store_payloads`: headers are ~0.3% of a
+	 * payload envelope and outlive it by months, so they must keep being
+	 * captured when payloads are dropped for the byte budget or switched off
+	 * entirely. Sharing the payload switch would put gaps in the long-range
+	 * series exactly during the heaviest traffic.
+	 */
+	getStoreHeaders(): boolean {
+		const fromFile = this.data.store_headers;
+		if (typeof fromFile === "boolean") return fromFile;
+		return true;
+	}
+
+	setStoreHeaders(value: boolean): void {
+		this.set("store_headers", value);
+	}
+
 	getUsageSnapshotRetentionDays(): number {
 		const fromFile = this.data.usage_snapshot_retention_days;
 		if (typeof fromFile === "number") return this.clamp(fromFile, 1, 3650);
@@ -622,6 +671,8 @@ export class Config extends EventEmitter {
 			payload_retention_hours: this.getPayloadRetentionHours(),
 			payload_max_mb: this.getPayloadMaxMb(),
 			request_retention_days: this.getRequestRetentionDays(),
+			header_retention_days: this.getHeaderRetentionDays(),
+			store_headers: this.getStoreHeaders(),
 			usage_snapshot_retention_days: this.getUsageSnapshotRetentionDays(),
 			memory_snapshot_retention_days: this.getMemorySnapshotRetentionDays(),
 			store_payloads: this.getStorePayloads(),

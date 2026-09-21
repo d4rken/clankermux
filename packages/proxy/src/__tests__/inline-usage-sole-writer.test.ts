@@ -61,6 +61,7 @@ class FakeDbOps {
 		});
 	}
 	async saveRequestRouting(): Promise<void> {}
+	async saveRequestHeaders(): Promise<void> {}
 	async saveRequestToolCalls(): Promise<void> {}
 	async encryptPayloadForStorage(json: string): Promise<string> {
 		return json;

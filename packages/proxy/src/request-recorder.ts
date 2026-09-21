@@ -260,6 +260,17 @@ interface SaveRoutingData {
 }
 
 /**
+ * Persisted header-row shape. Mirrors `RequestHeadersData` — see
+ * SaveRoutingData for why these shapes are duplicated rather than imported.
+ */
+interface SaveHeadersData {
+	requestId: string;
+	requestHeaders: Record<string, string> | null;
+	responseHeaders: Record<string, string> | null;
+	createdAt: number;
+}
+
+/**
  * Persisted request-row shape. Mirrors `RequestData`
  * (database/src/repositories/request.repository.ts) — see SaveRoutingData for
  * why these shapes are duplicated rather than imported.
@@ -333,6 +344,7 @@ export type ProjectAttributionSourceIsRequired = Assert<
 interface DbOpsLike {
 	saveRequest(data: SaveRequestData): Promise<void>;
 	saveRequestRouting(data: SaveRoutingData): Promise<void>;
+	saveRequestHeaders(data: SaveHeadersData): Promise<void>;
 	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
 	/**
 	 * Encrypt-only: produces the STORED FORM of the payload envelope. The insert
@@ -377,6 +389,11 @@ export interface RequestRecorderDeps {
 	asyncWriter: AsyncWriterLike;
 	emitSummaryEvent: (response: RequestResponse) => void;
 	getStorePayloads: () => boolean;
+	/**
+	 * Optional so existing construction sites (and tests) keep compiling; when
+	 * omitted, header capture follows the default-on config value.
+	 */
+	getStoreHeaders?: () => boolean;
 	now?: () => number;
 	scheduleTimer?: (cb: () => void, ms: number) => unknown;
 	clearTimer?: (id: unknown) => void;
@@ -459,6 +476,7 @@ export class RequestRecorder {
 	private readonly asyncWriter: AsyncWriterLike;
 	private readonly emitSummaryEvent: (response: RequestResponse) => void;
 	private readonly getStorePayloads: () => boolean;
+	private readonly getStoreHeaders: () => boolean;
 	private readonly now: () => number;
 	private readonly scheduleTimer: (cb: () => void, ms: number) => unknown;
 	private readonly clearTimer: (id: unknown) => void;
@@ -475,6 +493,7 @@ export class RequestRecorder {
 		this.asyncWriter = deps.asyncWriter;
 		this.emitSummaryEvent = deps.emitSummaryEvent;
 		this.getStorePayloads = deps.getStorePayloads;
+		this.getStoreHeaders = deps.getStoreHeaders ?? (() => true);
 		this.now = deps.now ?? Date.now;
 		this.scheduleTimer =
 			deps.scheduleTimer ?? ((cb, ms) => setTimeout(cb, ms) as unknown);
@@ -943,6 +962,10 @@ export class RequestRecorder {
 	): void {
 		const meta = record.meta;
 		const storePayloads = this.getStorePayloads();
+		// Read independently of storePayloads: headers are captured even when the
+		// envelope is dropped for the byte budget or payload storage is off, so
+		// the long-range series has no holes during the heaviest traffic.
+		const storeHeaders = this.getStoreHeaders();
 
 		// Stage 1: estimate BEFORE serializing, and reserve before enqueuing.
 		let reservation: PayloadReservationLike | null = null;
@@ -1044,6 +1067,25 @@ export class RequestRecorder {
 				} catch (error) {
 					log.error(
 						`Failed to save request routing/tool calls for ${meta.requestId}:`,
+						error,
+					);
+				}
+			}
+
+			// Its own try/catch rather than folded into the block above: header
+			// capture has a separate switch and a separate retention, so a failure
+			// on either side must not take the other down with it.
+			if (requestRowSaved && storeHeaders) {
+				try {
+					await this.dbOps.saveRequestHeaders({
+						requestId: meta.requestId,
+						requestHeaders: meta.requestHeaders,
+						responseHeaders: meta.responseHeaders,
+						createdAt: meta.timestamp,
+					});
+				} catch (error) {
+					log.error(
+						`Failed to save request headers for ${meta.requestId}:`,
 						error,
 					);
 				}

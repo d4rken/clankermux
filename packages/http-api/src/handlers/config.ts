@@ -56,11 +56,13 @@ export function createConfigHandlers(
 				payloadHours: config.getPayloadRetentionHours(),
 				payloadMaxMb: config.getPayloadMaxMb(),
 				requestDays: config.getRequestRetentionDays(),
+				headerDays: config.getHeaderRetentionDays(),
 				usageSnapshotDays: config.getUsageSnapshotRetentionDays(),
 				memorySnapshotDays: config.getMemorySnapshotRetentionDays(),
 				cacheKeepaliveSnapshotDays:
 					config.getCacheKeepaliveSnapshotRetentionDays(),
 				storePayloads: config.getStorePayloads(),
+				storeHeaders: config.getStoreHeaders(),
 			} satisfies RetentionGetResponse);
 		},
 
@@ -106,6 +108,18 @@ export function createConfigHandlers(
 					return errorResponse(BadRequest("Invalid 'requestDays'"));
 				}
 				config.setRequestRetentionDays(requestDays);
+				updated = true;
+			}
+			if (body.headerDays !== undefined) {
+				const headerDays = validateNumber(body.headerDays, "headerDays", {
+					min: 1,
+					max: 3650,
+					integer: true,
+				});
+				if (typeof headerDays !== "number") {
+					return errorResponse(BadRequest("Invalid 'headerDays'"));
+				}
+				config.setHeaderRetentionDays(headerDays);
 				updated = true;
 			}
 			if (body.usageSnapshotDays !== undefined) {
@@ -167,6 +181,15 @@ export function createConfigHandlers(
 					);
 				}
 				config.setStorePayloads(body.storePayloads);
+				updated = true;
+			}
+			if (body.storeHeaders !== undefined) {
+				if (typeof body.storeHeaders !== "boolean") {
+					return errorResponse(
+						BadRequest("Invalid 'storeHeaders': must be boolean"),
+					);
+				}
+				config.setStoreHeaders(body.storeHeaders);
 				updated = true;
 			}
 			if (!updated) {

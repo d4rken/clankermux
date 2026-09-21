@@ -166,6 +166,18 @@ export interface RequestRoutingData {
 	createdAt?: number;
 }
 
+/**
+ * Sanitized header sets for one request. Both sides are already stripped of
+ * auth, session and high-cardinality noise before they reach here — see
+ * `sanitizeRequestHeaders` / `sanitizeResponseHeadersForStorage`.
+ */
+export interface RequestHeadersData {
+	requestId: string;
+	requestHeaders: Record<string, string> | null;
+	responseHeaders: Record<string, string> | null;
+	createdAt: number;
+}
+
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
@@ -319,6 +331,69 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintContextCompacted ?? null,
 			],
 		);
+	}
+
+	/**
+	 * Upsert rather than plain insert: a request can be recorded more than once
+	 * (the recorder patches a row when usage finalizes late), and losing the
+	 * headers to a PK conflict would leave the long-range series with holes it
+	 * reports as "this request had no headers" rather than as an error.
+	 */
+	async saveHeaders(data: RequestHeadersData): Promise<void> {
+		await this.run(
+			`
+			INSERT INTO request_headers (
+				request_id, request_headers, response_headers, created_at
+			)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (request_id) DO UPDATE SET
+				request_headers = COALESCE(EXCLUDED.request_headers, request_headers.request_headers),
+				response_headers = COALESCE(EXCLUDED.response_headers, request_headers.response_headers),
+				created_at = COALESCE(request_headers.created_at, EXCLUDED.created_at)
+		`,
+			[
+				data.requestId,
+				data.requestHeaders ? JSON.stringify(data.requestHeaders) : null,
+				data.responseHeaders ? JSON.stringify(data.responseHeaders) : null,
+				data.createdAt,
+			],
+		);
+	}
+
+	/**
+	 * Read one request's stored header sets. Returns null when the row is gone
+	 * (pruned, or never captured because `store_headers` was off). A row whose
+	 * JSON fails to parse yields null for that side rather than throwing: these
+	 * are diagnostics, and a single malformed historical row must not break the
+	 * read for the request beside it.
+	 */
+	async getHeaders(requestId: string): Promise<{
+		requestHeaders: Record<string, string> | null;
+		responseHeaders: Record<string, string> | null;
+		createdAt: number;
+	} | null> {
+		const row = await this.get<{
+			request_headers: string | null;
+			response_headers: string | null;
+			created_at: number;
+		}>(
+			`SELECT request_headers, response_headers, created_at FROM request_headers WHERE request_id = ?`,
+			[requestId],
+		);
+		if (!row) return null;
+		const parse = (raw: string | null) => {
+			if (!raw) return null;
+			try {
+				return JSON.parse(raw) as Record<string, string>;
+			} catch {
+				return null;
+			}
+		};
+		return {
+			requestHeaders: parse(row.request_headers),
+			responseHeaders: parse(row.response_headers),
+			createdAt: row.created_at,
+		};
 	}
 
 	async saveRouting(data: RequestRoutingData): Promise<void> {
