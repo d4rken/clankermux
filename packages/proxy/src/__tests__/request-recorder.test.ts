@@ -3,6 +3,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 // ordinary metadata-queue capacity rejection, which a fake `enqueue` switch
 // cannot reproduce.
 import { AsyncDbWriter } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 import type {
 	CachePrefixCapture,
 	ContextComposition,
@@ -291,6 +292,11 @@ class FakeAsyncWriter {
 	enqueueShutdownBatch(job: () => void | Promise<void>): boolean {
 		this.queue.push(job);
 		return true;
+	}
+
+	/** Non-counting capacity probe; `acceptMetadata` is the modelled cap. */
+	canAcceptMetadata(): boolean {
+		return this.acceptMetadata;
 	}
 
 	canAcceptPayload(_bytes: number): boolean {
@@ -3056,3 +3062,200 @@ describe("RequestRecorder — settlement retention", () => {
 		expect(meta.requestBody?.byteLength).toBe(18);
 	});
 });
+
+describe("RequestRecorder — refused token patch (F10)", () => {
+	// `patchUsage` enqueues the token-carrying update and DISCARDS the boolean,
+	// then drops the record unconditionally. Under metadata-queue saturation the
+	// patch is refused and the record — the only thing that could retry it — is
+	// destroyed, so the row keeps NULL tokens, a NULL stamp and a NULL
+	// usage_source, and the published API reads `finalized: false` for good.
+	it("keeps the record when the token patch enqueue is REFUSED", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The queue saturates, then the real token vector arrives. The patch is
+		// the only carrier of those tokens.
+		h.writer.acceptMetadata = false;
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+
+		// The write did not land — that part is the queue's prerogative.
+		expect(h.dbOps.updateUsageCalls).toHaveLength(0);
+		// ...but the record must survive it, exactly as the settlement path does.
+		expect(h.recorder.getRecordCount()).toBe(1);
+		const retained = peekRecord(h.recorder, "req-1");
+		expect(retained?.settlementPending).toBe(true);
+		// Retention now outlives the TTL, so the retained record must be small.
+		expect(retained?.meta.requestBody).toBeNull();
+	});
+
+	it("lands the REAL token vector on a later retry and never settles it to 'none'", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		await h.flush();
+		expect(h.dbOps.updateUsageCalls).toHaveLength(0);
+
+		// Admission recovers; the sweep is what retries.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		const patches = h.dbOps.updateUsageCalls.filter((c) => c.id === "req-1");
+		expect(patches).toHaveLength(1);
+		const usage = patches[0].usage as Record<string, unknown>;
+		expect(usage.totalTokens).toBe(165);
+		expect(usage.promptTokens).toBe(115);
+		expect(usage.completionTokens).toBe(50);
+		expect(patches[0].usageSource).toBe("provider");
+
+		// 'none' would be a FALSE statement — the tokens are known — and the
+		// write-once column would make the lie permanent.
+		expect(
+			h.dbOps.markUsageSourceCalls.filter((c) => c.id === "req-1"),
+		).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+});
+
+describe("RequestRecorder — retained-record amplification (F11)", () => {
+	// (a) The refusal branch counts, fires onMetadataDrop and logs on EVERY
+	// refused retry, not just on the transition into the refused state. One
+	// saturated backlog therefore inflates the health metric and the log once
+	// per sweep for as long as it lasts.
+	it("counts and logs a refused settlement ONCE, not on every retry", async () => {
+		const warned = spyOn(Logger.prototype, "warn");
+		try {
+			const h = makeHarness();
+			h.recorder.begin(makeMeta());
+			h.recorder.finishTransport("req-1", "success");
+			h.timers.advance(150); // grace → persisted with usage_source NULL
+			await h.flush();
+
+			h.writer.acceptMetadata = false;
+			h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+			await h.flush();
+			expect(h.recorder.getMetadataDropped()).toBe(1);
+			expect(h.droppedMetadata.count).toBe(1);
+			expect(countSettlementWarnings(warned, "req-1")).toBe(1);
+
+			// The backlog persists and the sweep retries. A retry refused again is
+			// the SAME drop.
+			for (let i = 0; i < 3; i++) {
+				h.recorder.sweep();
+				await h.flush();
+			}
+			expect(h.recorder.getRecordCount()).toBe(1);
+
+			expect(h.recorder.getMetadataDropped()).toBe(1);
+			expect(h.droppedMetadata.count).toBe(1);
+			expect(countSettlementWarnings(warned, "req-1")).toBe(1);
+		} finally {
+			warned.mockRestore();
+		}
+	});
+
+	// (b) `enforceRecordCap` runs from begin() on every request. Retained records
+	// are the oldest entries, so the loop walks all of them first, retrying and
+	// logging each: N retained means N drops counted per INCOMING request.
+	it("does not re-count every retained record on each incoming request", async () => {
+		const h = makeHarness({ MAX_RECORDS: 3 });
+		for (const id of ["hold-0", "hold-1", "hold-2"]) {
+			h.recorder.begin(makeMeta({ requestId: id }));
+			h.recorder.finishTransport(id, "success");
+		}
+		h.timers.advance(150); // grace → all three persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → three REFUSED settlements
+		await h.flush();
+		expect(h.recorder.getMetadataDropped()).toBe(3);
+		expect(h.droppedMetadata.count).toBe(3);
+
+		// One more request arrives while the backlog is still saturated.
+		h.recorder.begin(makeMeta({ requestId: "probe" }));
+		await h.flush();
+
+		expect(h.recorder.getMetadataDropped()).toBe(3);
+		expect(h.droppedMetadata.count).toBe(3);
+	});
+
+	// (c) In that same loop a refused record `continue`s WITHOUT incrementing
+	// `removed`, so the walk carries on past it into younger, live records and
+	// takes the `transport === null` branch on them — releasing the buffers and
+	// setting bodyDiscarded, which suppresses the payload entirely. A record
+	// held for a settlement retry thereby destroys an in-flight request's
+	// captured payload.
+	it("does not evict a LIVE request's payload capture to make room past a retained record", async () => {
+		const h = makeHarness({ MAX_RECORDS: 2 });
+
+		// Oldest entry: persisted with usage_source NULL, settlement REFUSED, so
+		// it is retained as that row's only retry owner.
+		h.recorder.begin(makeMeta({ requestId: "held" }));
+		h.recorder.finishTransport("held", "success");
+		h.timers.advance(150);
+		await h.flush();
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+		await h.flush();
+		expect(peekRecord(h.recorder, "held")?.settlementPending).toBe(true);
+
+		// A live, still-streaming request with a captured body.
+		h.recorder.begin(
+			makeMeta({
+				requestId: "live",
+				isStream: true,
+				requestBody: makeArrayBuffer('{"live":"request"}'),
+			}),
+		);
+		// One more begin() pushes the map over MAX_RECORDS while the queue is
+		// still saturated, so the retained record cannot be evicted to satisfy it.
+		h.recorder.begin(makeMeta({ requestId: "next", isStream: true }));
+
+		// The backlog clears and the live request finishes normally.
+		h.writer.acceptMetadata = true;
+		h.recorder.captureResponseChunk(
+			"live",
+			new TextEncoder().encode('{"resp":1}'),
+		);
+		h.recorder.attachUsageSummary("live", makeSummary({ requestId: "live" }));
+		h.recorder.finishTransport("live", "success");
+		await h.flush();
+
+		const payload = h.dbOps.savePayloadCalls.find((c) => c.id === "live");
+		expect(payload).toBeDefined();
+		const env = JSON.parse(payload?.json ?? "{}");
+		expect(Buffer.from(env.request.body, "base64").toString("utf-8")).toBe(
+			'{"live":"request"}',
+		);
+	});
+});
+
+/**
+ * Count the settlement-refusal warnings the recorder emitted for one request.
+ * `log` is module-private, so the spy sits on the prototype and the message is
+ * filtered rather than the instance.
+ */
+function countSettlementWarnings(
+	warned: { mock: { calls: unknown[][] } },
+	requestId: string,
+): number {
+	return warned.mock.calls.filter((call) =>
+		String(call[0]).includes(
+			`Usage-source settlement dropped for ${requestId}`,
+		),
+	).length;
+}

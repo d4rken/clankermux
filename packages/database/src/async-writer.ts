@@ -307,6 +307,19 @@ export class AsyncDbWriter implements Disposable {
 		return true;
 	}
 
+	/**
+	 * Cheap, non-counting probe: would {@link enqueue} accept a job right now?
+	 *
+	 * A refused `enqueue` counts a dropped write into `metadataDropped` and the
+	 * interval drop count, which feed {@link getHealth}. A caller holding a job
+	 * it will RETRY (the RequestRecorder holds one per unsettled row) asks this
+	 * first, so a backlog that outlasts many retries still reports the one write
+	 * it actually dropped rather than one per attempt.
+	 */
+	canAcceptMetadata(): boolean {
+		return this.metadataQueue.length < this.METADATA_QUEUE_CAP;
+	}
+
 	// -----------------------------------------------------------------------
 	// Payload admission
 	// -----------------------------------------------------------------------

@@ -400,6 +400,15 @@ interface AsyncWriterLike {
 	 * refusal there is unrecoverable.
 	 */
 	enqueueShutdownBatch(job: () => void | Promise<void>): boolean;
+	/**
+	 * Non-counting capacity probe for the metadata queue. A refused
+	 * {@link enqueue} counts a dropped write into the writer's own health
+	 * metrics, so a caller holding a job it intends to RETRY asks this first
+	 * instead of re-counting one lost write on every attempt. Optional so
+	 * existing stand-ins stay assignable; absent means "assume there is room"
+	 * and the enqueue decides.
+	 */
+	canAcceptMetadata?(): boolean;
 	canAcceptPayload(bytes: number): boolean;
 	recordPayloadDrop(bytes: number): void;
 	reservePayload(estimatedBytes: number): PayloadReservationLike | null;
@@ -469,6 +478,15 @@ const PLAN_PROVIDERS = new Set([
 // Internal record
 // ---------------------------------------------------------------------------
 
+/** One late usage patch, resolved to the arguments it writes. */
+interface UsagePatchWrite {
+	requestId: string;
+	usage: unknown;
+	usageFinalizedAt: number | null;
+	response: { stopReason?: string; refusalCategory?: string };
+	usageSource: UsageSource | null;
+}
+
 interface InternalRecord {
 	gatewayHints: GatewayHintMetadata;
 	/**
@@ -505,6 +523,13 @@ interface InternalRecord {
 	 * one lands. The next sweep tries again.
 	 */
 	settlementPending: boolean;
+	/**
+	 * A token vector whose patch the metadata queue refused. The record is the
+	 * only carrier of those tokens, so it is held — with the vector — until a
+	 * retry lands. Never settled to `'none'`: the tokens are known and the
+	 * column is write-once, so the statement would be false and permanent.
+	 */
+	pendingPatch?: SlimUsageSummary | null;
 	bodyDiscarded: boolean;
 	persisted: boolean;
 	createdAt: number;
@@ -792,16 +817,27 @@ export class RequestRecorder {
 				// summary can still patch — createdAt may be far past the TTL the
 				// instant a 30-min stream persists, which would defeat invariant 2.
 				const anchor = record.persistedAt ?? record.createdAt;
-				// A record whose settlement the queue refused is held past its TTL
-				// on purpose, so retry it on every pass rather than waiting the
-				// window out a second time: its patch window has already shut and
-				// the retry is the only reason it is still here.
-				if (
-					record.settlementPending ||
-					now - anchor > this.config.PATCH_RECORD_TTL_MS
-				) {
-					if (this.closeUnresolvedUsageSource(record)) this.dropRecord(id);
+				// A record whose write the queue refused is held past its TTL on
+				// purpose, so retry it on every pass rather than waiting the window
+				// out a second time: its patch window has already shut and the
+				// retry is the only reason it is still here.
+				const retrying = record.settlementPending;
+				if (!retrying && now - anchor <= this.config.PATCH_RECORD_TTL_MS) {
+					continue;
 				}
+				// Probe rather than letting `enqueue` refuse again: a refusal counts
+				// a dropped write into the writer's health metrics, so a backlog
+				// that outlasts one sweep would re-count the same held write.
+				if (retrying && !this.writerHasMetadataCapacity()) continue;
+				const pendingPatch = record.pendingPatch;
+				if (pendingPatch) {
+					// Retry the PATCH — it carries the tokens. Settling this record
+					// at 'none' instead would state that a row with known tokens has
+					// none, in a write-once column.
+					this.patchUsage(record, pendingPatch);
+					continue;
+				}
+				if (this.closeUnresolvedUsageSource(record)) this.dropRecord(id);
 				continue;
 			}
 			const overAge = now - record.createdAt > this.config.RECORD_MAX_AGE_MS;
@@ -925,15 +961,33 @@ export class RequestRecorder {
 		// settle, and `needsUsageSourceSettlement` keeps a patched or waived one
 		// untouched.
 		const unsettled: string[] = [];
+		const heldPatches: UsagePatchWrite[] = [];
 		for (const record of this.records.values()) {
-			if (this.needsUsageSourceSettlement(record)) {
+			if (record.pendingPatch) {
+				// This record holds a token vector, not a statement: it is the only
+				// carrier of those tokens and there is no later sweep to retry from.
+				heldPatches.push(this.buildUsagePatch(record, record.pendingPatch));
+			} else if (this.needsUsageSourceSettlement(record)) {
 				unsettled.push(record.meta.requestId);
 			}
 			this.clearTimer(record.graceTimer);
 			this.clearTimer(record.patchTimer);
 		}
-		if (unsettled.length > 0) {
+		if (unsettled.length > 0 || heldPatches.length > 0) {
 			this.asyncWriter.enqueueShutdownBatch(async () => {
+				for (const patch of heldPatches) {
+					try {
+						await this.dbOps.updateRequestUsage(
+							patch.requestId,
+							patch.usage,
+							patch.usageFinalizedAt,
+							patch.response,
+							patch.usageSource,
+						);
+					} catch (error) {
+						log.error(`Failed to patch usage for ${patch.requestId}:`, error);
+					}
+				}
 				for (const requestId of unsettled) {
 					try {
 						await this.dbOps.markRequestUsageSource(requestId, "none");
@@ -1311,6 +1365,11 @@ export class RequestRecorder {
 	 * stay `usage_source` NULL, reading "not finished yet", permanently.
 	 */
 	private closeUnresolvedUsageSource(record: InternalRecord): boolean {
+		// A record holding a refused token patch is NOT settleable: its tokens are
+		// known, so `'none'` would be false, and the record is their only carrier,
+		// so a caller reading `true` as "safe to drop" would destroy them. Report
+		// it as unadmitted — {@link sweep} owns the retry of the patch itself.
+		if (record.pendingPatch) return false;
 		if (!this.needsUsageSourceSettlement(record)) return true;
 		const requestId = record.meta.requestId;
 		const accepted = this.asyncWriter.enqueue(async () => {
@@ -1320,8 +1379,12 @@ export class RequestRecorder {
 				log.error(`Failed to close usage source for ${requestId}:`, error);
 			}
 		});
-		record.settlementPending = !accepted;
-		if (!accepted) {
+		// Only on the TRANSITION into the refused state. A retry that is refused
+		// again is the same drop, and the counter feeds a health flag that means
+		// "request rows lost": re-counting it once per sweep for as long as the
+		// backlog lasts would inflate the metric and the log out of a single
+		// dropped write.
+		if (!accepted && !record.settlementPending) {
 			// The record now outlives both the patch TTL and cap eviction, and by
 			// design nothing bounds how many are retained: evicting one would lose a
 			// real request's token accounting permanently. So each retained record
@@ -1339,6 +1402,7 @@ export class RequestRecorder {
 				`Usage-source settlement dropped for ${requestId} — row left unsettled for a later retry (total dropped: ${this.metadataDropped})`,
 			);
 		}
+		record.settlementPending = !accepted;
 		return accepted;
 	}
 
@@ -1352,34 +1416,78 @@ export class RequestRecorder {
 		return record.persisted && record.usage === null && !record.usageWaived;
 	}
 
-	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
+	/**
+	 * The exact write a late usage patch performs, built while the record is
+	 * still held. Shared with {@link dispose}, which flushes a patch the queue
+	 * refused rather than dropping the tokens with the record.
+	 */
+	private buildUsagePatch(
+		record: InternalRecord,
+		summary: SlimUsageSummary,
+	): UsagePatchWrite {
 		const usage = this.toRequestUsage(summary);
-		// The stamp rides along with the late patch — the row was persisted before
-		// usage existed, so its column is still NULL. The repository COALESCEs the
-		// stored value first, so this can only ever fill it in, never move it.
-		const usageFinalizedAt = record.usageFinalizedAt;
-		// The patch window closes the moment this runs (the record is dropped
-		// below), so nothing is recoverable any more: a summary that yields no
-		// vector settles the column at 'none' rather than leaving it NULL.
-		const usageSource = this.deriveUsageSource(usage, summary, false);
-		this.asyncWriter.enqueue(async () => {
+		return {
+			requestId: record.meta.requestId,
+			usage,
+			// The stamp rides along with the late patch — the row was persisted
+			// before usage existed, so its column is still NULL. The repository
+			// COALESCEs the stored value first, so this can only ever fill it in,
+			// never move it.
+			usageFinalizedAt: record.usageFinalizedAt,
+			// The row was persisted before the response ended, so its stop-reason
+			// columns are still NULL; the late patch fills them.
+			response: {
+				stopReason: summary.stopReason,
+				refusalCategory: summary.refusalCategory,
+			},
+			// The patch window is already shut, so nothing is recoverable any
+			// more: a summary that yields no vector settles the column at 'none'
+			// rather than leaving it NULL.
+			usageSource: this.deriveUsageSource(usage, summary, false),
+		};
+	}
+
+	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
+		const patch = this.buildUsagePatch(record, summary);
+		const accepted = this.asyncWriter.enqueue(async () => {
 			try {
 				await this.dbOps.updateRequestUsage(
-					record.meta.requestId,
-					usage,
-					usageFinalizedAt,
-					// The row was persisted before the response ended, so its
-					// stop-reason columns are still NULL; the late patch fills them.
-					{
-						stopReason: summary.stopReason,
-						refusalCategory: summary.refusalCategory,
-					},
-					usageSource,
+					patch.requestId,
+					patch.usage,
+					patch.usageFinalizedAt,
+					patch.response,
+					patch.usageSource,
 				);
 			} catch (error) {
-				log.error(`Failed to patch usage for ${record.meta.requestId}:`, error);
+				log.error(`Failed to patch usage for ${patch.requestId}:`, error);
 			}
 		});
+		if (!accepted) {
+			// This write CARRIES the tokens: dropping the record with it loses
+			// them, and the row keeps NULL tokens, a NULL stamp and a NULL
+			// usage_source for good. Hold the vector and let the sweep retry the
+			// patch — never a 'none' settlement, which would be a false statement
+			// in a write-once column.
+			if (!record.settlementPending) {
+				// Retention now outlives the TTL, so shed the body copy exactly as
+				// the settlement refusal does (see closeUnresolvedUsageSource).
+				record.meta = { ...record.meta, requestBody: null };
+				log.warn(
+					`Usage patch dropped for ${patch.requestId} — tokens held in memory for a later retry`,
+				);
+			}
+			record.pendingPatch = summary;
+			// Shuts the patch window: a further summary has nothing to patch into,
+			// and the sweep revisits this record every pass.
+			record.settlementPending = true;
+			if (record.patchTimer !== null) {
+				// The timer's callback settles the row — which this record's tokens
+				// now forbid — and drops the record with them.
+				this.clearTimer(record.patchTimer);
+				record.patchTimer = null;
+			}
+			return;
+		}
 		// Keep the live dashboard in sync — re-emit with the patched usage.
 		const success = this.outcomeToSuccess(record);
 		const responseTime = this.computeResponseTime(record, summary);
@@ -1669,20 +1777,46 @@ export class RequestRecorder {
 		this.records.delete(requestId);
 	}
 
+	private writerHasMetadataCapacity(): boolean {
+		return this.asyncWriter.canAcceptMetadata?.() ?? true;
+	}
+
 	private enforceRecordCap(): void {
 		if (this.records.size <= this.config.MAX_RECORDS) return;
-		const excess = this.records.size - this.config.MAX_RECORDS;
+		// Records held for a refused write are exempt from the cap by decision:
+		// nothing bounds how many there are, because evicting one loses a real
+		// request's token accounting permanently. Measure the excess over the
+		// EVICTABLE records only — counted toward the cap, retained records (the
+		// oldest entries, so the first the walk below reaches) would instead push
+		// live requests into the `transport === null` branch, and the
+		// `bodyDiscarded` it sets suppresses that request's whole payload row.
+		let retained = 0;
+		for (const record of this.records.values()) {
+			if (record.settlementPending) retained++;
+		}
+		let excess = this.records.size - retained - this.config.MAX_RECORDS;
+		if (excess <= 0) return;
 		let removed = 0;
 		let freed = 0;
 		for (const [id, record] of this.records) {
 			if (removed >= excess) break;
+			// Retrying belongs to the sweep alone. This runs from begin(), once per
+			// incoming request, so retrying here would re-attempt — and re-log —
+			// every retained record on every request that arrives.
+			if (record.settlementPending) continue;
 			if (record.persisted) {
 				// Already persisted (its row is written / will be) → safe to delete
 				// to shrink the map. Drops the patch window early under cap pressure,
 				// so settle the row's accounting on the way out — and keep the
 				// record when that settlement is refused, since evicting it for
 				// memory would leave the row unfinished for good.
-				if (!this.closeUnresolvedUsageSource(record)) continue;
+				if (!this.closeUnresolvedUsageSource(record)) {
+					// It just joined the retained, cap-exempt population, so it stops
+					// counting toward the excess too. Walking on to evict a younger
+					// record in its place is what takes a LIVE request's payload.
+					excess--;
+					continue;
+				}
 				this.dropRecord(id);
 				removed++;
 			} else if (record.transport === null && !record.bodyDiscarded) {
