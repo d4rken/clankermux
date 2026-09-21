@@ -5,7 +5,9 @@ import {
 	ServiceUnavailableError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { requestIdFromError } from "./error-request-id";
 import { handleProxy, type ProxyContext } from "./proxy";
+import { CLIENT_REQUEST_ID_HEADER } from "./response-handler";
 import { ModelSubstitutionRouteError } from "./resolved-route";
 
 const log = new Logger("ProxyDispatch");
@@ -42,6 +44,8 @@ export async function dispatchProxyRequest(
 				: HTTP_STATUS.INTERNAL_SERVER_ERROR;
 
 		log.error("Proxy request failed:", proxyError);
+
+		const requestId = requestIdFromError(proxyError);
 
 		const isServiceUnavailable = statusCode === HTTP_STATUS.SERVICE_UNAVAILABLE;
 		// The one non-503 terminal whose message is deliberately client-facing.
@@ -102,13 +106,18 @@ export async function dispatchProxyRequest(
 			}),
 			{
 				status: statusCode,
-				headers:
-					retryAfterSeconds === undefined
-						? { "Content-Type": "application/json" }
-						: {
-								"Content-Type": "application/json",
-								"Retry-After": String(retryAfterSeconds),
-							},
+				headers: {
+					"Content-Type": "application/json",
+					...(retryAfterSeconds === undefined
+						? {}
+						: { "Retry-After": String(retryAfterSeconds) }),
+					// Present when the thrower knew the request: the give-up
+					// terminals write their row before throwing, so this is what
+					// makes that row reachable by id like every other refusal.
+					...(requestId === null
+						? {}
+						: { [CLIENT_REQUEST_ID_HEADER]: requestId }),
+				},
 			},
 		);
 	}

@@ -61,6 +61,7 @@ import {
 	isOfficialAnthropicProvider,
 } from "./provider-overload-cooldown";
 import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
+import { attachRequestId } from "./error-request-id";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RequestRecorder } from "./request-recorder";
 import {
@@ -366,6 +367,11 @@ export async function handleProxy(
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.
 		retractIfNeverStarted(null);
+		// The give-up terminals record their row and then throw, so the bytes a
+		// client receives are built a layer up from here. Send the id with the
+		// error or those rows, which are the ones most worth looking up, answer
+		// without the header every other terminal now carries.
+		attachRequestId(error, requestMeta.id);
 		throw error;
 	}
 }
