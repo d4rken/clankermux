@@ -49,7 +49,7 @@ describe("AccountPausedChip", () => {
 		const html = render(
 			makeAccount({ paused: true, pauseReason: "oauth_invalid_grant" }),
 		);
-		expect(html).toContain("Needs re-authentication");
+		expect(html).toContain("Re-auth needed");
 		expect(html).not.toContain("Paused");
 	});
 
@@ -136,6 +136,20 @@ function render(account: AccountResponse): string {
 	);
 }
 
+/**
+ * The rendered markup as visible text. Chips that dim their countdown put it in
+ * a nested span, so `"Overloaded: Haiku · 2m"` never appears contiguously in the
+ * HTML even though that is exactly what the chip reads as. `StatusChip` is a
+ * flex row with `gap-tight`, so each element boundary renders AS a space — hence
+ * every tag becomes one here rather than being dropped.
+ */
+function text(html: string): string {
+	return html
+		.replace(/<[^>]*>/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
 describe("AccountStatusChips — Usage presentation", () => {
 	function renderUsage(account: AccountResponse) {
 		return renderToStaticMarkup(
@@ -167,12 +181,12 @@ describe("AccountStatusChips — Usage presentation", () => {
 		for (const label of [
 			"Primary",
 			"Priority: 7",
-			"Auto-fallback",
-			"Auto-refresh",
-			"Auto-apply:",
-			"Credits past weekly",
+			"Fallback",
+			"Prewarm",
+			"Apply:",
+			"Credit spend",
 			"Renews",
-			"0 usage resets",
+			"0 resets",
 		]) {
 			expect(accounts).toContain(label);
 			expect(usage).not.toContain(label);
@@ -198,7 +212,7 @@ describe("AccountStatusChips — Usage presentation", () => {
 			},
 		});
 		const usage = renderUsage(account);
-		for (const label of ["2 usage resets", "On credits", "Duplicate"]) {
+		for (const label of ["2 resets", "On credits", "Duplicate"]) {
 			expect(usage).toContain(label);
 		}
 	});
@@ -304,7 +318,7 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 			refreshTokenExpiresAt: new Date(NOW - DAY).toISOString(),
 		});
 		for (const html of [render(account), renderUsageVariant(account)]) {
-			expect(html).toContain("Needs re-authentication");
+			expect(html).toContain("Re-auth needed");
 			expect(html).not.toContain("Re-auth in");
 			expect(html).not.toContain("Re-auth overdue");
 			// The deadline form too: a rejected token has no deadline left to plan
@@ -433,11 +447,15 @@ describe("AccountStatusChips — on-credits chip", () => {
 				},
 			}),
 		);
-		expect(html).toContain("On credits");
-		// Native credits (rounded) + exact EUR value at €0.04/credit.
-		expect(html).toContain("2430 cr");
+		// The chip shows credits (rounded) and whole euros at €0.04/credit…
+		const visible = text(html);
+		expect(visible).toContain("On credits");
+		expect(visible).toContain("2430 cr (€97)");
+		// …and leaves the cents and the plan type to the tooltip.
+		expect(visible).not.toContain("€97.21");
+		expect(visible).not.toContain("prolite");
 		expect(html).toContain("€97.21");
-		expect(html).toContain("prolite");
+		expect(html).toContain("Plan: prolite");
 		// Codex balances are credits/EUR, never USD.
 		expect(html).not.toContain("$");
 	});
@@ -480,7 +498,7 @@ describe("AccountStatusChips — usage-exhausted binding chain", () => {
 
 	it("renders the 5-hour tooltip for a session-bound exhaustion", () => {
 		const html = render(exhausted("session"));
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("5-hour session quota is spent");
 		expect(html).not.toContain("Weekly usage quota");
 	});
@@ -513,8 +531,8 @@ describe("AccountStatusChips — family-scoped overload chips", () => {
 				],
 			}),
 		);
-		expect(html).toContain("Overloaded: Haiku (2m)");
-		expect(html).not.toContain("Provider overloaded");
+		expect(text(html)).toContain("Overloaded: Haiku · 2m");
+		expect(text(html)).not.toContain("Overloaded ·");
 	});
 
 	it("renders the generic chip for a provider-wide open bucket", () => {
@@ -532,7 +550,7 @@ describe("AccountStatusChips — family-scoped overload chips", () => {
 				],
 			}),
 		);
-		expect(html).toContain("Provider overloaded (2m)");
+		expect(text(html)).toContain("Overloaded · 2m");
 		expect(html).not.toContain("Overloaded:");
 	});
 
@@ -552,7 +570,8 @@ describe("AccountStatusChips — family-scoped overload chips", () => {
 			}),
 		);
 		expect(html).toContain("Probing: Haiku");
-		expect(html).toContain("Probing recovery");
+		// The provider-wide bucket gets its own bare chip beside the family one.
+		expect(text(html)).toMatch(/Probing(?!:)/);
 		expect(html).not.toContain("Overloaded");
 	});
 
@@ -576,8 +595,8 @@ describe("AccountStatusChips — family-scoped overload chips", () => {
 				],
 			}),
 		);
-		expect(html).toContain("Overloaded: Haiku (1m)");
-		expect(html).toContain("Overloaded: Sonnet (1m)");
+		expect(text(html)).toContain("Overloaded: Haiku · 1m");
+		expect(text(html)).toContain("Overloaded: Sonnet · 1m");
 	});
 });
 
@@ -607,8 +626,7 @@ describe("AccountStatusChips — earned usage resets", () => {
 			}),
 		);
 
-		expect(html).toContain("3 usage resets");
-		expect(html).toContain("next expires Jan 5");
+		expect(text(html)).toContain("3 resets · expires Jan 5");
 	});
 
 	it("shows a known zero balance", () => {
@@ -623,7 +641,7 @@ describe("AccountStatusChips — earned usage resets", () => {
 			}),
 		);
 
-		expect(html).toContain("0 usage resets");
+		expect(html).toContain("0 resets");
 	});
 
 	it("does not render reset metadata on a non-Codex account", () => {
@@ -638,7 +656,7 @@ describe("AccountStatusChips — earned usage resets", () => {
 			}),
 		);
 
-		expect(html).not.toContain("usage reset");
+		expect(text(html)).not.toMatch(/\d+ resets?\b/);
 	});
 });
 
@@ -1034,7 +1052,7 @@ describe("AccountStatusChips — family-weekly exhausted chip", () => {
 				} as unknown as AccountResponse["usageData"],
 			}),
 		);
-		expect(html).toContain("Fable weekly exhausted (48h)");
+		expect(text(html)).toContain("Fable weekly exhausted · 48h");
 		expect(html).toContain("bg-warning/15");
 		// The account is routable for other families — no Force Reset offer.
 		expect(html).not.toContain("Force reset");
@@ -1062,7 +1080,7 @@ it("explains the request-path org restriction even when quota has headroom", () 
 			usageUtilization: 10,
 		}),
 	);
-	expect(html).toContain("Organization access disabled");
+	expect(html).toContain("Org access disabled");
 	expect(html).not.toContain("Subscription expired");
 });
 
@@ -1070,11 +1088,11 @@ it("shows Devin quota override state with provider-specific spending consequence
 	const html = render(
 		makeAccount({ provider: "devin", autoPauseOnOverageEnabled: false }),
 	);
-	expect(html).toContain("Unverified quota spend");
+	expect(html).toContain("Unverified spend");
 	expect(html).toContain("prepaid credits");
 	expect(html).toContain("CLI, Desktop, and cloud");
 	expect(html).not.toContain("Anthropic reporting overage");
-	expect(html).not.toContain("Auto-refresh");
+	expect(html).not.toContain("Prewarm");
 });
 
 describe("AccountStatusChips — D5 Devin grace period", () => {

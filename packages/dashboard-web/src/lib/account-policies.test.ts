@@ -194,7 +194,7 @@ describe("deriveAccountPolicies — flag polarity", () => {
 describe("describeAccountPolicy — provider-dependent extraSpend copy", () => {
 	it("resolves the codex wording on a codex account", () => {
 		const descriptor = describeAccountPolicy("extraSpend", "codex");
-		expect(descriptor.chipLabel).toBe("Credits past weekly");
+		expect(descriptor.chipLabel).toBe("Credit spend");
 		expect(descriptor.menuLabel).toBe("Allow credits past weekly limit");
 	});
 
@@ -215,7 +215,7 @@ describe("describeAccountPolicy — provider-dependent extraSpend copy", () => {
 	it("carries the provider-resolved chip label into the derived policy", () => {
 		expect(
 			policyOf(makeAccount({ provider: "codex" }), "extraSpend").label,
-		).toBe("Credits past weekly");
+		).toBe("Credit spend");
 		expect(
 			policyOf(makeAccount({ provider: "anthropic" }), "extraSpend").label,
 		).toBe("Overage spend");

@@ -35,9 +35,13 @@ import { StatusChip } from "./StatusChip";
  */
 const EUR_PER_CODEX_CREDIT = 0.04;
 
-/** "2430 cr (€97.21)" — native credits remaining plus their exact EUR value. */
+/**
+ * "2430 cr (€97)" — native credits remaining beside their EUR value, rounded to
+ * whole euros because the chip is a glance, not an invoice. The tooltip carries
+ * the exact figure.
+ */
 function formatCodexCreditBalance(credits: number): string {
-	const eur = (credits * EUR_PER_CODEX_CREDIT).toFixed(2);
+	const eur = Math.round(credits * EUR_PER_CODEX_CREDIT);
 	return `${Math.round(credits)} cr (€${eur})`;
 }
 
@@ -57,10 +61,9 @@ function formatReauthDeadline(daysRemaining: number): string {
 	return `Re-auth in ${daysRemaining} days`;
 }
 
-/** "Re-auth by Mar 4, 2026" — the far-out form, where a day count is noise. */
+/** "Re-auth by Mar 4" — the far-out form, where a day count is noise. */
 function formatReauthDeadlineDate(deadlineMs: number): string {
 	return `Re-auth by ${new Date(deadlineMs).toLocaleDateString(undefined, {
-		year: "numeric",
 		month: "short",
 		day: "numeric",
 	})}`;
@@ -436,13 +439,15 @@ function CodexUsageResetChip({
 
 	const availableExpiries = status.resetCreditAvailableExpiries;
 	const nextExpiry = status.resetCreditNextExpiry;
-	const countLabel = `${summary.availableCount} usage reset${summary.availableCount === 1 ? "" : "s"}`;
+	const countLabel = `${summary.availableCount} reset${summary.availableCount === 1 ? "" : "s"}`;
 	const shortExpiry = nextExpiry?.toLocaleDateString(undefined, {
 		month: "short",
 		day: "numeric",
 	});
+	// "expires" stays in the label: a bare date beside a countdown chip reads as
+	// a reset time, which is the opposite of what it marks.
 	const label = shortExpiry
-		? `${countLabel} · ${summary.availableCount === 1 ? "expires" : "next expires"} ${shortExpiry}`
+		? `${countLabel} · expires ${shortExpiry}`
 		: countLabel;
 
 	const expiryDetails = availableExpiries.length
@@ -593,7 +598,7 @@ export function AccountStatusChips({
 					title="The organization disabled OAuth or Claude Code subscription access. Ask an admin to restore it. While cooling down, the account is skipped. Once eligible again, requests check recovery one at a time until access is confirmed; routing pins still apply."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Organization access disabled
+					Org access disabled
 				</StatusChip>
 			)}
 			{status.isNeedsReauth && (
@@ -602,7 +607,7 @@ export function AccountStatusChips({
 					title="This account's OAuth refresh token was rejected (invalid_grant). It was auto-paused and removed from rotation. Re-authenticate it from the Accounts tab — it will auto-resume on success."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Needs re-authentication
+					Re-auth needed
 				</StatusChip>
 			)}
 			{/* One chip for the whole life of the deadline: neutral with the date
@@ -649,7 +654,7 @@ export function AccountStatusChips({
 					className="text-warning-strong"
 					title="Stale lock detected: usage data shows available capacity but account is still rate-limited"
 				>
-					Stale lock detected
+					Stale lock
 				</span>
 			)}
 			{status.isUsageThrottled && (
@@ -657,7 +662,7 @@ export function AccountStatusChips({
 					className="text-warning-strong"
 					title="Usage throttling is delaying requests for this account until pacing catches up"
 				>
-					Usage throttled
+					Throttled
 				</span>
 			)}
 			{status.providerOverloadedUntil && (
@@ -668,7 +673,10 @@ export function AccountStatusChips({
 					).toLocaleString()}`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Provider overloaded ({status.providerOverloadMinutes}m)
+					Overloaded
+					<span className="font-normal opacity-80">
+						· {status.providerOverloadMinutes}m
+					</span>
 				</StatusChip>
 			)}
 			{status.isProviderProbing && (
@@ -677,7 +685,7 @@ export function AccountStatusChips({
 					title="Provider overload cooldown elapsed — a single probe request will test whether the upstream has recovered before traffic resumes"
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Probing recovery
+					Probing
 				</StatusChip>
 			)}
 			{status.overloadedFamilies.map((entry) => (
@@ -689,7 +697,8 @@ export function AccountStatusChips({
 					).toLocaleString()}. Other model families keep routing to this account.`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Overloaded: {formatFamilyLabel(entry.family)} ({entry.minutes}m)
+					Overloaded: {formatFamilyLabel(entry.family)}
+					<span className="font-normal opacity-80">· {entry.minutes}m</span>
 				</StatusChip>
 			))}
 			{status.probingFamilies.map((family) => (
@@ -711,7 +720,8 @@ export function AccountStatusChips({
 					).toLocaleString()}. Other model families keep routing to this account.`}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					{entry.label} weekly exhausted ({entry.hoursLeft}h)
+					{entry.label} weekly exhausted
+					<span className="font-normal opacity-80">· {entry.hoursLeft}h</span>
 				</StatusChip>
 			))}
 			{status.isOnCredits && (
@@ -730,7 +740,6 @@ export function AccountStatusChips({
 					{status.creditsBalance != null
 						? ` · ${formatCodexCreditBalance(status.creditsBalance)}`
 						: ""}
-					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
 				</StatusChip>
 			)}
 			{(!isUsage ||

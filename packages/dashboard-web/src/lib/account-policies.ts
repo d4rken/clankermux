@@ -51,7 +51,7 @@ export interface AccountPolicyState {
  */
 const EXTRA_SPEND_CODEX: AccountPolicyDescriptor = {
 	key: "extraSpend",
-	chipLabel: "Credits past weekly",
+	chipLabel: "Credit spend",
 	menuLabel: "Allow credits past weekly limit",
 	description:
 		"When the weekly Codex limit is reached, allow this account to keep running on purchased credits. When OFF (default), the account pauses and traffic fails over to other accounts, then auto-resumes when the weekly window resets.",
@@ -59,7 +59,7 @@ const EXTRA_SPEND_CODEX: AccountPolicyDescriptor = {
 
 const EXTRA_SPEND_DEVIN: AccountPolicyDescriptor = {
 	key: "extraSpend",
-	chipLabel: "Unverified quota spend",
+	chipLabel: "Unverified spend",
 	menuLabel: "Allow requests beyond verified included quota",
 	description:
 		"Allow Devin requests when included quota is exhausted or unknown. This may consume prepaid credits. When OFF (default), requests require reported included capacity. Usage is shared with Devin CLI, Desktop, and cloud, so concurrent usage can exceed the last reported allowance. Keep prepaid overage disabled in Devin to prevent credit spending.",
@@ -79,35 +79,35 @@ const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
 > = {
 	autoFallback: {
 		key: "autoFallback",
-		chipLabel: "Auto-fallback",
+		chipLabel: "Fallback",
 		menuLabel: "Auto-fallback",
 		description:
 			"Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities.",
 	},
 	autoRefresh: {
 		key: "autoRefresh",
-		chipLabel: "Auto-refresh",
+		chipLabel: "Prewarm",
 		menuLabel: "Auto-refresh",
 		description:
 			"Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing.",
 	},
 	autoApplyExpiry: {
 		key: "autoApplyExpiry",
-		chipLabel: "Auto-apply: expiry",
+		chipLabel: "Apply: expiry",
 		menuLabel: "Auto-apply expiring usage resets",
 		description:
 			"Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
 	},
 	autoApplyWeekly: {
 		key: "autoApplyWeekly",
-		chipLabel: "Auto-apply: weekly",
+		chipLabel: "Apply: weekly",
 		menuLabel: "Auto-apply reset at weekly limit",
 		description:
 			"Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 	},
 	peakHoursPause: {
 		key: "peakHoursPause",
-		chipLabel: "Peak hours pause",
+		chipLabel: "Peak pause",
 		menuLabel: "Peak hours pause",
 		description:
 			"Automatically pause this account during Zai peak hours (14:00–18:00 SGT)",
