@@ -12,6 +12,7 @@ import type {
 	CodexResetCreditEventResponse,
 	LogEvent,
 	MemoryHistoryResponse,
+	ModelSubstitutionsResponse,
 	PaymentKind,
 	PaymentsSummary,
 	PoolSizingResponse,
@@ -1204,6 +1205,27 @@ class API extends HttpClient {
 	// history reads, and filter-scoped like the analytics reads: the card sits
 	// on a tab with a filter panel, so it answers for the same selection as the
 	// panels around it.
+	// Where a provider answered as a model other than the one it was sent.
+	// Range-scoped but NOT filter-scoped: the standard request filters key on
+	// the final request's account and model, and the substituting attempt is by
+	// design not that attempt — a sibling serves it — so filtering by account
+	// would hide the substitution on the very account it happened to.
+	async getModelSubstitutions(
+		range: string,
+	): Promise<ModelSubstitutionsResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/model-substitutions?${new URLSearchParams({ range }).toString()}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<ModelSubstitutionsResponse>(url);
+			this.logger.debug(`← GET ${url} - 200 (${Date.now() - startTime}ms)`);
+			return response;
+		} catch (error) {
+			this.logger.debug(`← GET ${url} - failed (${Date.now() - startTime}ms)`);
+			throw error;
+		}
+	}
+
 	async getStopsHistory(
 		range: string,
 		filters?: AnalyticsRequestFilters,

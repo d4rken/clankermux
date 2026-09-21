@@ -500,6 +500,26 @@ export const useStopsHistory = (range: string, filters?: FilterState) => {
 };
 
 /**
+ * Shared by the Accounts chip, the Overview banner and the analytics card.
+ *
+ * The chip and banner ask for a fixed short range and read only `degraded`;
+ * the card passes the analytics range and reads the series. One query key per
+ * range means the two pages do not double up on the scan.
+ */
+export const modelSubstitutionsQueryOptions = (range: string) => ({
+	queryKey: queryKeys.modelSubstitutions(range),
+	queryFn: () => api.getModelSubstitutions(range),
+	staleTime: 45000,
+	refetchInterval: 60000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const useModelSubstitutions = (range: string) => {
+	return useQuery(modelSubstitutionsQueryOptions(range));
+};
+
+/**
  * Precomputed quota-drift analysis for the Analytics "Quota" tab.
  *
  * The server recomputes it every 30 minutes, so polling faster would only

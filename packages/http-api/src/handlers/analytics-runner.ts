@@ -21,6 +21,7 @@ import { createCacheEffectivenessHandler as createDirectCacheEffectivenessHandle
 import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { EMBEDDED_ANALYTICS_WORKER_CODE } from "./inline-analytics-worker";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
+import { createModelSubstitutionsHandler as createDirectModelSubstitutionsHandler } from "./model-substitutions-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createPoolSizingHandler as createDirectPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
@@ -66,6 +67,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"filter-options": DEFAULT_WORKER_TIMEOUT_MS,
 	"quota-drift": DEFAULT_WORKER_TIMEOUT_MS,
 	"pool-sizing": DEFAULT_WORKER_TIMEOUT_MS,
+	"model-substitutions": DEFAULT_WORKER_TIMEOUT_MS,
 };
 
 // Per-kind response-cache TTL. The filter-options lists change only when a new
@@ -199,6 +201,8 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	// Sub-second on the live database (0.4s for the reset grouping, 0.2s for the
 	// 5-hour one), and cached for five minutes on top.
 	"pool-sizing": "light",
+	// One indexed window scan over routing_attempts, three groupings.
+	"model-substitutions": "light",
 };
 
 const WORKER_LANES: readonly WorkerLane[] = ["heavy", "light"];
@@ -296,6 +300,11 @@ const KIND_LABELS: Record<
 		timeoutMessage: "Pool sizing request timed out",
 		failureMessage: "Failed to fetch pool sizing data",
 		tooManyMessage: "Too many pool sizing requests",
+	},
+	"model-substitutions": {
+		timeoutMessage: "Model substitution request timed out",
+		failureMessage: "Failed to fetch model substitution data",
+		tooManyMessage: "Too many model substitution requests",
 	},
 };
 
@@ -415,6 +424,14 @@ export function createIsolatedPoolSizingHandler(context: APIContext) {
 		context,
 		"pool-sizing",
 		createDirectPoolSizingHandler(context),
+	);
+}
+
+export function createIsolatedModelSubstitutionsHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"model-substitutions",
+		createDirectModelSubstitutionsHandler(context),
 	);
 }
 
