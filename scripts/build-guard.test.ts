@@ -267,6 +267,21 @@ describe("dashboard target input globs", () => {
 
 		expect(after).not.toBe(before);
 	});
+
+	it("hashes the repo-root package.json (the bundle bakes in its version)", async () => {
+		// packages/dashboard-web/src/lib/version.ts imports the root
+		// package.json, so a version bump alone changes the built bundle.
+		// packages/dashboard-web/package.json is a different file and does not
+		// cover it.
+		await write("package.json", '{"version":"2026.9.1"}');
+		const target = dashboardTarget();
+		const before = await hashFileSet(target.inputGlobs, root);
+
+		await write("package.json", '{"version":"2026.9.2"}');
+		const after = await hashFileSet(target.inputGlobs, root);
+
+		expect(after).not.toBe(before);
+	});
 });
 
 describe("db-workers target output check", () => {
