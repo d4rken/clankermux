@@ -3711,10 +3711,12 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 			? new Date(earliestRateLimitedUntil).toISOString()
 			: null;
 
-	// Calculate Retry-After header (seconds) directly from numeric min
+	// Calculate Retry-After header (seconds) directly from numeric min. Ceiled,
+	// not rounded: a client that retries before the deadline it was handed just
+	// collects the same terminal again.
 	const retryAfterSeconds =
 		earliestRateLimitedUntil !== null
-			? Math.max(1, Math.round((earliestRateLimitedUntil - now) / 1000))
+			? Math.max(1, Math.ceil((earliestRateLimitedUntil - now) / 1000))
 			: 60; // Default 60s if no cooldown info
 
 	return new Response(

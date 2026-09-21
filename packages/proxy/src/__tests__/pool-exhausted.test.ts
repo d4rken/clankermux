@@ -204,6 +204,31 @@ describe("pool exhausted — 503 response", () => {
 		}
 	});
 
+	it("rounds a sub-second cooldown remainder UP so the advice is never early", async () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const rateLimitedAccount = makeAccount({
+			id: "acc-rl",
+			name: "rate-limited-account",
+			rate_limited_until: now + 1_499,
+		});
+
+		const realDateNow = Date.now;
+		Date.now = () => now;
+		try {
+			const ctx = makeContext([rateLimitedAccount]);
+			const response = await handleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+
+			expect(response.status).toBe(503);
+			expect(response.headers.get("Retry-After")).toBe("2");
+		} finally {
+			Date.now = realDateNow;
+		}
+	});
+
 	it("sets Retry-After to 60 when no cooldown info (only paused accounts)", async () => {
 		const pausedAccount = makeAccount({
 			id: "acc-paused",
