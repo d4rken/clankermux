@@ -2979,31 +2979,37 @@ export async function proxyWithAccount(
 			response.status === 529 && isTerminalAttempt()
 				? response.clone()
 				: response;
-		const isRateLimited = orgPermissionDenied
-			? false
-			: await processProxyResponse(
-					responseForRateLimitCheck,
-					account,
-					{
-						...ctx,
-						provider,
-					},
-					requestMeta,
-				);
-		// processProxyResponse only needed the rate-limit view (headers, or a
-		// provider body-parse that consumes it). When it was a distinct clone
-		// (final-529 path), release its tee branch now — the original `response`
-		// is what gets forwarded/returned below.
-		//
-		// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
-		// above), so `!== response` implies it is a `response.clone()` on every
-		// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
-		// drained: draining it would make the tee keep pulling and buffering for
-		// the twin that is about to be streamed to the client. And it must never
-		// be awaited — a tee branch's cancel does not settle until BOTH branches
-		// cancel, and the twin here is the live response.
-		if (responseForRateLimitCheck !== response) {
-			discardTeeBranch(responseForRateLimitCheck);
+		let isRateLimited: boolean;
+		try {
+			isRateLimited = orgPermissionDenied
+				? false
+				: await processProxyResponse(
+						responseForRateLimitCheck,
+						account,
+						{
+							...ctx,
+							provider,
+						},
+						requestMeta,
+					);
+		} finally {
+			// processProxyResponse only needed the rate-limit view (headers, or a
+			// provider body-parse that consumes it). When it was a distinct clone
+			// (final-529 path), release its tee branch — the original `response`
+			// is what gets forwarded/returned below. In a `finally` because the
+			// attempt-wide catch disposes `liveUpstream`, i.e. the original, and
+			// nothing else owns the branch.
+			//
+			// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
+			// above), so `!== response` implies it is a `response.clone()` on every
+			// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
+			// drained: draining it would make the tee keep pulling and buffering for
+			// the twin that is about to be streamed to the client. And it must never
+			// be awaited — a tee branch's cancel does not settle until BOTH branches
+			// cancel, and the twin here is the live response.
+			if (responseForRateLimitCheck !== response) {
+				discardTeeBranch(responseForRateLimitCheck);
+			}
 		}
 		if (isRateLimited) {
 			if (response.status === 529 && isTerminalAttempt()) {
