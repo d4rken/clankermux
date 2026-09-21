@@ -276,6 +276,87 @@ describe("transformStreamingResponse — text responses", () => {
 		expect(parsed.usage.output_tokens).toBe(5);
 	});
 
+	it("subtracts the cache classes out of the reported prompt total", async () => {
+		// `prompt_tokens` is the WHOLE prompt and `prompt_tokens_details` breaks
+		// out parts of it. Forwarding the total as `input_tokens` while also
+		// reporting the parts bills the cached prefix twice.
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "qwen3-coder-plus",
+				choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }],
+				usage: {
+					prompt_tokens: 1_000,
+					completion_tokens: 5,
+					prompt_tokens_details: {
+						cached_tokens: 800,
+						cache_creation_input_tokens: 100,
+					},
+				},
+			}),
+			"[DONE]",
+		]);
+		const transformed = transformStreamingResponse(upstream);
+		const events = parseSSEEvents(await readStream(transformed.body));
+		const msgDelta = events.find((e) => e.event === "message_delta");
+		if (!msgDelta) throw new Error("expected message_delta event");
+		const parsed = JSON.parse(dataOf(msgDelta));
+
+		expect(parsed.usage.input_tokens).toBe(100);
+		expect(parsed.usage.cache_read_input_tokens).toBe(800);
+		expect(parsed.usage.cache_creation_input_tokens).toBe(100);
+		// The four classes are additive, so they reconstruct the billable total.
+		expect(
+			parsed.usage.input_tokens +
+				parsed.usage.cache_read_input_tokens +
+				parsed.usage.cache_creation_input_tokens,
+		).toBe(1_000);
+	});
+
+	it("leaves the prompt total alone when no cache detail is reported", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }],
+				usage: { prompt_tokens: 1_000, completion_tokens: 5 },
+			}),
+			"[DONE]",
+		]);
+		const transformed = transformStreamingResponse(upstream);
+		const events = parseSSEEvents(await readStream(transformed.body));
+		const msgDelta = events.find((e) => e.event === "message_delta");
+		if (!msgDelta) throw new Error("expected message_delta event");
+		const parsed = JSON.parse(dataOf(msgDelta));
+
+		expect(parsed.usage.input_tokens).toBe(1_000);
+		expect(parsed.usage.cache_read_input_tokens).toBe(0);
+	});
+
+	it("clamps a cache count that exceeds its own prompt total", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "qwen3-coder-plus",
+				choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }],
+				usage: {
+					prompt_tokens: 10,
+					completion_tokens: 5,
+					prompt_tokens_details: { cached_tokens: 25 },
+				},
+			}),
+			"[DONE]",
+		]);
+		const transformed = transformStreamingResponse(upstream);
+		const events = parseSSEEvents(await readStream(transformed.body));
+		const msgDelta = events.find((e) => e.event === "message_delta");
+		if (!msgDelta) throw new Error("expected message_delta event");
+		const parsed = JSON.parse(dataOf(msgDelta));
+
+		expect(parsed.usage.input_tokens).toBe(0);
+		expect(parsed.usage.cache_read_input_tokens).toBe(10);
+	});
+
 	it("includes content_block_stop for text block", async () => {
 		const upstream = makeOpenAIStream([
 			JSON.stringify({

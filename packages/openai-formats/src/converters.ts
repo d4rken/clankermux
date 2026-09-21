@@ -13,7 +13,9 @@ import type {
 	OpenAIMessage,
 	OpenAIRequest,
 	OpenAIResponse,
+	OpenAIUsage,
 } from "./types";
+import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
 import { mapOpenAIFinishReason, removeUriFormat } from "./utils";
 
 const log = new Logger("openai-formats/converters");
@@ -377,8 +379,37 @@ export function convertOpenAIResponseToAnthropic(
 		stop_reason: mapOpenAIFinishReason(choice.finish_reason),
 		stop_sequence: undefined,
 		usage: {
-			input_tokens: openaiData.usage?.prompt_tokens || 0,
+			...normalizedInput(openaiData.usage),
 			output_tokens: openaiData.usage?.completion_tokens || 0,
 		},
+	};
+}
+
+/**
+ * The cache counters live in `prompt_tokens_details` on this path too, and the
+ * streaming path publishes them, so a client must not see the same account
+ * report a different convention depending on `stream`.
+ */
+function normalizedInput(usage: OpenAIUsage | undefined): {
+	input_tokens: number;
+	cache_read_input_tokens?: number;
+	cache_creation_input_tokens?: number;
+} {
+	const details = readPromptTokensDetails(usage?.prompt_tokens_details);
+	const input = normalizeCacheInclusiveInput(
+		usage?.prompt_tokens || 0,
+		details.cacheReadInputTokens,
+		details.cacheCreationInputTokens,
+	);
+	// Omitted rather than zeroed when upstream said nothing: a count that never
+	// arrived is not an observed cache miss.
+	return {
+		input_tokens: input.inputTokens,
+		...(usage?.prompt_tokens_details === undefined
+			? {}
+			: {
+					cache_read_input_tokens: input.cacheReadInputTokens,
+					cache_creation_input_tokens: input.cacheCreationInputTokens,
+				}),
 	};
 }

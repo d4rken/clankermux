@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
+import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
 import { repairTruncatedToolJson } from "./utils";
 
 const log = new Logger("openai-formats");
@@ -121,6 +122,14 @@ function emitStreamEnd(
 		);
 	}
 
+	// `promptTokens` is the upstream total and the two cache counts are parts of
+	// it, so the additive Anthropic shape needs them subtracted out.
+	const input = normalizeCacheInclusiveInput(
+		promptTokens,
+		cacheReadInputTokens,
+		cacheCreationInputTokens,
+	);
+
 	// Send message_delta with appropriate stop_reason
 	const messageDelta = {
 		type: "message_delta",
@@ -129,10 +138,10 @@ function emitStreamEnd(
 			stop_sequence: null,
 		},
 		usage: {
-			input_tokens: promptTokens,
+			input_tokens: input.inputTokens,
 			output_tokens: completionTokens,
-			cache_read_input_tokens: cacheReadInputTokens,
-			cache_creation_input_tokens: cacheCreationInputTokens,
+			cache_read_input_tokens: input.cacheReadInputTokens,
+			cache_creation_input_tokens: input.cacheCreationInputTokens,
 		},
 	};
 	controller.enqueue(encoder.encode(`event: message_delta\n`));
@@ -300,18 +309,18 @@ export function transformStreamingResponse(response: Response): Response {
 								if (data.usage.completion_tokens) {
 									context.completionTokens = data.usage.completion_tokens;
 								}
-								// Extract cache statistics from prompt_tokens_details (Qwen/DashScope)
+								// Parts of `prompt_tokens`, not additions to it; the
+								// subtraction happens once, where the delta is emitted.
 								if (data.usage.prompt_tokens_details) {
-									const details = data.usage.prompt_tokens_details as {
-										cache_creation_input_tokens?: number;
-										cached_tokens?: number;
-									};
-									if (details.cache_creation_input_tokens) {
+									const details = readPromptTokensDetails(
+										data.usage.prompt_tokens_details as Record<string, unknown>,
+									);
+									if (details.cacheCreationInputTokens) {
 										context.cacheCreationInputTokens =
-											details.cache_creation_input_tokens;
+											details.cacheCreationInputTokens;
 									}
-									if (details.cached_tokens) {
-										context.cacheReadInputTokens = details.cached_tokens;
+									if (details.cacheReadInputTokens) {
+										context.cacheReadInputTokens = details.cacheReadInputTokens;
 									}
 								}
 							}
