@@ -178,6 +178,10 @@ export const STARTUP_BUSY_TIMEOUT_MS = 10_000;
 /**
  * Apply SQLite pragmas for optimal performance on distributed filesystems.
  *
+ * Assumes the caller has already installed STARTUP_BUSY_TIMEOUT_MS on the
+ * handle: `journal_mode = WAL` needs a lock, and on a rollback-journal database
+ * a concurrent writer blocks it.
+ *
  * Note: `PRAGMA integrity_check` is NOT run here. The check is moved to a
  * background worker (see `packages/proxy/src/integrity-scheduler.ts`) so it
  * doesn't gate startup — on a multi-GB DB it can block the event loop for
@@ -224,12 +228,6 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 				db.run("PRAGMA journal_mode = DELETE");
 			}
 		}
-
-		// Tolerate a C-level busy wait for the rest of construction only; the
-		// constructor lowers this to MAIN_CONNECTION_BUSY_TIMEOUT_MS once the
-		// schema work is done. Deliberately NOT config.busyTimeoutMs — that
-		// value is for worker connections.
-		db.run(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
 
 		// Configure cache size
 		if (config.cacheSize !== undefined) {
@@ -582,6 +580,16 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		mkdirSync(dir, { recursive: true });
 
 		this.sqliteDb = new Database(resolvedPath, { create: true });
+
+		// FIRST statement on the handle, before any read or write. bun opens
+		// every connection at busy_timeout 0, and the next two operations —
+		// reading `PRAGMA auto_vacuum` and switching journal_mode — both need a
+		// lock another connection may briefly hold. Anything installed later
+		// leaves them to fail outright. The constructor lowers the connection to
+		// MAIN_CONNECTION_BUSY_TIMEOUT_MS once the schema work is done.
+		// Deliberately NOT config.busyTimeoutMs — that value is for worker
+		// connections.
+		this.sqliteDb.run(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
 
 		// Capture the persisted auto_vacuum mode BEFORE configureSqlite's
 		// leading PRAGMA flips the connection-local view. See the field
