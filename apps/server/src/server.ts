@@ -1618,21 +1618,26 @@ export default async function startServer(options?: {
 	}, MEMORY_MONITOR_INTERVAL_MS);
 	memoryMonitorInterval.unref();
 
-	// Warn loudly if bound to a non-loopback address. The management surface
-	// (/api/*) is unauthenticated by design — trust boundary is "can you reach
-	// the port" — so anything besides loopback exposes account management,
-	// debug endpoints, key administration, and request logs to the network.
-	// Operators should put a reverse proxy with auth in front for non-local
-	// deployments.
+	// Warn loudly when a non-loopback bind meets an open session gate: the gate
+	// fails open until an operator sets a management password, so both halves
+	// have to be true for /api/* to be exposed. Only a positive answer proves
+	// the gate is closed, so a failed read warns.
 	const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 	if (!loopbackHosts.has(hostname)) {
-		log.warn(
-			`ClankerMux is bound to '${hostname}' and the management API ` +
-				"(/api/*) is unauthenticated. Anyone who can reach this port can " +
-				"manage accounts, create/revoke API keys, read request logs, and " +
-				"download heap snapshots. Bind to localhost (set CLANKERMUX_HOST=127.0.0.1) " +
-				"or put ClankerMux behind a reverse proxy that enforces authentication.",
-		);
+		const managementPasswordSet = await sessionAuth
+			.isConfigured()
+			.catch(() => false);
+		if (!managementPasswordSet) {
+			log.warn(
+				`ClankerMux is bound to '${hostname}' and no management password is ` +
+					"set, so the management API (/api/*) admits anyone who can reach " +
+					"this port: account management, API key creation and revocation, " +
+					"request logs, and heap snapshots. Set one with " +
+					"`bun run auth:password --set`, bind to localhost (set " +
+					"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
+					"proxy that enforces authentication.",
+			);
+		}
 	}
 
 	// Log server startup (async)
