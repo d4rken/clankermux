@@ -96,38 +96,14 @@ hints. These remain available when payload storage is disabled.
 
 ## Integrations
 
-Client keys can request model metadata with
-`GET /wire/openai/v1/models?clankermux_metadata=1` or
-`GET /wire/anthropic/v1/models?clankermux_metadata=1`. The native list shape is
-preserved, with a `clankermux` object on each returned model. It contains the
-known context/output limits, modalities, reasoning support, pricing, and
-optional `cachePolicy` and advisory `cacheRetention`. Only that client's published
-aliases are returned; no management credentials are needed. Missing fields mean
-unknown, and an unavailable metadata lookup returns an empty object without
-replacing the list.
-
-Cache policy describes the eligible routes, not the warmth of a conversation.
-Discovery also provides `cacheRetention` with sourced or explicitly assumed
-retention estimates for every enriched model. Codex Astra gets an inferred
-30-minute window; models without numerical evidence get a labelled five-minute
-display heuristic. These estimates do not change verified policy or cache
-bridging. See [cache-policy coverage and client semantics](docs/public-api/cache-policy.md)
-for timing rules, request evidence, and sources. Session state stays in client
-memory. An elapsed estimate means uncertain warmth, not proven expiry.
-
-Accounts can be **paused** to stop routing temporarily, or **disabled** to keep
-an account saved without operating it. Disable stops routing, polling, token
-refresh, probes and automatic credit redemption, and excludes the account from
-current pool statistics and forecasts. Configuration and historical usage and
-payments remain available. Enable rechecks supported provider metadata and
-preserves existing subscription, authentication and pause conditions.
-
-Automatic subscription payment recording stops while disabled and resumes from
-the local calendar date of enabling, without catching up earlier disabled dates.
-Disabling an account does not cancel its upstream subscription. The management
-API exposes `POST /api/accounts/:id/disable` and `/enable`; account responses
-include `disabled` independently of `paused`.
-
+* Model metadata discovery: client keys can add `?clankermux_metadata=1` to
+  either wire's `/v1/models` to get context/output limits, modalities, pricing
+  and cache policy alongside the native list. See
+  [cache-policy coverage and client semantics](docs/public-api/cache-policy.md).
+* Accounts can be **paused** to stop routing temporarily, or **disabled** to
+  keep one saved without operating it: no routing, polling, token refresh,
+  probes, credit redemption or subscription payments, and left out of pool
+  statistics and forecasts.
 * [Public widget API](docs/public-api/README.md) for external displays and
   applets, with JSON Schemas and example payloads.
 * [Clankermux Usage for Cinnamon](https://github.com/d4rken/clankermux-mint-applet),
