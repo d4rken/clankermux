@@ -51,11 +51,26 @@ describe("ModelSubstitutionCard", () => {
 	});
 
 	it("marks a swap the operator accepted", () => {
-		expect(render([pair({ accepted: true })])).toContain("accepted");
+		expect(render([pair({ accepted: true })])).toContain("Accepted");
 	});
 
 	it("does not mark one that is still enforced", () => {
-		expect(render([pair({ accepted: false })])).not.toContain(">accepted<");
+		expect(render([pair({ accepted: false })])).not.toContain("Accepted");
+	});
+
+	// Tinted success tones, the opposite answer to the Degraded chip's warning
+	// tones. Token pairs, not literal Tailwind shades: a literal follows no
+	// palette and would keep its hue when the visual direction changes.
+	it("colours the tag with success tokens", () => {
+		const html = render([pair({ accepted: true })]);
+		expect(html).toContain("bg-success/15");
+		expect(html).toContain("text-success-strong");
+	});
+
+	it("explains the tag on hover", () => {
+		const html = render([pair({ accepted: true })]);
+		expect(html).toContain("accepted list");
+		expect(html).toContain("never failed over");
 	});
 
 	// An accepted pair is not hidden: acceptance changes what the proxy does

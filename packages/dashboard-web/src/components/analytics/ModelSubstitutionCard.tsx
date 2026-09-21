@@ -1,5 +1,7 @@
 import type { ModelSubstitutionsResponse } from "@clankermux/types";
 import { substitutionShare } from "@clankermux/types";
+import { Check } from "lucide-react";
+import { StatusChip } from "../accounts/StatusChip";
 import {
 	Card,
 	CardContent,
@@ -74,15 +76,24 @@ export function ModelSubstitutionCard({
 										{pair.outgoingModel}
 									</td>
 									<td className="py-tight font-mono text-xs">
-										{pair.reportedModel}
-										{/* Without this the row reads as a failure of enforcement:
-										    an accepted swap keeps happening on purpose, and at a
-										    share near 100% that is the obvious question to ask. */}
-										{pair.accepted ? (
-											<span className="ml-tight font-sans text-muted-foreground">
-												accepted
-											</span>
-										) : null}
+										<span className="inline-flex items-center gap-item">
+											{pair.reportedModel}
+											{/* Without this the row reads as a failure of
+											    enforcement: an accepted swap keeps happening on
+											    purpose, and at a share near 100% that is the
+											    obvious question to ask. Success tones rather than
+											    the Degraded chip's warning tones, because the two
+											    are the opposite answer to the same question. */}
+											{pair.accepted ? (
+												<StatusChip
+													className="bg-success/15 text-success-strong border border-success/30 font-sans"
+													title={`${pair.outgoingModel} answered as ${pair.reportedModel} is on the accepted list, so it is reported but never failed over.`}
+												>
+													<Check className="h-3 w-3" aria-hidden="true" />
+													Accepted
+												</StatusChip>
+											) : null}
+										</span>
 									</td>
 									<td className="py-tight text-right">
 										{Math.round(substitutionShare(pair) * 100)}%
