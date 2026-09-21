@@ -171,6 +171,30 @@ The v1 field names and public cause vocabulary remain stable; the additional
 counts are additive fields. The public event stream keeps its existing error
 categories, including its older quota category for `all_accounts_failed`.
 
+## Alias reasoning capabilities
+
+Request `GET /v1/models?clankermux_metadata=1` to include the `clankermux`
+metadata extension. The opt-in is a query parameter, not a request header.
+The canonical effort vocabulary is `minimal`, `low`, `medium`, `high`, `xhigh`,
+and `max`; each alias advertises only its substantiated subset.
+
+OpenAI, Anthropic, and Codex are client catalogue formats here, not promises of
+upstream provider support. Verified GPT profiles on the `codex` and
+`openai-compatible` upstream adapters currently substantiate effort metadata.
+Anthropic upstream routes and unknown adapter/model combinations do not.
+
+For an alias, `supportedReasoningEfforts` is the canonical effort list accepted by
+the alias across every eligible, known route. A value may be translated or
+lowered for the concrete fallback target selected for an attempt. The list is
+not a provider-specific thinking budget and does not advertise reasoning
+summaries.
+
+If an eligible route has an unknown provider family, unresolved permissions, or
+no verified adapter mapping, the effort field is omitted. Clients must not infer
+support from an alias target's model name alone. Codex's native response uses
+the same values in `supported_reasoning_levels`; each level describes an alias
+acceptance rather than one target's native metadata.
+
 ## Wire and transport rules
 
 Instants are ISO/RFC3339 strings; durations include units in field names. Null

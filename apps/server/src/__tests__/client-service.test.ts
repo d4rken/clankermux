@@ -151,8 +151,11 @@ describe("client service integration", () => {
 		expect(discovery.models[0]).toMatchObject({
 			slug: "good",
 			supports_reasoning_summaries: false,
-			supported_reasoning_levels: [],
 		});
+		expect(discovery.models[0]).not.toHaveProperty(
+			"supported_reasoning_levels",
+		);
+		expect(discovery.models[0]).not.toHaveProperty("default_reasoning_level");
 		expect(discovery.models[0].base_instructions).not.toContain("gpt-real");
 		expect(discovery.models[0].context_window).toBeUndefined();
 		expect(
@@ -1306,6 +1309,70 @@ describe("client service integration", () => {
 			rmSync(cacheDir, { recursive: true, force: true });
 		});
 
+		it("intersects alias efforts across formats and recomputes for restrictions and unknown routes", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["gpt-5.4-mini", "gpt-6-future"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:efforts",
+				displayName: "Efforts",
+				revision: 0,
+				targets: [
+					{ model: "gpt-6-astra", accountIds: ["c"] },
+					{ model: "gpt-5.4-mini", accountIds: ["d"] },
+				],
+			});
+			const draft = blank();
+			for (const format of ["openai", "anthropic", "codex"] as const)
+				draft.catalogues[format].models = [
+					{
+						id: "efforts",
+						displayName: "Efforts",
+						targetModel: alias.id,
+						accountIds: null,
+					},
+				];
+			const id = (await create(draft)).client.apiKeyId;
+			for (const format of ["openai", "anthropic", "codex"] as const) {
+				const plain = await (await service.wire(id, format)).json();
+				const enriched = await (await service.wire(id, format, true)).json();
+				const key = format === "codex" ? "models" : "data";
+				const { clankermux, ...native } = enriched[key][0];
+				expect(clankermux.supportedReasoningEfforts).toEqual(["low", "medium"]);
+				expect(native).toEqual(plain[key][0]);
+				expect(plain[key][0]).not.toHaveProperty("clankermux");
+				if (format === "codex") {
+					expect(native.slug).toBe("efforts");
+					expect(
+						native.supported_reasoning_levels.map(
+							(level: { effort: string }) => level.effort,
+						),
+					).toEqual(["low", "medium"]);
+				}
+			}
+			const pinned = structuredClone(draft);
+			pinned.name = "Pinned efforts";
+			pinned.destinations.accountId = "c";
+			const pinnedId = (await create(pinned)).client.apiKeyId;
+			expect(
+				(await service.modelMetadata(pinnedId, "openai")).models.efforts
+					?.supportedReasoningEfforts,
+			).toEqual(["low", "medium", "high", "xhigh", "max"]);
+			await dbOps.modelAliases.save({
+				...alias,
+				targets: [
+					alias.targets[0],
+					{ model: "gpt-6-future", accountIds: ["d"] },
+				],
+			});
+			expect(
+				(await service.modelMetadata(id, "openai")).models.efforts,
+			).not.toHaveProperty("supportedReasoningEfforts");
+			expect(
+				(await service.modelMetadata(pinnedId, "openai")).models.efforts
+					?.supportedReasoningEfforts,
+			).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		});
+
 		it("reduces limits and retention across fallback targets, pins, and live alias edits", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["fast-backup"]);
@@ -1826,6 +1893,7 @@ describe("client service integration", () => {
 			// Both accounts serve the model, so both routes count.
 			const pooled = await service.modelMetadata(id, "openai");
 			expect(pooled.models["gpt-6-astra"]).toEqual({
+				supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
 				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
@@ -1846,6 +1914,7 @@ describe("client service integration", () => {
 			});
 			const narrowed = await service.modelMetadata(id, "openai");
 			expect(narrowed.models["gpt-6-astra"]).toEqual({
+				supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
 				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
@@ -1915,6 +1984,7 @@ describe("client service integration", () => {
 			// entirely and its unread permissions say nothing about this alias.
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
 				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
@@ -1947,6 +2017,7 @@ describe("client service integration", () => {
 				.run("d");
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
 				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",

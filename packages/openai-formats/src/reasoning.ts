@@ -4,7 +4,11 @@
  * Licensed under the CAT Commercial License.
  * See LICENSE.md in the project root for license terms.
  */
-import { getModelFamily, ValidationError } from "@clankermux/core";
+import {
+	getAliasReasoningEfforts,
+	getModelReasoningEfforts,
+	ValidationError,
+} from "@clankermux/core";
 
 export const REASONING_EFFORT_VALUES = [
 	"minimal",
@@ -25,55 +29,20 @@ const EFFORT_RANK: Record<ReasoningEffort, number> = {
 	max: 5,
 };
 
-const CLAUDE_REASONING_EFFORTS: Record<
-	"opus" | "sonnet" | "haiku" | "fable",
-	readonly ReasoningEffort[]
-> = {
-	opus: ["low", "medium", "high", "xhigh", "max"],
-	sonnet: ["low", "medium", "high", "xhigh", "max"],
-	haiku: ["low", "medium"],
-	fable: ["low", "medium", "high", "xhigh", "max"],
-};
-
-const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {
-	"gpt-5": ["minimal", "low", "medium", "high", "xhigh"],
-	"gpt-5.5": ["minimal", "low", "medium", "high", "xhigh"],
-	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
-	"gpt-5.4-mini": ["low", "medium"],
-	// GPT-6 (2026-09-03): the API documents low..max and drops `minimal`; the
-	// Codex catalog entry additionally lists `ultra`, which is outside this
-	// module's effort vocabulary and is left to pass through untouched on the
-	// native path rather than widened into a value Claude models cannot take.
-	"gpt-6": ["low", "medium", "high", "xhigh", "max"],
-	"gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
-};
-
 function normalizeTargetModelName(model: string): string {
 	return model.toLowerCase().trim().replace(/^.*\//, "");
 }
 
 export function getSupportedReasoningEfforts(
 	model: string,
+	provider?: string,
 ): readonly ReasoningEffort[] | null {
 	const normalized = normalizeTargetModelName(model);
-	const family = getModelFamily(normalized);
-	if (family) {
-		return CLAUDE_REASONING_EFFORTS[family];
-	}
-
-	if (Object.hasOwn(TARGET_REASONING_EFFORTS, normalized)) {
-		return TARGET_REASONING_EFFORTS[normalized];
-	}
-
-	if (normalized.startsWith("gpt-6")) {
-		return TARGET_REASONING_EFFORTS["gpt-6"];
-	}
-
-	if (normalized.startsWith("gpt-5")) {
-		return TARGET_REASONING_EFFORTS["gpt-5"];
-	}
-
-	return null;
+	// A model name is not adapter evidence. Alias catalogue resolution passes
+	// the concrete provider, while request adaptation retains the legacy
+	// model-only lookup for already-routed provider paths.
+	if (provider !== undefined) return getAliasReasoningEfforts(model, provider);
+	return getModelReasoningEfforts(normalized);
 }
 
 export interface ReasoningEffortResolution {
@@ -90,7 +59,11 @@ export interface ReasoningEffortResolution {
 // constrain the value sent to a capable target.
 export function resolveReasoningEffort(
 	effort: unknown,
-	models: { sourceModel?: string; targetModel?: string },
+	models: {
+		sourceModel?: string;
+		targetModel?: string;
+		provider?: string;
+	},
 ): ReasoningEffortResolution {
 	if (effort === undefined) {
 		return { effort: undefined, downgrades: [] };
@@ -120,7 +93,10 @@ export function resolveReasoningEffort(
 	);
 
 	for (const { model } of modelContexts) {
-		const supportedEfforts = getSupportedReasoningEfforts(model);
+		const supportedEfforts = getSupportedReasoningEfforts(
+			model,
+			models.provider,
+		);
 		if (!supportedEfforts) {
 			// Unknown model (source or target) — pass through unchanged
 			continue;

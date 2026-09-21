@@ -131,6 +131,25 @@ describe("reasoning effort support", () => {
 		);
 	});
 
+	it("requires a known adapter family before using a model profile", () => {
+		expect(getSupportedReasoningEfforts("gpt-6-astra", "codex")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		expect(
+			getSupportedReasoningEfforts("gpt-6-astra", "openrouter"),
+		).toBeNull();
+		expect(
+			getSupportedReasoningEfforts("gpt-6-astra", "unknown-provider"),
+		).toBeNull();
+		expect(
+			getSupportedReasoningEfforts("claude-sonnet-4-6", "anthropic"),
+		).toBeNull();
+	});
+
 	it("passes through effort unchanged when target model is unknown", () => {
 		const resolved = resolveReasoningEffort("xhigh", {
 			sourceModel: "claude-sonnet-4-6",
