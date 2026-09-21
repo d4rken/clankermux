@@ -6,6 +6,7 @@
  * Collapsing those three into `?? 0` is how a failed `/api/stats` read became
  * indistinguishable from "no active sessions" on the Overview.
  */
+import { ageLabel } from "./age-label";
 
 /** The subset of a React Query result these helpers need. */
 export interface QueryAvailabilityInput {
@@ -48,9 +49,5 @@ export function dataAvailability(
 /** Short human phrase for how old a stale reading is. */
 export function staleAgeLabel(lastUpdatedAt: number, now = Date.now()): string {
 	if (!lastUpdatedAt) return "unknown age";
-	const seconds = Math.max(0, Math.floor((now - lastUpdatedAt) / 1000));
-	if (seconds < 60) return `${seconds}s ago`;
-	if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-	if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-	return `${Math.floor(seconds / 86400)}d ago`;
+	return ageLabel(lastUpdatedAt, now);
 }
