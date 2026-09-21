@@ -34,7 +34,8 @@ export const API_KEY_REQUIRED_ERROR =
  * Two independent credentials, gating two independent things:
  *
  *  - `api_key` gates UPSTREAM AI TRAFFIC (`/v1/*`, `/messages/*`, and the
- *    `/wire/*` mounts). Machine clients. It FAILS CLOSED: a request with no
+ *    `/wire/*` mounts) and the client's read-back of its own request
+ *    accounting (`/client/*`). Machine clients. It FAILS CLOSED: a request with no
  *    valid key is refused however many keys the database holds, including
  *    none. An identity is what the routing pins, the key-scoped rules, the
  *    session affinity and the per-key stats are all keyed on, so traffic
@@ -72,6 +73,13 @@ function policyFor(path: string): AuthRequirement {
 	// construction — it is a sibling of `/wire/*`, deliberately OUTSIDE `/api/*`
 	// so the session gate never touches it.
 	if (path === "/public" || path.startsWith("/public/")) return "public";
+	// The credential-scoped client API, another sibling of `/wire/*` outside
+	// `/api/*`. Its caller presents the same client key it proxies with, so the
+	// namespace is api-key gated in its entirety — including the paths no route
+	// claims, which the mount answers with its own 404 only after the key has
+	// been checked. The router passes `"api_key"` explicitly; this entry is what
+	// a caller that states nothing gets, and it fails closed like `/wire`.
+	if (path === "/client" || path.startsWith("/client/")) return "api_key";
 	// The management surface. The classification lives in one shared module so
 	// this policy and the router's own boundary cannot disagree about which
 	// `/api/*` paths are exempt (the auth endpoints, and the two Claude Code
@@ -114,7 +122,10 @@ export class AuthService {
 	 * `authenticateRequest`; callers are expected to have already confirmed
 	 * the request needs an api-key check.
 	 */
-	private async validateApiKey(apiKey: string): Promise<AuthenticationResult> {
+	private async validateApiKey(
+		apiKey: string,
+		recordUsage: boolean,
+	): Promise<AuthenticationResult> {
 		// A stored hash is the unsalted SHA-256 of the key, so the record can be
 		// computed rather than searched for: one indexed lookup, no key hashing,
 		// and no cost that scales with how many keys exist. The query filters on
@@ -122,7 +133,7 @@ export class AuthService {
 		// revocation event to plumb anywhere.
 		const lookupHash = await this.crypto.hashApiKey(apiKey);
 		const migrated = await this.dbOps.getApiKeyByHashedKey(lookupHash);
-		if (migrated) return this.accept(migrated);
+		if (migrated) return this.accept(migrated, recordUsage);
 
 		// Miss. Either the key is wrong, or its row still holds a salted scrypt
 		// hash — which cannot be computed from the key, only checked against it.
@@ -145,7 +156,7 @@ export class AuthService {
 			// already-authenticated request for the adapter's ten-minute busy
 			// retry, and the request's outcome does not depend on the write.
 			void this.migrateStoredHash(keyRecord, lookupHash);
-			return this.accept(keyRecord);
+			return this.accept(keyRecord, recordUsage);
 		}
 
 		return {
@@ -211,8 +222,13 @@ export class AuthService {
 	}
 
 	/** Record the usage hit and build the success result from the current row. */
-	private accept(keyRecord: ApiKey): AuthenticationResult {
-		this.dbOps.updateApiKeyUsage(keyRecord.id, Date.now());
+	private accept(
+		keyRecord: ApiKey,
+		recordUsage: boolean,
+	): AuthenticationResult {
+		if (recordUsage) {
+			this.dbOps.updateApiKeyUsage(keyRecord.id, Date.now());
+		}
 		return {
 			isAuthenticated: true,
 			apiKeyId: keyRecord.id,
@@ -240,12 +256,21 @@ export class AuthService {
 	 * has to present a key. The classification is the router's to make; inferring
 	 * it a second time from a path that no longer carries the mount can only get
 	 * it wrong.
+	 *
+	 * `options.recordUsage` (default true) decides whether a successful key
+	 * check counts as a request by that client. `last_used` and `usage_count`
+	 * are what the dashboard renders as "Last request … ago" and as the
+	 * within-24h activity marker, so a surface where the key is used to READ
+	 * ABOUT past requests rather than to send one has to opt out: otherwise an
+	 * idle client that only polls its own history reads as live traffic, and
+	 * `usage_count` stops counting proxied requests.
 	 */
 	async authenticateRequest(
 		req: Request,
 		path: string,
 		_method: string,
 		requirement?: AuthRequirement,
+		options?: { recordUsage?: boolean },
 	): Promise<AuthenticationResult> {
 		const effective = requirement ?? policyFor(path);
 		if (effective === "public") {
@@ -272,6 +297,6 @@ export class AuthService {
 			};
 		}
 
-		return await this.validateApiKey(apiKey);
+		return await this.validateApiKey(apiKey, options?.recordUsage ?? true);
 	}
 }

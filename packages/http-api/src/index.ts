@@ -4,6 +4,13 @@
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 // Management session auth: the app-level login behind /api/*
 export type { AuthStatusResponse } from "./handlers/auth";
+// The credential-scoped client API at /client/v1/*
+export { CLIENT_NO_STORE_HEADERS } from "./handlers/client/cache-headers";
+export {
+	type ClientRequestContext,
+	ClientRouter,
+	type ClientRouterDeps,
+} from "./handlers/client/router";
 export { NO_STORE_HEADERS } from "./handlers/public/cache-headers";
 // The read-only widget API at /public/v1/*
 export * from "./handlers/public/dto";
