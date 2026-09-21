@@ -2093,6 +2093,28 @@ describe("RequestRecorder — dispose", () => {
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(0);
 	});
+
+	// A graceful shutdown disposes in REVERSE registration order and the
+	// recorder registers after the async writer, so a settlement enqueued from
+	// dispose() still drains. Clearing the map without one strands every
+	// recoverable row at usage_source NULL permanently — the sweep that would
+	// have settled them never runs again.
+	it("settles the recoverable rows it is still holding", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		h.recorder.dispose();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
 });
 
 describe("RequestRecorder — payload ordering and reservation", () => {
@@ -2740,6 +2762,37 @@ describe("RequestRecorder — usage_source", () => {
 		expect(h.dbOps.markUsageSourceCalls).toEqual([
 			{ id: "req-1", usageSource: "none" },
 		]);
+	});
+
+	// `AsyncWriter.enqueue` returns false and DROPS the job once the metadata
+	// queue is at its cap. The in-memory record is the only thing that can retry
+	// the settlement, so destroying it on a rejected enqueue leaves the row at
+	// usage_source NULL — reading "not finished yet" — for good.
+	it("keeps the record when the settlement enqueue is REJECTED, and settles it on a later retry", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The metadata queue is saturated exactly when the patch window shuts.
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// The backlog clears; the next sweep still has something to settle.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+		expect(h.recorder.getRecordCount()).toBe(0);
 	});
 
 	it("writes 'none' when the SWEEP drops the patch record first", async () => {

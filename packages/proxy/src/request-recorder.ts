@@ -492,6 +492,13 @@ interface InternalRecord {
 	 */
 	usageFinalizedAt: number | null;
 	usageWaived: boolean;
+	/**
+	 * A `usage_source` settlement the metadata queue refused. The record is then
+	 * held past the end of its patch window for one reason only: it is the sole
+	 * thing that can retry the write, and the row reads "not finished yet" until
+	 * one lands. The next sweep tries again.
+	 */
+	settlementPending: boolean;
 	bodyDiscarded: boolean;
 	persisted: boolean;
 	createdAt: number;
@@ -645,6 +652,7 @@ export class RequestRecorder {
 			usage: null,
 			usageFinalizedAt: null,
 			usageWaived: false,
+			settlementPending: false,
 			bodyDiscarded,
 			persisted: false,
 			createdAt: this.now(),
@@ -770,9 +778,15 @@ export class RequestRecorder {
 				// summary can still patch — createdAt may be far past the TTL the
 				// instant a 30-min stream persists, which would defeat invariant 2.
 				const anchor = record.persistedAt ?? record.createdAt;
-				if (now - anchor > this.config.PATCH_RECORD_TTL_MS) {
-					this.closeUnresolvedUsageSource(record);
-					this.dropRecord(id);
+				// A record whose settlement the queue refused is held past its TTL
+				// on purpose, so retry it on every pass rather than waiting the
+				// window out a second time: its patch window has already shut and
+				// the retry is the only reason it is still here.
+				if (
+					record.settlementPending ||
+					now - anchor > this.config.PATCH_RECORD_TTL_MS
+				) {
+					if (this.closeUnresolvedUsageSource(record)) this.dropRecord(id);
 				}
 				continue;
 			}
@@ -852,6 +866,7 @@ export class RequestRecorder {
 			// A synthetic terminal has no provider usage at all — never a stamp.
 			usageFinalizedAt: null,
 			usageWaived: true,
+			settlementPending: false,
 			bodyDiscarded: !storePayloads,
 			persisted: true,
 			createdAt: this.now(),
@@ -869,8 +884,25 @@ export class RequestRecorder {
 		);
 	}
 
+	/**
+	 * Shut down: settle what is still settleable, then drop everything.
+	 *
+	 * The settlement is a plain synchronous enqueue and this stays synchronous.
+	 * `LifecycleManager.shutdown` disposes in REVERSE registration order and the
+	 * recorder registers after the async writer, so these jobs are still in the
+	 * queue when the writer's own dispose drains it. Without them a graceful
+	 * shutdown clears the map with every recoverable row left at `usage_source`
+	 * NULL — reading "not finished yet" — and the sweep that would have settled
+	 * them never runs again.
+	 *
+	 * Abrupt process death is a different matter and is still unhandled; it is
+	 * the residual the client contract documents.
+	 */
 	dispose(): void {
 		for (const record of this.records.values()) {
+			// Persisted only: a record whose transport never finished has no row to
+			// settle, and the guard inside keeps a patched or waived one untouched.
+			if (record.persisted) this.closeUnresolvedUsageSource(record);
 			this.clearTimer(record.graceTimer);
 			this.clearTimer(record.patchTimer);
 		}
@@ -972,7 +1004,11 @@ export class RequestRecorder {
 			this.releaseBuffers(record);
 			record.patchTimer = this.scheduleTimer(() => {
 				record.patchTimer = null;
-				this.closeUnresolvedUsageSource(record);
+				// A refused settlement keeps the record: it is the only thing that
+				// can retry, and the sweep will. The patch window stays SHUT —
+				// the timer is deliberately not re-armed, since what is retained
+				// is the retry, not a renewed window for a late summary.
+				if (!this.closeUnresolvedUsageSource(record)) return;
 				this.dropRecord(requestId);
 			}, this.config.PATCH_RECORD_TTL_MS);
 		}
@@ -1230,17 +1266,34 @@ export class RequestRecorder {
 	 * Guarded on the RECORD's state, not on the call site: `dropRecord` is also
 	 * reached from `patchUsage`, where usage did arrive and this write would be
 	 * a lie. Write-once in SQL, so it can never overwrite that patch's value.
+	 *
+	 * Returns whether the settlement was ADMITTED — true also when the record
+	 * needs none. `AsyncWriter.enqueue` drops the job at the queue cap and
+	 * nothing retries it, so a caller that drops the record on a `false` here
+	 * destroys the only thing that could finish the row's accounting: it would
+	 * stay `usage_source` NULL, reading "not finished yet", permanently.
 	 */
-	private closeUnresolvedUsageSource(record: InternalRecord): void {
-		if (record.usage !== null || record.usageWaived) return;
+	private closeUnresolvedUsageSource(record: InternalRecord): boolean {
+		if (record.usage !== null || record.usageWaived) return true;
 		const requestId = record.meta.requestId;
-		this.asyncWriter.enqueue(async () => {
+		const accepted = this.asyncWriter.enqueue(async () => {
 			try {
 				await this.dbOps.markRequestUsageSource(requestId, "none");
 			} catch (error) {
 				log.error(`Failed to close usage source for ${requestId}:`, error);
 			}
 		});
+		record.settlementPending = !accepted;
+		if (!accepted) {
+			// Counted the same way a rejected request-row write is, so queue
+			// saturation is observable here too rather than silent.
+			this.metadataDropped++;
+			this.onMetadataDrop?.(requestId);
+			log.warn(
+				`Usage-source settlement dropped for ${requestId} — row left unsettled for a later retry (total dropped: ${this.metadataDropped})`,
+			);
+		}
+		return accepted;
 	}
 
 	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
@@ -1570,8 +1623,10 @@ export class RequestRecorder {
 			if (record.persisted) {
 				// Already persisted (its row is written / will be) → safe to delete
 				// to shrink the map. Drops the patch window early under cap pressure,
-				// so settle the row's accounting on the way out.
-				this.closeUnresolvedUsageSource(record);
+				// so settle the row's accounting on the way out — and keep the
+				// record when that settlement is refused, since evicting it for
+				// memory would leave the row unfinished for good.
+				if (!this.closeUnresolvedUsageSource(record)) continue;
 				this.dropRecord(id);
 				removed++;
 			} else if (record.transport === null && !record.bodyDiscarded) {
