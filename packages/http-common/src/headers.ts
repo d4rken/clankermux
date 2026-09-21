@@ -73,6 +73,26 @@ export function sanitizeProxyHeaders(original: Headers): Headers {
 }
 
 /**
+ * The Codex CLI's per-turn continuity token. Opaque, and on
+ * {@link STORAGE_IDENTITY_HEADERS} — so its VALUE never reaches storage.
+ */
+export const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
+
+/**
+ * Character count of the turn-state token, or null when the request carried no
+ * such header. 0 means the header was present and empty, which is a different
+ * observation from absent.
+ *
+ * The length is recorded because the token is claimed to vary in size with the
+ * account's service tier; whether it actually does is what
+ * `requests.codex_turn_state_len` exists to measure.
+ */
+export function codexTurnStateLength(headers: Headers): number | null {
+	const value = headers.get(CODEX_TURN_STATE_HEADER);
+	return value === null ? null : value.length;
+}
+
+/**
  * Credentials and stable identifiers that must never reach storage, on EITHER
  * side of the exchange. One list for both sanitizers on purpose: they used to
  * carry separate hand-maintained sets, and the request side gained names the
@@ -106,7 +126,7 @@ const STORAGE_IDENTITY_HEADERS = [
 	"x-client-request-id",
 	"x-codex-installation-id",
 	"x-codex-window-id",
-	"x-codex-turn-state",
+	CODEX_TURN_STATE_HEADER,
 	"x-codex-session-id",
 	"x-codex-conversation-id",
 	"chatgpt-account-id",

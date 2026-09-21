@@ -9,6 +9,7 @@ import {
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import {
+	codexTurnStateLength,
 	sanitizeRequestHeaders,
 	sanitizeResponseHeadersForStorage,
 	stripHopByHopHeaders,
@@ -903,6 +904,7 @@ async function forwardToClientInner(
 			cachePrefixHashes: cachePrefixHashes ?? null,
 			clientUserAgent: clientUserAgent ?? null,
 			clientHarness: clientHarness ?? null,
+			codexTurnStateLen: codexTurnStateLength(requestHeaders),
 			routing: routingRecord,
 			timestamp,
 			requestBody:
