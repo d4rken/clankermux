@@ -337,17 +337,52 @@ describe("createFamilyWeeklyExhaustedResponse", () => {
 		);
 	});
 
-	it("does not clamp a transient sibling cooldown past the ceiling", () => {
+	it("clamps a sibling cooldown past the ceiling and keeps it in the body", async () => {
+		const siblingCooldown = NOW + 200_000;
 		const res = createFamilyWeeklyExhaustedResponse(
 			[excluded(NOW + 5 * 86_400_000, "Main")],
 			"fable",
 			"claude-fable-5",
 			NOW,
+			{ name: "Backup1", availableAt: siblingCooldown },
+		);
+		// A sibling cooldown carries no upper bound of its own, so it is capped
+		// the same way the family window is.
+		const retryAfter = Number(res.headers.get("Retry-After"));
+		expect(retryAfter).toBeGreaterThanOrEqual(45);
+		expect(retryAfter).toBeLessThanOrEqual(55);
+
+		const body = (await res.json()) as {
+			error: { earliest_known_reset_at: string };
+		};
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(siblingCooldown).toISOString(),
+		);
+	});
+
+	it("reports the earliest deadline across the family reset and the sibling", async () => {
+		const familyReset = NOW + 60_000;
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(familyReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
 			{ name: "Backup1", availableAt: NOW + 200_000 },
 		);
-		// A specific account's cooldown is a deadline worth obeying, unlike the
-		// family window it replaces.
-		expect(res.headers.get("Retry-After")).toBe("200");
+		const body = (await res.json()) as {
+			error: {
+				earliest_known_reset_at: string;
+				excluded_accounts: Array<{ resets_at: string }>;
+			};
+		};
+		// The excluded account's reset is the nearer of the two, and the field
+		// must never name a deadline later than one the same body reports.
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(familyReset).toISOString(),
+		);
+		expect(body.error.excluded_accounts[0].resets_at).toBe(
+			new Date(familyReset).toISOString(),
+		);
 	});
 
 	it("reports no earliest known reset when none is dated", async () => {

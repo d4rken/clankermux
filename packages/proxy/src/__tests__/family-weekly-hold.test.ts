@@ -281,12 +281,19 @@ describe("family-weekly transient-cooldown hold", () => {
 		expect(res.headers.get("x-clankermux-pool-status")).toBe(
 			"family-weekly-sibling-cooldown",
 		);
-		// Retry-After reflects the ~200s cooldown, NOT the 5-day family reset.
+		// Retry-After is the clamped re-check interval; the ~200s cooldown it was
+		// derived from is reported in the body, and the 5-day family reset is
+		// still not what drives either.
 		const retryAfter = Number(res.headers.get("Retry-After"));
-		expect(retryAfter).toBeGreaterThan(150);
-		expect(retryAfter).toBeLessThanOrEqual(200);
-		const body = (await res.json()) as { error: { message: string } };
+		expect(retryAfter).toBeGreaterThanOrEqual(45);
+		expect(retryAfter).toBeLessThanOrEqual(55);
+		const body = (await res.json()) as {
+			error: { message: string; earliest_known_reset_at: string };
+		};
 		expect(body.error.message).toContain("Backup1");
+		const knownReset = new Date(body.error.earliest_known_reset_at).getTime();
+		expect(knownReset - Date.now()).toBeGreaterThan(150_000);
+		expect(knownReset - Date.now()).toBeLessThanOrEqual(200_000);
 	});
 
 	it("returns the genuine family-exhausted 429 when NO family-capable sibling exists", async () => {

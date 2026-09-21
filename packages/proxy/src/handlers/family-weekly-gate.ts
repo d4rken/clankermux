@@ -249,10 +249,11 @@ export interface TransientSiblingCooldown {
  * interval, since a weekly window resets days out; the deadline itself is
  * reported in the body instead.
  *
- * When a `transientSibling` is supplied (a family-capable account momentarily
- * unavailable ONLY due to a short cooldown), its recovery — not the family
- * window — is the real wait: `Retry-After` and the message reflect the cooldown,
- * and the pool-status header is `family-weekly-sibling-cooldown`. Passing no
+ * When a `transientSibling` is supplied (a family-capable account unavailable
+ * ONLY due to a cooldown), its recovery, not the family window, is the real
+ * wait: `Retry-After` and the message reflect the cooldown, and the pool-status
+ * header is `family-weekly-sibling-cooldown`. A sibling cooldown has no upper
+ * bound of its own, so it is clamped like the family window. Passing no
  * `transientSibling` preserves the original genuinely-exhausted behavior exactly.
  */
 export function createFamilyWeeklyExhaustedResponse(
@@ -280,17 +281,25 @@ export function createFamilyWeeklyExhaustedResponse(
 			? transientSibling.availableAt
 			: null;
 
+	// The earliest future deadline this refusal knows about, across BOTH sources:
+	// a sibling's cooldown can outlast an excluded account's family reset, and
+	// the body reports the excluded resets either way.
+	const knownDeadlines = [
+		hasFutureReset ? soonestReset : null,
+		siblingCooldownMs,
+	].filter((d): d is number => d !== null);
+	const earliestKnownResetIso =
+		knownDeadlines.length > 0
+			? new Date(Math.min(...knownDeadlines)).toISOString()
+			: null;
+
 	let retryAfterSeconds: number;
 	let message: string;
 	let poolStatus: string;
-	// The deadline the advice is derived from, kept unclamped for the body.
-	let earliestKnownResetIso: string | null;
 	if (siblingCooldownMs !== null && transientSibling) {
-		// Deliberately NOT clamped: a transient sibling cooldown is a specific,
-		// near deadline on a specific account, so the honest number is the
-		// useful one. The clamp exists for the multi-day family window below.
-		retryAfterSeconds = ceilRetryAfterSeconds(siblingCooldownMs, now);
-		earliestKnownResetIso = new Date(siblingCooldownMs).toISOString();
+		retryAfterSeconds = clampRetryAfterSeconds(
+			ceilRetryAfterSeconds(siblingCooldownMs, now),
+		);
 		poolStatus = "family-weekly-sibling-cooldown";
 		message =
 			`The only account(s) with weekly "${family}" quota are temporarily ` +
@@ -301,7 +310,6 @@ export function createFamilyWeeklyExhaustedResponse(
 		retryAfterSeconds = hasFutureReset
 			? clampRetryAfterSeconds(ceilRetryAfterSeconds(soonestReset, now))
 			: DEFAULT_RECHECK_RETRY_AFTER_SECONDS;
-		earliestKnownResetIso = resetIso;
 		poolStatus = "family-weekly-exhausted";
 		message =
 			`All available accounts have exhausted their weekly "${family}" quota ` +
