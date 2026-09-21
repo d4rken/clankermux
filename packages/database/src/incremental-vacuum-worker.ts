@@ -53,11 +53,11 @@ export const SNAPSHOT_DELETE_BATCH_ROWS = 5000;
  * analysis_limit` before it. Without a limit (SQLite's default of 0 = unbounded)
  * ANALYZE does a full index scan on every table it deems stale — on our multi-GB
  * tables that holds SQLite's single writer slot for SECONDS, during which every
- * main-thread write parks in the busy handler (up to
- * MAIN_CONNECTION_BUSY_TIMEOUT_MS = 250 ms), freezing the event loop. 400 is
- * SQLite's documented value (https://sqlite.org/lang_analyze.html): it samples
- * ~400 rows per index for near-identical planner statistics while bounding each
- * ANALYZE to milliseconds, so the writer-slot hold — and the parks it caused —
+ * main-thread write bounces off SQLITE_BUSY and re-queues through the adapter's
+ * async retry loop. 400 is SQLite's documented value
+ * (https://sqlite.org/lang_analyze.html): it samples ~400 rows per index for
+ * near-identical planner statistics while bounding each ANALYZE to
+ * milliseconds, so the writer-slot hold — and the retries it caused —
  * effectively vanish.
  */
 const ANALYZE_ANALYSIS_LIMIT = 400;

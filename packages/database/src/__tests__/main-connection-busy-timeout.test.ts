@@ -1,14 +1,13 @@
 /**
- * Verifies that the MAIN-thread connection's `PRAGMA busy_timeout` is bounded
- * to a small constant instead of `dbConfig.busyTimeoutMs` (default 10 000).
+ * Verifies that the MAIN-thread connection's `PRAGMA busy_timeout` is zero
+ * rather than `dbConfig.busyTimeoutMs` (default 10 000).
  *
  * Background: bun:sqlite's busy handler waits at the C level (usleep) — the
  * entire Bun event loop freezes for however long busy_timeout is whenever a
  * main-thread call hits SQLITE_BUSY (e.g. while the vacuum/integrity worker
  * holds the write lock). The async retry layer (BunSqlAdapter.withBusyRetry)
- * already turns SQLITE_BUSY into non-blocking setTimeout retries, so the
- * C-level wait only needs to absorb sub-250ms write bursts; anything longer
- * must yield to the event loop and retry asynchronously.
+ * turns SQLITE_BUSY into non-blocking setTimeout retries, so the C-level wait
+ * buys nothing the retry loop does not already do, without the freeze.
  *
  * `dbConfig.busyTimeoutMs` stays intact for WORKER connections (vacuum,
  * integrity-check, dashboard workers), where long C-level blocking is fine.
@@ -39,7 +38,7 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it("bounds the default main connection to MAIN_CONNECTION_BUSY_TIMEOUT_MS", async () => {
+	it("leaves the default main connection with no C-level busy wait", async () => {
 		const dbOps = new DatabaseOperations(path.join(tmpDir, "default.db"));
 		try {
 			const { timeout } = dbOps
@@ -48,7 +47,7 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 				.query("PRAGMA busy_timeout")
 				.get() as { timeout: number };
 			expect(timeout).toBe(MAIN_CONNECTION_BUSY_TIMEOUT_MS);
-			expect(timeout).toBeLessThanOrEqual(250);
+			expect(timeout).toBe(0);
 		} finally {
 			await dbOps.close();
 		}
@@ -56,7 +55,7 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 
 	it("ignores a large dbConfig.busyTimeoutMs for the main connection (workers still consume it)", async () => {
 		// busyTimeoutMs is a WORKER-connection setting; the main connection must
-		// stay bounded no matter what the config says.
+		// stay at zero no matter what the config says.
 		const dbOps = new DatabaseOperations(path.join(tmpDir, "override.db"), {
 			busyTimeoutMs: 10_000,
 		});
