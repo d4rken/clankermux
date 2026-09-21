@@ -184,6 +184,9 @@ function isPublicApiPath(pathname: string): boolean {
 
 const RESPONSES_PATHS = new Set(["/v1/responses", "/v1/responses/compact"]);
 
+/** The id a client looks its own row up by under `/client/v1/requests/{id}`. */
+const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
 /**
  * Route one request. `fetch` is a thin wrapper around this.
  */
@@ -228,6 +231,11 @@ export async function routeRequest(
 			const headers = new Headers({ "content-type": "application/json" });
 			const retry = response.headers.get("retry-after");
 			if (retry) headers.set("retry-after", retry);
+			// The handle for `/client/v1/requests/{id}`: this rebuild is the last
+			// thing a chat client's error passes through, and a client that has to
+			// reconcile an error needs the id at least as much as a success does.
+			const requestId = response.headers.get(CLIENT_REQUEST_ID_HEADER);
+			if (requestId) headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
 			return new Response(
 				JSON.stringify(
 					errorEnvelope(

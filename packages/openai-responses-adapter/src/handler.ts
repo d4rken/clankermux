@@ -124,6 +124,25 @@ function nativeExtractionError(
 	);
 }
 
+/**
+ * The handle a client uses to read its own request back from
+ * `/client/v1/requests/{id}`. `forwardToClient` sets it on the response this
+ * adapter receives from `handleProxy`, and every leg below answers with a
+ * FRESH Response — so without a deliberate copy the id reaches the client only
+ * on the native streaming leg, which forwards the upstream headers verbatim.
+ */
+const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
+/**
+ * One exit for every response this adapter produces, so the request id is
+ * applied in a single place rather than at each construction site: the handler
+ * answers from a dozen return points and a copy at each one is a copy a future
+ * leg can silently omit.
+ *
+ * Only the id is carried over. The fresh headers each leg builds are what
+ * strips the internal native-Responses marker, the account id and the
+ * upstream's now-wrong content-type, and that must survive.
+ */
 export async function handleResponsesRequest(
 	req: Request,
 	url: URL,
@@ -131,6 +150,32 @@ export async function handleResponsesRequest(
 	ctx: unknown,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
+): Promise<Response> {
+	let captured: string | null = null;
+	const response = await respondToResponsesRequest(
+		req,
+		url,
+		handleProxy,
+		ctx,
+		apiKeyId,
+		apiKeyName,
+		(proxied) => {
+			captured = proxied.headers.get(CLIENT_REQUEST_ID_HEADER);
+		},
+	);
+	const requestId: string | null = captured;
+	if (requestId) response.headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
+	return response;
+}
+
+async function respondToResponsesRequest(
+	req: Request,
+	url: URL,
+	handleProxy: HandleProxyFn,
+	ctx: unknown,
+	apiKeyId: string | null | undefined,
+	apiKeyName: string | null | undefined,
+	captureProxyResponse: (proxied: Response) => void,
 ): Promise<Response> {
 	// 1. Parse body — Codex CLI compresses request bodies (zstd, gzip, deflate).
 	// Bun decompresses response bodies automatically but not request bodies,
@@ -303,6 +348,7 @@ export async function handleResponsesRequest(
 			apiKeyId,
 			apiKeyName,
 		);
+		captureProxyResponse(anthropicResp);
 	} catch (err) {
 		const statusCode =
 			typeof err === "object" &&

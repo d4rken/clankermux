@@ -467,10 +467,15 @@ describe("handleResponsesRequest", () => {
 
 			expect(resp.status).toBe(200);
 			expect(resp.headers.get("content-type")).toBe("application/json");
-			// Fresh headers: no internal marker, no stale SSE content-type/length,
-			// and no x-clankermux-* header of any kind.
+			// Fresh headers: no internal marker and no stale SSE
+			// content-type/length.
 			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			// The published request id is the ONE exception: it is this feature's
+			// handle for `/client/v1/requests/{id}`. Everything else under the
+			// prefix — the account id, the internal native-Responses marker — is
+			// still barred from a client-facing response.
 			for (const [name] of resp.headers.entries()) {
+				if (name === "x-clankermux-request-id") continue;
 				expect(name.startsWith("x-clankermux-")).toBe(false);
 			}
 
@@ -557,7 +562,12 @@ describe("handleResponsesRequest", () => {
 			expect(resp.status).toBe(200);
 			expect(resp.headers.get("content-type")).toBe("application/json");
 			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			// The published request id is the ONE exception: it is this feature's
+			// handle for `/client/v1/requests/{id}`. Everything else under the
+			// prefix — the account id, the internal native-Responses marker — is
+			// still barred from a client-facing response.
 			for (const [name] of resp.headers.entries()) {
+				if (name === "x-clankermux-request-id") continue;
 				expect(name.startsWith("x-clankermux-")).toBe(false);
 			}
 
@@ -1057,4 +1067,150 @@ test("Pi easy input retains user text on translated dispatch and original bytes 
 	);
 	expect(called).toBe(true);
 	expect(resp.status).toBe(200);
+});
+
+/**
+ * `x-clankermux-request-id` is the handle a client uses to read its own row
+ * back from `/client/v1/requests/{id}`, so it has to reach the client on EVERY
+ * route the proxy serves — not just the ones that happen to forward upstream
+ * headers verbatim.
+ *
+ * `forwardToClient` sets it on the response this adapter receives as
+ * `handleProxy`'s return value, which is exactly what the mocks below model.
+ * Each of these three legs then builds a fresh Response and drops it.
+ */
+describe("the client-facing request id survives the Responses adapter", () => {
+	const REQUEST_ID = "rid-responses-1";
+
+	function clientRequest(stream: boolean): Request {
+		return new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+				stream,
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	/** What `forwardToClient` hands back: the proxy's id is already on it. */
+	function forwarded(body: string, headers: Record<string, string>): Response {
+		return new Response(body, {
+			status: 200,
+			headers: { ...headers, "x-clankermux-request-id": REQUEST_ID },
+		});
+	}
+
+	const ANTHROPIC_SSE = [
+		`event: message_start\ndata: ${JSON.stringify({
+			type: "message_start",
+			message: {
+				id: "msg_1",
+				type: "message",
+				role: "assistant",
+				model: "claude-haiku-4-5",
+				content: [],
+				stop_reason: null,
+				stop_sequence: null,
+				usage: { input_tokens: 10, output_tokens: 0 },
+			},
+		})}\n\n`,
+		`event: content_block_start\ndata: ${JSON.stringify({
+			type: "content_block_start",
+			index: 0,
+			content_block: { type: "text", text: "" },
+		})}\n\n`,
+		`event: content_block_delta\ndata: ${JSON.stringify({
+			type: "content_block_delta",
+			index: 0,
+			delta: { type: "text_delta", text: "Hello" },
+		})}\n\n`,
+		`event: content_block_stop\ndata: ${JSON.stringify({
+			type: "content_block_stop",
+			index: 0,
+		})}\n\n`,
+		`event: message_delta\ndata: ${JSON.stringify({
+			type: "message_delta",
+			delta: { stop_reason: "end_turn", stop_sequence: null },
+			usage: { output_tokens: 5 },
+		})}\n\n`,
+		`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+	].join("");
+
+	const NATIVE_TERMINAL = {
+		id: "resp_backend_1",
+		object: "response",
+		status: "completed",
+		model: "gpt-5.5-codex",
+		output: [
+			{
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Hello" }],
+			},
+		],
+		usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+	};
+
+	const NATIVE_SSE = `event: response.completed\ndata: ${JSON.stringify({
+		type: "response.completed",
+		response: NATIVE_TERMINAL,
+	})}\n\n`;
+
+	test("on the translated JSON leg", async () => {
+		const resp = await handleResponsesRequest(
+			clientRequest(false),
+			new URL("http://localhost/v1/responses"),
+			async () =>
+				forwarded(ANTHROPIC_MESSAGE_BODY, {
+					"Content-Type": "application/json",
+				}),
+			{},
+		);
+
+		expect(resp.status).toBe(200);
+		expect(resp.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
+	});
+
+	test("on the translated stream leg", async () => {
+		const resp = await handleResponsesRequest(
+			clientRequest(true),
+			new URL("http://localhost/v1/responses"),
+			async () =>
+				forwarded(ANTHROPIC_SSE, { "Content-Type": "text/event-stream" }),
+			{},
+		);
+
+		expect(resp.headers.get("content-type")).toContain("text/event-stream");
+		expect(resp.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
+		await resp.text();
+	});
+
+	test("on the native non-streaming leg", async () => {
+		const resp = await handleResponsesRequest(
+			clientRequest(false),
+			new URL("http://localhost/v1/responses"),
+			async () =>
+				forwarded(NATIVE_SSE, {
+					"Content-Type": "text/event-stream",
+					[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+				}),
+			{},
+		);
+
+		expect(resp.status).toBe(200);
+		expect(resp.headers.get("content-type")).toBe("application/json");
+		// The internal marker still must not leak; only the id is published.
+		expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+		expect(resp.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
+	});
 });

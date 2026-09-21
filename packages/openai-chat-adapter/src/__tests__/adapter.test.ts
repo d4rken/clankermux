@@ -677,3 +677,38 @@ it("accepts a request exactly at the body limit", async () => {
 		).status,
 	).toBe(200);
 });
+
+/**
+ * `x-clankermux-request-id` is the handle a client uses to read its own row
+ * back from `/client/v1/requests/{id}`. `forwardToClient` puts it on the
+ * response this adapter receives from `handleProxy` — which is what the
+ * upstream below models — and both client-facing legs then build a fresh
+ * Response that does not carry it.
+ */
+describe("the client-facing request id survives the Chat adapter", () => {
+	const REQUEST_ID = "rid-chat-1";
+
+	/** What `forwardToClient` hands back: the proxy's id is already on it. */
+	const forwarded = (sse: string) =>
+		new Response(sse, {
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-id": REQUEST_ID,
+			},
+		});
+
+	it("on the non-streaming JSON leg", async () => {
+		const r = await run(input, forwarded(text));
+
+		expect(r.status).toBe(200);
+		expect(r.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
+	});
+
+	it("on the streaming leg", async () => {
+		const r = await run({ ...input, stream: true }, forwarded(text));
+
+		expect(r.headers.get("content-type")).toContain("text/event-stream");
+		expect(r.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
+		await r.text();
+	});
+});
