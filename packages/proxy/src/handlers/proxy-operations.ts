@@ -2864,7 +2864,7 @@ export async function proxyWithAccount(
 				account.provider,
 				rateLimitInfo.resetTime,
 				overloadAttributionModel,
-				{ accountName: account.name },
+				{ accountName: account.name, probeId: overloadProbeToken?.probeId },
 			);
 			// Probe verdict: the probe itself hit the overload. The trip above
 			// already invalidated the lease on the tripped bucket (generation

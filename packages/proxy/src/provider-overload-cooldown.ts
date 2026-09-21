@@ -385,6 +385,14 @@ export function applyProviderOverloadCooldown(
 		syntheticReset?: boolean;
 		/** Account whose attempt produced the overload, for attribution. */
 		accountName?: string;
+		/**
+		 * The probe id of the request REPORTING this overload, when it holds one.
+		 * Its own attempt is the one producing the evidence, so it is exempt from
+		 * the displacement cancellation below — a terminal 529 is forwarded to the
+		 * client from this very response, and a mid-stream overload arrives on a
+		 * stream already being forwarded.
+		 */
+		probeId?: string;
 	},
 ): number {
 	const now = Date.now();
@@ -412,11 +420,37 @@ export function applyProviderOverloadCooldown(
 				: "re-tripped(deadline retained)";
 	const generation = ++generationCounter;
 
+	// A re-trip replaces the bucket, and with it any lease it held. That lease is
+	// the only handle on its owner's upstream request, so it has to be cancelled
+	// on the way out rather than dropped: otherwise the displaced probe keeps
+	// running, the next admission after this cooldown cannot find it any more,
+	// and outstanding requests against a wedged upstream accumulate one per
+	// admission interval — the failure mode the admission deadline's abort exists
+	// to prevent. The reporting probe itself is exempt: it is mid-forward.
+	const displacedProbe = bucket?.probe ?? null;
+	const cancelDisplaced =
+		displacedProbe &&
+		displacedProbe.probeId !== context?.probeId &&
+		displacedProbe.onDisplaced
+			? displacedProbe.onDisplaced
+			: null;
+
 	buckets.set(key, {
 		until: effectiveUntil,
 		generation,
 		probe: null,
 	});
+	if (cancelDisplaced && displacedProbe) {
+		log.warn(
+			`Overload probe ${displacedProbe.probeId} displaced by a re-trip of ${key} ` +
+				`after ${now - displacedProbe.acquiredAt}ms; aborting it`,
+		);
+		try {
+			cancelDisplaced();
+		} catch (error) {
+			log.warn("Could not cancel a displaced overload probe", error);
+		}
+	}
 	const resetSource = context?.syntheticReset
 		? "midstream_no_headers_default"
 		: source;
@@ -588,6 +622,13 @@ export function tryAcquireProviderOverloadProbe(
 						`after ${ageMs}ms (ttl ${displacedProbe.ttlMs}ms); ` +
 						`admitting replacement ${probeId}`,
 				);
+				// Cancelled like every other replacement. An attempt still alive at
+				// the safety TTL — request timeout plus stream-forward total plus a
+				// margin — is outside every timeout this proxy sets, so "the
+				// transport probably killed it already" is exactly the assumption
+				// this branch cannot make. Abort is idempotent when it did.
+				if (displacedProbe.onDisplaced)
+					cancelDisplaced.add(displacedProbe.onDisplaced);
 			} else {
 				log.warn(
 					`Overload probe ${displacedProbe.probeId} produced no health evidence for ${key} ` +
@@ -798,6 +839,9 @@ export function getOverloadBucketGeneration(key: string): number | null {
  * Outstanding probe tokens are implicitly invalidated — their buckets are
  * gone, so late completions no-op.
  */
+// Deliberately does NOT cancel a probe in flight: an operator clear means "stop
+// gating", and after it nothing is suppressed behind that probe — there is no
+// convoy to break, and the probe is an ordinary client request.
 export function clearProviderOverloadCooldown(provider?: string): void {
 	if (provider) {
 		const providerKey = getProviderOverloadKey(provider);

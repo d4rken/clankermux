@@ -941,6 +941,63 @@ describe("family-scoped overload breaker", () => {
 			).toBe("closed");
 		});
 
+		it("a re-trip cancels the probe it displaces, and exempts the reporter", () => {
+			// A late 529 from an older request replaces the bucket, and with it B's
+			// lease — the only handle on B's upstream request. Dropping the
+			// canceller there leaves B running where the next admission can no
+			// longer find it, which is how outstanding requests accumulate against
+			// a wedged upstream.
+			const until = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now = until + 1;
+			let aborts = 0;
+			const wedged = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						aborts += 1;
+					},
+				}),
+			);
+
+			// The reporter is NOT the lease holder: an older attempt's 529 arrives.
+			const reopened = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			expect(aborts).toBe(1);
+
+			// …and the request that reports its OWN overload is exempt: its 529 is
+			// forwarded from the very response it is reporting on.
+			now = reopened + 1;
+			let selfAborts = 0;
+			const reporter = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						selfAborts += 1;
+					},
+				}),
+			);
+			applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+				{ probeId: reporter?.probeId },
+			);
+			expect(selfAborts).toBe(0);
+			expect(aborts).toBe(1);
+
+			// Both late completions are no-ops: the re-trips bumped the generation.
+			completeProviderOverloadProbe(wedged, "recovered");
+			completeProviderOverloadProbe(reporter, "recovered");
+			expect(
+				inspectProviderOverload("anthropic", "claude-haiku-4-5", now).state,
+			).toBe("open");
+		});
+
 		it("does not abort a probe that settled before the deadline", () => {
 			const until = applyProviderOverloadCooldown(
 				"anthropic",
