@@ -360,6 +360,77 @@ describe("createFamilyWeeklyExhaustedResponse", () => {
 		);
 	});
 
+	it("paces on the family reset when it precedes the sibling cooldown", async () => {
+		const familyReset = NOW + 60_000;
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(familyReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW + 200_000 },
+		);
+		// Clamping the 200s sibling here would advertise ~46s, ahead of the 60s
+		// reset this same body reports.
+		expect(res.headers.get("Retry-After")).toBe("60");
+		const body = (await res.json()) as {
+			error: { earliest_known_reset_at: string };
+		};
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(familyReset).toISOString(),
+		);
+	});
+
+	it("ignores an expired excluded reset when a later one is still valid", async () => {
+		const liveReset = NOW + 30_000;
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW - 1, "Expired"), excluded(liveReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+		);
+		// The expired entry is the numeric minimum, and taking it would drop the
+		// live reset out of both the header and the body.
+		expect(res.headers.get("Retry-After")).toBe("30");
+		const body = (await res.json()) as {
+			error: { earliest_known_reset_at: string };
+		};
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(liveReset).toISOString(),
+		);
+	});
+
+	it("ignores an expired excluded reset when a sibling cooldown is present", async () => {
+		const liveReset = NOW + 30_000;
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW - 1, "Expired"), excluded(liveReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW + 200_000 },
+		);
+		expect(res.headers.get("Retry-After")).toBe("30");
+		const body = (await res.json()) as {
+			error: { earliest_known_reset_at: string };
+		};
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(liveReset).toISOString(),
+		);
+	});
+
+	it("states the re-check meaning in the sibling message", async () => {
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW + 5 * 86_400_000, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW + 200_000 },
+		);
+		const body = (await res.json()) as { error: { message: string } };
+		expect(body.error.message).toContain("Re-check in");
+		expect(body.error.message).toContain("availability is not guaranteed");
+		expect(body.error.message).toContain("Backup1");
+	});
+
 	it("reports the earliest deadline across the family reset and the sibling", async () => {
 		const familyReset = NOW + 60_000;
 		const res = createFamilyWeeklyExhaustedResponse(
