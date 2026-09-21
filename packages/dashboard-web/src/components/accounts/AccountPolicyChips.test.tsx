@@ -84,27 +84,27 @@ function labelsOf(html: string): string[] {
 describe("AccountPolicyChips — provider inventory", () => {
 	it("renders all five codex flags with their chip labels", () => {
 		expect(labelsOf(render(makeAccount({ provider: "codex" })))).toEqual([
-			"Auto-fallback",
-			"Auto-refresh",
-			"Credits past weekly",
-			"Auto-apply: expiry",
-			"Auto-apply: weekly",
+			"Fallback",
+			"Prewarm",
+			"Credit spend",
+			"Apply: expiry",
+			"Apply: weekly",
 		]);
 	});
 
 	it("renders the three anthropic flags with their chip labels", () => {
 		expect(labelsOf(render(makeAccount({ provider: "anthropic" })))).toEqual([
-			"Auto-fallback",
-			"Auto-refresh",
+			"Fallback",
+			"Prewarm",
 			"Overage spend",
 		]);
 	});
 
 	it("renders the three zai flags, including peak-hours pause", () => {
 		expect(labelsOf(render(makeAccount({ provider: "zai" })))).toEqual([
-			"Auto-fallback",
-			"Auto-refresh",
-			"Peak hours pause",
+			"Fallback",
+			"Prewarm",
+			"Peak pause",
 		]);
 	});
 
@@ -123,7 +123,7 @@ describe("AccountPolicyChips — polarity tone", () => {
 	it("fills an enabled ordinary flag and keeps its border transparent", () => {
 		const chip = chipFor(
 			render(makeAccount({ provider: "anthropic", autoFallbackEnabled: true })),
-			"Auto-fallback",
+			"Fallback",
 		);
 		expect(chip).toContain("bg-secondary");
 		expect(chip).toContain("border-transparent");
@@ -135,7 +135,7 @@ describe("AccountPolicyChips — polarity tone", () => {
 			render(
 				makeAccount({ provider: "anthropic", autoFallbackEnabled: false }),
 			),
-			"Auto-fallback",
+			"Fallback",
 		);
 		expect(chip).toContain("border-border");
 		expect(chip).toContain("text-muted-foreground");
@@ -147,7 +147,7 @@ describe("AccountPolicyChips — polarity tone", () => {
 			render(
 				makeAccount({ provider: "codex", autoPauseOnOverageEnabled: false }),
 			),
-			"Credits past weekly",
+			"Credit spend",
 		);
 		expect(chip).toContain("bg-warning/15");
 		expect(chip).toContain("text-warning-strong");
@@ -159,7 +159,7 @@ describe("AccountPolicyChips — polarity tone", () => {
 			render(
 				makeAccount({ provider: "codex", autoPauseOnOverageEnabled: true }),
 			),
-			"Credits past weekly",
+			"Credit spend",
 		);
 		expect(chip).toContain("border-border");
 		expect(chip).toContain("text-muted-foreground");
@@ -194,10 +194,10 @@ describe("AccountPolicyChips — accessible state", () => {
 			const match = chip.match(/title="(On|Off) — [^"]+"/);
 			expect(match).not.toBeNull();
 		}
-		expect(chipFor(html, "Auto-fallback")).toContain(
+		expect(chipFor(html, "Fallback")).toContain(
 			'title="On — Automatically switch back to this account from lower-priority ones',
 		);
-		expect(chipFor(html, "Credits past weekly")).toContain(
+		expect(chipFor(html, "Credit spend")).toContain(
 			'title="Off — When the weekly Codex limit is reached',
 		);
 	});

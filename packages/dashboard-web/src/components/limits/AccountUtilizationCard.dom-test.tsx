@@ -168,16 +168,17 @@ describe("AccountUtilizationCard — usage indicators", () => {
 		for (const label of [
 			"Primary",
 			"Priority:",
-			"Auto-fallback",
-			"Auto-refresh",
+			"Fallback",
+			"Prewarm",
 			"Renews",
 			"Overage spend",
 		]) {
 			expect(text).not.toContain(label);
 		}
 		expect(text).toContain("Paused");
-		expect(text).toContain("Needs re-authentication");
-		expect(text).toContain("Provider overloaded (2m)");
+		expect(text).toContain("Re-auth needed");
+		expect(text).toContain("Overloaded");
+		expect(text).toContain("· 2m");
 		expect(text).toContain("Anthropic");
 
 		// The pause belongs to the row that names the account, not to the chip
@@ -206,7 +207,7 @@ describe("AccountUtilizationCard — usage indicators", () => {
 		);
 		expect(note).toBeDefined();
 		expect(note?.title).toContain("When OFF");
-		expect(host?.textContent).not.toContain("Auto-apply:");
+		expect(host?.textContent).not.toContain("Apply:");
 	});
 });
 

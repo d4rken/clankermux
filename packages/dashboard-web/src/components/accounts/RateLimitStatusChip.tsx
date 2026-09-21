@@ -37,7 +37,7 @@ function usageExhaustedDescriptor(
 	binding: UsageExhaustionBinding | null | undefined,
 ): StatusDescriptor {
 	return {
-		label: "Usage exhausted",
+		label: "Exhausted",
 		variant: "warning",
 		description:
 			binding === "session"

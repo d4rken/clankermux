@@ -55,9 +55,9 @@ describe("RateLimitStatusChip", () => {
 		expect(html).toContain("Some New Status");
 	});
 
-	it("maps a usage_exhausted status string to an amber 'Usage exhausted' chip", () => {
+	it("maps a usage_exhausted status string to an amber 'Exhausted' chip", () => {
 		const html = render("usage_exhausted (2760m)");
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("46h");
 	});
@@ -73,7 +73,7 @@ const NOW = 1_750_000_000_000;
 const MIN = 60_000;
 
 describe("RateLimitStatusChip — structured cause", () => {
-	it("renders 'Usage exhausted' (amber) from the cause, with the cause's countdown", () => {
+	it("renders 'Exhausted' (amber) from the cause, with the cause's countdown", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitStatusChip
 				status="usage_exhausted (1380m)"
@@ -83,7 +83,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 				now={NOW}
 			/>,
 		);
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("bg-warning/15");
 		// 90 minutes -> 1h 30m, taken from resetMs rather than the string.
 		expect(html).toContain("1h 30m");
@@ -142,7 +142,7 @@ describe("RateLimitStatusChip — structured cause", () => {
 				now={NOW}
 			/>,
 		);
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).not.toContain("·");
 	});
 });
@@ -169,7 +169,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 
 	it("explains a session binding as the 5-hour window", () => {
 		const html = renderExhausted("session");
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("5-hour session quota is spent");
 		expect(html).not.toContain("Weekly usage quota");
@@ -179,7 +179,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 
 	it("explains a weekly binding as the weekly window", () => {
 		const html = renderExhausted("weekly");
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("bg-warning/15");
 		expect(html).toContain("Weekly usage quota is spent");
 		expect(html).not.toContain("5-hour session");
@@ -187,7 +187,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 
 	it("falls back to generic wording when no binding is supplied (older payloads)", () => {
 		const html = renderExhausted();
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("A usage quota is spent");
 		expect(html).not.toContain("Weekly usage quota");
 		expect(html).not.toContain("5-hour session");
@@ -197,7 +197,7 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitStatusChip status="usage_exhausted (2760m)" />,
 		);
-		expect(html).toContain("Usage exhausted");
+		expect(html).toContain("Exhausted");
 		expect(html).toContain("A usage quota is spent");
 	});
 });
