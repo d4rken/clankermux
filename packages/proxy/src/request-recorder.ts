@@ -1358,11 +1358,16 @@ export class RequestRecorder {
 	 * reached from `patchUsage`, where usage did arrive and this write would be
 	 * a lie. Write-once in SQL, so it can never overwrite that patch's value.
 	 *
-	 * Returns whether the settlement was ADMITTED — true also when the record
-	 * needs none. `AsyncWriter.enqueue` drops the job at the queue cap and
-	 * nothing retries it, so a caller that drops the record on a `false` here
-	 * destroys the only thing that could finish the row's accounting: it would
-	 * stay `usage_source` NULL, reading "not finished yet", permanently.
+	 * Returns DROP PERMISSION, not a write result. `true` — the caller may
+	 * release the record: the settlement was admitted, or none was needed.
+	 * `false` — retain it: the settlement was refused, or a pending patch
+	 * belongs to another retry path and this record is its only carrier.
+	 *
+	 * So `false` is never merely "the write failed". `AsyncWriter.enqueue`
+	 * drops the job at the queue cap and nothing retries it, so a caller that
+	 * drops the record on a `false` here destroys the only thing that could
+	 * finish the row's accounting: it would stay `usage_source` NULL, reading
+	 * "not finished yet", permanently.
 	 */
 	private closeUnresolvedUsageSource(record: InternalRecord): boolean {
 		// A record holding a refused token patch is NOT settleable: its tokens are
