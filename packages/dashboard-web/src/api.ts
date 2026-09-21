@@ -49,6 +49,9 @@ export type RequestSummary = RequestResponse;
 // Re-export types directly
 export type { RequestPayload, RequestResponse } from "@clankermux/types";
 
+/** Mirrors `ServedModelSubstitutionMode` in @clankermux/config. */
+export type ServedModelSubstitutionMode = "off" | "observe" | "enforce";
+
 export interface CacheWarmingResponse {
 	mode: "off" | "static" | "dynamic";
 	minTokens: number;
@@ -1922,6 +1925,18 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	async getServedModelSubstitutionMode(): Promise<{
+		servedModelSubstitutionMode: ServedModelSubstitutionMode;
+	}> {
+		return this.get("/api/config/model-substitution");
+	}
+
+	async setServedModelSubstitutionMode(body: {
+		mode: ServedModelSubstitutionMode;
+	}): Promise<{ servedModelSubstitutionMode: ServedModelSubstitutionMode }> {
+		return this.post("/api/config/model-substitution", body);
 	}
 
 	async setCacheWarming(body: {

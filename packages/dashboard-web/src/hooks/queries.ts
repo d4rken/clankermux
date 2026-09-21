@@ -11,7 +11,12 @@ import {
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
-import { api, type RequestPayload, type RequestSummary } from "../api";
+import {
+	api,
+	type RequestPayload,
+	type RequestSummary,
+	type ServedModelSubstitutionMode,
+} from "../api";
 import type { FilterState } from "../components/analytics/AnalyticsFilters";
 import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
@@ -840,6 +845,30 @@ export const useCacheWarming = () => {
 	return useQuery({
 		queryKey: ["cache-warming"],
 		queryFn: () => api.getCacheWarming(),
+	});
+};
+
+export const useServedModelSubstitutionMode = () => {
+	return useQuery({
+		queryKey: ["model-substitution-mode"],
+		queryFn: () => api.getServedModelSubstitutionMode(),
+	});
+};
+
+export const useSetServedModelSubstitutionMode = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: { mode: ServedModelSubstitutionMode }) =>
+			api.setServedModelSubstitutionMode(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["model-substitution-mode"] });
+			// Leaving `enforce` releases the suppressions enforcement wrote, so the
+			// chip and banner are stale the moment the mode changes.
+			queryClient.invalidateQueries({
+				queryKey: queryKeys.modelSubstitutions(),
+				exact: false,
+			});
+		},
 	});
 };
 
