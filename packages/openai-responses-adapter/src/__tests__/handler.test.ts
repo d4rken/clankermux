@@ -220,6 +220,142 @@ describe("handleResponsesRequest", () => {
 		expect(resp.status).toBe(429);
 	});
 
+	test("Test 3b: error passthrough keeps the proxy's retry guidance headers", async () => {
+		const mockHandleProxy: HandleProxyFn = async () =>
+			new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "pool_exhausted", message: "no capacity" },
+				}),
+				{
+					status: 429,
+					headers: {
+						"Content-Type": "application/json",
+						"Retry-After": "47",
+						"x-clankermux-pool-status": "exhausted",
+						"anthropic-ratelimit-unified-5h-utilization": "100",
+						"x-request-id": "req_internal",
+					},
+				},
+			);
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(429);
+		expect(resp.headers.get("Retry-After")).toBe("47");
+		expect(resp.headers.get("x-clankermux-pool-status")).toBe("exhausted");
+		expect(resp.headers.get("anthropic-ratelimit-unified-5h-utilization")).toBe(
+			"100",
+		);
+		// Allowlisted, not copied wholesale.
+		expect(resp.headers.get("x-request-id")).toBeNull();
+		expect(resp.headers.get("Content-Type")).toContain("application/json");
+		expect(
+			((await resp.json()) as { error: { message: string } }).error.message,
+		).toBe("no capacity");
+	});
+
+	test("Test 3c: an error body that never settles still answers the client", async () => {
+		// A 503 whose body stream stays open forever: the status is already
+		// enough to translate, so the read must not hold the request open until
+		// the server's idle timeout drops the connection.
+		const mockHandleProxy: HandleProxyFn = async () =>
+			new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode('{"det'));
+					},
+				}),
+				{ status: 503, headers: { "Content-Type": "application/json" } },
+			);
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const started = Date.now();
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(503);
+		expect(Date.now() - started).toBeLessThan(10_000);
+		const body = (await resp.json()) as { error: { message: string } };
+		expect(typeof body.error.message).toBe("string");
+		expect(body.error.message.length).toBeGreaterThan(0);
+	});
+
+	test("Test 3d: a body whose reader cannot be acquired is handled like a read failure", async () => {
+		const mockHandleProxy: HandleProxyFn = async () => {
+			const resp = new Response("boom", { status: 502 });
+			Object.defineProperty(resp, "body", {
+				get: () => ({
+					getReader() {
+						throw new TypeError("body already locked");
+					},
+				}),
+			});
+			return resp;
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(502);
+		const body = (await resp.json()) as { error: { message: string } };
+		expect(body.error.message).toBe("Unknown error");
+	});
+
 	test("Test 4: streaming path → returns a text/event-stream response", async () => {
 		const sseBody =
 			"event: message_start\ndata: " +
