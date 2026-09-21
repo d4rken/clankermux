@@ -1,3 +1,4 @@
+import { AccountRepository, RoutingRepository } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import { BACKEND_RESOLVED_SLUGS, isModelSubstitution } from "@clankermux/proxy";
 import type {
@@ -142,13 +143,25 @@ export function createModelSubstitutionsHandlerFromSources(
 	};
 }
 
+/**
+ * Repositories are constructed from the ADAPTER, never reached through
+ * `context.dbOps`. This handler also runs inside the analytics worker, whose
+ * synthetic APIContext carries only `getAdapter()` — going through `dbOps`
+ * there throws on every call, and does so in a place no unit test driving the
+ * sources seam can see.
+ */
 export function createModelSubstitutionsHandler(
 	context: APIContext,
 ): (params: URLSearchParams) => Promise<Response> {
+	const adapter = context.dbOps.getAdapter();
+	const routing = new RoutingRepository(adapter);
+	const accounts = new AccountRepository(adapter);
 	return createModelSubstitutionsHandlerFromSources({
-		getModelSubstitutions: (opts) =>
-			context.dbOps.routing.getModelSubstitutions(opts),
-		getAllAccounts: () => context.dbOps.getAllAccounts(),
+		getModelSubstitutions: (opts) => routing.getModelSubstitutions(opts),
+		// Disabled accounts included: an account taken out of rotation can still
+		// own substitutions recorded while it was live, and the history must not
+		// silently rename them to a bare id.
+		getAllAccounts: () => accounts.findAll(true),
 	});
 }
 
