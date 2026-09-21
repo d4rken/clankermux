@@ -24,6 +24,7 @@ import {
 	MAIN_CONNECTION_BUSY_TIMEOUT_MS,
 	STARTUP_BUSY_TIMEOUT_MS,
 } from "../database-operations";
+import { ADDITIVE_COLUMNS, ensureSchema, runMigrations } from "../migrations";
 
 function makeTempDbDir(): string {
 	return fs.mkdtempSync(
@@ -261,6 +262,70 @@ describe("bootstrapAutoVacuum under contention", () => {
 			});
 		} finally {
 			await dbOps.close();
+		}
+	});
+});
+
+describe("runMigrations under contention", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = makeTempDbDir();
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("applies a pending ALTER while another process is committing", async () => {
+		// The additive-column pass reads schema metadata and then ALTERs. Under
+		// a DEFERRED transaction those reads pin a snapshot, and a writer that
+		// commits before the ALTER lands kills it: SQLite refuses the upgrade
+		// immediately and the busy handler is never consulted, so no amount of
+		// busy_timeout repairs it. Nothing retries runMigrations, so the
+		// constructor fails and the process does not boot.
+		const dbPath = path.join(tmpDir, "pending-alter.db");
+		const setup = new Database(dbPath, { create: true });
+		setup.exec("PRAGMA journal_mode = WAL");
+		ensureSchema(setup);
+		const pending = ADDITIVE_COLUMNS.find(({ table, column }) =>
+			(
+				setup.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+					name: string;
+				}>
+			).some((c) => c.name === column),
+		);
+		if (!pending) throw new Error("no additive column to strip");
+		setup.run(`ALTER TABLE ${pending.table} DROP COLUMN ${pending.column}`);
+		setup.close();
+
+		const db = new Database(dbPath);
+		db.exec(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+		const holder = await holdWriteLock(dbPath, {
+			holdMs: 400,
+			writeSql: [
+				"INSERT INTO strategies (name, config, updated_at) VALUES ('contention-probe', '{}', 1)",
+			],
+		});
+
+		try {
+			runMigrations(db);
+			const columns = (
+				db.prepare(`PRAGMA table_info(${pending.table})`).all() as Array<{
+					name: string;
+				}>
+			).map((c) => c.name);
+			expect(columns).toContain(pending.column);
+			// The other process's write survived — this waited for it rather
+			// than racing it.
+			expect(
+				db
+					.query("SELECT name FROM strategies WHERE name = 'contention-probe'")
+					.get(),
+			).not.toBeNull();
+		} finally {
+			await holder.release();
+			db.close();
 		}
 	});
 });
