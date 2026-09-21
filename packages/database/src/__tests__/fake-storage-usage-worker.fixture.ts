@@ -38,6 +38,8 @@ export type FakeWorker = {
 	respondWithoutAck: (result: StorageUsageScanResult) => void;
 	/** Acknowledge the close; an `error` makes it a failed one. */
 	acknowledge: (error?: string) => void;
+	/** Raise an uncaught worker error, the way `worker.onerror` delivers one. */
+	errorOut: (message: string) => void;
 };
 
 export type FakeWorkerLog = {
@@ -83,6 +85,9 @@ export function installFakeWorkers(): FakeWorkerLog {
 			respond: (result) => {
 				fake.respondWithoutAck(result);
 				fake.acknowledge();
+			},
+			errorOut: (message) => {
+				fake.onerror?.({ message } as ErrorEvent);
 			},
 		};
 		workers.push(fake);

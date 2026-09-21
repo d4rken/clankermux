@@ -518,6 +518,75 @@ describe("storage-usage scan admission", () => {
 		expect(refusalReason(refused)).toContain("quarantine");
 	});
 
+	it("admits the next call when the scan timer fires during the acknowledgement wait", async () => {
+		// The measurement already landed and the worker then confirmed a clean
+		// close, so nothing about this path is uncertain. The scan cap exists to
+		// bound a worker that never reported; it must not still be armed once the
+		// result is in, where it would turn a clean scan into a held path.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = {
+			// 1000ms is the floor `resolveTimeoutMs` clamps to, so this is the
+			// shortest cap the runner will honour.
+			timeoutMs: 1000,
+			failureCooldownMs: 60_000,
+			quarantineMs: 60_000,
+			cleanupGraceMs: 10_000,
+		};
+
+		const first = startScan(path, windows);
+		const worker1 = await log.nth(1);
+		worker1.respondWithoutAck(measured(1));
+		await settleQueue();
+		// Armed before this sleep and for a shorter delay, so the cap is due
+		// first however loaded the loop is — and both are far inside the grace.
+		await Bun.sleep(1250);
+		worker1.acknowledge();
+		expect(await first).toEqual(measured(1));
+
+		const second = startScan(path, windows);
+		await settleQueue();
+		// Checked before the worker is driven: a path held over that expired cap
+		// refuses this call and builds nothing, which shows up here.
+		expect(log.count).toBe(2);
+		(await log.nth(2)).respond(measured(2));
+		expect(await second).toEqual(measured(2));
+	});
+
+	it("quarantines a path whose worker errors during the acknowledgement wait", async () => {
+		// An uncaught error in the worker thread says nothing about what that
+		// thread had already done with its file handle, and a close message that
+		// arrives afterwards cannot vouch for it. The bytes measured before the
+		// error are still good, so the caller keeps them and only the path is
+		// held.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = {
+			// Only reached if the quarantine fails to refuse; it caps the stray
+			// scan so this test cannot hang on a worker nothing will answer.
+			timeoutMs: 1000,
+			failureCooldownMs: 60_000,
+			quarantineMs: 60_000,
+			cleanupGraceMs: 2000,
+		};
+
+		const first = startScan(path, windows);
+		const worker1 = await log.nth(1);
+		worker1.respondWithoutAck(measured(1));
+		await settleQueue();
+		worker1.errorOut("worker thread crashed");
+		await settleQueue();
+		worker1.acknowledge();
+		expect(await first).toEqual(measured(1));
+
+		const second = startScan(path, windows);
+		await settleQueue();
+		// Checked before the call is awaited: the refusal owes nothing to a
+		// worker, so an admitted scan shows up here as a second construction.
+		expect(log.count).toBe(1);
+		expect(refusalReason(await second)).toContain("quarantine");
+	});
+
 	it("revokes the worker blob URL on every path, quarantined ones included", async () => {
 		const log = installFakeWorkers();
 		const created: string[] = [];

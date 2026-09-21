@@ -425,6 +425,10 @@ async function spawnScan(
 				error: err instanceof Error ? err.message : String(err),
 			}),
 		);
+		// The cap bounds the scan, and the scan is over the moment the result
+		// settles. The acknowledgement wait below carries its own bound in
+		// `cleanupGraceMs`, so nothing past here needs this timer.
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 		if (!unconfirmedStop) {
 			// A worker that never reported is already uncertain; only one that
 			// did can still confirm what it did with its handle.
@@ -432,7 +436,10 @@ async function spawnScan(
 				closeAck.promise,
 				resolveWindowMs(options.cleanupGraceMs, DEFAULT_CLEANUP_GRACE_MS),
 			);
-			unconfirmedStop = ack === null || !ack.closed;
+			// Never clears the flag: `worker.onerror` can still fire while this
+			// wait is in progress, and a close message posted by a thread that
+			// crashed cannot vouch for what it did with the handle first.
+			unconfirmedStop = unconfirmedStop || ack === null || !ack.closed;
 		}
 		if (result.ok) {
 			const problem = validateScanTables(options.tables, result.types);
