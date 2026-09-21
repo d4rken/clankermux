@@ -35,6 +35,7 @@ import {
 	clearCodexUsagePersistMemo,
 	clearPendingRotation,
 	refreshCodexUsageForAccount,
+	restartUsagePollingForAccount,
 } from "@clankermux/proxy";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 
@@ -844,6 +845,13 @@ export function createAnthropicReauthCallbackHandler(
 				// replaced. See the Qwen handler for why only reauth completion may
 				// drop one.
 				clearPendingRotation(account.id);
+				// What the poller learned under the old credentials includes any
+				// retry-after the usage endpoint imposed, and the access recheck now
+				// honours that deadline rather than spending a request against it. A
+				// marker left behind would therefore defer the first test of the new
+				// token. The restarter drops the Anthropic cache and the marker with
+				// it; it reports per-server failures itself and never rejects.
+				await restartUsagePollingForAccount(account.id);
 
 				log.info(`Successfully re-authenticated Anthropic account '${name}'`);
 

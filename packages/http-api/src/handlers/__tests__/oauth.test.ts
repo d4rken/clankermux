@@ -1,9 +1,18 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	DatabaseFactory,
 	DatabaseOperations as DirectDbOps,
 } from "@clankermux/database";
+import { OAuthFlow } from "@clankermux/oauth-flow";
 import { usageCache } from "@clankermux/providers";
 import {
 	clearAllPendingRotationsForTests,
@@ -11,6 +20,7 @@ import {
 	type PendingRotationWriter,
 	recordPendingRotation,
 	registerCodexUsageRefresher,
+	registerPollingRestarter,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
 import { tempDbTracker } from "@clankermux/test-support";
@@ -654,5 +664,61 @@ describe("createAnthropicReauthCallbackHandler", () => {
 		expect(res.status).toBe(400);
 		const data = await res.json();
 		expect(data.error).toMatch(/session/i);
+	});
+
+	// A usage-endpoint 429 recorded under the OLD credentials outlives them: the
+	// marker lives in the usage cache, keyed by account id. The access recheck
+	// honours that deadline instead of spending a request against it, so a marker
+	// carried across a reauth would defer the first check of the new token until
+	// a window the new token was never subject to had expired.
+	it("restarts usage polling so nothing learned under the old credentials outlives them", async () => {
+		const accountId = "11111111-1111-4111-8111-111111111111";
+		const sessionId = "22222222-2222-4222-8222-222222222222";
+		const restarted: string[] = [];
+		registerPollingRestarter(
+			"anthropic-reauth-usage-restart-test",
+			async (id) => {
+				restarted.push(id);
+				return true;
+			},
+		);
+		const completeReauth = spyOn(
+			OAuthFlow.prototype,
+			"completeReauth",
+		).mockResolvedValue(undefined);
+		try {
+			await dbOps
+				.getAdapter()
+				.run(
+					"INSERT INTO accounts (id, name, provider, created_at, access_token, refresh_token) VALUES (?, ?, 'anthropic', ?, 'old-at', 'old-rt')",
+					[accountId, "reauth-target", Date.now()],
+				);
+			await dbOps.createOAuthSession(
+				sessionId,
+				"reauth-target",
+				"test-verifier",
+				"claude-oauth",
+			);
+
+			const res = await handler(
+				new Request("http://localhost/api/oauth/reauth/anthropic/callback", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ sessionId, code: "some-auth-code" }),
+				}),
+			);
+
+			expect(res.status).toBe(200);
+			expect(completeReauth).toHaveBeenCalled();
+			expect(restarted).toContain(accountId);
+		} finally {
+			completeReauth.mockRestore();
+			// There is no unregister counterpart; leave an inert entry behind rather
+			// than a recorder other suites would feed.
+			registerPollingRestarter(
+				"anthropic-reauth-usage-restart-test",
+				async () => false,
+			);
+		}
 	});
 });
