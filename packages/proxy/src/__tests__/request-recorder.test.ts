@@ -2752,4 +2752,55 @@ describe("RequestRecorder — usage_source", () => {
 
 		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
 	});
+
+	it("writes 'none' when the RECORD CAP evicts the patch record first", async () => {
+		const h = makeHarness({ MAX_RECORDS: 1 });
+		h.recorder.begin(makeMeta({ requestId: "cap-0" }));
+		h.recorder.finishTransport("cap-0", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		// A new request pushes the map over MAX_RECORDS; the retained patch record
+		// is the persisted one, so cap pressure evicts it well before its TTL.
+		h.recorder.begin(makeMeta({ requestId: "cap-1" }));
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "cap-0", usageSource: "none" },
+		]);
+	});
+
+	it("does NOT write under cap pressure for a row that persisted WITH usage", async () => {
+		const h = makeHarness({ MAX_RECORDS: 2 });
+		// Usage arrived before the transport ended, so this row is persisted
+		// complete and keeps no patch record.
+		h.recorder.begin(makeMeta({ requestId: "cap-usage" }));
+		h.recorder.attachUsageSummary(
+			"cap-usage",
+			makeSummary({ requestId: "cap-usage" }),
+		);
+		h.recorder.finishTransport("cap-usage", "success");
+		// This one has no usage, so it lingers for a late patch.
+		h.recorder.begin(makeMeta({ requestId: "cap-null" }));
+		h.recorder.finishTransport("cap-null", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// Drive the map over the cap.
+		h.recorder.begin(makeMeta({ requestId: "cap-2" }));
+		h.recorder.begin(makeMeta({ requestId: "cap-3" }));
+		await h.flush();
+
+		// Only the recoverable row is settled; the complete one is never touched,
+		// which the write-once column alone could not distinguish from a spurious
+		// call that lost the race.
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "cap-null", usageSource: "none" },
+		]);
+		expect(
+			h.dbOps.saveRequestCalls.find((c) => c.id === "cap-usage")?.usageSource,
+		).toBe("provider");
+	});
 });

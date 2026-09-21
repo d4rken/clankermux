@@ -1561,7 +1561,9 @@ export class RequestRecorder {
 			if (removed >= excess) break;
 			if (record.persisted) {
 				// Already persisted (its row is written / will be) → safe to delete
-				// to shrink the map. Drops the patch window early under cap pressure.
+				// to shrink the map. Drops the patch window early under cap pressure,
+				// so settle the row's accounting on the way out.
+				this.closeUnresolvedUsageSource(record);
 				this.dropRecord(id);
 				removed++;
 			} else if (record.transport === null && !record.bodyDiscarded) {
