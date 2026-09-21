@@ -375,6 +375,18 @@ export async function handleResponsesRequest(
 				? (err as { statusCode: number }).statusCode
 				: 503;
 		const isUnavailable = statusCode === 503;
+		// Read the same way as `statusCode` above: the give-up terminals attach
+		// their re-check interval to the error, and this leg has to pace its 503
+		// exactly as the /v1/messages leg does or a Codex retry loop is the only
+		// client left with no guidance.
+		const retryAfterSeconds =
+			typeof err === "object" &&
+			err !== null &&
+			"retryAfterSeconds" in err &&
+			typeof (err as { retryAfterSeconds: unknown }).retryAfterSeconds ===
+				"number"
+				? (err as { retryAfterSeconds: number }).retryAfterSeconds
+				: undefined;
 		return new Response(
 			JSON.stringify({
 				error: {
@@ -383,9 +395,21 @@ export async function handleResponsesRequest(
 						: "Proxy request failed",
 					type: isUnavailable ? "server_error" : "api_error",
 					code: isUnavailable ? "server_error" : "api_error",
+					...(retryAfterSeconds === undefined
+						? {}
+						: { availability_guaranteed: false }),
 				},
 			}),
-			{ status: statusCode, headers: { "Content-Type": "application/json" } },
+			{
+				status: statusCode,
+				headers:
+					retryAfterSeconds === undefined
+						? { "Content-Type": "application/json" }
+						: {
+								"Content-Type": "application/json",
+								"Retry-After": String(retryAfterSeconds),
+							},
+			},
 		);
 	}
 

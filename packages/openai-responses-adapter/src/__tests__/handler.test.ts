@@ -274,6 +274,82 @@ describe("handleResponsesRequest", () => {
 		).toBe("no capacity");
 	});
 
+	test("Test 3b2: a thrown give-up error paces the 503 it becomes", async () => {
+		// The server hands this adapter the raw proxy entry point, so a terminal
+		// that throws never passes through the dispatcher that would otherwise
+		// attach the pacing.
+		const mockHandleProxy: HandleProxyFn = async () => {
+			const err = Object.assign(
+				new Error("All accounts failed to proxy the request (2 attempted)"),
+				{ statusCode: 503, retryAfterSeconds: 23 },
+			);
+			throw err;
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(503);
+		expect(resp.headers.get("Retry-After")).toBe("23");
+		const body = (await resp.json()) as {
+			error: { type: string; availability_guaranteed: boolean };
+		};
+		expect(body.error.type).toBe("server_error");
+		expect(body.error.availability_guaranteed).toBe(false);
+	});
+
+	test("Test 3b3: a throw with no advice is serialized exactly as before", async () => {
+		const mockHandleProxy: HandleProxyFn = async () => {
+			throw Object.assign(new Error("boom"), { statusCode: 503 });
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(503);
+		expect(resp.headers.get("Retry-After")).toBeNull();
+		const body = (await resp.json()) as {
+			error: Record<string, unknown>;
+		};
+		expect("availability_guaranteed" in body.error).toBe(false);
+	});
+
 	test("Test 3c: an error body that never settles still answers the client", async () => {
 		// A 503 whose body stream stays open forever: the status is already
 		// enough to translate, so the read must not hold the request open until
