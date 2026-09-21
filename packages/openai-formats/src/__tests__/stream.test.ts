@@ -336,7 +336,7 @@ describe("transformStreamingResponse — text responses", () => {
 		expect(parsed.usage.cache_creation_input_tokens).toBeUndefined();
 	});
 
-	it("clamps a cache count that exceeds its own prompt total", async () => {
+	it("drops a cache count that exceeds its own prompt total", async () => {
 		const upstream = makeOpenAIStream([
 			JSON.stringify({
 				id: "c1",
@@ -356,9 +356,12 @@ describe("transformStreamingResponse — text responses", () => {
 		if (!msgDelta) throw new Error("expected message_delta event");
 		const parsed = JSON.parse(dataOf(msgDelta));
 
-		expect(parsed.usage.input_tokens).toBe(0);
-		expect(parsed.usage.cache_read_input_tokens).toBe(10);
-		// Only `cached_tokens` was reported; the write class stays unstated.
+		// 25 cached tokens out of a 10-token prompt is not a vector to repair.
+		// Cutting it to 10 would publish the proxy's arithmetic under the
+		// provider's name, so the prompt total stands alone and no cache class
+		// is claimed at all.
+		expect(parsed.usage.input_tokens).toBe(10);
+		expect(parsed.usage.cache_read_input_tokens).toBeUndefined();
 		expect(parsed.usage.cache_creation_input_tokens).toBeUndefined();
 	});
 

@@ -144,17 +144,21 @@ function emitStreamEnd(
 		},
 		// Each cache field is emitted only when upstream reported ITS counter.
 		// They are optional in this shape, and a 0 nobody stated is published by
-		// the row as a claim that none of that class was consumed.
-		usage: {
-			input_tokens: input.inputTokens,
-			output_tokens: completionTokens,
-			...(sawCacheRead
-				? { cache_read_input_tokens: input.cacheReadInputTokens }
-				: {}),
-			...(sawCacheCreation
-				? { cache_creation_input_tokens: input.cacheCreationInputTokens }
-				: {}),
-		},
+		// the row as a claim that none of that class was consumed. Counters that
+		// do not fit their own total are dropped rather than cut down to fit: a
+		// clamped figure is the proxy's arithmetic under the provider's name.
+		usage: input.clamped
+			? { input_tokens: promptTokens, output_tokens: completionTokens }
+			: {
+					input_tokens: input.inputTokens,
+					output_tokens: completionTokens,
+					...(sawCacheRead
+						? { cache_read_input_tokens: input.cacheReadInputTokens }
+						: {}),
+					...(sawCacheCreation
+						? { cache_creation_input_tokens: input.cacheCreationInputTokens }
+						: {}),
+				},
 	};
 	controller.enqueue(encoder.encode(`event: message_delta\n`));
 	controller.enqueue(

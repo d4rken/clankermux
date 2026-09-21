@@ -3085,12 +3085,16 @@ describe("normalizeCodexInputUsage", () => {
 			inputTokens: 50,
 			cacheReadInputTokens: 30,
 			cacheCreationInputTokens: 20,
+			// Both counters fit the total, so nothing was cut down.
+			clamped: false,
 		});
 		expect(normalizeCodexInputUsage(10, 8, 20)).toEqual({
 			totalInputTokens: 10,
 			inputTokens: 0,
 			cacheReadInputTokens: 8,
 			cacheCreationInputTokens: 2,
+			// 20 writes cut to the 2 the total left: a repair, and the row says so.
+			clamped: true,
 		});
 	});
 	it("keeps unreported or malformed cache fields absent, preserving explicit zero", () => {
@@ -3107,6 +3111,8 @@ describe("normalizeCodexInputUsage", () => {
 				inputTokens: 100,
 				cacheReadInputTokens: undefined,
 				cacheCreationInputTokens: undefined,
+				// Nothing usable arrived, so nothing was cut down either.
+				clamped: false,
 			});
 		}
 		expect(normalizeCodexInputUsage(100, 0, 0)).toEqual({
@@ -3114,6 +3120,7 @@ describe("normalizeCodexInputUsage", () => {
 			inputTokens: 100,
 			cacheReadInputTokens: 0,
 			cacheCreationInputTokens: 0,
+			clamped: false,
 		});
 	});
 	it("subtracts cached tokens from the cache-inclusive total", () => {
@@ -3124,17 +3131,21 @@ describe("normalizeCodexInputUsage", () => {
 	});
 
 	it("treats a missing or non-numeric total as zero", () => {
+		// 5 cache reads against a total of zero cannot both be true; the read is
+		// cut to 0 and the vector is a repair.
 		expect(normalizeCodexInputUsage(undefined, 5)).toEqual({
 			totalInputTokens: 0,
 			inputTokens: 0,
 			cacheReadInputTokens: 0,
 			cacheCreationInputTokens: undefined,
+			clamped: true,
 		});
 		expect(normalizeCodexInputUsage(Number.NaN, 5)).toEqual({
 			totalInputTokens: 0,
 			inputTokens: 0,
 			cacheReadInputTokens: 0,
 			cacheCreationInputTokens: undefined,
+			clamped: true,
 		});
 	});
 
@@ -3144,12 +3155,14 @@ describe("normalizeCodexInputUsage", () => {
 			inputTokens: 10,
 			cacheReadInputTokens: undefined,
 			cacheCreationInputTokens: undefined,
+			clamped: false,
 		});
 		expect(normalizeCodexInputUsage(10, -5)).toEqual({
 			totalInputTokens: 10,
 			inputTokens: 10,
 			cacheReadInputTokens: undefined,
 			cacheCreationInputTokens: undefined,
+			clamped: false,
 		});
 	});
 
@@ -3157,6 +3170,7 @@ describe("normalizeCodexInputUsage", () => {
 		const result = normalizeCodexInputUsage(10, 25);
 		expect(result.inputTokens).toBe(0);
 		expect(result.cacheReadInputTokens).toBe(10);
+		expect(result.clamped).toBe(true);
 	});
 });
 

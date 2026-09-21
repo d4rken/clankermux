@@ -1403,6 +1403,54 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBe(false);
 		});
 
+		it("marks a repaired input vector as not provider-reported", async () => {
+			// 90 cache writes out of what is left of a 100-token prompt after 30
+			// cache reads does not fit. The vector the row then carries is the
+			// proxy's arithmetic, and `provider` promises the counts ARE the
+			// provider's, so the row has to say `approximate` instead.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 100,
+					output_tokens: 4,
+					input_tokens_details: { cached_tokens: 30, cache_write_tokens: 90 },
+				}),
+				1000,
+			);
+			expect(state.inputClamped).toBe(true);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.inputClamped).toBe(true);
+			// The output count itself was reported, so this is not that flag.
+			expect(summary.outputApproximate).toBe(false);
+		});
+
+		it("leaves a vector that fits unmarked", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 100,
+					output_tokens: 4,
+					input_tokens_details: { cached_tokens: 30, cache_write_tokens: 20 },
+				}),
+				1000,
+			);
+			expect(state.inputClamped).toBe(false);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.inputClamped).toBeUndefined();
+		});
+
 		it("ignores negative cached-token details (mirrors CodexProvider's >= 0 guard)", () => {
 			const state = createUsageState();
 			feedChunk(

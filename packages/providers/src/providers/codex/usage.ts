@@ -26,6 +26,12 @@ export interface NormalizedCodexInputUsage {
 	inputTokens: number;
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
+	/**
+	 * True when a counter did not fit its own total and was cut down. What the
+	 * row then carries is the proxy's repair, not the provider's report, and
+	 * the numbers alone cannot say which.
+	 */
+	clamped: boolean;
 }
 
 /**
@@ -54,6 +60,7 @@ export function normalizeCodexInputUsage(
 		inputTokens: total - (cached ?? 0) - (creation ?? 0),
 		cacheReadInputTokens: cached,
 		cacheCreationInputTokens: creation,
+		clamped: cached !== read || creation !== write,
 	};
 }
 

@@ -201,6 +201,13 @@ export interface SlimUsageSummary {
 	 * holding an estimate that looks measured.
 	 */
 	outputApproximate?: boolean;
+	/**
+	 * True when a counter did not fit its own total and the proxy cut it down.
+	 * The published vector is then a repair, and `usageSource` says
+	 * `approximate` for the same reason an estimated output does: the numbers
+	 * are not established as the provider's own.
+	 */
+	inputClamped?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
 	/**
@@ -1343,8 +1350,12 @@ export class RequestRecorder {
 	): UsageSource | null {
 		if (usage !== undefined) {
 			// `outputApproximate` is always stated by the collector, so `false` is a
-			// positive claim that the provider reported the output count.
-			return summary?.outputApproximate ? "approximate" : "provider";
+			// positive claim that the provider reported the output count. A clamped
+			// input vector disqualifies the row the same way: `provider` promises
+			// the counts ARE the provider's, and a repaired one is not.
+			return summary?.outputApproximate || summary?.inputClamped
+				? "approximate"
+				: "provider";
 		}
 		return recoverable ? null : "none";
 	}

@@ -87,6 +87,12 @@ export interface UsageState {
 	cacheReadInputTokens: number | undefined;
 	cacheCreationInputTokens: number | undefined;
 	/**
+	 * True once a counter had to be cut down to fit its own total. What the row
+	 * then carries is the proxy's repair rather than the provider's report, so
+	 * the vector's provenance is no longer `provider`.
+	 */
+	inputClamped: boolean;
+	/**
 	 * The authoritative cumulative output-token count last seen from the
 	 * provider (`message_delta` or a Responses terminal while streaming, or a
 	 * non-stream `usage` object). `undefined` until the provider reports one.
@@ -205,6 +211,7 @@ export function createUsageState(): UsageState {
 		inputTokens: undefined,
 		cacheReadInputTokens: undefined,
 		cacheCreationInputTokens: undefined,
+		inputClamped: false,
 		providerFinalOutputTokens: undefined,
 		providerReportedOutput: false,
 		streamedBytes: 0,
@@ -534,6 +541,7 @@ function applySseData(
 				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens =
 					normalizedInput.cacheCreationInputTokens;
+				if (normalizedInput.clamped) state.inputClamped = true;
 			} else if (
 				typeof inputTokenDetails?.cached_tokens === "number" &&
 				Number.isFinite(inputTokenDetails.cached_tokens) &&
@@ -1234,6 +1242,10 @@ export async function finalizeUsage(
 	// it", which is the more flattering of the two and wrong for any producer
 	// that simply does not set it.
 	summary.outputApproximate = outputApproximate;
+	// A repaired input vector is no more provider-reported than an estimated
+	// output is, and `usageSource` has one value for both: not established as
+	// provider-reported.
+	if (state.inputClamped) summary.inputClamped = true;
 	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
 	// Top-level, not inside `usage`: these describe how the response ENDED, not
 	// what it cost, and they persist to their own columns.

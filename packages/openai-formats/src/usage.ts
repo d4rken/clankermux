@@ -16,6 +16,12 @@ export interface DisjointInputUsage {
 	inputTokens: number;
 	cacheReadInputTokens: number;
 	cacheCreationInputTokens: number;
+	/**
+	 * True when the counters did not fit their own total and had to be cut down.
+	 * The result is then the proxy's repair, not the provider's report, and no
+	 * consumer can tell the two apart from the numbers alone.
+	 */
+	clamped: boolean;
 }
 
 /**
@@ -40,12 +46,15 @@ export function normalizeCacheInclusiveInput(
 	const count = (value: number): number =>
 		Number.isFinite(value) && value > 0 ? value : 0;
 	const total = count(totalInputTokens);
-	const read = Math.min(count(cacheReadInputTokens), total);
-	const creation = Math.min(count(cacheCreationInputTokens), total - read);
+	const wantedRead = count(cacheReadInputTokens);
+	const wantedCreation = count(cacheCreationInputTokens);
+	const read = Math.min(wantedRead, total);
+	const creation = Math.min(wantedCreation, total - read);
 	return {
 		inputTokens: total - read - creation,
 		cacheReadInputTokens: read,
 		cacheCreationInputTokens: creation,
+		clamped: read !== wantedRead || creation !== wantedCreation,
 	};
 }
 
