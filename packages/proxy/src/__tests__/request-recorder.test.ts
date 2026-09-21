@@ -2590,6 +2590,44 @@ describe("RequestRecorder — usage_source", () => {
 		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("provider");
 	});
 
+	// The stamp and the token vector are ONE fact about the row, so they have to
+	// be captured together. `usage` and the derived `usageSource` are read
+	// before the enqueue and `usageFinalizedAt` inside the queued job, so a
+	// summary landing in that gap commits a row with no tokens, a NULL
+	// usage_source, and a non-NULL usage_finalized_at — which the client
+	// contract reads as finalized with an 'approximate' source for a row that
+	// has nothing to be approximate about.
+	it("never stamps usage_finalized_at on the row it persists with NO usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace elapses → the no-usage row is ENQUEUED
+
+		// The summary arrives while the write is still queued. That gap is the
+		// writer's backlog, so it is as wide as the queue is deep.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+
+		const initial = h.dbOps.saveRequestCalls[0];
+		expect(initial.usage).toBeUndefined();
+		expect(initial.usageSource).toBeNull();
+		expect(initial.usageFinalizedAt ?? null).toBeNull();
+
+		// The other direction of the same rule, so the fix cannot be "never
+		// stamp": when the vector IS in hand at persist time, the stamp captured
+		// alongside it still rides the initial row.
+		const withUsage = makeHarness();
+		withUsage.recorder.begin(makeMeta());
+		withUsage.recorder.attachUsageSummary("req-1", makeSummary());
+		withUsage.recorder.finishTransport("req-1", "success");
+		await withUsage.flush();
+
+		const complete = withUsage.dbOps.saveRequestCalls[0];
+		expect(complete.usage).toBeDefined();
+		expect(complete.usageSource).toBe("provider");
+		expect(complete.usageFinalizedAt).toBe(1_000_000);
+	});
+
 	it("writes 'approximate' when the stream did not end cleanly", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());

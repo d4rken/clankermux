@@ -1005,6 +1005,14 @@ export class RequestRecorder {
 			record.usage,
 			record.usage === null && !record.usageWaived,
 		);
+		// Snapshotted HERE, alongside `usage` and `usageSource`, because the three
+		// are one fact about the row: when the vector existed, what it was, and
+		// where it came from. Read inside the queued job instead, a summary that
+		// lands while the write sits in the backlog stamps a row that has no
+		// tokens and no provenance — which the client contract then publishes as
+		// finalized with an 'approximate' source. Only `patchUsage` may publish
+		// the stamp that belongs to a late vector, and it already does.
+		const usageFinalizedAt = record.usageFinalizedAt;
 		const storePayloads = this.getStorePayloads();
 		// Read independently of storePayloads: headers are captured even when the
 		// envelope is dropped for the byte budget or payload storage is off, so
@@ -1068,7 +1076,7 @@ export class RequestRecorder {
 					reasoningEffort: meta.reasoningEffort ?? null,
 					contextComposition: meta.contextComposition ?? null,
 					requestedModel: meta.requestedModel ?? null,
-					usageFinalizedAt: record.usageFinalizedAt,
+					usageFinalizedAt,
 					sessionKey: meta.sessionKey ?? null,
 					cachePrefixHashes: meta.cachePrefixHashes ?? null,
 					clientUserAgent: meta.clientUserAgent ?? null,
