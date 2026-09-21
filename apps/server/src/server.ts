@@ -1618,26 +1618,34 @@ export default async function startServer(options?: {
 	}, MEMORY_MONITOR_INTERVAL_MS);
 	memoryMonitorInterval.unref();
 
-	// Warn loudly when a non-loopback bind meets an open session gate: the gate
-	// fails open until an operator sets a management password, so both halves
-	// have to be true for /api/* to be exposed. Only a positive answer proves
-	// the gate is closed, so a failed read warns.
+	// Startup diagnostic, fired when this process is bound off loopback and no
+	// management password is set. Never awaited: the lookup is a DB read that
+	// can queue behind write contention for minutes, and nothing else in
+	// startup depends on its answer.
 	const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 	if (!loopbackHosts.has(hostname)) {
-		const managementPasswordSet = await sessionAuth
-			.isConfigured()
-			.catch(() => false);
-		if (!managementPasswordSet) {
-			log.warn(
-				`ClankerMux is bound to '${hostname}' and no management password is ` +
-					"set, so the management API (/api/*) admits anyone who can reach " +
-					"this port: account management, API key creation and revocation, " +
-					"request logs, and heap snapshots. Set one with " +
-					"`bun run auth:password --set`, bind to localhost (set " +
-					"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
-					"proxy that enforces authentication.",
-			);
-		}
+		void sessionAuth.isConfigured().then(
+			(managementPasswordSet) => {
+				if (managementPasswordSet) return;
+				log.warn(
+					`ClankerMux is bound to '${hostname}' and no management password is ` +
+						"set, so the management API (/api/*) admits anyone who can reach " +
+						"this port: account management, API key creation and revocation, " +
+						"request logs, and heap snapshots. Set one with " +
+						"`bun run auth:password --set`, bind to localhost (set " +
+						"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
+						"proxy that enforces authentication.",
+				);
+			},
+			(err) => {
+				log.warn(
+					`ClankerMux is bound to '${hostname}' and could not determine ` +
+						`whether a management password is set (${err}). If none is, the ` +
+						"management API (/api/*) admits anyone who can reach this port; " +
+						"check with `bun run auth:password --status`.",
+				);
+			},
+		);
 	}
 
 	// Log server startup (async)
