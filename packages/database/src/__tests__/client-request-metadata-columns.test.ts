@@ -143,6 +143,69 @@ describe("requests client-metadata columns", () => {
 		expect(readRow(db)?.usage_source).toBe("provider");
 	});
 
+	/**
+	 * `finalized` is published as a promise that no later write can change the
+	 * row's accounting, and `usageSource` is part of that accounting. Committing
+	 * the token vector and the provenance as two statements breaks it: between
+	 * them the row is stamped and tokened with `usage_source` still NULL, which
+	 * the client DTO publishes as finalized with an `approximate` source, and
+	 * the same row answers `provider` once the second statement lands.
+	 *
+	 * Observed at the adapter, which is the only place the intermediate commit
+	 * is visible — each statement is its own transaction, so a concurrent reader
+	 * genuinely sees it.
+	 */
+	it("settles usage_source in the same statement that finalizes the row", async () => {
+		interface Snapshot {
+			usage_source: string | null;
+			usage_finalized_at: number | null;
+			total_tokens: number | null;
+			model: string | null;
+		}
+		const observed: Snapshot[] = [];
+		const snapshot = () =>
+			db
+				.query(
+					`SELECT usage_source, usage_finalized_at, total_tokens, model
+					 FROM requests WHERE id = 'req-1'`,
+				)
+				.get() as Snapshot | null;
+
+		class ObservingAdapter extends BunSqlAdapter {
+			async run(sqlStr: string, params: unknown[] = []): Promise<void> {
+				await super.run(sqlStr, params);
+				const row = snapshot();
+				if (row) observed.push(row);
+			}
+		}
+
+		const observing = new RequestRepository(new ObservingAdapter(db));
+		await observing.save(requestData());
+		observed.length = 0; // the insert is not the window under test
+
+		await observing.updateUsage(
+			"req-1",
+			{ model: "claude-sonnet-4-5", outputTokens: 7, totalTokens: 7 },
+			3_000,
+			undefined,
+			"provider",
+		);
+
+		expect(observed.length).toBeGreaterThan(0);
+		expect(readRow(db)?.usage_source).toBe("provider");
+
+		// `isClientRequestFinalized`, restated over the columns: this package
+		// cannot import the DTO that owns it.
+		const finalized = (s: Snapshot) =>
+			s.usage_source != null ||
+			s.usage_finalized_at != null ||
+			s.model != null ||
+			s.total_tokens != null;
+		expect(
+			observed.filter((s) => finalized(s) && s.usage_source !== "provider"),
+		).toEqual([]);
+	});
+
 	it("settles usage_source on a patch that carried NO token vector", async () => {
 		await repo.save(requestData());
 		await repo.updateUsage("req-1", undefined, null, undefined, "none");

@@ -533,11 +533,19 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * patch may fill it in but must never move it forward. Same rule as the
 	 * upsert in {@link RequestRepository.save}.
 	 *
-	 * `usageSource` goes through {@link RequestRepository.markUsageSource} rather
-	 * than riding the usage half, because the two answer different questions: a
-	 * late summary that yields NO token vector still settles the provenance to
-	 * `'none'`, and folding it into the `if (usage)` branch would leave exactly
-	 * that row NULL forever.
+	 * `usageSource` rides the usage statement, and the atomicity is the point.
+	 * A client reads `finalized` as a promise that no later write can change the
+	 * row's accounting, and the provenance is part of that accounting: settled
+	 * by a second statement — its own transaction — the row is briefly stamped
+	 * and tokened with `usage_source` still NULL, which publishes as finalized
+	 * with an `approximate` source and then answers `provider` a moment later.
+	 *
+	 * The standalone {@link RequestRepository.markUsageSource} still runs for
+	 * the one arm with no usage statement to ride: a late summary that yields NO
+	 * token vector, which must still settle to `'none'`.
+	 *
+	 * Both places keep the stored-first COALESCE. What changed is when the write
+	 * lands, not whether it can overwrite.
 	 */
 	async updateUsage(
 		requestId: string,
@@ -556,6 +564,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			UPDATE requests
 			SET
 				usage_finalized_at = COALESCE(usage_finalized_at, ?),
+				usage_source = COALESCE(usage_source, ?),
 				model = COALESCE(?, model),
 				prompt_tokens = COALESCE(?, prompt_tokens),
 				completion_tokens = COALESCE(?, completion_tokens),
@@ -574,6 +583,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		`,
 				[
 					usageFinalizedAt ?? null,
+					usageSource ?? null,
 					usage.model || null,
 					usage.promptTokens || null,
 					usage.completionTokens || null,
@@ -615,7 +625,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			);
 		}
 
-		if (usageSource) await this.markUsageSource(requestId, usageSource);
+		// The vector-less arm only: with a usage statement in play the provenance
+		// already committed with it, and a second write here would reopen the
+		// window this method closes.
+		if (usageSource && !usage)
+			await this.markUsageSource(requestId, usageSource);
 	}
 
 	/**
