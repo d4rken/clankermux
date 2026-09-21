@@ -61,6 +61,10 @@ The proxy returns `x-clankermux-request-id` on the response to the proxied
 request. That value is the `{id}` these routes take, and it is set for every
 provider, so a client cannot tell from the header which backend served it.
 
+It is present in the INITIAL response headers, before the first byte of the
+body, for streamed and non-streamed responses alike. A client can record it when
+headers return and start forwarding bytes without waiting.
+
 A request the gateway refuses on its own carries it too, so a refusal is
 reachable by id like any other request. The header identifies the REQUEST, not
 a stored row: it is set whether or not the request is one Request History
@@ -69,6 +73,13 @@ keeps, so a lookup can still answer 404 for the reasons listed below.
 The exception is a request rejected during ingestion, before an id is assigned
 at all: a malformed body, a path that does not route, an authentication
 failure. Those never reached a provider and there is nothing to look up.
+
+One proxied request produces exactly ONE row under ONE id, whatever happens
+upstream. If the proxy retries, or falls back to another account, provider or
+model, every attempt stays under the id it first answered with. So more than one
+distinct id for a single correlation tag means more than one request was made,
+never that one request was split. `failoverAttempts` describes attempts INSIDE
+that single row and never implies a second one.
 
 ## Correlation tags
 
@@ -157,6 +168,12 @@ change. It is a property of the committed row rather than an elapsed-time
 guess: `usage_source` is write-once in SQL, so a row that reports `true` can
 never be contradicted by a later write.
 
+The COUNTS are covered by the same guarantee. The token vector and
+`usage_source` are written by one statement, so a later write cannot move the
+numbers while leaving the provenance alone, and a row read as finalized will
+report the same counts on every later read. Settle from the first finalized
+read; re-reading it gains nothing.
+
 `false` means a token vector may still land, and `usageSource` is null.
 
 One residual is worth planning for. A row that persisted without usage stays
@@ -165,7 +182,9 @@ itself closes those rows on the way out, including the ones whose settling
 write it could not queue at the time. When the server's write queue is full it
 holds such a row's accounting in memory and retries it rather than dropping it,
 so a sustained backlog grows that memory with no ceiling; the accounting is
-never discarded to bound it.
+never discarded to bound it. That promise covers the SETTLING PATCH, the write
+that completes a row already on disk. The initial row insert is a different
+write and can be dropped outright, which is the third cause of a 404 below.
 
 Two things remain. The process can die abruptly (a crash, a kill, or a power
 loss) inside that window. And a write the queue ACCEPTED can still fail at the
@@ -203,9 +222,13 @@ contains another, and summing any subset double counts nothing.
 
 Providers do not agree on this. Some report a prompt total with the cache
 classes as parts of it; the proxy subtracts them at the translation boundary so
-one convention reaches this surface. Where a provider's counters disagree with
-their own total, cache reads are clamped to the total and cache writes to what
-remains, so the additive input can never go negative.
+one convention reaches this surface.
+
+A counter that does not fit its own total is never published as though it did.
+Where the proxy can drop it, it does, and the class reads as not received. Where
+it repairs the vector instead, the row reports `usageSource: "approximate"`, so
+a repaired figure is never published under a claim that the provider reported
+it. A row reporting `provider` carries counts as the provider stated them.
 
 `null` means one thing: no count for that class was received. A provider that
 reports zero is stating that none of that class was consumed, and that is
@@ -266,7 +289,11 @@ is asynchronous, so absence has five causes this response cannot tell apart:
 
 1. The request is still running.
 2. The write is queued, or retrying against a locked database.
-3. The write was dropped under writer backpressure and will never be retried.
+3. The row INSERT was dropped under writer backpressure and will never be
+   retried. This is the one write that can be dropped, and it is what the
+   `finalized` section's never-discarded promise does not cover: that promise is
+   about the later settling patch, which is held in memory and retried rather
+   than dropped. No row is written, so nothing is left to find.
 4. The row was deleted, by retention or by an operator statistics reset.
 5. The request is one Request History does not keep, such as an internal
    probe. Its response still carried an id.
