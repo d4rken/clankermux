@@ -80,6 +80,8 @@ export interface ConfigData {
 	cache_warming_enabled?: boolean;
 	cache_warming_mode?: CacheWarmingMode;
 	served_model_substitution_mode?: ServedModelSubstitutionMode;
+	/** `sent>served` pairs enforcement skips; see getServedModelSubstitutionExceptions. */
+	served_model_substitution_exceptions?: string[];
 	cache_keepalive_snapshot_retention_days?: number;
 	cache_warming_min_tokens?: number;
 	cache_warming_risk_factor?: number;
@@ -579,6 +581,35 @@ export class Config extends EventEmitter {
 		return this.getServedModelSubstitutionMode() === "enforce";
 	}
 
+	/**
+	 * Swaps the operator has accepted, as raw `sent>served` strings.
+	 *
+	 * Stored raw and matched by the proxy, which owns the model-id normalisation
+	 * this comparison needs; this package must not depend on it. Entries that do
+	 * not parse are dropped at the point of use rather than here, so a
+	 * hand-edited file keeps the lines it already has.
+	 */
+	getServedModelSubstitutionExceptions(): string[] {
+		const fromFile = this.data.served_model_substitution_exceptions;
+		if (!Array.isArray(fromFile)) return [];
+		return fromFile.filter(
+			(entry): entry is string =>
+				typeof entry === "string" && entry.trim().length > 0,
+		);
+	}
+
+	setServedModelSubstitutionExceptions(entries: readonly string[]): void {
+		const cleaned: string[] = [];
+		const seen = new Set<string>();
+		for (const entry of entries) {
+			const normalized = entry.trim().toLowerCase();
+			if (!normalized || seen.has(normalized)) continue;
+			seen.add(normalized);
+			cleaned.push(normalized);
+		}
+		this.setStructured("served_model_substitution_exceptions", cleaned);
+	}
+
 	getCacheWarmingMinTokens(): number {
 		// Default mirrors bridge-policy's DEFAULT_MIN_CACHE_TOKENS (duplicated here
 		// because the config package must not depend on the proxy package).
@@ -689,12 +720,18 @@ export class Config extends EventEmitter {
 	}
 
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
-		// The structured project-attribution keys are deliberately excluded:
-		// this returns a flat scalar map, and they have their own endpoint like
-		// every other setting group. Spreading `this.data` would smuggle them in.
-		const { project_roots, project_overrides, ...scalars } = this.data;
+		// The structured keys are deliberately excluded: this returns a flat
+		// scalar map, and each has its own endpoint like every other setting
+		// group. Spreading `this.data` would smuggle them in.
+		const {
+			project_roots,
+			project_overrides,
+			served_model_substitution_exceptions,
+			...scalars
+		} = this.data;
 		void project_roots;
 		void project_overrides;
+		void served_model_substitution_exceptions;
 		// Include current strategy (which might come from env)
 		return {
 			...(scalars as Record<string, string | number | boolean | undefined>),

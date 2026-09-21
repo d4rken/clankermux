@@ -75,12 +75,27 @@ export function ModelSubstitutionBannerView({
 	);
 }
 
+/**
+ * What still deserves a banner.
+ *
+ * Accepted swaps never do. Acknowledging is how a VIEWER says "I have seen
+ * this", and it is stored per browser; an exception is the OPERATOR having said
+ * it already, server-side. Bannering one would ask them to dismiss their own
+ * decision again in every browser they open the dashboard in.
+ */
+export function unacknowledgedSubstitutions(
+	pairs: readonly ModelSubstitutionPair[],
+	isAcknowledged: (pair: ModelSubstitutionPair) => boolean,
+): ModelSubstitutionPair[] {
+	return pairs.filter((pair) => !pair.accepted && !isAcknowledged(pair));
+}
+
 export function ModelSubstitutionBanner() {
 	// Same range and therefore the same cache entry as the Accounts page uses,
 	// so opening both pages does not run the scan twice.
 	const { data } = useModelSubstitutions("24h");
 	const { acknowledge, isAcknowledged } = useAcknowledgedSubstitutions();
-	const unseen = (data?.pairs ?? []).filter((pair) => !isAcknowledged(pair));
+	const unseen = unacknowledgedSubstitutions(data?.pairs ?? [], isAcknowledged);
 	return (
 		<ModelSubstitutionBannerView
 			pairs={unseen}

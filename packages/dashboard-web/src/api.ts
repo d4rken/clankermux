@@ -52,6 +52,12 @@ export type { RequestPayload, RequestResponse } from "@clankermux/types";
 /** Mirrors `ServedModelSubstitutionMode` in @clankermux/config. */
 export type ServedModelSubstitutionMode = "off" | "observe" | "enforce";
 
+export interface ModelSubstitutionSettings {
+	servedModelSubstitutionMode: ServedModelSubstitutionMode;
+	/** Accepted swaps as `sent>served`; enforcement skips these while still reporting them. */
+	servedModelSubstitutionExceptions: string[];
+}
+
 export interface CacheWarmingResponse {
 	mode: "off" | "static" | "dynamic";
 	minTokens: number;
@@ -1927,15 +1933,14 @@ class API extends HttpClient {
 		}
 	}
 
-	async getServedModelSubstitutionMode(): Promise<{
-		servedModelSubstitutionMode: ServedModelSubstitutionMode;
-	}> {
+	async getServedModelSubstitutionMode(): Promise<ModelSubstitutionSettings> {
 		return this.get("/api/config/model-substitution");
 	}
 
 	async setServedModelSubstitutionMode(body: {
-		mode: ServedModelSubstitutionMode;
-	}): Promise<{ servedModelSubstitutionMode: ServedModelSubstitutionMode }> {
+		mode?: ServedModelSubstitutionMode;
+		exceptions?: string[];
+	}): Promise<ModelSubstitutionSettings> {
 		return this.post("/api/config/model-substitution", body);
 	}
 

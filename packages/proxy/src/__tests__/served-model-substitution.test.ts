@@ -77,7 +77,11 @@ function makeAnthropicAccount(overrides: Partial<Account> = {}): Account {
 const suppressed: Array<{ accountId: string; model: string; reason: string }> =
 	[];
 
-function makeContext(accounts: Account[], mode: Mode): ProxyContext {
+function makeContext(
+	accounts: Account[],
+	mode: Mode,
+	exceptions: string[] = [],
+): ProxyContext {
 	const byId = new Map(accounts.map((a) => [a.id, a]));
 	return {
 		strategy: {
@@ -112,6 +116,7 @@ function makeContext(accounts: Account[], mode: Mode): ProxyContext {
 			getCacheWarmingMinTokens: () => 100_000,
 			getStorePayloads: () => false,
 			getServedModelSubstitutionMode: () => mode,
+			getServedModelSubstitutionExceptions: () => exceptions,
 		} as never,
 		provider: {
 			name: "anthropic",
@@ -299,6 +304,59 @@ describe("served-model substitution — enforcement", () => {
 		expect(res.status).toBe(200);
 		expect(await res.text()).toBe(body);
 		expect(suppressed).toEqual([]);
+	});
+
+	it("serves an accepted swap instead of failing it over", async () => {
+		// The swap an operator has approved. Enforcement is still ON, and the
+		// sibling that would have served the request correctly must not be
+		// reached: the point of the exception is that the answer in hand is fine.
+		const body = anthropicSse("claude-haiku-4-5");
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return sseResponse(body);
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("claude-sonnet-4-5"),
+			makeContext(
+				[
+					makeAnthropicAccount({ name: "Swaps", priority: 1 }),
+					makeAnthropicAccount({ name: "Honest", priority: 2 }),
+				],
+				"enforce",
+				["claude-sonnet-4-5>claude-haiku-4-5"],
+			),
+		);
+
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(body);
+		expect(call).toBe(1);
+		expect(suppressed).toEqual([]);
+	});
+
+	it("still enforces a swap the exception does not name", async () => {
+		// One accepted pair must not read as "substitution is fine on this
+		// account": a different served model is a different decision.
+		const first = makeAnthropicAccount({ name: "Swaps", priority: 1 });
+		const second = makeAnthropicAccount({ name: "Honest", priority: 2 });
+		const served = anthropicSse("claude-sonnet-4-5");
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return sseResponse(call === 1 ? anthropicSse("claude-opus-5") : served);
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("claude-sonnet-4-5"),
+			makeContext([first, second], "enforce", [
+				"claude-sonnet-4-5>claude-haiku-4-5",
+			]),
+		);
+
+		expect(res.status).toBe(200);
+		expect(call).toBe(2);
+		expect(suppressed).toHaveLength(1);
 	});
 
 	it("does nothing at all when switched off", async () => {

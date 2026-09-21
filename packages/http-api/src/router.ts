@@ -76,6 +76,7 @@ import { createCleanupHandler } from "./handlers/maintenance";
 import { createMemoryHistoryHandler } from "./handlers/memory-history";
 import { createModelAliasesHandler } from "./handlers/model-aliases";
 import { createModelSubstitutionsHandler } from "./handlers/model-substitutions";
+import { MODEL_SUBSTITUTION_EXCEPTIONS_PARAM } from "./handlers/model-substitutions-direct";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -549,7 +550,16 @@ export class APIRouter {
 		// the consolidated /api/analytics payload, which only the analytics page
 		// requests.
 		this.handlers.set("GET:/api/analytics/model-substitutions", (_req, url) => {
-			return modelSubstitutionsHandler(url.searchParams);
+			// The exception list is a SERVER setting, injected here rather than
+			// read inside the handler: that handler also executes in the analytics
+			// worker, whose synthetic context has no Config at all. Travelling as a
+			// param also puts it in the response-cache key, so editing the list
+			// invalidates the cached answer instead of leaving a stale one.
+			const params = new URLSearchParams(url.searchParams);
+			params.delete(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM);
+			for (const exception of this.context.config.getServedModelSubstitutionExceptions())
+				params.append(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM, exception);
+			return modelSubstitutionsHandler(params);
 		});
 		// Precomputed quota-drift analysis. Takes no params: the pass fits the
 		// whole retained history, and a range filter would silently change which

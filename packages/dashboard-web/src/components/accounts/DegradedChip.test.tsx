@@ -15,6 +15,7 @@ function degraded(over: Partial<DegradedAccount> = {}): DegradedAccount {
 				provider: "codex",
 				outgoingModel: "gpt-6-astra",
 				reportedModel: "gpt-5.6-luna",
+				accepted: false,
 				substituted: 87,
 				comparable: 100,
 				firstAtMs: Date.UTC(2026, 8, 17),

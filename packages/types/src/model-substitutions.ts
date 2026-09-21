@@ -21,6 +21,12 @@ export interface ModelSubstitutionPair {
 	outgoingModel: string;
 	/** What the provider said it served instead. */
 	reportedModel: string;
+	/**
+	 * True when an operator exception covers this pair, so enforcement waives
+	 * the failover. The pair is still counted and still rendered; only its claim
+	 * on the operator's attention changes.
+	 */
+	accepted: boolean;
 	/** Attempts in the window whose served model differed. */
 	substituted: number;
 	/**
@@ -90,4 +96,76 @@ export const MODEL_SUBSTITUTION_ACTIVE_MIN_ATTEMPTS = 3;
 /** Convenience for both the chip tooltip and the analytics card. */
 export function substitutionShare(pair: ModelSubstitutionPair): number {
 	return pair.comparable > 0 ? pair.substituted / pair.comparable : 0;
+}
+
+/**
+ * A substitution the operator has decided is acceptable.
+ *
+ * Not every swap is a downgrade: a provider answering a `gpt-5.6-luna` request
+ * with `gpt-6-luna` hands back a newer model than the one asked for, and
+ * failing that attempt over would trade a better answer for a retry.
+ *
+ * An exception suppresses only the ENFORCEMENT. The pair is still detected,
+ * still recorded on the attempt row and still reaches the dashboard, because
+ * "this is fine" and "this is not happening" are different claims and only the
+ * second one should ever make the data disappear.
+ */
+export interface ModelSubstitutionException {
+	/** The model the proxy sent, or `*` for any. */
+	sent: string;
+	/** The model the provider answered with, or `*` for any. */
+	served: string;
+}
+
+/** Separator in the stored form. No model id in any provider's catalogue uses it. */
+const EXCEPTION_SEPARATOR = ">";
+
+export const MODEL_SUBSTITUTION_EXCEPTION_WILDCARD = "*";
+
+/**
+ * `sent>served`, e.g. `gpt-5.6-luna>gpt-6-luna`.
+ *
+ * Returns null for anything unparseable so a hand-edited config file degrades
+ * to "this line does nothing" rather than to an exception that matches
+ * everything.
+ */
+export function parseModelSubstitutionException(
+	raw: string,
+): ModelSubstitutionException | null {
+	const parts = raw.split(EXCEPTION_SEPARATOR);
+	if (parts.length !== 2) return null;
+	const sent = parts[0]?.trim().toLowerCase() ?? "";
+	const served = parts[1]?.trim().toLowerCase() ?? "";
+	if (!sent || !served) return null;
+	// `*>*` would silence enforcement for every pair on every account while the
+	// mode still reads "enforce". That state already has a name: `observe`.
+	if (
+		sent === MODEL_SUBSTITUTION_EXCEPTION_WILDCARD &&
+		served === MODEL_SUBSTITUTION_EXCEPTION_WILDCARD
+	)
+		return null;
+	return { sent, served };
+}
+
+export function formatModelSubstitutionException(
+	exception: ModelSubstitutionException,
+): string {
+	return `${exception.sent}${EXCEPTION_SEPARATOR}${exception.served}`;
+}
+
+/** Parse a stored list, dropping entries that do not parse. */
+export function parseModelSubstitutionExceptions(
+	raw: readonly string[],
+): ModelSubstitutionException[] {
+	const out: ModelSubstitutionException[] = [];
+	const seen = new Set<string>();
+	for (const entry of raw) {
+		const parsed = parseModelSubstitutionException(entry);
+		if (!parsed) continue;
+		const key = formatModelSubstitutionException(parsed);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(parsed);
+	}
+	return out;
 }
