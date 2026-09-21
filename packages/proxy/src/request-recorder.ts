@@ -394,6 +394,12 @@ interface PayloadReservationLike {
 
 interface AsyncWriterLike {
 	enqueue(job: () => void | Promise<void>): boolean;
+	/**
+	 * Append one job to the same FIFO, exempt from the metadata queue cap. Only
+	 * {@link RequestRecorder.dispose} may use it: see the call site for why a
+	 * refusal there is unrecoverable.
+	 */
+	enqueueShutdownBatch(job: () => void | Promise<void>): boolean;
 	canAcceptPayload(bytes: number): boolean;
 	recordPayloadDrop(bytes: number): void;
 	reservePayload(estimatedBytes: number): PayloadReservationLike | null;
@@ -729,6 +735,14 @@ export class RequestRecorder {
 	attachUsageSummary(requestId: string, summary: SlimUsageSummary): void {
 		const record = this.records.get(requestId);
 		if (!record) return;
+		// The record is being held for ONE reason: it owns the retry of a
+		// settlement the metadata queue refused. Its patch window shut when the
+		// patch timer fired and was deliberately not re-armed, so there is nothing
+		// for a summary to patch into. Falling through would route it to
+		// patchUsage, which drops the record unconditionally — taking the only
+		// thing that can still settle the row and leaving it `usage_source` NULL,
+		// reading "not finished yet", for good.
+		if (record.settlementPending) return;
 		// Stamp the moment a PERSISTABLE token vector became known — which is not
 		// the same as "a summary arrived". A model-less charge is persistable but
 		// does not establish a token vector and must not stamp. The first qualifying
@@ -889,22 +903,45 @@ export class RequestRecorder {
 	 *
 	 * The settlement is a plain synchronous enqueue and this stays synchronous.
 	 * `LifecycleManager.shutdown` disposes in REVERSE registration order and the
-	 * recorder registers after the async writer, so these jobs are still in the
-	 * queue when the writer's own dispose drains it. Without them a graceful
-	 * shutdown clears the map with every recoverable row left at `usage_source`
-	 * NULL — reading "not finished yet" — and the sweep that would have settled
-	 * them never runs again.
+	 * recorder registers after the async writer, so the job is still in the queue
+	 * when the writer's own dispose drains it. Without it a graceful shutdown
+	 * clears the map with every recoverable row left at `usage_source` NULL —
+	 * reading "not finished yet" — and the sweep that would have settled them
+	 * never runs again.
+	 *
+	 * ONE batch job, via the cap-exempt shutdown enqueue, rather than the
+	 * per-record {@link closeUnresolvedUsageSource}: dispose() clears the timers
+	 * and the whole map, so there is no later sweep to retry from and a refused
+	 * settlement here is lost outright. A shutdown that begins with a saturated
+	 * metadata queue is exactly when that happens. It still goes on the writer's
+	 * queue, behind the request writes already there, so a settlement can never
+	 * overtake the row it settles.
 	 *
 	 * Abrupt process death is a different matter and is still unhandled; it is
 	 * the residual the client contract documents.
 	 */
 	dispose(): void {
+		// Persisted only: a record whose transport never finished has no row to
+		// settle, and `needsUsageSourceSettlement` keeps a patched or waived one
+		// untouched.
+		const unsettled: string[] = [];
 		for (const record of this.records.values()) {
-			// Persisted only: a record whose transport never finished has no row to
-			// settle, and the guard inside keeps a patched or waived one untouched.
-			if (record.persisted) this.closeUnresolvedUsageSource(record);
+			if (this.needsUsageSourceSettlement(record)) {
+				unsettled.push(record.meta.requestId);
+			}
 			this.clearTimer(record.graceTimer);
 			this.clearTimer(record.patchTimer);
+		}
+		if (unsettled.length > 0) {
+			this.asyncWriter.enqueueShutdownBatch(async () => {
+				for (const requestId of unsettled) {
+					try {
+						await this.dbOps.markRequestUsageSource(requestId, "none");
+					} catch (error) {
+						log.error(`Failed to close usage source for ${requestId}:`, error);
+					}
+				}
+			});
 		}
 		if (this.sweepTimer !== null) {
 			this.clearTimer(this.sweepTimer);
@@ -1274,7 +1311,7 @@ export class RequestRecorder {
 	 * stay `usage_source` NULL, reading "not finished yet", permanently.
 	 */
 	private closeUnresolvedUsageSource(record: InternalRecord): boolean {
-		if (record.usage !== null || record.usageWaived) return true;
+		if (!this.needsUsageSourceSettlement(record)) return true;
 		const requestId = record.meta.requestId;
 		const accepted = this.asyncWriter.enqueue(async () => {
 			try {
@@ -1285,6 +1322,15 @@ export class RequestRecorder {
 		});
 		record.settlementPending = !accepted;
 		if (!accepted) {
+			// The record now outlives both the patch TTL and cap eviction, and by
+			// design nothing bounds how many are retained: evicting one would lose a
+			// real request's token accounting permanently. So each retained record
+			// has to be SMALL. `releaseBuffers` already freed reqBytes and the
+			// response chunks, but `meta.requestBody` is a separate copy — possibly
+			// megabytes — outside the capturedBytesPending accounting, and no
+			// remaining recorder operation reads it. Swap in a recorder-owned
+			// metadata copy without it; the caller's object is not ours to mutate.
+			record.meta = { ...record.meta, requestBody: null };
 			// Counted the same way a rejected request-row write is, so queue
 			// saturation is observable here too rather than silent.
 			this.metadataDropped++;
@@ -1294,6 +1340,16 @@ export class RequestRecorder {
 			);
 		}
 		return accepted;
+	}
+
+	/**
+	 * Whether the record's row is still sitting at `usage_source` NULL with this
+	 * record as the only thing that can close it. Usage that arrived, or usage
+	 * explicitly waived, already stated a provenance; writing `'none'` over
+	 * either would be a lie (and SQL's write-once would refuse it anyway).
+	 */
+	private needsUsageSourceSettlement(record: InternalRecord): boolean {
+		return record.persisted && record.usage === null && !record.usageWaived;
 	}
 
 	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {

@@ -1,4 +1,8 @@
 import { describe, expect, it, spyOn } from "bun:test";
+// The REAL async writer, not a stand-in: the shutdown test below turns on
+// ordinary metadata-queue capacity rejection, which a fake `enqueue` switch
+// cannot reproduce.
+import { AsyncDbWriter } from "@clankermux/database";
 import type {
 	CachePrefixCapture,
 	ContextComposition,
@@ -275,6 +279,16 @@ class FakeAsyncWriter {
 		if (!this.acceptMetadata) {
 			return false;
 		}
+		this.queue.push(job);
+		return true;
+	}
+
+	/**
+	 * Cap-exempt tail append. The real writer refuses it only once its own
+	 * dispose has drained; `acceptMetadata` models the ORDINARY cap, which this
+	 * path is exempt from, so it is deliberately not consulted here.
+	 */
+	enqueueShutdownBatch(job: () => void | Promise<void>): boolean {
 		this.queue.push(job);
 		return true;
 	}
@@ -2893,5 +2907,152 @@ describe("RequestRecorder — usage_source", () => {
 		expect(
 			h.dbOps.saveRequestCalls.find((c) => c.id === "cap-usage")?.usageSource,
 		).toBe("provider");
+	});
+});
+
+/**
+ * Test-only reach-in at a record the recorder is holding. The record map is
+ * private and there is no accessor for a single record; `private` is erased at
+ * runtime, so this reads the very object the recorder holds without widening
+ * the production API for a test.
+ */
+function peekRecord(
+	recorder: RequestRecorder,
+	requestId: string,
+): { settlementPending: boolean; meta: RecordMeta } | undefined {
+	const map = (
+		recorder as unknown as {
+			records: Map<string, { settlementPending: boolean; meta: RecordMeta }>;
+		}
+	).records;
+	return map.get(requestId);
+}
+
+describe("RequestRecorder — settlement retention", () => {
+	it("settles usage_source on dispose even when the metadata queue is SATURATED", async () => {
+		// Graceful shutdown is the one path with no later sweep to retry from:
+		// dispose() clears the timers and the whole record map. If the settlement
+		// is refused there, the row stays usage_source NULL — reading "not
+		// finished yet" — for good, after an ORDERLY restart.
+		//
+		// The queue is filled with real jobs through the real AsyncDbWriter
+		// because ordinary capacity rejection is exactly what has to be survived;
+		// a stubbed `enqueue` would prove nothing about it.
+		const writer = new AsyncDbWriter();
+		const dbOps = new FakeDbOps([]);
+		const timers = new FakeTimers();
+		const recorder = new RequestRecorder({
+			dbOps: dbOps as never,
+			asyncWriter: writer as never,
+			emitSummaryEvent: () => {},
+			getStorePayloads: () => false,
+			getStoreHeaders: () => false,
+			now: timers.now,
+			scheduleTimer: timers.schedule,
+			clearTimer: timers.clear,
+			config: { SUMMARY_GRACE_MS: 100, PATCH_RECORD_TTL_MS: 5_000 },
+		});
+		// Holds the writer's drain tick open, so the queue filled below cannot
+		// empty itself out from under the assertions.
+		let releaseBlocker!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			releaseBlocker = resolve;
+		});
+
+		try {
+			recorder.begin(makeMeta());
+			recorder.finishTransport("req-1", "success");
+			timers.advance(150); // grace → persisted with usage_source NULL
+
+			// The real writer drains on its own; wait for the row to land.
+			for (let i = 0; i < 50 && dbOps.saveRequestCalls.length === 0; i++) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			}
+			expect(dbOps.saveRequestCalls).toHaveLength(1);
+			expect(dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+			// Saturate for real. One job holds the drain tick open, then the queue
+			// is filled until `enqueue` genuinely refuses at METADATA_QUEUE_CAP.
+			expect(writer.enqueue(() => blocked)).toBe(true);
+			let filled = 0;
+			while (filled < 10_000 && writer.enqueue(() => {})) filled++;
+			expect(writer.enqueue(() => {})).toBe(false);
+
+			// Shutdown. The recorder disposes BEFORE the writer (LifecycleManager
+			// disposes in reverse registration order), so whatever it enqueues is
+			// still in the FIFO when the writer drains it below.
+			recorder.dispose();
+
+			releaseBlocker();
+			await writer.dispose();
+
+			expect(dbOps.markUsageSourceCalls).toEqual([
+				{ id: "req-1", usageSource: "none" },
+			]);
+		} finally {
+			releaseBlocker();
+			await writer.dispose();
+		}
+	});
+
+	it("keeps the retry owner when a LATE summary arrives after a REFUSED settlement", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The patch window shuts while the metadata queue is saturated: the
+		// settlement is refused, so the record is held for ONE reason — it is the
+		// only thing that can retry the write. The window itself stays shut.
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// A summary lands after that window closed, with the queue still full. It
+		// has no window to patch into and must not consume the retry owner: doing
+		// so leaves the row at usage_source NULL with nothing left to settle it.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// The backlog clears; the retained record still has a row to settle.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+
+	it("stops pinning the request body on a record retained for a settlement retry", async () => {
+		const h = makeHarness();
+		const meta = makeMeta();
+		h.recorder.begin(meta);
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+		await h.flush();
+
+		const retained = peekRecord(h.recorder, "req-1");
+		expect(retained).toBeDefined();
+		expect(retained?.settlementPending).toBe(true);
+		// `releaseBuffers` clears reqBytes and the response chunks, but the body
+		// copy in `meta` is a separate allocation outside the
+		// capturedBytesPending accounting. Retention now outlives both the TTL
+		// and cap eviction, so a retained record must not keep it alive.
+		expect(retained?.meta.requestBody).toBeNull();
+		// The metadata object belongs to the caller, so dropping the body must
+		// not reach back into it.
+		expect(meta.requestBody).not.toBeNull();
+		expect(meta.requestBody?.byteLength).toBe(18);
 	});
 });

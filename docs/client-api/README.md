@@ -151,10 +151,13 @@ never be contradicted by a later write.
 
 One residual is worth planning for. A row that persisted without usage stays
 open for a late patch for about sixty seconds. A shutdown the server performs
-itself closes those rows on the way out, and a settling write the server cannot
-queue at the time is retried later, so what remains is the process dying
-abruptly (a crash, a kill, or a power loss) inside that window. Nothing is then
-left to close the row and it stays `finalized: false` permanently. No row-level
+itself closes those rows on the way out, including the ones whose settling
+write it could not queue at the time. When the server's write queue is full it
+holds such a row's accounting in memory and retries it rather than dropping it,
+so a sustained backlog grows that memory with no ceiling; the accounting is
+never discarded to bound it. What remains is the process dying abruptly (a
+crash, a kill, or a power loss) inside that window. Nothing is then left to
+close the row and it stays `finalized: false` permanently. No row-level
 evidence distinguishes it from a row that is still waiting. Resolve such a row
 as unknown when your own reconciliation window closes.
 

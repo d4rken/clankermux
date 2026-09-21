@@ -280,6 +280,33 @@ export class AsyncDbWriter implements Disposable {
 		return true;
 	}
 
+	/**
+	 * Append ONE shutdown job to the tail of the metadata queue, exempt from
+	 * `METADATA_QUEUE_CAP`.
+	 *
+	 * For a disposable that has to settle state it is the last owner of. Ordinary
+	 * capacity rejection exists to shed load from a server that is still serving;
+	 * at shutdown there is no later attempt to shed toward, and refusing here
+	 * loses the state instead of deferring it. Exempting a job per disposable
+	 * rather than per record is what keeps that exemption bounded.
+	 *
+	 * It goes on the SAME FIFO as everything else, deliberately: the queue is
+	 * what serializes a settlement behind the row writes already sitting in front
+	 * of it. Calling the DB directly would let the settlement land first.
+	 *
+	 * Returns false only once {@link dispose} has finished draining, when nothing
+	 * would ever run the job.
+	 */
+	enqueueShutdownBatch(job: DbJob): boolean {
+		if (this.disposed) return false;
+		this.metadataQueue.push({
+			enqueuedAt: performance.now(),
+			run: job,
+		});
+		void this.processQueue();
+		return true;
+	}
+
 	// -----------------------------------------------------------------------
 	// Payload admission
 	// -----------------------------------------------------------------------
