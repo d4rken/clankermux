@@ -511,6 +511,24 @@ function makeHarness(
 // ---------------------------------------------------------------------------
 
 describe("RequestRecorder — normal terminal end", () => {
+	it("releases the incoming body synchronously at persist time", async () => {
+		const h = makeHarness();
+		const meta = makeMeta();
+		h.recorder.begin(meta);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			request: { body: string | null };
+		};
+		expect(
+			JSON.parse(Buffer.from(envelope.request.body ?? "", "base64").toString()),
+		).toEqual({ model: "claude" });
+	});
+
 	it("persists usage/cost/tokens into the row and emits a matching event", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());
@@ -1404,6 +1422,40 @@ describe("RequestRecorder — recordSynthetic", () => {
 		expect(h.emitted[0].statusCode).toBe(529);
 		expect(h.emitted[0].errorMessage).toBe("provider_overloaded");
 		expect(h.emitted[0].requestedModel).toBe("claude-haiku-4-5-20251001");
+	});
+
+	it("releases the incoming body once the envelope is serialized", async () => {
+		const h = makeHarness();
+		const meta = makeMeta({ requestId: "syn-release", responseStatus: 529 });
+		h.recorder.recordSynthetic(meta, "error", "pool_exhausted", {
+			responseBody: makeArrayBuffer('{"error":"exhausted"}'),
+		});
+
+		// Synthetic records never enter the live map, so nothing else can ever
+		// release them: the queued job must not be holding the raw bodies.
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			request: { body: string | null };
+		};
+		expect(
+			JSON.parse(Buffer.from(envelope.request.body ?? "", "base64").toString()),
+		).toEqual({ model: "claude" });
+	});
+
+	it("releases the incoming body when payload admission is refused", async () => {
+		const h = makeHarness();
+		h.writer.acceptPayload = false;
+		const meta = makeMeta({ requestId: "syn-refused", responseStatus: 529 });
+		h.recorder.recordSynthetic(meta, "error", "usage_throttled", {
+			responseBody: makeArrayBuffer('{"error":"throttled"}'),
+		});
+
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.dbOps.saveRequestCalls[0].errorMessage).toBe("usage_throttled");
+		expect(h.dbOps.savePayloadCalls).toHaveLength(0);
 	});
 
 	it("keeps synthetic records metadata-only when payload storage is disabled", async () => {

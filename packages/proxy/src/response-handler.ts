@@ -1447,8 +1447,9 @@ async function forwardToClientInner(
 										? classifyNativeResponsesEnd(usageState, false)
 										: null) ??
 									"stream_read_error");
+					const recordedOutcome = completedBeforeCut ? "success" : outcome;
 					observeOutcome(
-						completedBeforeCut ? "success" : outcome,
+						recordedOutcome,
 						completedBeforeCut ? "terminal_event_before_cut" : readReason,
 						terminalSeen,
 						completedBeforeCut,
@@ -1463,8 +1464,15 @@ async function forwardToClientInner(
 					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
-						completedBeforeCut ? "success" : outcome,
-						usageState.sseErrorType ?? undefined,
+						recordedOutcome,
+						// An in-band SSE error type still wins. Below it the computed
+						// read reason is the only thing that can distinguish a transport
+						// cut from an upstream application error in Request History.
+						// Restricted to "error": the recorder's own disconnect/timeout
+						// labels are the user-facing wording for those outcomes, and
+						// "success" carries no message at all.
+						usageState.sseErrorType ??
+							(recordedOutcome === "error" ? readReason : undefined),
 					);
 					trackFinalize(
 						usageState,

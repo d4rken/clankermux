@@ -111,6 +111,7 @@ export interface ZeroAccountsOutcomeDeps {
 	recordSyntheticErrorResponse: (
 		response: Response,
 		error: string,
+		opts?: { failoverAttempts?: number },
 	) => Promise<void>;
 	/** handleProxy's synthetic provider-overloaded 529 (records itself). */
 	createProviderOverloadedResponse: (
@@ -456,6 +457,7 @@ export async function resolveZeroAccountsOutcome(
 			bumpIdleTimeout,
 			NETWORK.IDLE_REARM_INTERVAL_MS,
 		);
+		let contextWindowTerminal: Response | null = null;
 		try {
 			const held = await holds.holdForNonCodexRecovery(cwHoldBudget, "CW hold");
 			if (held) return held;
@@ -547,14 +549,15 @@ export async function resolveZeroAccountsOutcome(
 			// probe-suppressed — a non-retryable answer to a purely temporary,
 			// retryable condition.
 			if (relaxCandidates.length === 0) {
-				return createContextWindowExceededResponse(
+				// Assigned rather than returned: the recorder call below must run
+				// after this block's `finally` has stopped the idle re-arm.
+				contextWindowTerminal = createContextWindowExceededResponse(
 					gateTokenEstimate,
 					[...gates.contextExcludedAccounts],
 					effectiveRequestModel ?? "unknown",
 					requestMeta.excludeOfficialAnthropic === true,
 				);
-			}
-			if (!relaxAttempted && relaxSuppressed > 0) {
+			} else if (!relaxAttempted && relaxSuppressed > 0) {
 				log.info(
 					`Context-window last-resort: all ${relaxSuppressed} fitting account(s) were recovery-probe suppressed — deferring to an availability terminal, NOT a context_window_exceeded 400`,
 				);
@@ -570,6 +573,16 @@ export async function resolveZeroAccountsOutcome(
 			// Stop re-arming on EVERY exit path: success returns, relaxation
 			// returns, the 400, client-abort returns, and the fall-through.
 			clearInterval(cwRearm);
+		}
+		if (contextWindowTerminal) {
+			if (!req.signal.aborted) {
+				await recordSyntheticErrorResponse(
+					contextWindowTerminal,
+					"context_window_exceeded",
+					{ failoverAttempts: getUpstreamAttempts() },
+				);
+			}
+			return contextWindowTerminal;
 		}
 	}
 
@@ -694,10 +707,16 @@ export async function resolveZeroAccountsOutcome(
 		throttledAccounts.length > 0 ||
 		gates.familyWeeklyPacedAccounts.length > 0
 	) {
-		return createUsageThrottledResponse([
+		const throttledResponse = createUsageThrottledResponse([
 			...throttledAccounts,
 			...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
 		]);
+		if (!req.signal.aborted) {
+			await recordSyntheticErrorResponse(throttledResponse, "usage_throttled", {
+				failoverAttempts: getUpstreamAttempts(),
+			});
+		}
+		return throttledResponse;
 	}
 
 	if (
