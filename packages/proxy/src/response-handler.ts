@@ -10,6 +10,7 @@ import {
 } from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
+	sanitizeResponseHeadersForStorage,
 	stripHopByHopHeaders,
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
@@ -792,7 +793,13 @@ async function forwardToClientInner(
 	const sanitizedReq = sanitizeRequestHeaders(requestHeaders);
 	const requestHeadersObj = Object.fromEntries(sanitizedReq.entries());
 
-	const responseHeadersObj = Object.fromEntries(response.headers.entries());
+	// Sanitized like the request side. These headers now outlive the payload
+	// envelope by months in `request_headers`, so set-cookie and the echoed
+	// session ids must not reach storage — the 24h payload window used to be the
+	// only thing bounding how long a stored copy lived.
+	const responseHeadersObj = Object.fromEntries(
+		sanitizeResponseHeadersForStorage(response.headers).entries(),
+	);
 
 	// `requests.is_stream` means the UPSTREAM TRANSPORT, not what the client
 	// asked for. A native Responses request with `"stream": false` records
