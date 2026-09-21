@@ -578,7 +578,7 @@ describe("proxyWithAccount — reprobe mode", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {
+	it("a TRANSIENT reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {
 		// A STILL-transient re-probe: the gentle treatment (no streak, no anchor,
 		// no DB write) is reserved for the 429s the classifier calls retryable.
 		globalThis.fetch = mockFetch(

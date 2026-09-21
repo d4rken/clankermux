@@ -1160,6 +1160,11 @@ export async function proxyWithAccount(
 	// the outbound fetch's signal below, so a probe that never produced health
 	// evidence stops rather than lingering alongside its replacement.
 	let overloadProbeDisplaced: AbortController | null = null;
+	// This attempt's single-flight recovery-probe lease, when the admission
+	// chokepoint handed it one. Read at each use rather than captured: the lease
+	// is released and forgotten the moment a terminal outcome settles it.
+	const heldProbeLease = () => findRateLimitProbeLease(requestMeta, account.id);
+
 	// Release the held probe lease locally and drop ownership. `fail()` calls
 	// this with "abandoned" as the universal chokepoint; the 529 trip site calls
 	// it with "reopened" first (fail's later "abandoned" then no-ops on null).
@@ -1857,7 +1862,9 @@ export async function proxyWithAccount(
 				_model: string | null,
 				source: "claims" | "usage",
 			): Promise<Response | null> => {
-				applyRateLimitCooldown(account, quota, ctx);
+				applyRateLimitCooldown(account, quota, ctx, {
+					probeLease: heldProbeLease(),
+				});
 				// The helper sets this synchronously, including adaptive no-reset
 				// backoff. Outcomes must report the applied deadline, not a default.
 				const cooldownUntil = account.rate_limited_until as number;
@@ -1948,6 +1955,7 @@ export async function proxyWithAccount(
 						account,
 						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 						ctx,
+						{ probeLease: heldProbeLease() },
 					);
 					log.warn(
 						`Re-probe of held account ${account.name} got a non-transient 429 (${classification.reason}) — cooling down until ${new Date(cooldownUntil).toISOString()} and ending the hold`,
@@ -1989,7 +1997,9 @@ export async function proxyWithAccount(
 				const reason: RateLimitReason = "out_of_credits";
 				// floorUntil bypasses the exponential-backoff min() cap so the long
 				// cooldown actually sticks (see applyRateLimitCooldown.floorUntil).
-				applyRateLimitCooldown(account, { floorUntil, reason }, ctx);
+				applyRateLimitCooldown(account, { floorUntil, reason }, ctx, {
+					probeLease: heldProbeLease(),
+				});
 				// Persist the 429's unified-status header so the dashboard chip
 				// doesn't freeze at the last successful response's value.
 				persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -2334,6 +2344,7 @@ export async function proxyWithAccount(
 						account,
 						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 						ctx,
+						{ probeLease: heldProbeLease() },
 					);
 					// Persist the 429's unified-status header (status/reset/remaining).
 					// This short-circuit never reaches processProxyResponse /
@@ -2436,6 +2447,7 @@ export async function proxyWithAccount(
 						account,
 						{ resetTime: cooldownUntil, reason },
 						ctx,
+						{ probeLease: heldProbeLease() },
 					);
 					// Persist the 429's unified-status header (status/reset/remaining).
 					// This short-circuit never reaches processProxyResponse /
@@ -2503,7 +2515,9 @@ export async function proxyWithAccount(
 			// Share the existing escalating cooldown counter deliberately (30s to
 			// 5min). Access denials are not quotas; the distinct reason excludes them
 			// from quota recovery and transient holds despite sharing that storage.
-			applyRateLimitCooldown(account, { reason }, ctx);
+			applyRateLimitCooldown(account, { reason }, ctx, {
+				probeLease: heldProbeLease(),
+			});
 			log.warn(
 				`Account ${account.name} org_permission_denied (403): organization disabled OAuth/Claude Code access; cooling down this account`,
 			);

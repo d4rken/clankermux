@@ -5,6 +5,7 @@ import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
+	markCapacityRestoredProbePending,
 	type RateLimitProbeLease,
 	resetRateLimitProbeGatesForTests,
 } from "../rate-limit-cooldown";
@@ -169,14 +170,17 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		});
 		const { ctx } = makeCtx();
 
-		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
+		const probeLease = admit(account);
 		// Server-directed reset in the future -> Lever B path applies a fresh
 		// cooldown; the probe lease must be released as part of that.
-		applyRateLimitCooldown(account, { resetTime: NOW + 120_000 }, ctx);
-		Date.now = () => NOW + 120_001;
+		//
+		// The cooldown is deliberately SHORTER than the 2-minute lease: at expiry
+		// the lease would still be live, so only a real release can admit here.
+		applyRateLimitCooldown(account, { resetTime: NOW + 30_000 }, ctx, {
+			probeLease,
+		});
+		Date.now = () => NOW + 30_001;
 
-		// The reapplied cooldown released the old lease. Once it expires again,
-		// and the streak is still mature, a fresh probe is admitted.
 		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
@@ -188,15 +192,23 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		});
 		const { ctx } = makeCtx();
 
-		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
+		// Waiting this cooldown out could not tell an explicit release apart from
+		// the lease lapsing: the escalating backoff is its 300s ceiling at EVERY
+		// mature streak (30/60/120/240/300s on the 1..n ramp, and the gate needs
+		// n >= 5), which always outlives the 2-minute lease. A capacity marker
+		// gates the account independently of its deadline, so the assertion can
+		// run at once, with the lease still fully live and the escalating path
+		// still the thing under test.
+		markCapacityRestoredProbePending(account.id);
+		const probeLease = admit(account);
+
 		// No reset time -> escalating no-reset path; still a fresh cooldown that
 		// must release the probe lease.
-		applyRateLimitCooldown(account, {}, ctx);
-		expect(account.rate_limited_until).not.toBeNull();
-		// Advance past the just-applied cooldown so the mature streak is again
-		// eligible; the lease was released so a fresh probe is admitted.
-		Date.now = () => (account.rate_limited_until as number) + 1;
+		applyRateLimitCooldown(account, {}, ctx, { probeLease });
+		expect(account.rate_limited_until).toBe(NOW + 300_000);
 
+		// `cooldown_reapplied` retains the marker, so the account is still gated —
+		// an unreleased lease would read "suppressed" here.
 		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
@@ -288,6 +300,44 @@ describe("probe lease ownership", () => {
 		// was never admitted, so it has nothing to hand back.
 		completeRateLimitProbe(account, "recovered", undefined);
 		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+	});
+
+	it("an expired owner's 429 persists the cooldown but keeps the replacement's lease", () => {
+		Date.now = () => NOW;
+		const account = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		const { ctx } = makeCtx();
+		const expired = admit(account);
+
+		// A's lease lapses; B is admitted under a fresh one and goes upstream.
+		Date.now = () => NOW + 120_001;
+		const replacement = admit(account);
+
+		// A finally 429s. The account-level cooldown must be persisted…
+		applyRateLimitCooldown(
+			account,
+			{ resetTime: NOW + 150_001, reason: "model_fallback_429" },
+			ctx,
+			{ probeLease: expired },
+		);
+		expect(account.rate_limited_until).toBe(NOW + 150_001);
+
+		// …but the deadline does not protect B: it is SHORTER than B's remaining
+		// lease, and B is still upstream. Admitting C here would be a second
+		// concurrent probe.
+		Date.now = () => NOW + 150_002;
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+		// The burst hold's re-probe exemption skips the deadline, not the lease.
+		expect(
+			getRateLimitProbeAdmission(account, Date.now(), { reprobe: true })
+				.decision,
+		).toBe("suppressed");
+
+		// B's own terminal outcome is what frees the account again.
+		completeRateLimitProbe(account, "recovered", replacement);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("an expired owner cannot delete the lease that replaced it", () => {

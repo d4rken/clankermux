@@ -180,9 +180,13 @@ describe("capacity-restored single-flight marker", () => {
 		const { ctx } = makeCtx();
 
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
+		// The probe's OWN 429: it carries the lease it was admitted with, which is
+		// what lets the reapply release it.
+		const probeLease = admit(account);
 
-		applyRateLimitCooldown(account, { resetTime: NOW + 60_000 }, ctx);
+		applyRateLimitCooldown(account, { resetTime: NOW + 60_000 }, ctx, {
+			probeLease,
+		});
 		expect(account.consecutive_rate_limits).toBe(0);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
 

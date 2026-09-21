@@ -332,7 +332,9 @@ export async function processProxyResponse(
 			// Streaming-content-type and other generic 429 paths must use the
 			// same quota cause/deadline as the attempt loop, never the summary's
 			// scoped weekly reset under an unreleasable generic reason.
-			applyRateLimitCooldown(account, liveAccountQuota, ctx);
+			applyRateLimitCooldown(account, liveAccountQuota, ctx, {
+				probeLease: findRateLimitProbeLease(requestMeta, account.id),
+			});
 		} else {
 			// Single entry point for both with-reset and no-reset paths.
 			// Derive a 529-specific reason override so the audit trail reflects
@@ -344,7 +346,9 @@ export async function processProxyResponse(
 						? "upstream_529_overloaded_with_reset"
 						: "upstream_529_overloaded_no_reset"
 					: undefined;
-			applyRateLimitCooldown(account, { ...rateLimitInfo, reason }, ctx);
+			applyRateLimitCooldown(account, { ...rateLimitInfo, reason }, ctx, {
+				probeLease: findRateLimitProbeLease(requestMeta, account.id),
+			});
 
 			// Reliable burst marker (storm-affinity-hold Part 1). The transparent
 			// burst-retry hold is gated on the shared Anthropic-OAuth burst marker,

@@ -663,7 +663,15 @@ export function applyRateLimitCooldown(
 		floorUntil?: number;
 	},
 	ctx: ProxyContext,
-	options?: { reprobe?: boolean },
+	options?: {
+		reprobe?: boolean;
+		/**
+		 * The single-flight recovery-probe lease the CALLING attempt holds for
+		 * this account, when it holds one. Ownership proof for the release below:
+		 * without it, another request's live lease is left alone.
+		 */
+		probeLease?: RateLimitProbeLease;
+	},
 ): void {
 	const now = Date.now();
 
@@ -687,20 +695,26 @@ export function applyRateLimitCooldown(
 
 	// Single-flight recovery probe: reaching here means a REAL fresh cooldown is
 	// about to be (re)applied (Lever B server-directed reset OR the escalating
-	// no-reset path) — a terminal outcome for any in-flight recovery probe on
-	// this account. Release its lease so the account isn't sidelined for the full
-	// lease TTL; the next expiry re-arms a fresh single probe. The reprobe path
-	// above returns before this point, so gentle in-request re-probes never
-	// release the cross-request lease.
+	// no-reset path) — a terminal outcome for THIS attempt's probe, if it holds
+	// one. Release its lease so the account isn't sidelined for the full lease
+	// TTL; the next expiry re-arms a fresh single probe. The reprobe path above
+	// returns before this point, so gentle in-request re-probes never release the
+	// cross-request lease.
 	//
-	// Deliberately NOT ownership-scoped: a fresh cooldown is evidence about the
-	// ACCOUNT, produced by a request that really did reach upstream, so it is
-	// terminal for whoever holds the lease. It only ever releases one, and it
-	// writes a future deadline that takes the account out of rotation anyway.
-	const liveLease = probeLeases.get(account.id);
-	if (liveLease) {
-		releaseProbeLease(account, "cooldown_reapplied", liveLease);
-		log.info(`[clankermux] account=${account.name} cooldown_probe_reapplied`);
+	// Ownership-scoped like every other settle. A cooldown is account-level
+	// evidence, but that does NOT make it terminal for another request's probe:
+	// the deadline it writes does not stop the lease holder's upstream request,
+	// and it does not keep the account out of rotation for the lease's lifetime
+	// either — a 30s cooldown expires while a 2-minute lease still has 90s to
+	// run, and the burst hold's re-probe re-enters sooner than that. Freeing the
+	// lease there would admit a second concurrent probe, which is the exact
+	// defect the token exists to prevent.
+	if (options?.probeLease) {
+		const beforeRelease = probeLeases.get(account.id);
+		completeRateLimitProbe(account, "cooldown_reapplied", options.probeLease);
+		if (beforeRelease === options.probeLease) {
+			log.info(`[clankermux] account=${account.name} cooldown_probe_reapplied`);
+		}
 	}
 
 	// Lever B: the upstream gave us an explicit reset time (it told us exactly when
