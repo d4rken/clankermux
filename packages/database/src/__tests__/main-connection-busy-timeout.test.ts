@@ -19,6 +19,7 @@ import * as path from "node:path";
 import {
 	DatabaseOperations,
 	MAIN_CONNECTION_BUSY_TIMEOUT_MS,
+	STARTUP_BUSY_TIMEOUT_MS,
 } from "../database-operations";
 
 function makeTempDbDir(): string {
@@ -50,6 +51,55 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 			expect(timeout).toBe(0);
 		} finally {
 			await dbOps.close();
+		}
+	});
+
+	it("boots through a transient lock held by another process", async () => {
+		// runMigrations and runOneShotBackfills write through the raw handle,
+		// before the adapter's async retry exists, so the startup window keeps a
+		// real C-level busy_timeout. A restart genuinely races here: the
+		// outgoing process holds the database exclusively for its shutdown
+		// wal_checkpoint(TRUNCATE) while the incoming one opens its handle.
+		//
+		// The lock is held from a SEPARATE PROCESS on purpose — the constructor
+		// blocks synchronously inside SQLite, so a timer in THIS process could
+		// never fire to release it.
+		const dbPath = path.join(tmpDir, "contended.db");
+		const holder = Bun.spawn([
+			"bun",
+			"-e",
+			`
+			const { Database } = require("bun:sqlite");
+			const db = new Database(${JSON.stringify(dbPath)}, { create: true });
+			db.exec("PRAGMA journal_mode = WAL");
+			db.exec("BEGIN EXCLUSIVE");
+			db.run("CREATE TABLE IF NOT EXISTS hold (id INTEGER PRIMARY KEY)");
+			console.log("held");
+			setTimeout(() => { db.exec("COMMIT"); db.close(); }, 400);
+			`,
+		]);
+		try {
+			// Wait for the child to actually hold the lock before racing it.
+			const reader = holder.stdout.getReader();
+			await reader.read();
+			reader.releaseLock();
+
+			const dbOps = new DatabaseOperations(dbPath);
+			try {
+				const { timeout } = dbOps
+					.getAdapter()
+					.getSQLiteDb()
+					.query("PRAGMA busy_timeout")
+					.get() as { timeout: number };
+				// Construction survived the lock, and the widened window is gone.
+				expect(timeout).toBe(MAIN_CONNECTION_BUSY_TIMEOUT_MS);
+				expect(STARTUP_BUSY_TIMEOUT_MS).toBeGreaterThan(0);
+			} finally {
+				await dbOps.close();
+			}
+		} finally {
+			holder.kill();
+			await holder.exited;
 		}
 	});
 

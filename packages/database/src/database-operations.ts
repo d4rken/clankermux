@@ -159,6 +159,23 @@ export interface DatabaseRetryConfig {
 export const MAIN_CONNECTION_BUSY_TIMEOUT_MS = 0;
 
 /**
+ * busy_timeout for the main connection during construction only.
+ *
+ * `runMigrations` and `runOneShotBackfills` write through the raw handle
+ * before the adapter — and therefore the async busy-retry loop — exists, so
+ * for them a zero timeout means a transient lock aborts the constructor and
+ * the process never boots. The lock is not hypothetical: a restart opens the
+ * new process's handle while the outgoing one may still be inside its shutdown
+ * `wal_checkpoint(TRUNCATE)`, which takes the database exclusively for up to
+ * CLOSE_CHECKPOINT_BUSY_TIMEOUT_MS.
+ *
+ * Blocking here is free — nothing is being served yet, which is exactly the
+ * property that makes it unacceptable afterwards. The constructor drops the
+ * connection to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} as its last step.
+ */
+export const STARTUP_BUSY_TIMEOUT_MS = 10_000;
+
+/**
  * Apply SQLite pragmas for optimal performance on distributed filesystems.
  *
  * Note: `PRAGMA integrity_check` is NOT run here. The check is moved to a
@@ -208,13 +225,11 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 			}
 		}
 
-		// Disable the C-level busy wait on the main connection. Deliberately NOT
-		// config.busyTimeoutMs (that value is for worker connections): any
-		// busy_timeout here parks the whole event loop inside SQLite's busy
-		// handler whenever a worker holds the write lock. The adapter's async
-		// busy-retry layer handles the collision instead. See
-		// MAIN_CONNECTION_BUSY_TIMEOUT_MS.
-		db.run(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
+		// Tolerate a C-level busy wait for the rest of construction only; the
+		// constructor lowers this to MAIN_CONNECTION_BUSY_TIMEOUT_MS once the
+		// schema work is done. Deliberately NOT config.busyTimeoutMs — that
+		// value is for worker connections.
+		db.run(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
 
 		// Configure cache size
 		if (config.cacheSize !== undefined) {
@@ -586,6 +601,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		// schema is complete, and each pass records that it ran so it never
 		// repeats (see backfills.ts).
 		runOneShotBackfills(this.sqliteDb);
+
+		// Schema work is done and the adapter's async busy-retry takes over from
+		// here, so give the event loop back its guarantee: a contended call now
+		// returns SQLITE_BUSY instead of parking inside sqlite3_step.
+		this.sqliteDb.run(
+			`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`,
+		);
 
 		this.adapter = new BunSqlAdapter(this.sqliteDb);
 
