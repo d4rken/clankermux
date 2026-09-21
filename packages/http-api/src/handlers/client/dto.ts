@@ -49,6 +49,14 @@ export interface ClientRequestDto {
 	cacheReadInputTokens: number | null;
 	cacheCreationInputTokens: number | null;
 	usageSource: ClientUsageSourceDto;
+	/**
+	 * How many upstream attempts were abandoned before the one this row's counts
+	 * describe. Above 0, the counts are the ANSWERING attempt alone and the
+	 * abandoned ones are unaccounted: the proxy can discard a provider response
+	 * it has already been billed for, and no column anywhere records what that
+	 * cost. Treat such a row as a lower bound rather than an exact total.
+	 */
+	failoverAttempts: number | null;
 	project: string | null;
 	apiKeyId: string;
 	correlationTag: string | null;
@@ -125,6 +133,7 @@ export function toClientRequestDto(row: ClientRequestRow): ClientRequestDto {
 		cacheReadInputTokens: row.cache_read_input_tokens,
 		cacheCreationInputTokens: row.cache_creation_input_tokens,
 		usageSource: toClientUsageSource(row),
+		failoverAttempts: row.failover_attempts,
 		project: row.project,
 		apiKeyId: row.api_key_id,
 		correlationTag: row.correlation_tag,

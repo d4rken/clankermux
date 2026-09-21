@@ -39,6 +39,7 @@ interface SeedRow {
 	totalTokens?: number | null;
 	usageFinalizedAt?: number | null;
 	usageSource?: string | null;
+	failoverAttempts?: number | null;
 	project?: string | null;
 }
 
@@ -53,8 +54,9 @@ async function seed(row: SeedRow): Promise<void> {
 			id, timestamp, method, path, status_code, success, error_message,
 			model, requested_model, input_tokens, output_tokens,
 			cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
-			usage_finalized_at, usage_source, project, api_key_id, correlation_tag
-		) VALUES (?, ?, 'POST', '/v1/messages', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			usage_finalized_at, usage_source, failover_attempts, project, api_key_id,
+			correlation_tag
+		) VALUES (?, ?, 'POST', '/v1/messages', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			row.id,
 			row.timestamp ?? 1000,
@@ -69,6 +71,7 @@ async function seed(row: SeedRow): Promise<void> {
 			row.totalTokens ?? null,
 			row.usageFinalizedAt ?? null,
 			row.usageSource ?? null,
+			row.failoverAttempts ?? null,
 			row.project ?? null,
 			row.apiKeyId === undefined ? KEY_A : row.apiKeyId,
 			row.tag ?? null,
@@ -146,6 +149,7 @@ describe("GET /client/v1/requests/{id}", () => {
 			cacheCreationInputTokens: 44,
 			totalTokens: 110,
 			usageSource: "provider",
+			failoverAttempts: 0,
 			project: "alpha",
 			tag: TAG,
 		});
@@ -170,10 +174,28 @@ describe("GET /client/v1/requests/{id}", () => {
 			cacheReadInputTokens: 33,
 			cacheCreationInputTokens: 44,
 			usageSource: "provider",
+			failoverAttempts: 0,
 			project: "alpha",
 			apiKeyId: KEY_A,
 			correlationTag: TAG,
 		});
+	});
+
+	it("publishes the abandoned-attempt count, which the counts exclude", async () => {
+		// The token columns describe the attempt that ANSWERED. An abandoned one
+		// can have been billed by its provider and is recorded nowhere, so this
+		// count is what separates a row that is exact from one that is a floor.
+		await seed({
+			id: "failed-over",
+			inputTokens: 11,
+			outputTokens: 22,
+			usageSource: "provider",
+			failoverAttempts: 2,
+		});
+
+		const { body } = await call("/client/v1/requests/failed-over");
+
+		expect(body).toMatchObject({ failoverAttempts: 2, inputTokens: 11 });
 	});
 
 	// One answer for three situations, so the route cannot be used to find out

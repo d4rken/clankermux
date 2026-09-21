@@ -217,6 +217,7 @@ export interface ClientRequestRow {
 	total_tokens: number | null;
 	usage_finalized_at: number | null;
 	usage_source: string | null;
+	failover_attempts: number | null;
 	project: string | null;
 	/** Non-null by construction: both queries filter `api_key_id = ?`. */
 	api_key_id: string;
@@ -226,7 +227,8 @@ export interface ClientRequestRow {
 const CLIENT_REQUEST_COLUMNS = `id, timestamp, status_code, error_message,
 	model, requested_model, input_tokens, output_tokens,
 	cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
-	usage_finalized_at, usage_source, project, api_key_id, correlation_tag`;
+	usage_finalized_at, usage_source, failover_attempts, project, api_key_id,
+	correlation_tag`;
 
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {

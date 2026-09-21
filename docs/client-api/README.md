@@ -61,9 +61,14 @@ The proxy returns `x-clankermux-request-id` on the response to the proxied
 request. That value is the `{id}` these routes take, and it is set for every
 provider, so a client cannot tell from the header which backend served it.
 
-The header rides a forwarded provider response. A request the gateway refuses
-on its own, before or during an upstream attempt, answers without it, so a
-client that needs those requests back has to find them by correlation tag.
+A request the gateway refuses on its own carries it too, so a refusal is
+reachable by id like any other request. The header identifies the REQUEST, not
+a stored row: it is set whether or not the request is one Request History
+keeps, so a lookup can still answer 404 for the reasons listed below.
+
+The exception is a request rejected during ingestion, before an id is assigned
+at all: a malformed body, a path that does not route, an authentication
+failure. Those never reached a provider and there is nothing to look up.
 
 ## Correlation tags
 
@@ -105,6 +110,7 @@ ingest header uses, so a tag that can be stored can always be searched for.
 | `cacheReadInputTokens` | number \| null | Prompt tokens served from the cache |
 | `cacheCreationInputTokens` | number \| null | Prompt tokens written to the cache |
 | `usageSource` | `provider` \| `approximate` \| `none` \| null | Provenance of the token vector |
+| `failoverAttempts` | number \| null | Upstream attempts abandoned before the one the counts describe |
 | `project` | string \| null | The project the proxy attributed the request to |
 | `apiKeyId` | string | The client id the row is scoped to |
 | `correlationTag` | string \| null | The stored tag, null when none was accepted |
@@ -208,6 +214,15 @@ version that publishes this document has no such rows.
 Values are otherwise upstream-reported and are not validated for sign or bound.
 The schemas constrain neither.
 
+The counts describe ONE upstream attempt: the one that produced the response.
+`failoverAttempts` says how many were abandoned before it, and their tokens are
+recorded nowhere. The proxy can discard a provider response it has already been
+billed for, most often when a provider answers as a different model than it was
+sent, and no column holds what that attempt cost. So a row with
+`failoverAttempts` above 0 is a LOWER BOUND on what the request consumed, and
+one at 0 is exact. That is why the field is published: without it every row
+would have to be labelled approximate, or none of them would.
+
 Two caveats:
 
 - Devin reports its cache reads disjoint from its input, which matches this
@@ -232,12 +247,14 @@ around the call.
 A row becomes readable only after two things have happened: the request's
 transport closed, and the metadata write committed. A stream may legitimately
 run for a long time (the recorder's own backstop is 35 minutes), and the write
-is asynchronous, so absence has four causes this response cannot tell apart:
+is asynchronous, so absence has five causes this response cannot tell apart:
 
 1. The request is still running.
 2. The write is queued, or retrying against a locked database.
 3. The write was dropped under writer backpressure and will never be retried.
 4. The row was deleted, by retention or by an operator statistics reset.
+5. The request is one Request History does not keep, such as an internal
+   probe. Its response still carried an id.
 
 No elapsed-time rule makes a 404 terminal. The SQL adapter retries a busy
 database against a ten-minute deadline, so "it has been a while" establishes

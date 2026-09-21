@@ -15,6 +15,7 @@
       "cacheReadInputTokens": 18432,
       "cacheCreationInputTokens": 0,
       "usageSource": "provider",
+      "failoverAttempts": 0,
       "project": "invoice-extractor",
       "apiKeyId": "8c2e0a97-6f41-4c8e-9a0b-1d3f5e7c9a20",
       "correlationTag": "batch-2026-09-21"
@@ -33,6 +34,7 @@
       "cacheReadInputTokens": null,
       "cacheCreationInputTokens": null,
       "usageSource": null,
+      "failoverAttempts": 1,
       "project": "invoice-extractor",
       "apiKeyId": "8c2e0a97-6f41-4c8e-9a0b-1d3f5e7c9a20",
       "correlationTag": "batch-2026-09-21"
