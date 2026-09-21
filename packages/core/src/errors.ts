@@ -223,11 +223,17 @@ export class ModelSubstitutedError extends AppError {
  * Service unavailable errors
  */
 export class ServiceUnavailableError extends AppError {
+	/**
+	 * `retryAfterSeconds` is the thrower's re-check advice for the 503 its
+	 * catcher will build. The catcher has no account state of its own, so a
+	 * terminal that knows a dated blocker has to carry the number with it.
+	 */
 	constructor(
 		message: string,
 		public readonly service?: string,
+		public readonly retryAfterSeconds?: number,
 	) {
-		super(message, "SERVICE_UNAVAILABLE", 503, { service });
+		super(message, "SERVICE_UNAVAILABLE", 503, { service, retryAfterSeconds });
 	}
 }
 

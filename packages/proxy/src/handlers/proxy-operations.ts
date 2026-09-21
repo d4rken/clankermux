@@ -81,6 +81,11 @@ import {
 } from "../resolved-route";
 import { forwardToClient } from "../response-handler";
 import {
+	ceilRetryAfterSeconds,
+	clampRetryAfterSeconds,
+	DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+} from "../retry-after";
+import {
 	type RoutingAttemptAudit,
 	recordLocalRoutingOutcome,
 	sendAuthorizedRequest,
@@ -3706,16 +3711,24 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 		.filter((until): until is number => until != null && until > now);
 	const earliestRateLimitedUntil =
 		rateLimitedTimes.length > 0 ? Math.min(...rateLimitedTimes) : null;
+	// The earliest known cooldown expiry across the pool — not a promise that
+	// the account it belongs to becomes eligible then: every other gate is still
+	// applied at that account's next selection.
 	const nextAvailableAt =
 		earliestRateLimitedUntil !== null
 			? new Date(earliestRateLimitedUntil).toISOString()
 			: null;
 
-	// Calculate Retry-After header (seconds) directly from numeric min
+	// `Retry-After` is re-check advice, not this deadline: the earliest cooldown
+	// in the pool can be a 5-hour or weekly reset, and a client parked on that
+	// figure sleeps through a gift reset, an operator unpause or an account
+	// added in the meantime. `next_available_at` above keeps the real number.
 	const retryAfterSeconds =
 		earliestRateLimitedUntil !== null
-			? Math.max(1, Math.round((earliestRateLimitedUntil - now) / 1000))
-			: 60; // Default 60s if no cooldown info
+			? clampRetryAfterSeconds(
+					ceilRetryAfterSeconds(earliestRateLimitedUntil, now),
+				)
+			: DEFAULT_RECHECK_RETRY_AFTER_SECONDS;
 
 	return new Response(
 		JSON.stringify({
@@ -3832,23 +3845,36 @@ export function createContextWindowExceededResponse(
  * account. `failure.code` becomes the error `type` so the operator sees exactly
  * which pin rule fired (pinned_account_missing / pinned_account_unavailable /
  * pinned_no_available_account / pinned_header_rejected / pinned_resolution_error).
+ *
+ * `retryAfterSeconds` is the caller's clamped re-check advice, derived from
+ * whatever dated blocker it can see; the default covers a refusal whose cause
+ * carries no date at all (a paused account, a rejected pin header).
  */
-export function createPinnedTargetUnavailableResponse(failure: {
-	code: string;
-	message: string;
-}): Response {
+export function createPinnedTargetUnavailableResponse(
+	failure: {
+		code: string;
+		message: string;
+	},
+	retryAfterSeconds: number = DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+): Response {
 	return new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
 				type: failure.code,
 				message: failure.message,
+				// A retryable 503 with no pacing invites an immediate re-send
+				// against unchanged state, so the header is always set — but a pin
+				// can stay unsatisfiable indefinitely, and the body says so rather
+				// than letting the header imply a recovery time.
+				availability_guaranteed: false,
 			},
 		}),
 		{
 			status: 503,
 			headers: {
 				"Content-Type": "application/json",
+				"Retry-After": String(retryAfterSeconds),
 				"x-clankermux-pool-status": "pinned-target-unavailable",
 			},
 		},

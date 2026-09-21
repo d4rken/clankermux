@@ -2,6 +2,7 @@ import {
 	HTTP_STATUS,
 	ModelNotServedError,
 	ModelSubstitutedError,
+	ServiceUnavailableError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { handleProxy, type ProxyContext } from "./proxy";
@@ -71,6 +72,14 @@ export async function dispatchProxyRequest(
 					? "Service temporarily unavailable. Please try again later."
 					: "Proxy request failed";
 
+		// A retryable 503 with no pacing is re-sent immediately against unchanged
+		// pool state. The thrower supplies the interval when it knows one; the
+		// flag says the interval is when to look again, not when capacity is back.
+		const retryAfterSeconds =
+			isServiceUnavailable && proxyError instanceof ServiceUnavailableError
+				? proxyError.retryAfterSeconds
+				: undefined;
+
 		return new Response(
 			JSON.stringify({
 				type: "error",
@@ -86,11 +95,20 @@ export async function dispatchProxyRequest(
 									"invalid_request_error"
 								: "proxy_error",
 					message,
+					...(retryAfterSeconds === undefined
+						? {}
+						: { availability_guaranteed: false }),
 				},
 			}),
 			{
 				status: statusCode,
-				headers: { "Content-Type": "application/json" },
+				headers:
+					retryAfterSeconds === undefined
+						? { "Content-Type": "application/json" }
+						: {
+								"Content-Type": "application/json",
+								"Retry-After": String(retryAfterSeconds),
+							},
 			},
 		);
 	}

@@ -16,9 +16,11 @@ import type {
 	AnthropicUsageData,
 	CapacitySignal,
 } from "@clankermux/types";
-
-/** Fallback Retry-After (seconds) when no usable family reset time is known. */
-const RETRY_AFTER_FALLBACK_SECONDS = 60;
+import {
+	ceilRetryAfterSeconds,
+	clampRetryAfterSeconds,
+	DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+} from "../retry-after";
 
 /**
  * Max age of cached usage data the family-weekly gate will trust (2× the 90s
@@ -241,15 +243,16 @@ export interface TransientSiblingCooldown {
 
 /**
  * Build the fail-clean 429 returned when every candidate account's requested
- * model family is weekly-exhausted. `Retry-After` is derived from the soonest
- * family reset across the excluded accounts (falling back to a fixed default
- * when no finite future reset is known).
+ * model family is weekly-exhausted. `Retry-After` is the soonest future
+ * deadline known to the refusal, clamped to a re-check interval (a weekly
+ * window resets days out) and falling back to a fixed default when nothing is
+ * dated; `earliest_known_reset_at` in the body carries the deadline itself.
  *
- * When a `transientSibling` is supplied (a family-capable account momentarily
- * unavailable ONLY due to a short cooldown), its recovery — not the family
- * window — is the real wait: `Retry-After` and the message reflect the cooldown,
- * and the pool-status header is `family-weekly-sibling-cooldown`. Passing no
- * `transientSibling` preserves the original genuinely-exhausted behavior exactly.
+ * When a `transientSibling` is supplied (a family-capable account unavailable
+ * ONLY due to a cooldown), it is one of the deadlines considered and it selects
+ * the message and the `family-weekly-sibling-cooldown` pool-status header.
+ * Passing no `transientSibling` preserves the original genuinely-exhausted
+ * behavior exactly.
  */
 export function createFamilyWeeklyExhaustedResponse(
 	excluded: FamilyWeeklyExcludedAccount[],
@@ -258,17 +261,23 @@ export function createFamilyWeeklyExhaustedResponse(
 	now: number,
 	transientSibling?: TransientSiblingCooldown | null,
 ): Response {
-	const soonestReset = excluded.reduce(
-		(min, e) => (e.resetAt < min ? e.resetAt : min),
-		Number.POSITIVE_INFINITY,
-	);
-	const hasFutureReset = Number.isFinite(soonestReset) && soonestReset > now;
-	const resetIso = hasFutureReset ? new Date(soonestReset).toISOString() : null;
+	// Each entry is screened for finiteness and futurity BEFORE the minimum is
+	// taken. An exclusion outlives the hold that produced it, so one whose reset
+	// has already passed by the time this response is built is routine, and a
+	// minimum taken over the raw list would let that expired entry stand in for
+	// a live reset the body goes on to report.
+	const futureResets = excluded
+		.map((e) => e.resetAt)
+		.filter((resetAt) => Number.isFinite(resetAt) && resetAt > now);
+	const soonestReset =
+		futureResets.length > 0 ? Math.min(...futureResets) : null;
+	const resetIso =
+		soonestReset !== null ? new Date(soonestReset).toISOString() : null;
 	const names = excluded.map((e) => e.account.name).join(", ");
 
-	// A family-capable sibling on a transient cooldown drives Retry-After (and the
-	// message) when its recovery is a finite future time — otherwise fall through
-	// to the family-window / default behavior.
+	// A family-capable sibling on a transient cooldown drives the message (and
+	// the pool-status header) when its recovery is a finite future time —
+	// otherwise fall through to the family-window / default behavior.
 	const siblingCooldownMs =
 		transientSibling &&
 		Number.isFinite(transientSibling.availableAt) &&
@@ -276,24 +285,34 @@ export function createFamilyWeeklyExhaustedResponse(
 			? transientSibling.availableAt
 			: null;
 
-	let retryAfterSeconds: number;
+	// `Retry-After` is the EARLIEST deadline across both sources, clamped. Order
+	// matters: clamping the sibling's deadline when an excluded account resets
+	// sooner advertises a retry ahead of a time this very body names, which is
+	// the thing ceiling the conversion was meant to stop.
+	const earliestDeadlineMs =
+		soonestReset !== null && siblingCooldownMs !== null
+			? Math.min(soonestReset, siblingCooldownMs)
+			: (soonestReset ?? siblingCooldownMs);
+	const earliestKnownResetIso =
+		earliestDeadlineMs !== null
+			? new Date(earliestDeadlineMs).toISOString()
+			: null;
+	const retryAfterSeconds =
+		earliestDeadlineMs !== null
+			? clampRetryAfterSeconds(ceilRetryAfterSeconds(earliestDeadlineMs, now))
+			: DEFAULT_RECHECK_RETRY_AFTER_SECONDS;
+
 	let message: string;
 	let poolStatus: string;
 	if (siblingCooldownMs !== null && transientSibling) {
-		retryAfterSeconds = Math.max(
-			1,
-			Math.ceil((siblingCooldownMs - now) / 1000),
-		);
 		poolStatus = "family-weekly-sibling-cooldown";
 		message =
 			`The only account(s) with weekly "${family}" quota are temporarily ` +
-			`rate-limited (e.g. "${transientSibling.name}"); retry in ` +
-			`${retryAfterSeconds}s. Account(s) with this family's weekly quota ` +
-			`exhausted: ${names}${resetIso ? ` (reset at ${resetIso})` : ""}.`;
+			`rate-limited (e.g. "${transientSibling.name}"). Re-check in ` +
+			`${retryAfterSeconds}s; availability is not guaranteed. Account(s) ` +
+			`with this family's weekly quota exhausted: ${names}` +
+			`${resetIso ? ` (reset at ${resetIso})` : ""}.`;
 	} else {
-		retryAfterSeconds = hasFutureReset
-			? Math.max(1, Math.ceil((soonestReset - now) / 1000))
-			: RETRY_AFTER_FALLBACK_SECONDS;
 		poolStatus = "family-weekly-exhausted";
 		message =
 			`All available accounts have exhausted their weekly "${family}" quota ` +
@@ -309,6 +328,10 @@ export function createFamilyWeeklyExhaustedResponse(
 				message,
 				request_model: requestModel,
 				family,
+				// The earliest cooldown/reset known to this refusal, unclamped —
+				// `Retry-After` above is bounded re-check advice, and a weekly
+				// window resets days after the client is told to look again.
+				earliest_known_reset_at: earliestKnownResetIso,
 				excluded_accounts: excluded.map((e) => ({
 					name: e.account.name,
 					resets_at: Number.isFinite(e.resetAt)

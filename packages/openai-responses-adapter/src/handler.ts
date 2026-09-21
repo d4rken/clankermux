@@ -36,13 +36,50 @@ const log = new Logger("openai-responses-adapter");
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 /**
+ * Longest the diagnostic read waits on a failed upstream. The status line is
+ * already in hand and the body only ever improves the message, so a body that
+ * does not settle is worth less than answering the client: without a bound the
+ * handler sits on the request until Bun's idle timeout drops the connection,
+ * and the client gets nothing instead of the translated error.
+ */
+const ERROR_BODY_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * Headers copied from the proxy's failed response onto the translated error.
+ * Rebuilding the response from the status alone throws away everything the
+ * proxy attached about WHEN to come back: the synthetic terminals' pacing, a
+ * verbatim upstream `retry-after`, and the pool-restated rate-limit figures a
+ * client meters itself against.
+ */
+const RETRY_GUIDANCE_HEADERS = [
+	"retry-after",
+	"x-clankermux-pool-status",
+	"x-clankermux-burst-retry",
+];
+const RETRY_GUIDANCE_HEADER_PREFIXES = ["anthropic-ratelimit-", "x-codex-"];
+
+function errorResponseHeaders(upstream: Headers): Headers {
+	const headers = new Headers({ "Content-Type": "application/json" });
+	upstream.forEach((value, name) => {
+		const lower = name.toLowerCase();
+		if (
+			RETRY_GUIDANCE_HEADERS.includes(lower) ||
+			RETRY_GUIDANCE_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix))
+		) {
+			headers.set(name, value);
+		}
+	});
+	return headers;
+}
+
+/**
  * Reads at most `MAX_ERROR_BODY_BYTES` of a response body as UTF-8, returning
  * "" when the body is missing or nothing arrived before the stream failed.
  *
  * A stream that errors after the headers arrived must not reject the whole
  * request: the status code is still meaningful and the caller can fall back to
- * its generic message, which is what happened before this branch read the body
- * at all for non-JSON responses.
+ * its generic message. The same applies to whatever is in hand when
+ * `ERROR_BODY_READ_TIMEOUT_MS` expires or `signal` aborts.
  *
  * Bytes are copied straight into one fixed-size buffer rather than collected as
  * chunks and merged. A stream may hand back a chunk of any size, so holding
@@ -50,14 +87,38 @@ const MAX_ERROR_BODY_BYTES = 64 * 1024;
  * once retained, once copied — for a string that gets truncated to a few
  * hundred characters anyway.
  */
-async function readBoundedText(resp: Response): Promise<string> {
+async function readBoundedText(
+	resp: Response,
+	signal?: AbortSignal,
+): Promise<string> {
 	if (!resp.body) return "";
-	const reader = resp.body.getReader();
+	let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 	let buffer: Uint8Array | null = null;
 	let filled = 0;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
 	try {
+		// Inside the try: getReader() throws on a body another consumer already
+		// locked, and that is the same class of problem as a mid-read failure —
+		// the caller still has a usable status and its generic message.
+		reader = resp.body.getReader();
+		// Raced rather than polled: a read that never settles is exactly the case
+		// a `while` condition cannot see.
+		const stop = new Promise<null>((resolve) => {
+			timer = setTimeout(() => resolve(null), ERROR_BODY_READ_TIMEOUT_MS);
+			if (signal) {
+				if (signal.aborted) {
+					resolve(null);
+					return;
+				}
+				onAbort = () => resolve(null);
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
 		while (filled < MAX_ERROR_BODY_BYTES) {
-			const { done, value } = await reader.read();
+			const next = await Promise.race([reader.read(), stop]);
+			if (!next) break;
+			const { done, value } = next;
 			if (done) break;
 			if (!value || value.byteLength === 0) continue;
 			if (!buffer) buffer = new Uint8Array(MAX_ERROR_BODY_BYTES);
@@ -71,10 +132,12 @@ async function readBoundedText(resp: Response): Promise<string> {
 		// fails to parse and the caller falls back to its generic message.
 		log.warn(`Failed to read upstream error body: ${String(err)}`);
 	} finally {
+		clearTimeout(timer);
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
 		// Signal we are done without awaiting: the response is discarded either
 		// way, and an awaited cancel can hang on a stalled upstream. cancel()
 		// rejects on an already-errored stream, hence the swallowed catch.
-		void reader.cancel().catch(() => {});
+		if (reader) void reader.cancel().catch(() => {});
 	}
 
 	if (!buffer || filled === 0) return "";
@@ -312,6 +375,25 @@ export async function handleResponsesRequest(
 				? (err as { statusCode: number }).statusCode
 				: 503;
 		const isUnavailable = statusCode === 503;
+		// The give-up terminals attach their re-check interval to the error, and
+		// this leg has to pace its 503 exactly as the /v1/messages leg does or a
+		// Codex retry loop is the only client left with no guidance.
+		//
+		// Unlike `statusCode` above, this value is computed rather than a literal,
+		// and `Retry-After` takes whole seconds: anything that is not a positive
+		// integer would reach the client as `NaN`, `Infinity` or `-1` and make the
+		// header worse than absent. Only a 503 carries it, matching the dispatcher.
+		const rawRetryAfter =
+			typeof err === "object" && err !== null && "retryAfterSeconds" in err
+				? (err as { retryAfterSeconds: unknown }).retryAfterSeconds
+				: undefined;
+		const retryAfterSeconds =
+			isUnavailable &&
+			typeof rawRetryAfter === "number" &&
+			Number.isInteger(rawRetryAfter) &&
+			rawRetryAfter > 0
+				? rawRetryAfter
+				: undefined;
 		return new Response(
 			JSON.stringify({
 				error: {
@@ -320,9 +402,21 @@ export async function handleResponsesRequest(
 						: "Proxy request failed",
 					type: isUnavailable ? "server_error" : "api_error",
 					code: isUnavailable ? "server_error" : "api_error",
+					...(retryAfterSeconds === undefined
+						? {}
+						: { availability_guaranteed: false }),
 				},
 			}),
-			{ status: statusCode, headers: { "Content-Type": "application/json" } },
+			{
+				status: statusCode,
+				headers:
+					retryAfterSeconds === undefined
+						? { "Content-Type": "application/json" }
+						: {
+								"Content-Type": "application/json",
+								"Retry-After": String(retryAfterSeconds),
+							},
+			},
 		);
 	}
 
@@ -349,7 +443,7 @@ export async function handleResponsesRequest(
 		// error responses (a 401 `{"detail":"Not authenticated"}` sent as
 		// text/plain is real), and JSON.parse is the authoritative test of
 		// whether a body is JSON anyway.
-		const rawErrorBody = await readBoundedText(anthropicResp);
+		const rawErrorBody = await readBoundedText(anthropicResp, req.signal);
 		let errType = "api_error";
 		let message: string | null = null;
 
@@ -380,7 +474,7 @@ export async function handleResponsesRequest(
 		};
 		return new Response(JSON.stringify(errorBody), {
 			status: anthropicResp.status,
-			headers: { "Content-Type": "application/json" },
+			headers: errorResponseHeaders(anthropicResp.headers),
 		});
 	}
 
