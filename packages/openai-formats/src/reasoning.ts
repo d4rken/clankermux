@@ -38,9 +38,12 @@ export function getSupportedReasoningEfforts(
 	provider?: string,
 ): readonly ReasoningEffort[] | null {
 	const normalized = normalizeTargetModelName(model);
-	// A model name is not adapter evidence. Alias catalogue resolution passes
-	// the concrete provider, while request adaptation retains the legacy
-	// model-only lookup for already-routed provider paths.
+	// Two policies, deliberately separate. `provider` opts into the catalogue's
+	// ADVERTISEMENT allowlist, which is narrow on purpose: it publishes an
+	// effort only for named (model, adapter) pairs that have been verified.
+	// Request adaptation must NOT use it — a target missing from the allowlist
+	// would resolve to null and skip clamping, sending an effort the endpoint
+	// never accepted. Adaptation therefore keeps the model-only lookup.
 	if (provider !== undefined) return getAliasReasoningEfforts(model, provider);
 	return getModelReasoningEfforts(normalized);
 }
@@ -62,7 +65,6 @@ export function resolveReasoningEffort(
 	models: {
 		sourceModel?: string;
 		targetModel?: string;
-		provider?: string;
 	},
 ): ReasoningEffortResolution {
 	if (effort === undefined) {
@@ -93,10 +95,7 @@ export function resolveReasoningEffort(
 	);
 
 	for (const { model } of modelContexts) {
-		const supportedEfforts = getSupportedReasoningEfforts(
-			model,
-			models.provider,
-		);
+		const supportedEfforts = getSupportedReasoningEfforts(model);
 		if (!supportedEfforts) {
 			// Unknown model (source or target) — pass through unchanged
 			continue;

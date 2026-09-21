@@ -150,6 +150,20 @@ describe("reasoning effort support", () => {
 		).toBeNull();
 	});
 
+	it("clamps targets the advertisement allowlist does not name", () => {
+		// The allowlist is narrow on purpose: it governs what the catalogue
+		// PUBLISHES. Request adaptation must not consult it, or a target absent
+		// from it resolves to null and the effort reaches an endpoint that never
+		// accepted it. Both models below are outside the allowlist.
+		expect(
+			resolveReasoningEffort("max", { targetModel: "gpt-5.6-sol" }).effort,
+		).toBe("xhigh");
+		expect(
+			resolveReasoningEffort("max", { targetModel: "claude-haiku-4-5" })
+				.effort,
+		).toBe("medium");
+	});
+
 	it("passes through effort unchanged when target model is unknown", () => {
 		const resolved = resolveReasoningEffort("xhigh", {
 			sourceModel: "claude-sonnet-4-6",

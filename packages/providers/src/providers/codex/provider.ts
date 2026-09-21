@@ -1586,7 +1586,6 @@ export class CodexProvider extends BaseProvider {
 						{
 							sourceModel: body.model,
 							targetModel: model,
-							provider: "codex",
 						},
 					);
 		if (reasoningResolution.downgrades.length > 0) {
