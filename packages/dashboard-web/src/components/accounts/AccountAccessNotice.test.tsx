@@ -64,9 +64,31 @@ describe("AccountAccessNotice", () => {
 		}
 	});
 
+	// The button's class list carries `disabled:` Tailwind variants whatever its
+	// state, so only the attribute itself distinguishes one from the other.
 	it("disables rechecking while a request is pending", () => {
 		const html = render({}, true);
-		expect(html).toContain("disabled");
+		expect(html).toContain('disabled=""');
 		expect(html).toContain("Checking access…");
+	});
+
+	it("names the retry time and blocks rechecking while the usage endpoint is rate limited", () => {
+		const until = Date.now() + 30 * 60_000;
+		const html = render({ usageRateLimitedUntil: until });
+		expect(html).toContain("Usage endpoint rate limited");
+		expect(html).toContain(
+			new Date(until).toLocaleTimeString(undefined, {
+				hour: "2-digit",
+				minute: "2-digit",
+				hour12: false,
+			}),
+		);
+		expect(html).toContain('disabled=""');
+	});
+
+	it("allows rechecking once the retry time has passed", () => {
+		const html = render({ usageRateLimitedUntil: Date.now() - 1000 });
+		expect(html).not.toContain("Usage endpoint rate limited");
+		expect(html).not.toContain('disabled=""');
 	});
 });

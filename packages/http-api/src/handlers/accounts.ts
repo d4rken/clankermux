@@ -2849,6 +2849,30 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				});
 			}
 
+			// The usage endpoint hands out a retry-after with its 429, and a request
+			// sent before it expires only earns the same deadline back. Report the
+			// deadline instead of spending a doomed request on it: the restart
+			// below drops the poller's own copy of it (`stopPolling` clears the
+			// marker and the failure streak that produced it) and then re-learns it
+			// from the next rejection.
+			const usageRateLimitedUntil = usageCache.getRateLimitedUntil(accountId);
+			if (usageRateLimitedUntil !== null) {
+				const retryInMinutes = Math.max(
+					1,
+					Math.ceil((usageRateLimitedUntil - Date.now()) / 60_000),
+				);
+				log.info(
+					`Usage refresh deferred for account '${account.name}': usage endpoint rate limited for another ${retryInMinutes}m`,
+				);
+				return jsonResponse({
+					success: false,
+					message: `Usage endpoint rate limited for account '${account.name}' — retry in ${retryInMinutes}m. Polling retries on its own.`,
+					pollingRestarted: false,
+					cacheRefreshed: false,
+					usageRateLimitedUntil,
+				});
+			}
+
 			if (account.provider === "devin" && account.api_key)
 				devinClient.invalidateAccount(
 					account.api_key,

@@ -20,6 +20,13 @@ export function AccountAccessNotice({
 		return null;
 	}
 	const expired = account.pauseReason === "subscription_expired";
+	// The recheck reads the same usage endpoint the poller does, so while its
+	// retry-after is outstanding there is nothing a click can achieve.
+	const rateLimitedUntil =
+		account.usageRateLimitedUntil != null &&
+		account.usageRateLimitedUntil > Date.now()
+			? account.usageRateLimitedUntil
+			: null;
 	const checkedAt = account.identitySubscriptionCheckedAt;
 	const fetchedAt = account.identityProfileFetchedAt;
 	const checkUnconfirmed =
@@ -58,11 +65,21 @@ export function AccountAccessNotice({
 					)}
 				</p>
 			)}
+			{rateLimitedUntil != null && (
+				<p className="text-xs text-warning-strong">
+					Usage endpoint rate limited — retry after{" "}
+					{new Date(rateLimitedUntil).toLocaleTimeString(undefined, {
+						hour: "2-digit",
+						minute: "2-digit",
+						hour12: false,
+					})}
+				</p>
+			)}
 			<Button
 				variant="outline"
 				size="sm"
 				onClick={onRecheck}
-				disabled={isChecking}
+				disabled={isChecking || rateLimitedUntil != null}
 			>
 				<RefreshCw
 					className={`h-3.5 w-3.5 ${isChecking ? "animate-spin" : ""}`}
