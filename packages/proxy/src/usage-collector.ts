@@ -2,7 +2,10 @@ import {
 	isPlausibleSpeed,
 	estimateCostUSD as realEstimateCostUSD,
 } from "@clankermux/core";
-import { normalizeCodexInputUsage } from "@clankermux/providers";
+import {
+	normalizeCodexInputUsage,
+	reportsTokenUsage,
+} from "@clankermux/providers";
 import {
 	type NativeJsonError,
 	NativeTerminalJson,
@@ -1119,6 +1122,20 @@ export async function finalizeUsage(
 	// on state as a diagnostic signal but no longer feeds this flag. Absent any
 	// caller flag, default to clean for back-compat (trust the provider's count).
 	const endedCleanly = opts.endedCleanly ?? true;
+
+	// A provider that reports no usage still has to emit the fields the
+	// Anthropic streaming shape requires, so what reached this state from one is
+	// a placeholder rather than a measurement. Reading the same stream the
+	// client does, nothing here can tell the two apart — the provider can.
+	// Dropped before the precedence rules below, so the output falls to the
+	// content estimate and is marked approximate, exactly as an absent count is.
+	if (!reportsTokenUsage(opts.accountProvider ?? opts.providerName)) {
+		state.inputTokens = undefined;
+		state.cacheReadInputTokens = undefined;
+		state.cacheCreationInputTokens = undefined;
+		state.providerReportedOutput = false;
+		state.providerFinalOutputTokens = undefined;
+	}
 
 	// PRECEDENCE + R5: trust the provider's count when it reported one AND the
 	// stream ended cleanly (even a 0 is authoritative then). On a non-clean end

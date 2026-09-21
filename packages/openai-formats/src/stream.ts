@@ -80,13 +80,18 @@ function emitStreamEnd(
 	controller: TransformStreamDefaultController,
 	encoder: TextEncoder,
 	stopReason: "tool_use" | "end_turn",
-	promptTokens: number,
-	completionTokens: number,
+	context: TransformStreamContext,
 	toolCallBlockIndices: Record<number, number> | null,
-	cacheReadInputTokens: number,
-	cacheCreationInputTokens: number,
 	endTurnBlockIndex = 0,
 ) {
+	const {
+		promptTokens,
+		completionTokens,
+		cacheReadInputTokens,
+		cacheCreationInputTokens,
+		sawCacheRead,
+		sawCacheCreation,
+	} = context;
 	// Send content_block_stop for all blocks
 	if (toolCallBlockIndices) {
 		// Tool call blocks — use Anthropic block indices (not OpenAI tool_call indices)
@@ -137,11 +142,18 @@ function emitStreamEnd(
 			stop_reason: stopReason,
 			stop_sequence: null,
 		},
+		// Each cache field is emitted only when upstream reported ITS counter.
+		// They are optional in this shape, and a 0 nobody stated is published by
+		// the row as a claim that none of that class was consumed.
 		usage: {
 			input_tokens: input.inputTokens,
 			output_tokens: completionTokens,
-			cache_read_input_tokens: input.cacheReadInputTokens,
-			cache_creation_input_tokens: input.cacheCreationInputTokens,
+			...(sawCacheRead
+				? { cache_read_input_tokens: input.cacheReadInputTokens }
+				: {}),
+			...(sawCacheCreation
+				? { cache_creation_input_tokens: input.cacheCreationInputTokens }
+				: {}),
 		},
 	};
 	controller.enqueue(encoder.encode(`event: message_delta\n`));
@@ -248,11 +260,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"tool_use",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									context.toolCallBlockIndices,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 								);
 							} else if (context.hasSentContentBlockStart) {
 								// If text block was closed mid-stream (content→thinking transition),
@@ -264,11 +273,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"end_turn",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									null,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 									lastBlockIndex,
 								);
 							} else if (context.hasSentThinkingBlockStart) {
@@ -277,11 +283,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"end_turn",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									null,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 									context.thinkingBlockIndex,
 								);
 							}
@@ -315,12 +318,14 @@ export function transformStreamingResponse(response: Response): Response {
 									const details = readPromptTokensDetails(
 										data.usage.prompt_tokens_details as Record<string, unknown>,
 									);
-									if (details.cacheCreationInputTokens) {
+									if (details.cacheCreationInputTokens !== undefined) {
 										context.cacheCreationInputTokens =
 											details.cacheCreationInputTokens;
+										context.sawCacheCreation = true;
 									}
-									if (details.cacheReadInputTokens) {
+									if (details.cacheReadInputTokens !== undefined) {
 										context.cacheReadInputTokens = details.cacheReadInputTokens;
+										context.sawCacheRead = true;
 									}
 								}
 							}
@@ -616,11 +621,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"tool_use",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						context.toolCallBlockIndices,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 					);
 				} else if (
 					context.hasSentContentBlockStart &&
@@ -636,11 +638,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"end_turn",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						null,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 						lastBlockIndex,
 					);
 				} else if (context.hasSentThinkingBlockStart) {
@@ -652,11 +651,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"end_turn",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						null,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 						context.thinkingBlockIndex,
 					);
 				}

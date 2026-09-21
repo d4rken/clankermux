@@ -232,10 +232,11 @@ describe("ollama-transformer", () => {
 			expect(sse).toContain("stop");
 		});
 
-		it("states NO token counts, rather than a count of zero", () => {
-			// Ollama reports none. A fabricated 0 is a positive claim that none
-			// were consumed, which the persisted row publishes and a client
-			// settles its budget against; absence keeps the row honest.
+		it("keeps the usage fields the Anthropic stream shape requires", () => {
+			// Ollama reports no counts, but `usage` is required on message_start and
+			// message_delta and a client SDK accumulates straight through it. The
+			// placeholders stay on the wire; `reportsTokenUsage` is what stops the
+			// usage collector reading them as measurements.
 			const state = freshState();
 			const start = ollamaChunkToAnthropicSSE(
 				{
@@ -249,7 +250,8 @@ describe("ollama-transformer", () => {
 			const startUsage = JSON.parse(
 				/data: (.*"type":"message_start".*)/.exec(start)?.[1] ?? "{}",
 			).message.usage;
-			expect(startUsage.input_tokens).toBeUndefined();
+			expect(startUsage.input_tokens).toBe(0);
+			expect(startUsage.output_tokens).toBe(0);
 
 			const end = ollamaChunkToAnthropicSSE(
 				{
@@ -264,8 +266,7 @@ describe("ollama-transformer", () => {
 			const delta = JSON.parse(
 				/data: (.*"type":"message_delta".*)/.exec(end)?.[1] ?? "{}",
 			);
-			// message_delta is where a provider states its authoritative counts.
-			expect(delta.usage).toBeUndefined();
+			expect(delta.usage.output_tokens).toBe(0);
 			expect(delta.delta.stop_reason).toBe("stop");
 		});
 
@@ -307,13 +308,14 @@ describe("ollama-transformer", () => {
 			expect(result.stop_reason).toBe("end_turn");
 		});
 
-		it("states no usage at all rather than a zero vector", () => {
+		it("keeps the usage field the Anthropic message shape requires", () => {
+			// A placeholder on the wire, not a measurement; see the streaming case.
 			const result = ollamaResponseToAnthropic({
 				model: "gemma3",
 				message: { role: "assistant", content: "Hello world" },
 				done: true,
 			});
-			expect(result.usage).toBeUndefined();
+			expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0 });
 		});
 	});
 

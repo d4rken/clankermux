@@ -330,7 +330,10 @@ describe("transformStreamingResponse — text responses", () => {
 		const parsed = JSON.parse(dataOf(msgDelta));
 
 		expect(parsed.usage.input_tokens).toBe(1_000);
-		expect(parsed.usage.cache_read_input_tokens).toBe(0);
+		// Nothing was reported for either cache class, so neither is stated. A 0
+		// here would be a count upstream never sent.
+		expect(parsed.usage.cache_read_input_tokens).toBeUndefined();
+		expect(parsed.usage.cache_creation_input_tokens).toBeUndefined();
 	});
 
 	it("clamps a cache count that exceeds its own prompt total", async () => {
@@ -355,6 +358,8 @@ describe("transformStreamingResponse — text responses", () => {
 
 		expect(parsed.usage.input_tokens).toBe(0);
 		expect(parsed.usage.cache_read_input_tokens).toBe(10);
+		// Only `cached_tokens` was reported; the write class stays unstated.
+		expect(parsed.usage.cache_creation_input_tokens).toBeUndefined();
 	});
 
 	it("includes content_block_stop for text block", async () => {

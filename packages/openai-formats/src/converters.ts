@@ -398,18 +398,19 @@ function normalizedInput(usage: OpenAIUsage | undefined): {
 	const details = readPromptTokensDetails(usage?.prompt_tokens_details);
 	const input = normalizeCacheInclusiveInput(
 		usage?.prompt_tokens || 0,
-		details.cacheReadInputTokens,
-		details.cacheCreationInputTokens,
+		details.cacheReadInputTokens ?? 0,
+		details.cacheCreationInputTokens ?? 0,
 	);
-	// Omitted rather than zeroed when upstream said nothing: a count that never
-	// arrived is not an observed cache miss.
+	// Each cache field rides on ITS OWN counter, not on the details object: a
+	// body reporting `cached_tokens` alone says nothing about cache writes, and
+	// publishing a 0 for the other would be a count upstream never stated.
 	return {
 		input_tokens: input.inputTokens,
-		...(usage?.prompt_tokens_details === undefined
+		...(details.cacheReadInputTokens === undefined
 			? {}
-			: {
-					cache_read_input_tokens: input.cacheReadInputTokens,
-					cache_creation_input_tokens: input.cacheCreationInputTokens,
-				}),
+			: { cache_read_input_tokens: input.cacheReadInputTokens }),
+		...(details.cacheCreationInputTokens === undefined
+			? {}
+			: { cache_creation_input_tokens: input.cacheCreationInputTokens }),
 	};
 }

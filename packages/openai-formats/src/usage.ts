@@ -56,11 +56,17 @@ export function normalizeCacheInclusiveInput(
  */
 export function readPromptTokensDetails(
 	details: Record<string, unknown> | undefined,
-): { cacheReadInputTokens: number; cacheCreationInputTokens: number } {
-	const number = (value: unknown): number =>
-		typeof value === "number" && Number.isFinite(value) && value > 0
+): {
+	cacheReadInputTokens?: number;
+	cacheCreationInputTokens?: number;
+} {
+	// Absent stays absent. A counter upstream did not send is not an observed
+	// zero, and the row publishes a stored 0 as a claim that none of that class
+	// was consumed. A negative or non-finite value is not a count either.
+	const number = (value: unknown): number | undefined =>
+		typeof value === "number" && Number.isFinite(value) && value >= 0
 			? value
-			: 0;
+			: undefined;
 	return {
 		cacheReadInputTokens: number(details?.cached_tokens),
 		cacheCreationInputTokens: number(details?.cache_creation_input_tokens),

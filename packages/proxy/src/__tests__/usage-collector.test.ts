@@ -272,6 +272,61 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBe(true);
 		});
 
+		it("drops a placeholder vector from a provider that reports none", async () => {
+			// Ollama has to emit the usage fields the Anthropic shape requires, so
+			// what arrives here is a fabricated zero rather than a measurement.
+			// Recording it would publish a row claiming the request consumed
+			// nothing, which a client settles its budget against.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "gemma3",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1050,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 0 },
+				}),
+				1100,
+			);
+			// The collector believed them up to this point.
+			expect(state.providerReportedOutput).toBe(true);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "ollama",
+					accountProvider: "ollama",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.usage.cacheCreationInputTokens).toBeUndefined();
+			// The output falls to the content estimate and says so.
+			expect(summary.outputApproximate).toBe(true);
+			expect(summary.usage.outputTokens).toBe(10);
+		});
+
 		it("keeps a reported 0 as 0", async () => {
 			const state = createUsageState();
 			feedChunk(

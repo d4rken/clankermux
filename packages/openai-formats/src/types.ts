@@ -149,6 +149,13 @@ export interface OpenAIUsage {
 }
 
 export interface TransformStreamContext {
+	/**
+	 * Whether upstream reported each cache counter. The counts themselves
+	 * default to 0, so without these a class nobody mentioned is indistinguishable
+	 * from one reported as zero, and the persisted row publishes the second.
+	 */
+	sawCacheRead?: boolean;
+	sawCacheCreation?: boolean;
 	buffer: string;
 	hasStarted: boolean;
 	extractedModel: string;
