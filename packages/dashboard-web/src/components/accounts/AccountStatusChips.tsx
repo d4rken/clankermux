@@ -895,10 +895,17 @@ export function AccountRenewalInfo({
 		label = `${verb} ${dateMark}${shortDate} (${when})`;
 	}
 
+	// A derived price is a list price looked up from the plan tier, so it carries
+	// the same "~" a derived date does, and the tooltip says what confirming it
+	// changes: nothing records it until then.
+	const isDerivedPrice = account.renewalPriceSource === "derived";
 	const priceSuffix =
 		account.renewalPriceUsd != null
-			? ` · ${formatUsd(account.renewalPriceUsd)}/renewal`
+			? ` · ${isDerivedPrice ? "~" : ""}${formatUsd(account.renewalPriceUsd)}/renewal`
 			: "";
+	const derivedPriceSuffix = isDerivedPrice
+		? " · Price estimated from the plan tier; no payment is recorded until you confirm it."
+		: "";
 	const derivedSuffix = isDerived
 		? " · Estimated from the subscription start; the provider reports no renewal date. Set it to confirm."
 		: "";
@@ -915,7 +922,7 @@ export function AccountRenewalInfo({
 	} else {
 		titleBase = `Subscription renews ${isoDate} (${cadence})`;
 	}
-	const title = titleBase + priceSuffix + derivedSuffix;
+	const title = titleBase + priceSuffix + derivedSuffix + derivedPriceSuffix;
 
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??

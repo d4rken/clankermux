@@ -7,7 +7,8 @@
 		".": "./src/index.ts",
 		"./env": "./src/env.ts",
 		"./renewal": "./src/renewal.ts",
-		"./response-body-disposal": "./src/response-body-disposal.ts"
+		"./response-body-disposal": "./src/response-body-disposal.ts",
+		"./subscription-pricing": "./src/subscription-pricing.ts"
 	},
 	"scripts": {
 		"typecheck": "bunx tsc --noEmit"

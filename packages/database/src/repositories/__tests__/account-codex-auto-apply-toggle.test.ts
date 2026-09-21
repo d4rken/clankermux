@@ -67,6 +67,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
+			renewal_price_source TEXT,
 			renewal_auto_start_date TEXT,
 			identity_external_id TEXT,
 			identity_email TEXT,
