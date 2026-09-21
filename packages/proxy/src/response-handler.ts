@@ -704,10 +704,26 @@ export async function forwardToClient(
 	ctx: ProxyContext,
 ): Promise<Response> {
 	try {
-		return applyPoolHeadroomHeaders(
+		const response = applyPoolHeadroomHeaders(
 			await forwardToClientInner(options, ctx),
 			options,
 		);
+		// The id the client needs to look its own request up afterwards.
+		//
+		// Set HERE rather than on the upstream response object, because whether a
+		// value set there survives to the client depends on which provider
+		// answered: the Codex provider lists this header among the internal ones
+		// it strips from every response it returns, and stripping an inbound
+		// header the proxy classifies on is correct — a forged one must never
+		// reach that classification. This wrapper runs after every provider's
+		// `processResponse` and after `withSanitizedProxyHeaders`, so it is the
+		// one place a client-facing header is a property of the proxy instead of
+		// a property of the account that served the request.
+		//
+		// Not inside `applyPoolHeadroomHeaders`: that returns early for internal
+		// dispatches and for a null account, and the id depends on neither.
+		response.headers.set("x-clankermux-request-id", options.requestId);
+		return response;
 	} catch (err) {
 		// A throw during setup would otherwise orphan the probe lease until the
 		// safety TTL (~an hour), wedging the half-open bucket against every
