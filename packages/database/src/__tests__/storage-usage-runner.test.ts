@@ -10,10 +10,9 @@
  * failure paths (unopenable file, timeout) that must report `ok: false`
  * instead of throwing or hanging.
  *
- * The admission tests at the bottom drive a hand-written fake worker instead:
- * a real scan of a temp DB finishes in milliseconds, so two calls never
- * actually overlap, and a real worker cannot be held open, failed on demand,
- * or left silent.
+ * The admission tests at the bottom drive the fake worker from
+ * `fake-storage-usage-worker.fixture.ts` instead, for the reasons its header
+ * gives.
  */
 
 import { Database } from "bun:sqlite";
@@ -27,10 +26,11 @@ import {
 	setStorageUsageWorkerFactoryForTests,
 	validateScanTables,
 } from "../storage-usage-runner";
-import type {
-	StorageUsageScanResult,
-	StorageUsageWorkerMessage,
-} from "../storage-usage-worker";
+import type { StorageUsageScanResult } from "../storage-usage-worker";
+import {
+	installFakeWorkers,
+	settleQueue,
+} from "./fake-storage-usage-worker.fixture";
 
 const tmpDb = tempDbTracker("test-storage-usage-worker");
 
@@ -251,86 +251,6 @@ function measured(rowCount: number): StorageUsageScanResult {
 			{ key: "things", table: "things", rowCount, approxBytes: rowCount * 10 },
 		],
 	};
-}
-
-type FakeWorker = {
-	onmessage: ((event: MessageEvent) => void) | null;
-	onerror: ((event: ErrorEvent) => void) | null;
-	postMessage: (data: unknown) => void;
-	terminate: () => void;
-	/**
-	 * Finish this worker's scan with `result` and acknowledge a clean close in
-	 * the same tick — the sequence the real worker posts.
-	 */
-	respond: (result: StorageUsageScanResult) => void;
-	/** Finish the scan and say nothing about the close. */
-	respondWithoutAck: (result: StorageUsageScanResult) => void;
-	/** Acknowledge the close; an `error` makes it a failed one. */
-	acknowledge: (error?: string) => void;
-};
-
-/**
- * Install a worker factory whose workers do nothing on their own: each is
- * finished by hand with `respond`, or left silent so the runner's timeout
- * fires. `events` records construction and termination in call order, which is
- * how "two scans, never at the same time" is asserted.
- */
-function installFakeWorkers() {
-	const workers: FakeWorker[] = [];
-	const events: string[] = [];
-	const awaited = new Map<number, () => void>();
-
-	setStorageUsageWorkerFactoryForTests(() => {
-		const index = workers.length + 1;
-		const post = (message: StorageUsageWorkerMessage) => {
-			fake.onmessage?.({ data: message } as MessageEvent);
-		};
-		const fake: FakeWorker = {
-			onmessage: null,
-			onerror: null,
-			postMessage: () => {},
-			terminate: () => {
-				events.push(`terminate:${index}`);
-			},
-			respondWithoutAck: (result) => post({ kind: "result", result }),
-			acknowledge: (error) =>
-				post(
-					error === undefined
-						? { kind: "close", closed: true }
-						: { kind: "close", closed: false, error },
-				),
-			respond: (result) => {
-				fake.respondWithoutAck(result);
-				fake.acknowledge();
-			},
-		};
-		workers.push(fake);
-		events.push(`construct:${index}`);
-		awaited.get(index)?.();
-		awaited.delete(index);
-		return fake as unknown as Worker;
-	});
-
-	return {
-		events,
-		get count(): number {
-			return workers.length;
-		},
-		/** Resolves once the nth worker (1-based) has been constructed. */
-		async nth(index: number): Promise<FakeWorker> {
-			if (workers.length < index) {
-				await new Promise<void>((resolve) => {
-					awaited.set(index, resolve);
-				});
-			}
-			return workers[index - 1];
-		},
-	};
-}
-
-/** Let every pending continuation run, so "no worker was built" is a real claim. */
-async function settleQueue(): Promise<void> {
-	for (let i = 0; i < 5; i++) await Bun.sleep(0);
 }
 
 function refusalReason(result: StorageUsageScanResult): string {
