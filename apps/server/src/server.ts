@@ -1624,28 +1624,34 @@ export default async function startServer(options?: {
 	// startup depends on its answer.
 	const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 	if (!loopbackHosts.has(hostname)) {
-		void sessionAuth.isConfigured().then(
-			(managementPasswordSet) => {
-				if (managementPasswordSet) return;
-				log.warn(
-					`ClankerMux is bound to '${hostname}' and no management password is ` +
-						"set, so the management API (/api/*) admits anyone who can reach " +
-						"this port: account management, API key creation and revocation, " +
-						"request logs, and heap snapshots. Set one with " +
-						"`bun run auth:password --set`, bind to localhost (set " +
-						"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
-						"proxy that enforces authentication.",
-				);
-			},
-			(err) => {
-				log.warn(
-					`ClankerMux is bound to '${hostname}' and could not determine ` +
-						`whether a management password is set (${err}). If none is, the ` +
-						"management API (/api/*) admits anyone who can reach this port; " +
-						"check with `bun run auth:password --status`.",
-				);
-			},
-		);
+		void sessionAuth
+			.isConfigured()
+			.then(
+				(managementPasswordSet) => {
+					if (managementPasswordSet) return;
+					log.warn(
+						`ClankerMux is bound to '${hostname}' and no management password is ` +
+							"set, so the management API (/api/*) admits anyone who can reach " +
+							"this port: account management, API key creation and revocation, " +
+							"request logs, and heap snapshots. Set one with " +
+							"`bun run auth:password --set`, bind to localhost (set " +
+							"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
+							"proxy that enforces authentication.",
+					);
+				},
+				(err) => {
+					log.warn(
+						`ClankerMux is bound to '${hostname}' and could not determine ` +
+							`whether a management password is set (${err}). If none is, the ` +
+							"management API (/api/*) admits anyone who can reach this port; " +
+							"check with `bun run auth:password --status`.",
+					);
+				},
+			)
+			// log.warn emits synchronously to subscribers this module does not own,
+			// so a throwing subscriber would surface as an unhandled rejection on a
+			// chain nothing awaits.
+			.catch(() => {});
 	}
 
 	// Log server startup (async)
