@@ -1,0 +1,42 @@
+{
+  "schema": "clankermux.client.requests.v1",
+  "requests": [
+    {
+      "schema": "clankermux.client.request.v1",
+      "id": "3f9a5c41-2b6d-4c7a-9f13-5c0d8e2a6b47",
+      "timestamp": 1758461280914,
+      "finalized": true,
+      "statusCode": 200,
+      "error": null,
+      "model": "claude-sonnet-4-5-20250929",
+      "requestedModel": "claude-sonnet-4-5",
+      "inputTokens": 1284,
+      "outputTokens": 903,
+      "cacheReadInputTokens": 18432,
+      "cacheCreationInputTokens": null,
+      "usageSource": "provider",
+      "project": "invoice-extractor",
+      "apiKeyId": "8c2e0a97-6f41-4c8e-9a0b-1d3f5e7c9a20",
+      "correlationTag": "batch-2026-09-21"
+    },
+    {
+      "schema": "clankermux.client.request.v1",
+      "id": "0f1c1b52-6c9c-4f2c-9a4c-6f2f7c1d84b1",
+      "timestamp": 1758461283517,
+      "finalized": false,
+      "statusCode": 200,
+      "error": null,
+      "model": null,
+      "requestedModel": "claude-sonnet-4-5",
+      "inputTokens": null,
+      "outputTokens": null,
+      "cacheReadInputTokens": null,
+      "cacheCreationInputTokens": null,
+      "usageSource": null,
+      "project": "invoice-extractor",
+      "apiKeyId": "8c2e0a97-6f41-4c8e-9a0b-1d3f5e7c9a20",
+      "correlationTag": "batch-2026-09-21"
+    }
+  ],
+  "next": "eyJ0IjoxNzU4NDYxMjgzNTE3LCJpIjoiMGYxYzFiNTItNmM5Yy00ZjJjLTlhNGMtNmYyZjdjMWQ4NGIxIn0"
+}
