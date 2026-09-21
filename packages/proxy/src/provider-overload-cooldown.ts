@@ -19,8 +19,19 @@
  *   operator clear.
  *
  * Probe tokens carry the bucket generation and lease identity so that late
- * completions (after a re-trip, a clear, or a lease-TTL takeover) are
- * harmless no-ops.
+ * completions (after a re-trip, a clear, or a takeover) are harmless no-ops.
+ *
+ * A probe that produces no health evidence within {@link PROBE_ADMISSION_TTL_MS}
+ * is displaced: the replacement takes the bucket and the displaced attempt is
+ * ABORTED, so a wedged upstream cannot convoy a whole model family behind one
+ * request that will never answer.
+ *
+ * Its late COMPLETION is a no-op, but its late TRIP is not, and that is
+ * deliberate: both re-trip paths call {@link applyProviderOverloadCooldown}
+ * BEFORE settling, so a displaced request that does eventually see a 529 still
+ * re-opens the breaker. That evidence is as real as the replacement's — an
+ * upstream refused a live request — and re-opening is the conservative
+ * direction for a circuit breaker.
  */
 
 import {
@@ -64,6 +75,34 @@ export function getProbeLeaseSafetyTtlMs(): number {
 		PROBE_LEASE_SAFETY_MARGIN_MS
 	);
 }
+
+/**
+ * How long a probe may hold its bucket WITHOUT producing health evidence.
+ *
+ * The safety TTL above bounds the longest a legitimate probe request can still
+ * be in flight — an hour, sized for a 30-minute stream. That is the right bound
+ * for lease IDENTITY and the wrong one for ADMISSION: an upstream that accepts
+ * the connection and never sends response headers would keep every other
+ * same-family request out of the half-open bucket for that whole hour, which is
+ * the convoy the breaker exists to prevent rather than cause.
+ *
+ * A healthy probe does not need anywhere near this long: the streaming forwarder
+ * settles it "recovered" at the first `message_start`, and a non-stream attempt
+ * settles at its status. So past this deadline the probe has produced no
+ * evidence of health, and another request may take the bucket over.
+ *
+ * Sized at the breaker's own default cooldown: if the bucket had simply
+ * re-tripped instead, a fresh probe would have been due after this long anyway.
+ *
+ * The trade-off is explicit and accepted: a genuinely slow-but-healthy probe —
+ * an upstream taking more than a minute to produce its first token — is
+ * ABORTED and replaced. That is deliberate. Merely expiring the admission and
+ * leaving the displaced request running would let one outstanding upstream
+ * request accumulate per interval against a wedged provider, and would let a
+ * consistently-slow healthy provider have every probe replaced before it
+ * succeeds, leaving the breaker half-open indefinitely under sustained demand.
+ */
+export const PROBE_ADMISSION_TTL_MS = DEFAULT_PROVIDER_OVERLOAD_COOLDOWN_MS;
 
 export type OverloadBreakerState = "closed" | "open" | "half-open";
 
@@ -155,8 +194,19 @@ interface OverloadBucket {
 		leaseId: number;
 		acquiredAt: number;
 		ttlMs: number;
+		/**
+		 * How long this probe blocks admission (see {@link PROBE_ADMISSION_TTL_MS}).
+		 * Captured at acquisition alongside `ttlMs`.
+		 */
+		admissionTtlMs: number;
 		/** Admission identity, so a TTL takeover can name who it displaced. */
 		probeId: string;
+		/**
+		 * Cancels the probing attempt. Invoked when this lease is taken over
+		 * before its safety TTL, so the displaced request cannot stay outstanding
+		 * against an upstream the replacement is about to test.
+		 */
+		onDisplaced?: () => void;
 	} | null;
 }
 
@@ -291,6 +341,22 @@ function relevantKeys(provider: string, model?: string | null): string[] {
 function isLeaseActive(bucket: OverloadBucket, now: number): boolean {
 	return (
 		bucket.probe !== null && now - bucket.probe.acquiredAt < bucket.probe.ttlMs
+	);
+}
+
+/**
+ * Does this bucket's probe still BLOCK admission? Narrower than
+ * {@link isLeaseActive}: past the admission deadline the probe has produced no
+ * health evidence, so another request may displace it (see
+ * {@link PROBE_ADMISSION_TTL_MS}).
+ */
+function isLeaseBlockingAdmission(
+	bucket: OverloadBucket,
+	now: number,
+): boolean {
+	return (
+		bucket.probe !== null &&
+		now - bucket.probe.acquiredAt < bucket.probe.admissionTtlMs
 	);
 }
 
@@ -468,6 +534,15 @@ export function tryAcquireProviderOverloadProbe(
 	provider: string,
 	model?: string | null,
 	now = Date.now(),
+	options?: {
+		/**
+		 * Cancels the caller's upstream attempt. Held on every lease this
+		 * admission takes and invoked if a later request displaces it at the
+		 * admission deadline, so a probe that never produced health evidence does
+		 * not stay outstanding alongside its replacement.
+		 */
+		onDisplaced?: () => void;
+	},
 ): ProbeAdmission {
 	const keys = relevantKeys(provider, model);
 
@@ -480,7 +555,7 @@ export function tryAcquireProviderOverloadProbe(
 	for (const key of keys) {
 		const bucket = buckets.get(key);
 		if (!bucket) continue;
-		if (isLeaseActive(bucket, now)) {
+		if (isLeaseBlockingAdmission(bucket, now)) {
 			return { admitted: false, reason: "probe-active", until: null };
 		}
 		halfOpenKeys.push(key);
@@ -494,28 +569,62 @@ export function tryAcquireProviderOverloadProbe(
 	// same env-aware deadline.
 	const ttlMs = getProbeLeaseSafetyTtlMs();
 	const probeId = `p${++probeIdCounter}`;
+	// One probe can hold BOTH the family and provider-wide buckets, so collect
+	// the cancellers and fire each at most once.
+	const cancelDisplaced = new Set<() => void>();
 	for (const key of halfOpenKeys) {
 		const bucket = buckets.get(key);
 		if (!bucket) continue;
-		// An expired lease being overwritten is the ONE lifecycle that otherwise
-		// ends with no line at all: its owner died without ever completing, so no
-		// settle arrives to report it. Say so at WARN — a bucket that keeps
-		// producing these is leaking probe owners, which nothing else reveals.
-		if (bucket.probe) {
-			log.warn(
-				`Overload probe ${bucket.probe.probeId} lease expired for ${key} ` +
-					`after ${now - bucket.probe.acquiredAt}ms (ttl ${bucket.probe.ttlMs}ms); ` +
-					`admitting replacement ${probeId}`,
-			);
+		// Overwriting a stored lease is the ONE lifecycle that otherwise ends with
+		// no line at all: no settle arrives to report it. Say so at WARN — a bucket
+		// that keeps producing these is leaking probe owners or facing an upstream
+		// that accepts connections without answering, and nothing else reveals it.
+		const displacedProbe = bucket.probe;
+		if (displacedProbe) {
+			const ageMs = now - displacedProbe.acquiredAt;
+			if (ageMs >= displacedProbe.ttlMs) {
+				log.warn(
+					`Overload probe ${displacedProbe.probeId} lease expired for ${key} ` +
+						`after ${ageMs}ms (ttl ${displacedProbe.ttlMs}ms); ` +
+						`admitting replacement ${probeId}`,
+				);
+			} else {
+				log.warn(
+					`Overload probe ${displacedProbe.probeId} produced no health evidence for ${key} ` +
+						`within ${displacedProbe.admissionTtlMs}ms (age ${ageMs}ms); ` +
+						`aborting it and admitting replacement ${probeId}`,
+				);
+				if (displacedProbe.onDisplaced)
+					cancelDisplaced.add(displacedProbe.onDisplaced);
+			}
 		}
 		const leaseId = ++leaseIdCounter;
-		bucket.probe = { leaseId, acquiredAt: now, ttlMs, probeId };
+		bucket.probe = {
+			leaseId,
+			acquiredAt: now,
+			ttlMs,
+			admissionTtlMs: PROBE_ADMISSION_TTL_MS,
+			probeId,
+			onDisplaced: options?.onDisplaced,
+		};
 		leases.push({ key, generation: bucket.generation, leaseId });
+	}
+	// After the buckets are reassigned: the replacement owns them whatever the
+	// cancellation does, and a throwing canceller must not leave a half-armed
+	// admission behind.
+	for (const cancel of cancelDisplaced) {
+		try {
+			cancel();
+		} catch (error) {
+			log.warn("Could not cancel a displaced overload probe", error);
+		}
 	}
 	log.info(
 		`Overload probe ${probeId} admitted for ${halfOpenKeys
 			.map((k) => `${k}@g${buckets.get(k)?.generation ?? "?"}`)
-			.join(", ")} (single-flight, ttl ${ttlMs}ms` +
+			.join(
+				", ",
+			)} (single-flight, admission ${PROBE_ADMISSION_TTL_MS}ms, ttl ${ttlMs}ms` +
 			`${model ? `, model=${model}` : ""})`,
 	);
 	return { admitted: true, token: { probeId, acquiredAt: now, leases } };
@@ -631,7 +740,16 @@ export interface OverloadDiagnosticBucket {
 	 * Nulling it there would make an orphan indistinguishable from no probe at
 	 * all, and the orphan is the interesting one.
 	 */
-	lease: { id: string; ageMs: number; ttlMs: number; active: boolean } | null;
+	lease: {
+		id: string;
+		ageMs: number;
+		ttlMs: number;
+		/** Admission deadline, i.e. how long this lease refuses other probes. */
+		admissionTtlMs: number;
+		active: boolean;
+		/** Still refusing other probes, as opposed to merely still in flight. */
+		blocksAdmission: boolean;
+	} | null;
 }
 
 /**
@@ -655,7 +773,9 @@ export function getOverloadDiagnostics(
 						id: bucket.probe.probeId,
 						ageMs: now - bucket.probe.acquiredAt,
 						ttlMs: bucket.probe.ttlMs,
+						admissionTtlMs: bucket.probe.admissionTtlMs,
 						active: isLeaseActive(bucket, now),
+						blocksAdmission: isLeaseBlockingAdmission(bucket, now),
 					}
 				: null,
 		});

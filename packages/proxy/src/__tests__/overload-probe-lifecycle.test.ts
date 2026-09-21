@@ -34,6 +34,7 @@ import {
 	completeProviderOverloadProbe,
 	getProviderWideOverloadUntil,
 	inspectProviderOverload,
+	PROBE_ADMISSION_TTL_MS,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 
@@ -525,6 +526,54 @@ describe("half-open overload probe lifecycle", () => {
 		stalling.finish();
 		await reader.cancel();
 	});
+
+	it("aborts a wedged probe when the admission deadline lets another one in", async () => {
+		// The residual convoy: an upstream that accepts the connection and never
+		// sends response headers settles nothing, so no early `message_start` can
+		// fire and the bucket used to stay held for the full safety TTL.
+		let firstSeen = false;
+		let firstAborted = false;
+		globalThis.fetch = upstreamOnlyFetch(async (input) => {
+			if (firstSeen) return sseResponse(HEALTHY_SSE_FRAMES);
+			firstSeen = true;
+			const signal = (input as Request).signal;
+			return await new Promise<Response>((_resolve, reject) => {
+				signal.addEventListener("abort", () => {
+					firstAborted = true;
+					reject(new DOMException("The operation was aborted.", "AbortError"));
+				});
+			});
+		}) as never;
+
+		await tripToHalfOpen();
+		const ctx = makeContext([makeAccount()]);
+		const wedged = callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		).catch(() => null);
+		await waitFor(() => firstSeen);
+
+		// Past the admission deadline the next request takes the bucket over.
+		const realNow = Date.now;
+		Date.now = () => realNow() + PROBE_ADMISSION_TTL_MS + 1;
+		try {
+			const second = await callHandleProxy(
+				modelRequest("claude-haiku-4-5"),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+			expect(second.status).toBe(200);
+			await second.text();
+		} finally {
+			Date.now = realNow;
+		}
+
+		// …and the displaced attempt is cancelled, not left running against an
+		// upstream the replacement is already testing.
+		await waitFor(() => firstAborted);
+		await wedged;
+	}, 15_000);
 
 	it("does NOT settle early on a ping chunk that carries no message_start", async () => {
 		// Regression pin: a silent rate-limit sniffer is not health evidence on

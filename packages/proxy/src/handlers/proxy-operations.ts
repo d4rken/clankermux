@@ -1155,6 +1155,11 @@ export async function proxyWithAccount(
 	// every non-forwarding exit. Completion is idempotent
 	// and generation-checked, so belt-and-suspenders double-completion is safe.
 	let overloadProbeToken: OverloadProbeToken | null = null;
+	// Cancels THIS attempt's upstream request when a later request displaces its
+	// half-open probe lease. Null until a lease is actually taken; composed into
+	// the outbound fetch's signal below, so a probe that never produced health
+	// evidence stops rather than lingering alongside its replacement.
+	let overloadProbeDisplaced: AbortController | null = null;
 	// Release the held probe lease locally and drop ownership. `fail()` calls
 	// this with "abandoned" as the universal chokepoint; the 529 trip site calls
 	// it with "reopened" first (fail's later "abandoned" then no-ops on null).
@@ -1541,9 +1546,19 @@ export async function proxyWithAccount(
 		}
 
 		if (!isLocalCountTokens) {
+			const displaced = new AbortController();
 			const overloadAdmission = tryAcquireProviderOverloadProbe(
 				account.provider,
 				overloadAttributionModel,
+				Date.now(),
+				{
+					onDisplaced: () =>
+						displaced.abort(
+							new Error(
+								"Overload probe displaced: no health evidence within the admission deadline",
+							),
+						),
+				},
 			);
 			if (!overloadAdmission.admitted) {
 				const refusalLine = `Overload probe admission refused for account ${account.name} (${overloadAdmission.reason}) — failing over without an upstream attempt`;
@@ -1558,6 +1573,9 @@ export async function proxyWithAccount(
 				});
 			}
 			overloadProbeToken = overloadAdmission.token;
+			// Only a real lease can be displaced; with every bucket closed there is
+			// nothing holding this attempt to a deadline.
+			overloadProbeDisplaced = overloadAdmission.token ? displaced : null;
 		}
 
 		// Every authenticated upstream attempt in this function goes through this
@@ -1577,6 +1595,18 @@ export async function proxyWithAccount(
 				ctx,
 			);
 
+		// The caller's own deadline (a hold's budget) composed with the
+		// overload-probe displacement abort, so a probe that is taken over stops
+		// its upstream request instead of running on beside its replacement.
+		const attemptSignal = (): AbortSignal | undefined => {
+			const signals = [
+				...(options?.signal ? [options.signal] : []),
+				...(overloadProbeDisplaced ? [overloadProbeDisplaced.signal] : []),
+			];
+			if (signals.length === 0) return undefined;
+			return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+		};
+
 		const forwardAttempt = async (
 			attemptRequest: Request,
 		): Promise<Response> => {
@@ -1590,7 +1620,7 @@ export async function proxyWithAccount(
 					account,
 					requestMeta,
 					ctx,
-					options?.signal,
+					attemptSignal(),
 					attemptAudit,
 					getDevinRequestProvenance(outgoing) ?? devinRequestProvenance,
 					async (raw) => {
@@ -1610,7 +1640,7 @@ export async function proxyWithAccount(
 			const response = await send();
 			if (account.provider !== "zai") return response;
 			try {
-				return await recoverZaiOverload(response, send, options?.signal);
+				return await recoverZaiOverload(response, send, attemptSignal());
 			} catch (error) {
 				// A failed/aborted peek may own a retry response already. Release
 				// it even when the cache-control retry's local catch keeps its 400.
