@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
 import { fitWithIntervals } from "../fit";
 import { makeSyntheticSegments, type Quantizer } from "./synthetic";
 
@@ -12,6 +12,11 @@ import { makeSyntheticSegments, type Quantizer } from "./synthetic";
  * nearest point, or flooring to the point it has passed) is unknown, and
  * flooring introduces a systematic downward bias that rounding does not.
  */
+// Bootstrap resampling over fixed seeds: the outcomes are deterministic, the
+// runtime is not. Several agents share this machine, and the default per-test
+// budget is short enough that load decides pass or fail.
+setDefaultTimeout(60_000);
+
 const TRUE_W = 2.4;
 const TRIALS = 40;
 

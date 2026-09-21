@@ -1,8 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
 import { detectChanges, normalQuantile } from "../changepoint";
 import { mulberry32 } from "../fit";
 import type { QuotaSegment } from "../types";
 import { DAY_MS, makeSyntheticSegments, type Quantizer } from "./synthetic";
+
+// Bootstrap resampling over fixed seeds: the outcomes are deterministic, the
+// runtime is not. Several agents share this machine, and the default per-test
+// budget is short enough that load decides pass or fail.
+setDefaultTimeout(60_000);
 
 const HOUR = 60 * 60 * 1000;
 const START = 1_760_000_000_000;
