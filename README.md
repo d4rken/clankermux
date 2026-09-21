@@ -100,10 +100,6 @@ hints. These remain available when payload storage is disabled.
   either wire's `/v1/models` to get context/output limits, modalities, pricing
   and cache policy alongside the native list. See
   [cache-policy coverage and client semantics](docs/public-api/cache-policy.md).
-* Accounts can be **paused** to stop routing temporarily, or **disabled** to
-  keep one saved without operating it: no routing, polling, token refresh,
-  probes, credit redemption or subscription payments, and left out of pool
-  statistics and forecasts.
 * [Public widget API](docs/public-api/README.md) for external displays and
   applets, with JSON Schemas and example payloads.
 * [Clankermux Usage for Cinnamon](https://github.com/d4rken/clankermux-mint-applet),
