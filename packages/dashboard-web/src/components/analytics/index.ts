@@ -17,6 +17,7 @@ export { ClientModelEfficiencyPanel } from "./ClientModelEfficiencyPanel";
 export { ContextCompositionPanel } from "./ContextCompositionPanel";
 export { MissingSectionsNotice } from "./MissingSectionsNotice";
 export { ModelAnalytics } from "./ModelAnalytics";
+export { ModelSubstitutionCard } from "./ModelSubstitutionCard";
 export { ModelWindowCostPanel } from "./ModelWindowCostPanel";
 export { PoolSizingPanel } from "./PoolSizingPanel";
 export { ProjectAnalytics } from "./ProjectAnalytics";

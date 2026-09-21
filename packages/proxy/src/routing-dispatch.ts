@@ -31,10 +31,20 @@ export async function recordLocalRoutingOutcome(
 	ctx: ProxyContext,
 	error: string,
 	status: number | null = null,
+	/**
+	 * The model the upstream said it served, when the caller already knows it
+	 * and is about to discard the body the observer would have read it from.
+	 */
+	reportedModel: string | null = null,
 ): Promise<void> {
 	if (audit.id) {
 		// Semantic classification wins regardless of whether the body observer finished first.
-		await ctx.dbOps.routing.annotateAttempt(audit.id, error, status);
+		await ctx.dbOps.routing.annotateAttempt(
+			audit.id,
+			error,
+			status,
+			reportedModel,
+		);
 		return;
 	}
 	const route = getResolvedRoute(meta);

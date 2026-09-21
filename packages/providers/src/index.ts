@@ -1,6 +1,7 @@
 export * from "./providers/devin/auth";
 export * from "./providers/devin/client";
 export * from "./providers/devin/provider";
+export { peekDevinServedModel } from "./providers/devin/served-model";
 export * from "./providers/zai/auth";
 
 import { DevinProvider } from "./providers/devin/provider";

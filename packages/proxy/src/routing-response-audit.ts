@@ -6,6 +6,48 @@ export interface RoutingResponseResult {
 	error: string | null;
 	modelRejected?: boolean;
 }
+
+/**
+ * The one expression that knows where a provider can name the model it served.
+ * Anthropic puts it on `message_start.message`, the OpenAI Responses shapes on
+ * `response`, and the chat shapes at the top level.
+ *
+ * The length guard is a bound on a client-influenced string, not a validity
+ * test: an id that long is not a model name, and it would otherwise reach a DB
+ * column and a dashboard label.
+ *
+ * Shared with {@link peekServedModel} so the value a request FAILS OVER on and
+ * the value recorded in `routing_attempts.reported_model` can never disagree.
+ */
+export function extractServedModel(value: unknown): string | null {
+	const holder = value as
+		| {
+				model?: unknown;
+				response?: { model?: unknown };
+				message?: { model?: unknown };
+		  }
+		| null
+		| undefined;
+	const model =
+		holder?.model ?? holder?.response?.model ?? holder?.message?.model;
+	return typeof model === "string" && model.length > 0 && model.length <= 512
+		? model
+		: null;
+}
+
+/**
+ * The `data:` payload of one SSE frame, continuation lines joined with newlines
+ * exactly as the wire format specifies. Returns "" for a frame that carries no
+ * `data:` line at all — a bare `: comment` keepalive, or a frame of `event:`
+ * alone.
+ */
+export function sseFrameData(frame: string): string {
+	return frame
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).replace(/^ /, ""))
+		.join("\n");
+}
 /** Observe raw bytes on the consumer's stream, before any adapter can synthesize a model. */
 export function observeRoutingResponse(
 	response: Response,
@@ -40,20 +82,14 @@ export function observeRoutingResponse(
 				)
 					protocolSucceeded = true;
 			}
-			const model =
-				value?.model ?? value?.response?.model ?? value?.message?.model;
-			if (typeof model === "string" && model.length > 0 && model.length <= 512)
-				reportedModel = model;
+			const model = extractServedModel(value);
+			if (model !== null) reportedModel = model;
 		} catch {
 			/* An event need not be JSON. */
 		}
 	};
 	const inspectEvent = (event: string, framed = true) => {
-		const data = event
-			.split(/\r?\n/)
-			.filter((line) => line.startsWith("data:"))
-			.map((line) => line.slice(5).replace(/^ /, ""))
-			.join("\n");
+		const data = sseFrameData(event);
 		if (data) inspect(data, framed);
 	};
 	const consume = (text: string) => {

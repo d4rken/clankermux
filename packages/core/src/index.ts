@@ -119,6 +119,7 @@ export {
 	isInvalidGrantMessage,
 	logError,
 	ModelNotServedError,
+	ModelSubstitutedError,
 	OAuthError,
 	OAuthRefreshTokenError,
 	PAUSE_REASON_NEEDS_REAUTH,
@@ -217,6 +218,7 @@ export {
 	LATEST_SONNET_MODEL,
 	MODEL_DISPLAY_NAMES,
 	MODEL_SHORT_NAMES,
+	stripDatedModelSuffix,
 } from "./models";
 export {
 	type ClassBudget,

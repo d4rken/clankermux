@@ -26,6 +26,18 @@ const log = new Logger("Config");
  * (predictive promotion + de-stick). */
 export type CacheWarmingMode = "off" | "static" | "dynamic";
 
+/**
+ * What to do when a provider answers as a different model than the one sent.
+ *
+ * `observe` exists because substitution has been measured on exactly one
+ * provider. Every other wire format's false-positive classes are unknown, and a
+ * false positive here turns a working response into a client-visible error, so
+ * the middle setting keeps detection and the dashboard surfaces alive while
+ * taking the failover out of the request path. Rolling back is then a setting
+ * change rather than a deploy.
+ */
+export type ServedModelSubstitutionMode = "off" | "observe" | "enforce";
+
 export interface RuntimeConfig {
 	clientId: string;
 	sessionDurationMs: number;
@@ -67,6 +79,7 @@ export interface ConfigData {
 	usage_poll_interval_ms?: number;
 	cache_warming_enabled?: boolean;
 	cache_warming_mode?: CacheWarmingMode;
+	served_model_substitution_mode?: ServedModelSubstitutionMode;
 	cache_keepalive_snapshot_retention_days?: number;
 	cache_warming_min_tokens?: number;
 	cache_warming_risk_factor?: number;
@@ -548,6 +561,24 @@ export class Config extends EventEmitter {
 		this.setCacheWarmingMode(value ? "dynamic" : "off");
 	}
 
+	getServedModelSubstitutionMode(): ServedModelSubstitutionMode {
+		const fromFile = this.data.served_model_substitution_mode;
+		if (fromFile === "off" || fromFile === "observe" || fromFile === "enforce")
+			return fromFile;
+		// Default ON: a silent swap is a correctness failure, and an operator who
+		// has configured nothing is the one least likely to notice it.
+		return "enforce";
+	}
+
+	setServedModelSubstitutionMode(mode: ServedModelSubstitutionMode): void {
+		this.set("served_model_substitution_mode", mode);
+	}
+
+	/** True when a detected substitution should fail the attempt over. */
+	getServedModelSubstitutionEnforced(): boolean {
+		return this.getServedModelSubstitutionMode() === "enforce";
+	}
+
 	getCacheWarmingMinTokens(): number {
 		// Default mirrors bridge-policy's DEFAULT_MIN_CACHE_TOKENS (duplicated here
 		// because the config package must not depend on the proxy package).
@@ -679,6 +710,7 @@ export class Config extends EventEmitter {
 			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 			cache_warming_enabled: this.getCacheWarmingEnabled(),
 			cache_warming_mode: this.getCacheWarmingMode(),
+			served_model_substitution_mode: this.getServedModelSubstitutionMode(),
 			cache_keepalive_snapshot_retention_days:
 				this.getCacheKeepaliveSnapshotRetentionDays(),
 			cache_warming_min_tokens: this.getCacheWarmingMinTokens(),

@@ -1,4 +1,5 @@
 import type { AnalyticsSection } from "@clankermux/types";
+import { useModelSubstitutions } from "../../../hooks/queries";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { CostCoverageNote } from "../../CostCoverage";
 import {
@@ -6,6 +7,7 @@ import {
 	ContextCompositionPanel,
 	MissingSectionsNotice,
 	ModelAnalytics,
+	ModelSubstitutionCard,
 	RefusalFallbackPanel,
 	TokenSpeedAnalytics,
 } from "..";
@@ -46,6 +48,10 @@ export function ModelsTab(props: ModelsTabProps) {
 	const { analytics, loading, refetch } = useAnalyticsData(range, filters, {
 		sections: MODELS_SECTIONS,
 	});
+
+	// Range-scoped like every other panel here, but filter-free by design: see
+	// ModelSubstitutionCard for why the request filters cannot apply.
+	const substitutions = useModelSubstitutions(range);
 
 	// Use real cost by model data with filters. No slice cap: ModelAnalytics
 	// joins this per model against the (up to 10) modelPerformance rows, so
@@ -88,6 +94,19 @@ export function ModelsTab(props: ModelsTabProps) {
 					<CostCoverageNote coverage={analytics.totals.apiCostCoverage} />
 				</p>
 			)}
+			{/* Where a provider answered as something other than what it was sent.
+			    Its own query rather than an analytics section: the chip and banner
+			    read the same endpoint from pages that never request that payload. */}
+			<ModelSubstitutionCard
+				data={substitutions.data}
+				loading={substitutions.isPending}
+				unavailableReason={
+					substitutions.isError
+						? "Substitution data is unavailable right now."
+						: null
+				}
+			/>
+
 			{/* Enhanced Model Analytics */}
 			<ModelAnalytics
 				modelPerformance={analytics?.modelPerformance || []}

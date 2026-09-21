@@ -1,4 +1,5 @@
 import type { LiveScopedFamily } from "@clankermux/core";
+import type { DegradedAccount } from "@clankermux/types";
 import {
 	supportsCustomEndpoint,
 	supportsUsagePolling,
@@ -62,6 +63,12 @@ import { RateLimitProgress } from "./RateLimitProgress";
 interface AccountListItemProps {
 	account: Account;
 	isForced?: boolean;
+	/**
+	 * This account's substitution entry, when a provider is currently answering
+	 * it with a different model. Threaded from the list so one query serves
+	 * every row rather than one per row.
+	 */
+	degraded?: DegradedAccount;
 	// Per-window-category reset endpoints across the whole list; forwarded to the
 	// rate-limit card so it can distinguish the first and last capacity returns.
 	earliestResets?: ReadonlyMap<string, number>;
@@ -119,6 +126,7 @@ const RENEWAL_SOURCE_TITLE: Record<"manual" | "derived" | "provider", string> =
 export function AccountListItem({
 	account,
 	isForced = false,
+	degraded,
 	earliestResets,
 	latestResets,
 	poolScopedFamilies,
@@ -682,6 +690,7 @@ export function AccountListItem({
 						account={account}
 						status={status}
 						showAccountDetails={false}
+						degraded={degraded}
 					/>
 					<AccountAccessNotice
 						account={account}

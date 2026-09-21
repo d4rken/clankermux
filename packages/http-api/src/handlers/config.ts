@@ -12,6 +12,7 @@ import {
 	clampRiskFactor,
 	KEEPALIVE_REFRESH_1H_MS,
 	MAX_BRIDGE_HOURS,
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	riskFactorToBridgeHours,
 	unmatchedPathTracker,
 } from "@clankermux/proxy";
@@ -46,6 +47,14 @@ function cacheWarmingResponse(config: Config): Record<string, unknown> {
 export function createConfigHandlers(
 	config: Config,
 	_runtime?: { port: number; tlsEnabled: boolean },
+	/**
+	 * Only the substitution-mode setter needs it, to release the suppressions
+	 * enforcement wrote. Optional so the existing positional callers and every
+	 * test that constructs these handlers are unaffected.
+	 */
+	routing?: {
+		clearModelSuppressionsByReason: (reason: string) => Promise<void>;
+	},
 ) {
 	return {
 		/**
@@ -200,6 +209,36 @@ export function createConfigHandlers(
 
 		getCacheWarming: (): Response => {
 			return jsonResponse(cacheWarmingResponse(config));
+		},
+
+		getServedModelSubstitutionMode: (): Response =>
+			jsonResponse({
+				servedModelSubstitutionMode: config.getServedModelSubstitutionMode(),
+			}),
+
+		setServedModelSubstitutionMode: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+			if (
+				body.mode !== "off" &&
+				body.mode !== "observe" &&
+				body.mode !== "enforce"
+			) {
+				return errorResponse(
+					BadRequest("Invalid 'mode': must be off|observe|enforce"),
+				);
+			}
+			config.setServedModelSubstitutionMode(body.mode);
+			// Turning enforcement down has to release what enforcement wrote. The
+			// three suppression gates are unconditional, so without this an
+			// account stays out of rotation for the rest of its five-minute
+			// window and the setting reads as having done nothing.
+			if (body.mode !== "enforce")
+				await routing?.clearModelSuppressionsByReason(
+					MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+				);
+			return jsonResponse({
+				servedModelSubstitutionMode: config.getServedModelSubstitutionMode(),
+			});
 		},
 
 		setCacheWarming: async (req: Request): Promise<Response> => {
