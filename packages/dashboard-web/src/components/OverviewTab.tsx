@@ -21,6 +21,7 @@ import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
+import { ModelSubstitutionBanner } from "./overview/ModelSubstitutionBanner";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
@@ -196,10 +197,14 @@ export const OverviewTab = React.memo(() => {
 		[analytics],
 	);
 
-	// Use analytics data for model distribution
+	// Use analytics data for model distribution. A substituted row is labelled
+	// with both models: the count belongs to the model that answered, but
+	// reading it as demand for that model would be wrong — nobody asked for it.
 	const modelData =
 		analytics?.modelDistribution?.map((model) => ({
-			name: model.model || "Unknown",
+			name: model.substitutedFrom
+				? `${model.model || "Unknown"} (sent as ${model.substitutedFrom})`
+				: model.model || "Unknown",
 			value: model.count,
 		})) || [];
 
@@ -213,6 +218,10 @@ export const OverviewTab = React.memo(() => {
 
 			{/* Only renders when /api/system/status reports unpriced models */}
 			<PricingGapBanner />
+
+			{/* Only renders for a substitution pair this browser has not been
+			    shown before; the standing condition lives on the Accounts chip */}
+			<ModelSubstitutionBanner now={now} />
 
 			{/* Visually hidden, but structurally load-bearing. The shell already
 			    renders the page's only visible title as an h1, so printing

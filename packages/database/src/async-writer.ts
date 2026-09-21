@@ -173,9 +173,9 @@ class ReservationToken implements PayloadReservation {
 
 export class AsyncDbWriter implements Disposable {
 	private metadataQueue: MetadataJob[] = [];
-	// Tracks the currently-executing tick. dispose() and re-entrant callers
-	// await this so a tick that has already shift()-ed its last job (queue
-	// empty) but is still inside its job's `finally` is not abandoned.
+	// Tracks the currently-executing tick. Only dispose()'s drain awaits it, so
+	// a tick that has already shift()-ed its last job (queue empty) but is still
+	// inside its job's `finally` is not abandoned.
 	private runningPromise: Promise<void> | null = null;
 	private intervalId: Timer | null = null;
 	private healthInterval: Timer | null = null;
@@ -235,7 +235,7 @@ export class AsyncDbWriter implements Disposable {
 
 	constructor(options: AsyncDbWriterOptions = {}) {
 		this.createPayloadWriter = options.createPayloadWriter;
-		this.intervalId = setInterval(() => void this.processQueue(), 100);
+		this.intervalId = setInterval(() => this.kickQueue(), 100);
 		this.healthInterval = setInterval(() => {
 			const recentDrops =
 				this.droppedJobsSinceLastLog + this.payloadDroppedSinceLastLog;
@@ -276,7 +276,7 @@ export class AsyncDbWriter implements Disposable {
 			enqueuedAt: performance.now(),
 			run: job,
 		});
-		void this.processQueue();
+		this.kickQueue();
 		return true;
 	}
 
@@ -303,7 +303,7 @@ export class AsyncDbWriter implements Disposable {
 			enqueuedAt: performance.now(),
 			run: job,
 		});
-		void this.processQueue();
+		this.kickQueue();
 		return true;
 	}
 
@@ -529,23 +529,28 @@ export class AsyncDbWriter implements Disposable {
 		}
 	}
 
-	private async processQueue(): Promise<void> {
-		// Coalesce concurrent invocations onto the in-flight tick so callers can
-		// observe its completion. Without this dispose() can return while a
-		// shift()-ed job is mid-execution (queue length 0, finally not yet run).
-		if (this.runningPromise) {
-			return this.runningPromise;
-		}
-		if (this.metadataQueue.length === 0) {
-			return;
-		}
+	/**
+	 * Start a tick unless one is already running. SYNCHRONOUS and waiter-free by
+	 * construction: the poll interval calls this ten times a second, and an
+	 * `async` variant that returned `this.runningPromise` would adopt it, which
+	 * pins one reaction record (and the promise it resolves) to the in-flight
+	 * tick per call until that tick settles. Callers that need to observe the
+	 * tick use {@link drainTick} instead.
+	 */
+	private kickQueue(): void {
+		if (this.runningPromise) return;
+		if (this.metadataQueue.length === 0) return;
 
-		this.runningPromise = this.runTick();
-		try {
-			await this.runningPromise;
-		} finally {
-			this.runningPromise = null;
-		}
+		const tick = this.runTick().finally(() => {
+			if (this.runningPromise === tick) this.runningPromise = null;
+		});
+		this.runningPromise = tick;
+	}
+
+	/** Run or join one tick, awaited. The drain in {@link dispose} is its caller. */
+	private async drainTick(): Promise<void> {
+		this.kickQueue();
+		if (this.runningPromise) await this.runningPromise;
 	}
 
 	private async runTick(): Promise<void> {
@@ -641,12 +646,12 @@ export class AsyncDbWriter implements Disposable {
 			this.healthInterval = null;
 		}
 
-		// Drain the metadata queue to completion. processQueue is budgeted
-		// per-tick; call it in a loop until the queue is empty AND no in-flight
-		// tick is still running (the latter covers the race where the last job
-		// has been shift()-ed off but its `finally` has not yet executed).
+		// Drain the metadata queue to completion. A tick is budgeted, so call it
+		// in a loop until the queue is empty AND no in-flight tick is still
+		// running (the latter covers the race where the last job has been
+		// shift()-ed off but its `finally` has not yet executed).
 		while (this.metadataQueue.length > 0 || this.runningPromise) {
-			await this.processQueue();
+			await this.drainTick();
 		}
 
 		// The drain is done, so no further publish can come from a queued job:

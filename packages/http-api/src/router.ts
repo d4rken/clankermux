@@ -75,6 +75,8 @@ import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
 import { createMemoryHistoryHandler } from "./handlers/memory-history";
 import { createModelAliasesHandler } from "./handlers/model-aliases";
+import { createModelSubstitutionsHandler } from "./handlers/model-substitutions";
+import { MODEL_SUBSTITUTION_EXCEPTIONS_PARAM } from "./handlers/model-substitutions-direct";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -215,7 +217,11 @@ export class APIRouter {
 			dbOps.getAdapter(),
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
-		const configHandlers = createConfigHandlers(config, this.context.runtime);
+		const configHandlers = createConfigHandlers(
+			config,
+			this.context.runtime,
+			this.context.dbOps.routing,
+		);
 
 		const logsStreamHandler = createLogsStreamHandler(
 			undefined,
@@ -233,6 +239,9 @@ export class APIRouter {
 			this.context,
 		);
 		const stopsHistoryHandler = createStopsHistoryHandler(this.context);
+		const modelSubstitutionsHandler = createModelSubstitutionsHandler(
+			this.context,
+		);
 		const quotaDriftHandler = createQuotaDriftHandler(this.context);
 		const poolSizingHandler = createPoolSizingHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
@@ -447,6 +456,12 @@ export class APIRouter {
 		this.handlers.set("GET:/api/config/cache-warming", () =>
 			configHandlers.getCacheWarming(),
 		);
+		this.handlers.set("GET:/api/config/model-substitution", () =>
+			configHandlers.getServedModelSubstitutionMode(),
+		);
+		this.handlers.set("POST:/api/config/model-substitution", (req) =>
+			configHandlers.setServedModelSubstitutionMode(req),
+		);
 		this.handlers.set("POST:/api/config/cache-warming", (req) =>
 			configHandlers.setCacheWarming(req),
 		);
@@ -529,6 +544,22 @@ export class APIRouter {
 		// unlike a projection, this one can be checked against what happened.
 		this.handlers.set("GET:/api/analytics/stops-history", (_req, url) => {
 			return stopsHistoryHandler(url.searchParams);
+		});
+		// Feeds three surfaces that do not share a page: the Accounts chip, the
+		// Overview banner and the analytics card. Deliberately NOT a section of
+		// the consolidated /api/analytics payload, which only the analytics page
+		// requests.
+		this.handlers.set("GET:/api/analytics/model-substitutions", (_req, url) => {
+			// The exception list is a SERVER setting, injected here rather than
+			// read inside the handler: that handler also executes in the analytics
+			// worker, whose synthetic context has no Config at all. Travelling as a
+			// param also puts it in the response-cache key, so editing the list
+			// invalidates the cached answer instead of leaving a stale one.
+			const params = new URLSearchParams(url.searchParams);
+			params.delete(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM);
+			for (const exception of this.context.config.getServedModelSubstitutionExceptions())
+				params.append(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM, exception);
+			return modelSubstitutionsHandler(params);
 		});
 		// Precomputed quota-drift analysis. Takes no params: the pass fits the
 		// whole retained history, and a range filter would silently change which

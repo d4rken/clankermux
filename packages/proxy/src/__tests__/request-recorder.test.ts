@@ -551,6 +551,24 @@ function makeHarness(
 // ---------------------------------------------------------------------------
 
 describe("RequestRecorder — normal terminal end", () => {
+	it("releases the incoming body synchronously at persist time", async () => {
+		const h = makeHarness();
+		const meta = makeMeta();
+		h.recorder.begin(meta);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			request: { body: string | null };
+		};
+		expect(
+			JSON.parse(Buffer.from(envelope.request.body ?? "", "base64").toString()),
+		).toEqual({ model: "claude" });
+	});
+
 	it("persists usage/cost/tokens into the row and emits a matching event", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());
@@ -1444,6 +1462,40 @@ describe("RequestRecorder — recordSynthetic", () => {
 		expect(h.emitted[0].statusCode).toBe(529);
 		expect(h.emitted[0].errorMessage).toBe("provider_overloaded");
 		expect(h.emitted[0].requestedModel).toBe("claude-haiku-4-5-20251001");
+	});
+
+	it("releases the incoming body once the envelope is serialized", async () => {
+		const h = makeHarness();
+		const meta = makeMeta({ requestId: "syn-release", responseStatus: 529 });
+		h.recorder.recordSynthetic(meta, "error", "pool_exhausted", {
+			responseBody: makeArrayBuffer('{"error":"exhausted"}'),
+		});
+
+		// Synthetic records never enter the live map, so nothing else can ever
+		// release them: the queued job must not be holding the raw bodies.
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			request: { body: string | null };
+		};
+		expect(
+			JSON.parse(Buffer.from(envelope.request.body ?? "", "base64").toString()),
+		).toEqual({ model: "claude" });
+	});
+
+	it("releases the incoming body when payload admission is refused", async () => {
+		const h = makeHarness();
+		h.writer.acceptPayload = false;
+		const meta = makeMeta({ requestId: "syn-refused", responseStatus: 529 });
+		h.recorder.recordSynthetic(meta, "error", "usage_throttled", {
+			responseBody: makeArrayBuffer('{"error":"throttled"}'),
+		});
+
+		expect(meta.requestBody).toBeNull();
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.dbOps.saveRequestCalls[0].errorMessage).toBe("usage_throttled");
+		expect(h.dbOps.savePayloadCalls).toHaveLength(0);
 	});
 
 	it("keeps synthetic records metadata-only when payload storage is disabled", async () => {
@@ -3055,11 +3107,14 @@ describe("RequestRecorder — settlement retention", () => {
 		// copy in `meta` is a separate allocation outside the
 		// capturedBytesPending accounting. Retention now outlives both the TTL
 		// and cap eviction, so a retained record must not keep it alive.
+		//
+		// Do NOT add an assertion that the caller's own `meta` still holds its
+		// body. The recorder OWNS the metadata object from `begin` onward and
+		// `releaseCapturedBodies` nulls the body in place — see "releases the
+		// incoming body synchronously at persist time". Swapping in a private
+		// copy instead would leave the buffer reachable from the caller, which
+		// is the leak that ownership rule exists to close.
 		expect(retained?.meta.requestBody).toBeNull();
-		// The metadata object belongs to the caller, so dropping the body must
-		// not reach back into it.
-		expect(meta.requestBody).not.toBeNull();
-		expect(meta.requestBody?.byteLength).toBe(18);
 	});
 });
 

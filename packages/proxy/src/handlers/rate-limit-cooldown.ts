@@ -5,8 +5,9 @@ import {
 	RateLimitError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import type { Account, RateLimitReason } from "@clankermux/types";
+import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
+import { isOAuthAnthropicAccount } from "./transparent-retry";
 
 const log = new Logger("RateLimitCooldown");
 
@@ -107,10 +108,7 @@ export function applySuccessRateLimitClear(
 const MATURE_COOLDOWN_STREAK = 5;
 const PROBE_LEASE_MS = 2 * 60 * 1000;
 const MAX_PROBE_GATES = 10_000;
-const probeLeases = new Map<
-	string,
-	{ leaseUntil: number; capacityGeneration?: number }
->();
+const probeLeases = new Map<string, RateLimitProbeLease>();
 
 // --- Capacity-restored single-flight marker ---------------------------------
 //
@@ -127,10 +125,26 @@ const probeLeases = new Map<
 const capacityRestoredPending = new Map<string, CapacityProbeReservation>();
 let capacityGenerationCounter = 0;
 
+/**
+ * Proof that a request holds an account's single-flight probe lease.
+ *
+ * Opaque to callers: object IDENTITY is the proof. Hand it back to
+ * {@link completeRateLimitProbe} and nothing else. The lease it names may
+ * already have been superseded — expired and re-issued to another request, or
+ * released by a fresh cooldown — which is exactly why completion compares
+ * identity instead of trusting the account id.
+ */
+export interface RateLimitProbeLease {
+	readonly accountId: string;
+	readonly leaseUntil: number;
+	/** The capacity-restored generation this probe was admitted for, if any. */
+	readonly capacityGeneration: number | undefined;
+}
+
 export type RateLimitProbeAdmission =
-	| "not_required"
-	| "admitted"
-	| "suppressed";
+	| { decision: "not_required" }
+	| { decision: "suppressed" }
+	| { decision: "admitted"; lease: RateLimitProbeLease };
 
 /**
  * A capacity-restored reservation — a node in the per-account reservation chain.
@@ -147,6 +161,14 @@ export interface CapacityProbeReservation {
 	generation: number;
 	/** The reservation this one displaced, or null if the slot was empty. */
 	previous: CapacityProbeReservation | null;
+	/**
+	 * Cooldown deadline this reservation was armed with, for a marker that came
+	 * from a FRESH 429 rather than an early release. Admission reads it instead
+	 * of trusting `account.rate_limited_until`: every request in flight holds its
+	 * own independently-loaded copy of the account, and the periodic expiry sweep
+	 * nulls the column outright.
+	 */
+	cooldownUntil?: number;
 	/**
 	 * Set once this reservation's clear is known to have failed. A rolled-back
 	 * reservation is never restored as anyone else's predecessor — otherwise two
@@ -194,6 +216,35 @@ export function markCapacityRestoredProbePending(
 	};
 	capacityRestoredPending.set(accountId, reservation);
 	return reservation;
+}
+
+/**
+ * Arm the single-flight gate for a reset-bearing burst cooldown, stamped with
+ * the deadline the cooldown just wrote.
+ *
+ * The burst path writes a server-directed deadline WITHOUT escalating
+ * `consecutive_rate_limits`, so the account comes back at streak 0 with an
+ * expired deadline — the shape neither half of the mature-streak gate engages
+ * on. Every concurrent request would then reach the just-throttled account at
+ * the same instant and re-trip the same burst window.
+ *
+ * Armed with NO predecessor: an account that keeps bursting would otherwise
+ * grow a linked reservation chain, one node per 429, and nothing ever rolls a
+ * burst arming back (the rollback path exists for a compare-and-clear that
+ * never committed).
+ */
+function armBurstRecoveryProbe(account: Account, cooldownUntil: number): void {
+	capacityGenerationCounter += 1;
+	capacityRestoredPending.set(account.id, {
+		accountId: account.id,
+		generation: capacityGenerationCounter,
+		previous: null,
+		cooldownUntil,
+		rolledBack: false,
+	});
+	log.info(
+		`[clankermux] account=${account.name} cooldown_probe_armed reason=burst capacity_generation=${capacityGenerationCounter} until=${new Date(cooldownUntil).toISOString()}`,
+	);
 }
 
 /**
@@ -273,6 +324,11 @@ interface ProbeGateInspection {
 	gatingRequired: boolean;
 	/** The pending capacity-restored generation, or undefined when none is owed. */
 	capacityGeneration: number | undefined;
+	/**
+	 * The gating reservation carries a deadline that has not lapsed yet. Probing
+	 * now would land inside the cooldown that armed it.
+	 */
+	coolingDown: boolean;
 }
 
 /**
@@ -289,9 +345,8 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
 		account.rate_limited_until != null &&
 		account.rate_limited_until <= now;
-	const capacityGeneration = capacityRestoredPending.get(
-		account.id,
-	)?.generation;
+	const reservation = capacityRestoredPending.get(account.id);
+	const capacityGeneration = reservation?.generation;
 	return {
 		// Keep the reason through the expiry sweep: NULL deadline means the
 		// sweep released it, not that Claude Code access has been confirmed.
@@ -301,6 +356,7 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 			(account.rate_limited_reason === "org_permission_denied" &&
 				(!account.rate_limited_until || account.rate_limited_until <= now)),
 		capacityGeneration,
+		coolingDown: (reservation?.cooldownUntil ?? 0) > now,
 	};
 }
 
@@ -335,9 +391,32 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 export function getRateLimitProbeAdmission(
 	account: Account,
 	now: number = Date.now(),
+	options?: {
+		/**
+		 * This attempt is the burst hold's bounded re-probe of the account it is
+		 * holding, which by design runs INSIDE that account's own cooldown (see
+		 * `applyRateLimitCooldown`'s re-probe semantics). It is the one caller
+		 * whose whole purpose is to test a deadline that has not lapsed, so the
+		 * gate arbitrates it for single-flight only, never for the deadline.
+		 */
+		reprobe?: boolean;
+	},
 ): RateLimitProbeAdmission {
-	const { gatingRequired, capacityGeneration } = inspectProbeGate(account, now);
-	if (!gatingRequired) return "not_required";
+	const { gatingRequired, capacityGeneration, coolingDown } = inspectProbeGate(
+		account,
+		now,
+	);
+	if (!gatingRequired) return { decision: "not_required" };
+	if (coolingDown && !options?.reprobe) {
+		// The reservation's own deadline has not lapsed. Hand out no lease: the
+		// probe this account owes belongs to the wave AFTER the cooldown.
+		log.debug(
+			`[clankermux] account=${account.name} cooldown_probe_deferred until=${new Date(
+				capacityRestoredPending.get(account.id)?.cooldownUntil ?? now,
+			).toISOString()}`,
+		);
+		return { decision: "suppressed" };
+	}
 
 	pruneProbeLeases(now);
 	const existingLease = probeLeases.get(account.id);
@@ -345,28 +424,32 @@ export function getRateLimitProbeAdmission(
 		log.debug(
 			`[clankermux] account=${account.name} cooldown_probe_suppressed lease_until=${new Date(existingLease.leaseUntil).toISOString()}`,
 		);
-		return "suppressed";
+		return { decision: "suppressed" };
 	}
 
-	const leaseUntil = now + PROBE_LEASE_MS;
 	// Record WHICH capacity generation this probe was admitted for, so its
 	// outcome can only ever clear that generation's marker.
-	probeLeases.set(account.id, { leaseUntil, capacityGeneration });
+	const lease: RateLimitProbeLease = {
+		accountId: account.id,
+		leaseUntil: now + PROBE_LEASE_MS,
+		capacityGeneration,
+	};
+	probeLeases.set(account.id, lease);
 	log.info(
 		`[clankermux] account=${account.name} cooldown_probe_admitted streak=${account.consecutive_rate_limits}${
 			capacityGeneration !== undefined
 				? ` capacity_generation=${capacityGeneration}`
 				: ""
-		} lease_until=${new Date(leaseUntil).toISOString()}`,
+		} lease_until=${new Date(lease.leaseUntil).toISOString()}`,
 	);
-	return "admitted";
+	return { decision: "admitted", lease };
 }
 
+type ProbeOutcome = "recovered" | "cooldown_reapplied" | "abandoned";
+
 /**
- * Releases the single-flight probe lease for an account, if one is held.
- * Must be called on every terminal outcome of a probed request: success
- * (recovered), a fresh cooldown being reapplied (cooldown_reapplied), or the
- * request being abandoned (exception, mid-loop skip, or any other early exit).
+ * Drop `lease` — which the caller has already established IS the live lease —
+ * and apply the outcome's capacity-marker semantics.
  *
  * The capacity-restored marker has a NARROWER lifecycle than the lease:
  *   - `recovered` clears it — but only when the admitted generation still
@@ -380,17 +463,12 @@ export function getRateLimitProbeAdmission(
  *     dormant (the account is unselectable); when it expires the marker again
  *     forces exactly one probe.
  *   - `abandoned` RETAINS it: nothing was learned about the account.
- *
- * Idempotent: if no lease is held this is a no-op (and capacity state is left
- * untouched), so it is safe to call from a try/finally chokepoint even when an
- * earlier path already released it.
  */
-export function completeRateLimitProbe(
+function releaseProbeLease(
 	account: Account,
-	outcome: "recovered" | "cooldown_reapplied" | "abandoned",
+	outcome: ProbeOutcome,
+	lease: RateLimitProbeLease,
 ): void {
-	const lease = probeLeases.get(account.id);
-	if (!lease) return;
 	probeLeases.delete(account.id);
 	if (outcome === "recovered") {
 		if (
@@ -406,6 +484,87 @@ export function completeRateLimitProbe(
 	} else if (outcome === "abandoned") {
 		log.debug(`[clankermux] account=${account.name} cooldown_probe_abandoned`);
 	}
+}
+
+/**
+ * Report a terminal outcome for the probe `lease` names. Must be called on
+ * every terminal outcome of a probed request: success (recovered), a fresh
+ * cooldown being reapplied (cooldown_reapplied), or the request being abandoned
+ * (exception, mid-loop skip, or any other early exit).
+ *
+ * `lease` is the ownership proof, and a mismatch is a silent no-op. An
+ * ORDINARY request holds none, so it can never settle a probe it was not
+ * admitted for — the local count_tokens synthesis is the clearest case: it
+ * answers without touching upstream, and its `response.ok` would otherwise be
+ * read as proof that somebody else's probed account recovered. An EXPIRED owner
+ * is the other case: leases expire after {@link PROBE_LEASE_MS} and a later
+ * request may already have been admitted under a fresh one, which this owner's
+ * terminal path must not delete.
+ *
+ * Idempotent: settling twice with the same lease no-ops the second time, so it
+ * is safe to call from a try/finally chokepoint even when an earlier path
+ * already released it.
+ */
+export function completeRateLimitProbe(
+	account: Account,
+	outcome: ProbeOutcome,
+	lease: RateLimitProbeLease | undefined,
+): void {
+	if (!lease || probeLeases.get(account.id) !== lease) return;
+	releaseProbeLease(account, outcome, lease);
+}
+
+// --- Per-request lease custody ---------------------------------------------
+//
+// Admission happens at ONE chokepoint (attemptThroughProbeGate); the terminal
+// outcomes that settle a probe sit deep inside the attempt — the 429 rungs in
+// proxy-operations and the verdict in response-processor — and have no
+// admission handle of their own. This side table carries the proof from one to
+// the other.
+//
+// Keyed on the RequestMeta identity (same pattern as request-model-exclusions),
+// so it dies with the request. A request that was never admitted reads back
+// `undefined`, which is precisely what makes an unleased path a no-op instead
+// of another request's settle.
+const attemptLeases = new WeakMap<object, Map<string, RateLimitProbeLease>>();
+
+/** Record that `scope` owns `lease` for the duration of its attempt. */
+export function holdRateLimitProbeLease(
+	scope: RequestMeta,
+	lease: RateLimitProbeLease,
+): void {
+	let held = attemptLeases.get(scope);
+	if (!held) {
+		held = new Map<string, RateLimitProbeLease>();
+		attemptLeases.set(scope, held);
+	}
+	held.set(lease.accountId, lease);
+}
+
+/**
+ * The lease `scope` holds for `accountId`, or undefined when it holds none.
+ *
+ * `scope` is widened to `object` because `processProxyResponse` accepts a
+ * structural subset of RequestMeta; production always passes the real object,
+ * and a caller that does not is simply not an owner.
+ */
+export function findRateLimitProbeLease(
+	scope: object | undefined,
+	accountId: string,
+): RateLimitProbeLease | undefined {
+	if (!scope) return undefined;
+	return attemptLeases.get(scope)?.get(accountId);
+}
+
+/** Forget `scope`'s custody of `accountId`'s lease; the attempt is over. */
+export function dropRateLimitProbeLease(
+	scope: RequestMeta,
+	accountId: string,
+): void {
+	const held = attemptLeases.get(scope);
+	if (!held) return;
+	held.delete(accountId);
+	if (held.size === 0) attemptLeases.delete(scope);
 }
 
 /**
@@ -425,7 +584,9 @@ export function wouldSuppressProbe(
 	account: Account,
 	now: number = Date.now(),
 ): boolean {
-	if (!inspectProbeGate(account, now).gatingRequired) return false;
+	const { gatingRequired, coolingDown } = inspectProbeGate(account, now);
+	if (!gatingRequired) return false;
+	if (coolingDown) return true;
 	const existingLease = probeLeases.get(account.id);
 	return existingLease !== undefined && existingLease.leaseUntil > now;
 }
@@ -502,7 +663,15 @@ export function applyRateLimitCooldown(
 		floorUntil?: number;
 	},
 	ctx: ProxyContext,
-	options?: { reprobe?: boolean },
+	options?: {
+		reprobe?: boolean;
+		/**
+		 * The single-flight recovery-probe lease the CALLING attempt holds for
+		 * this account, when it holds one. Ownership proof for the release below:
+		 * without it, another request's live lease is left alone.
+		 */
+		probeLease?: RateLimitProbeLease;
+	},
 ): void {
 	const now = Date.now();
 
@@ -526,15 +695,26 @@ export function applyRateLimitCooldown(
 
 	// Single-flight recovery probe: reaching here means a REAL fresh cooldown is
 	// about to be (re)applied (Lever B server-directed reset OR the escalating
-	// no-reset path) — a terminal outcome for any in-flight recovery probe on
-	// this account. Release its lease so the account isn't sidelined for the full
-	// lease TTL; the next expiry re-arms a fresh single probe. The reprobe path
-	// above returns before this point, so gentle in-request re-probes never
-	// release the cross-request lease.
-	const wasRecoveryProbe = probeLeases.has(account.id);
-	completeRateLimitProbe(account, "cooldown_reapplied");
-	if (wasRecoveryProbe) {
-		log.info(`[clankermux] account=${account.name} cooldown_probe_reapplied`);
+	// no-reset path) — a terminal outcome for THIS attempt's probe, if it holds
+	// one. Release its lease so the account isn't sidelined for the full lease
+	// TTL; the next expiry re-arms a fresh single probe. The reprobe path above
+	// returns before this point, so gentle in-request re-probes never release the
+	// cross-request lease.
+	//
+	// Ownership-scoped like every other settle. A cooldown is account-level
+	// evidence, but that does NOT make it terminal for another request's probe:
+	// the deadline it writes does not stop the lease holder's upstream request,
+	// and it does not keep the account out of rotation for the lease's lifetime
+	// either — a 30s cooldown expires while a 2-minute lease still has 90s to
+	// run, and the burst hold's re-probe re-enters sooner than that. Freeing the
+	// lease there would admit a second concurrent probe, which is the exact
+	// defect the token exists to prevent.
+	if (options?.probeLease) {
+		const beforeRelease = probeLeases.get(account.id);
+		completeRateLimitProbe(account, "cooldown_reapplied", options.probeLease);
+		if (beforeRelease === options.probeLease) {
+			log.info(`[clankermux] account=${account.name} cooldown_probe_reapplied`);
+		}
 	}
 
 	// Lever B: the upstream gave us an explicit reset time (it told us exactly when
@@ -559,6 +739,13 @@ export function applyRateLimitCooldown(
 		account.rate_limited_reason = reason;
 
 		const cooldownUntil = rateLimitInfo.resetTime;
+		// A burst 429 leaves exactly the state nothing else gates on — streak 0,
+		// and a deadline that is about to expire — so arm the single-flight marker
+		// here rather than waiting for a capacity-restored release that will never
+		// come for this cause.
+		if (reason === "model_fallback_429" && isOAuthAnthropicAccount(account)) {
+			armBurstRecoveryProbe(account, cooldownUntil);
+		}
 		ctx.asyncWriter.enqueue(async () => {
 			await ctx.dbOps.markAccountRateLimitedDeadlineOnly(
 				account.id,

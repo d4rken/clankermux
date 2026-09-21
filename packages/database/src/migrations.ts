@@ -1728,6 +1728,14 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
  * a table introduced after that database was created is likewise absent until
  * ensureSchema() adds it — with the current CREATE TABLE, which already has the
  * column.
+ *
+ * The transaction is IMMEDIATE, not the default DEFERRED. The body reads schema
+ * metadata and only then ALTERs, so under DEFERRED it holds a read snapshot
+ * that another connection's commit invalidates; SQLite then refuses the upgrade
+ * to a write transaction outright and does not consult the busy handler, so
+ * waiting cannot recover it. Nothing retries this pass and it runs inside the
+ * DatabaseOperations constructor, so that failure is a process that will not
+ * boot. Taking the writer slot up front removes the upgrade step entirely.
  */
 function applyAdditiveColumns(db: Database): void {
 	if (ADDITIVE_COLUMNS.length === 0) return;
@@ -1763,7 +1771,7 @@ function applyAdditiveColumns(db: Database): void {
 			log.info(`Added column ${table}.${column}`);
 		}
 	});
-	tx();
+	tx.immediate();
 }
 
 export function runMigrations(db: Database): void {

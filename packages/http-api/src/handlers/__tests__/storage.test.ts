@@ -167,7 +167,7 @@ describe("createStorageHandler", () => {
 		it("returns 'skipped' status and surfaces the full skip reason + attempt time", async () => {
 			const attemptTs = new Date("2025-01-15T10:30:00.000Z").getTime();
 			const skipReason =
-				"DB 30.0GiB exceeds full-check ceiling 24GiB — ran quick check instead";
+				"DB 70.0GiB exceeds the automatic-check ceiling 64GiB — trigger a check from the dashboard to scan anyway";
 			const handler = createStorageHandler(
 				makeDbOps(
 					{},

@@ -70,6 +70,7 @@ import {
 	PIN_HOLD_MAX_MS,
 	type RecoveryHolds,
 } from "./recovery-holds";
+import { retryAfterFromDeadlines } from "./retry-after";
 
 // Same channel name as handleProxy's own logger: this module was carved out of
 // it, and the log lines below must keep their historical prefix.
@@ -111,6 +112,7 @@ export interface ZeroAccountsOutcomeDeps {
 	recordSyntheticErrorResponse: (
 		response: Response,
 		error: string,
+		opts?: { failoverAttempts?: number },
 	) => Promise<void>;
 	/** handleProxy's synthetic provider-overloaded 529 (records itself). */
 	createProviderOverloadedResponse: (
@@ -172,6 +174,19 @@ export async function resolveZeroAccountsOutcome(
 		logFinalOrderOnce,
 		attemptThroughProbeGate,
 	} = deps;
+
+	// Re-check advice for the pinned terminals below: the earliest dated blocker
+	// this call can see, which is a cooldown on a candidate account or a
+	// provider-overload deadline. Nothing dated (a paused account, a rejected
+	// pin header, an empty selection) falls back to the default interval.
+	const pinnedRetryAfterSeconds = () =>
+		retryAfterFromDeadlines(
+			[
+				...selectedAccounts.map((account) => account.rate_limited_until),
+				...providerOverloadedAccounts.map((overloaded) => overloaded.until),
+			],
+			Date.now(),
+		);
 
 	/** The one model an attempt against this account would send. */
 	const resolvedModelFor = (account: Account): string =>
@@ -317,6 +332,7 @@ export async function resolveZeroAccountsOutcome(
 	if (requestMeta.pinFailure) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(
 			requestMeta.pinFailure,
+			pinnedRetryAfterSeconds(),
 		);
 		await recordSyntheticErrorResponse(
 			pinnedResponse,
@@ -456,6 +472,7 @@ export async function resolveZeroAccountsOutcome(
 			bumpIdleTimeout,
 			NETWORK.IDLE_REARM_INTERVAL_MS,
 		);
+		let contextWindowTerminal: Response | null = null;
 		try {
 			const held = await holds.holdForNonCodexRecovery(cwHoldBudget, "CW hold");
 			if (held) return held;
@@ -547,14 +564,15 @@ export async function resolveZeroAccountsOutcome(
 			// probe-suppressed — a non-retryable answer to a purely temporary,
 			// retryable condition.
 			if (relaxCandidates.length === 0) {
-				return createContextWindowExceededResponse(
+				// Assigned rather than returned: the recorder call below must run
+				// after this block's `finally` has stopped the idle re-arm.
+				contextWindowTerminal = createContextWindowExceededResponse(
 					gateTokenEstimate,
 					[...gates.contextExcludedAccounts],
 					effectiveRequestModel ?? "unknown",
 					requestMeta.excludeOfficialAnthropic === true,
 				);
-			}
-			if (!relaxAttempted && relaxSuppressed > 0) {
+			} else if (!relaxAttempted && relaxSuppressed > 0) {
 				log.info(
 					`Context-window last-resort: all ${relaxSuppressed} fitting account(s) were recovery-probe suppressed — deferring to an availability terminal, NOT a context_window_exceeded 400`,
 				);
@@ -570,6 +588,16 @@ export async function resolveZeroAccountsOutcome(
 			// Stop re-arming on EVERY exit path: success returns, relaxation
 			// returns, the 400, client-abort returns, and the fall-through.
 			clearInterval(cwRearm);
+		}
+		if (contextWindowTerminal) {
+			if (!req.signal.aborted) {
+				await recordSyntheticErrorResponse(
+					contextWindowTerminal,
+					"context_window_exceeded",
+					{ failoverAttempts: getUpstreamAttempts() },
+				);
+			}
+			return contextWindowTerminal;
 		}
 	}
 
@@ -694,10 +722,16 @@ export async function resolveZeroAccountsOutcome(
 		throttledAccounts.length > 0 ||
 		gates.familyWeeklyPacedAccounts.length > 0
 	) {
-		return createUsageThrottledResponse([
+		const throttledResponse = createUsageThrottledResponse([
 			...throttledAccounts,
 			...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
 		]);
+		if (!req.signal.aborted) {
+			await recordSyntheticErrorResponse(throttledResponse, "usage_throttled", {
+				failoverAttempts: getUpstreamAttempts(),
+			});
+		}
+		return throttledResponse;
 	}
 
 	if (
@@ -741,11 +775,14 @@ export async function resolveZeroAccountsOutcome(
 		(requestMeta.pin || requestMeta.excludeOfficialAnthropic) &&
 		!requestMeta.pinFailure
 	) {
-		const pinnedResponse = createPinnedTargetUnavailableResponse({
-			code: "pinned_target_unavailable",
-			message:
-				"The account/provider pinned to this API key has no available account for this request.",
-		});
+		const pinnedResponse = createPinnedTargetUnavailableResponse(
+			{
+				code: "pinned_target_unavailable",
+				message:
+					"The account/provider pinned to this API key has no available account for this request.",
+			},
+			pinnedRetryAfterSeconds(),
+		);
 		await recordSyntheticErrorResponse(
 			pinnedResponse,
 			"pinned_target_unavailable",

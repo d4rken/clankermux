@@ -11,7 +11,12 @@ import {
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
-import { api, type RequestPayload, type RequestSummary } from "../api";
+import {
+	api,
+	type RequestPayload,
+	type RequestSummary,
+	type ServedModelSubstitutionMode,
+} from "../api";
 import type { FilterState } from "../components/analytics/AnalyticsFilters";
 import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
@@ -500,6 +505,26 @@ export const useStopsHistory = (range: string, filters?: FilterState) => {
 };
 
 /**
+ * Shared by the Accounts chip, the Overview banner and the analytics card.
+ *
+ * The chip and banner ask for a fixed short range and read only `degraded`;
+ * the card passes the analytics range and reads the series. One query key per
+ * range means the two pages do not double up on the scan.
+ */
+export const modelSubstitutionsQueryOptions = (range: string) => ({
+	queryKey: queryKeys.modelSubstitutions(range),
+	queryFn: () => api.getModelSubstitutions(range),
+	staleTime: 45000,
+	refetchInterval: 60000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const useModelSubstitutions = (range: string) => {
+	return useQuery(modelSubstitutionsQueryOptions(range));
+};
+
+/**
  * Precomputed quota-drift analysis for the Analytics "Quota" tab.
  *
  * The server recomputes it every 30 minutes, so polling faster would only
@@ -820,6 +845,33 @@ export const useCacheWarming = () => {
 	return useQuery({
 		queryKey: ["cache-warming"],
 		queryFn: () => api.getCacheWarming(),
+	});
+};
+
+export const useServedModelSubstitutionMode = () => {
+	return useQuery({
+		queryKey: ["model-substitution-mode"],
+		queryFn: () => api.getServedModelSubstitutionMode(),
+	});
+};
+
+export const useSetServedModelSubstitutionMode = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (body: {
+			mode?: ServedModelSubstitutionMode;
+			exceptions?: string[];
+		}) => api.setServedModelSubstitutionMode(body),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["model-substitution-mode"] });
+			// Leaving `enforce` releases the suppressions enforcement wrote, and an
+			// exception edit changes which pairs count as degraded, so the chip and
+			// banner are stale the moment either one changes.
+			queryClient.invalidateQueries({
+				queryKey: queryKeys.modelSubstitutions(),
+				exact: false,
+			});
+		},
 	});
 };
 

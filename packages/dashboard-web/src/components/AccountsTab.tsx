@@ -1,10 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Crosshair, Plus } from "lucide-react";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { type Account, api } from "../api";
 import {
 	useAccounts,
 	useForcedAccount,
+	useModelSubstitutions,
 	useRenameAccount,
 } from "../hooks/queries";
 import { useApiError } from "../hooks/useApiError";
@@ -98,6 +99,22 @@ export function AccountsTab() {
 	};
 
 	const [adding, setAdding] = useState(false);
+	// One query for the whole list. The window is short and fixed rather than
+	// user-selectable: the chip answers "is this happening now", which a range
+	// picker would turn into "did this ever happen", and the server already owns
+	// the recency threshold that decides it. Same range as the Overview banner,
+	// so the two pages share one cache entry and one scan.
+	const substitutions = useModelSubstitutions("24h");
+	const degradedByAccount = useMemo(
+		() =>
+			new Map(
+				(substitutions.data?.degraded ?? []).map((entry) => [
+					entry.accountId,
+					entry,
+				]),
+			),
+		[substitutions.data],
+	);
 	// Row order, persisted so the choice survives reloads. localStorage can throw
 	// (e.g. Safari private mode) — degrade to the in-memory default.
 	const [sortMode, setSortMode] = useState<AccountListSortMode>(() => {
@@ -889,6 +906,7 @@ export function AccountsTab() {
 					<AccountList
 						accounts={accounts}
 						sortMode={sortMode}
+						degradedByAccount={degradedByAccount}
 						forcedAccountId={forcedAccountId}
 						onForceAccount={handleForceAccount}
 						onPauseToggle={handlePauseToggle}

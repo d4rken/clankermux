@@ -1085,14 +1085,11 @@ export class RequestRecorder {
 
 		if (record.usageWaived || record.usage !== null) {
 			// Unrecoverable (waived) OR already complete with usage → drop now.
-			// dropRecord releases the buffers, so do NOT release here too (the
-			// double release would double-decrement capturedBytesPending).
 			this.dropRecord(requestId);
 		} else {
 			// Persisted without usage but recoverable: keep a tiny no-body record
-			// for a late patchUsage(), bounded by PATCH_RECORD_TTL_MS. Release the
-			// buffers exactly once here since the record lingers in the map.
-			this.releaseBuffers(record);
+			// for a late patchUsage(), bounded by PATCH_RECORD_TTL_MS. persistOrdered
+			// has already released its bodies, so what lingers is metadata only.
 			record.patchTimer = this.scheduleTimer(() => {
 				record.patchTimer = null;
 				// A refused settlement keeps the record: it is the only thing that
@@ -1155,8 +1152,7 @@ export class RequestRecorder {
 			if (!reservation) this.asyncWriter.recordPayloadDrop(estimatedBytes);
 		}
 
-		// Stage 2: serialize while the bodies are still held (the record frees
-		// them right after this method returns).
+		// Stage 2: serialize while the bodies are still held (Stage 4 frees them).
 		let json: string | null = null;
 		if (reservation) {
 			try {
@@ -1172,61 +1168,75 @@ export class RequestRecorder {
 			}
 		}
 
+		// Stage 3: snapshot every field the queued job reads. The job must close
+		// over neither `record` nor `meta`, so that the raw bodies released below
+		// are unreachable the moment this method returns — the serialized
+		// envelope, whose bytes a reservation already covers, is the only capture
+		// allowed to outlive the call.
+		const requestId = meta.requestId;
+		const timestamp = meta.timestamp;
+		const requestHeaders = meta.requestHeaders;
+		const responseHeaders = meta.responseHeaders;
+		const toolCallStats = meta.toolCallStats;
 		const routing = meta.routing;
-		const accountUsed = meta.accountId;
+		const requestRow = {
+			...record.gatewayHints,
+			id: meta.requestId,
+			method: meta.method,
+			path: meta.path,
+			accountUsed: meta.accountId,
+			statusCode: meta.responseStatus,
+			success,
+			errorMessage,
+			responseTime,
+			failoverAttempts: meta.failoverAttempts,
+			usage,
+			apiKeyId: meta.apiKeyId ?? undefined,
+			apiKeyName: meta.apiKeyName ?? undefined,
+			project: meta.project ?? null,
+			projectAttributionSource: meta.projectAttributionSource ?? null,
+			billingType: record.billingType,
+			comboName: meta.comboName ?? null,
+			reasoningEffort: meta.reasoningEffort ?? null,
+			contextComposition: meta.contextComposition ?? null,
+			requestedModel: meta.requestedModel ?? null,
+			usageFinalizedAt,
+			sessionKey: meta.sessionKey ?? null,
+			cachePrefixHashes: meta.cachePrefixHashes ?? null,
+			clientUserAgent: meta.clientUserAgent ?? null,
+			clientHarness: meta.clientHarness ?? null,
+			// Response-side facts come off the finalized usage summary; the
+			// two credit marks are ingress facts carried on the meta.
+			stopReason: record.usage?.stopReason,
+			refusalCategory: record.usage?.refusalCategory,
+			fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
+			fallbackFromModel: meta.fallbackFromModel ?? undefined,
+			correlationTag: record.correlationTag,
+			usageSource,
+		};
 		const payloadJson = json;
 		const payloadReservation = reservation;
+
+		// Stage 4: the raw bodies have served their two purposes (the estimate and
+		// the envelope) and nothing downstream reads them again.
+		this.releaseCapturedBodies(record);
 
 		const accepted = this.asyncWriter.enqueue(async () => {
 			// Tracked separately from routing/tool-call outcomes: only a committed
 			// request row makes the payload's FK satisfiable.
 			let requestRowSaved = false;
 			try {
-				await this.dbOps.saveRequest({
-					...record.gatewayHints,
-					id: meta.requestId,
-					method: meta.method,
-					path: meta.path,
-					accountUsed,
-					statusCode: meta.responseStatus,
-					success,
-					errorMessage,
-					responseTime,
-					failoverAttempts: meta.failoverAttempts,
-					usage,
-					apiKeyId: meta.apiKeyId ?? undefined,
-					apiKeyName: meta.apiKeyName ?? undefined,
-					project: meta.project ?? null,
-					projectAttributionSource: meta.projectAttributionSource ?? null,
-					billingType: record.billingType,
-					comboName: meta.comboName ?? null,
-					reasoningEffort: meta.reasoningEffort ?? null,
-					contextComposition: meta.contextComposition ?? null,
-					requestedModel: meta.requestedModel ?? null,
-					usageFinalizedAt,
-					sessionKey: meta.sessionKey ?? null,
-					cachePrefixHashes: meta.cachePrefixHashes ?? null,
-					clientUserAgent: meta.clientUserAgent ?? null,
-					clientHarness: meta.clientHarness ?? null,
-					// Response-side facts come off the finalized usage summary; the
-					// two credit marks are ingress facts carried on the meta.
-					stopReason: record.usage?.stopReason,
-					refusalCategory: record.usage?.refusalCategory,
-					fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
-					fallbackFromModel: meta.fallbackFromModel ?? undefined,
-					correlationTag: record.correlationTag,
-					usageSource,
-				});
+				await this.dbOps.saveRequest(requestRow);
 				requestRowSaved = true;
 			} catch (error) {
-				log.error(`Failed to save request for ${meta.requestId}:`, error);
+				log.error(`Failed to save request for ${requestId}:`, error);
 			}
 
 			if (requestRowSaved) {
 				try {
 					if (routing) {
 						await this.dbOps.saveRequestRouting({
-							requestId: meta.requestId,
+							requestId,
 							strategy: routing.strategy,
 							decision: routing.decision,
 							affinityScope: routing.affinityScope,
@@ -1234,20 +1244,17 @@ export class RequestRecorder {
 							selectedAccountId: routing.selectedAccountId,
 							previousAccountId: routing.previousAccountId,
 							candidatesCount: routing.candidatesCount,
-							failoverAttempts: meta.failoverAttempts,
+							failoverAttempts: requestRow.failoverAttempts,
 							failoverReason: routing.failoverReason,
-							createdAt: meta.timestamp,
+							createdAt: timestamp,
 						});
 					}
-					if (meta.toolCallStats?.length) {
-						await this.dbOps.saveRequestToolCalls(
-							meta.requestId,
-							meta.toolCallStats,
-						);
+					if (toolCallStats?.length) {
+						await this.dbOps.saveRequestToolCalls(requestId, toolCallStats);
 					}
 				} catch (error) {
 					log.error(
-						`Failed to save request routing/tool calls for ${meta.requestId}:`,
+						`Failed to save request routing/tool calls for ${requestId}:`,
 						error,
 					);
 				}
@@ -1259,16 +1266,13 @@ export class RequestRecorder {
 			if (requestRowSaved && storeHeaders) {
 				try {
 					await this.dbOps.saveRequestHeaders({
-						requestId: meta.requestId,
-						requestHeaders: meta.requestHeaders,
-						responseHeaders: meta.responseHeaders,
-						createdAt: meta.timestamp,
+						requestId,
+						requestHeaders,
+						responseHeaders,
+						createdAt: timestamp,
 					});
 				} catch (error) {
-					log.error(
-						`Failed to save request headers for ${meta.requestId}:`,
-						error,
-					);
+					log.error(`Failed to save request headers for ${requestId}:`, error);
 				}
 			}
 
@@ -1286,23 +1290,21 @@ export class RequestRecorder {
 			try {
 				stored = await this.dbOps.encryptPayloadForStorage(payloadJson);
 			} catch (error) {
-				log.error(`Failed to encrypt payload for ${meta.requestId}:`, error);
+				log.error(`Failed to encrypt payload for ${requestId}:`, error);
 				payloadReservation.release();
 				this.asyncWriter.recordPayloadDrop(estimatedBytes);
 				return;
 			}
 
 			const published = this.asyncWriter.enqueuePayload(payloadReservation, {
-				requestId: meta.requestId,
+				requestId,
 				ciphertext: stored,
 				timestamp: this.now(),
 				payloadBytes: Buffer.byteLength(payloadJson),
 			});
 			if (!published) {
 				// enqueuePayload already released the reservation and counted the drop.
-				log.warn(
-					`Payload write rejected post-serialization for ${meta.requestId}`,
-				);
+				log.warn(`Payload write rejected post-serialization for ${requestId}`);
 			}
 		});
 
@@ -1310,9 +1312,9 @@ export class RequestRecorder {
 			// Metadata queue saturated — the request row was NOT persisted. Count
 			// and log it; never pretend it was written.
 			this.metadataDropped++;
-			this.onMetadataDrop?.(meta.requestId);
+			this.onMetadataDrop?.(requestId);
 			log.warn(
-				`Metadata enqueue dropped for ${meta.requestId} — request row not persisted (total dropped: ${this.metadataDropped})`,
+				`Metadata enqueue dropped for ${requestId} — request row not persisted (total dropped: ${this.metadataDropped})`,
 			);
 			if (payloadReservation) {
 				payloadReservation.release();
@@ -1393,12 +1395,10 @@ export class RequestRecorder {
 			// The record now outlives both the patch TTL and cap eviction, and by
 			// design nothing bounds how many are retained: evicting one would lose a
 			// real request's token accounting permanently. So each retained record
-			// has to be SMALL. `releaseBuffers` already freed reqBytes and the
-			// response chunks, but `meta.requestBody` is a separate copy — possibly
-			// megabytes — outside the capturedBytesPending accounting, and no
-			// remaining recorder operation reads it. Swap in a recorder-owned
-			// metadata copy without it; the caller's object is not ours to mutate.
-			record.meta = { ...record.meta, requestBody: null };
+			// has to be SMALL, and `releaseCapturedBodies` is what makes it so —
+			// idempotent, so calling it on a record whose persist path already ran
+			// costs nothing and covers any path that did not.
+			this.releaseCapturedBodies(record);
 			// Counted the same way a rejected request-row write is, so queue
 			// saturation is observable here too rather than silent.
 			this.metadataDropped++;
@@ -1474,9 +1474,9 @@ export class RequestRecorder {
 			// patch — never a 'none' settlement, which would be a false statement
 			// in a write-once column.
 			if (!record.settlementPending) {
-				// Retention now outlives the TTL, so shed the body copy exactly as
-				// the settlement refusal does (see closeUnresolvedUsageSource).
-				record.meta = { ...record.meta, requestBody: null };
+				// Retention now outlives the TTL, so shed the bodies exactly as the
+				// settlement refusal does (see closeUnresolvedUsageSource).
+				this.releaseCapturedBodies(record);
 				log.warn(
 					`Usage patch dropped for ${patch.requestId} — tokens held in memory for a later retry`,
 				);
@@ -1525,9 +1525,7 @@ export class RequestRecorder {
 			// request. Safe to share because the wrap is only ever read and never
 			// outlives this expression: toString() does not mutate and returns an
 			// independent string, so the alias is gone before the next event-loop
-			// turn. (`reqBytes` is cleared below for ordinary records; a synthetic
-			// record's async persistence closure can keep it alive longer under
-			// writer backlog, which affects retention, not this.)
+			// turn.
 			requestBody = Buffer.from(
 				record.reqBytes.buffer,
 				record.reqBytes.byteOffset,
@@ -1760,6 +1758,16 @@ export class RequestRecorder {
 			offset += chunk.byteLength;
 		}
 		return out;
+	}
+
+	/**
+	 * Drop every raw body reachable from a record: the captured request/response
+	 * buffers AND the incoming body still held on its meta. Idempotent, and the
+	 * capture budget is returned exactly once.
+	 */
+	private releaseCapturedBodies(record: InternalRecord): void {
+		this.releaseBuffers(record);
+		record.meta.requestBody = null;
 	}
 
 	private releaseBuffers(record: InternalRecord): void {

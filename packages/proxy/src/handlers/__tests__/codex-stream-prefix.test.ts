@@ -317,7 +317,6 @@ describe("peekCodexStreamPrefix — no detection", () => {
 	for (const [label, init] of [
 		["a non-200 status", { status: 503 }],
 		["a JSON content-type", { contentType: "application/json" }],
-		["no content-type at all", { contentType: null }],
 	] as const) {
 		it(`skips ${label}`, async () => {
 			const response = sseResponse(
@@ -331,6 +330,22 @@ describe("peekCodexStreamPrefix — no detection", () => {
 			expect(await peekCodexStreamPrefix(response)).toBeNull();
 		});
 	}
+
+	// The Codex backend routinely omits the content-type. The peek used to sit
+	// downstream of the provider fix-up that supplies it and could rely on the
+	// header; now that it reads the RAW body it has to recognise the framing
+	// itself, or the traffic it exists for would never be inspected.
+	it("sniffs SSE when the backend sent no content-type", async () => {
+		const response = sseResponse(
+			[
+				CREATED,
+				frame("error", { type: "error", error: { type: "server_error" } }),
+			],
+			{ contentType: null },
+		);
+
+		expect(await peekCodexStreamPrefix(response)).toBe("server_error");
+	});
 });
 
 describe("peekCodexStreamPrefix — bounds", () => {

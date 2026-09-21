@@ -3,6 +3,7 @@ import {
 	getModelFamily,
 	isDebugEnabled,
 	ModelNotServedError,
+	ModelSubstitutedError,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
@@ -13,7 +14,7 @@ import {
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -47,7 +48,9 @@ import {
 import { createClientAbortResponse } from "./handlers/client-abort-response";
 import {
 	completeRateLimitProbe,
+	dropRateLimitProbeLease,
 	getRateLimitProbeAdmission,
+	holdRateLimitProbeLease,
 } from "./handlers/rate-limit-cooldown";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
@@ -66,6 +69,7 @@ import {
 	getResolvedRoute,
 	RoutingPolicyError,
 } from "./resolved-route";
+import { retryAfterFromDeadlines } from "./retry-after";
 import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
@@ -139,18 +143,25 @@ type GatedAttempt = {
  *    must not consume an account's single recovery probe.
  */
 async function attemptThroughProbeGate(
+	requestMeta: RequestMeta,
 	account: Account,
 	attempt: () => Promise<Response | null>,
+	options?: { reprobe?: boolean },
 ): Promise<GatedAttempt> {
-	const admission = getRateLimitProbeAdmission(account);
-	if (admission === "suppressed") {
+	const admission = getRateLimitProbeAdmission(account, Date.now(), options);
+	if (admission.decision === "suppressed") {
 		return { response: null, suppressed: true };
 	}
+	const lease = admission.decision === "admitted" ? admission.lease : undefined;
+	// Custody for the whole attempt: the settle sites inside it read the lease
+	// back off the request, so each one releases THIS attempt's lease or none.
+	if (lease) holdRateLimitProbeLease(requestMeta, lease);
 	try {
 		return { response: await attempt(), suppressed: false };
 	} finally {
-		if (admission === "admitted") {
-			completeRateLimitProbe(account, "abandoned");
+		if (lease) {
+			completeRateLimitProbe(account, "abandoned", lease);
+			dropRateLimitProbeLease(requestMeta, account.id);
 		}
 	}
 }
@@ -422,11 +433,14 @@ async function handleIngestedProxy(
 			log.warn(
 				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a deny-official-anthropic (Codex CLI) request`,
 			);
-			return createPinnedTargetUnavailableResponse({
-				code: "anthropic_excluded_no_account",
-				message:
-					"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
-			});
+			return createPinnedTargetUnavailableResponse(
+				{
+					code: "anthropic_excluded_no_account",
+					message:
+						"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
+				},
+				retryAfterFromDeadlines([forcedAccount.rate_limited_until], Date.now()),
+			);
 		}
 
 		requestMeta.routing = {
@@ -466,7 +480,8 @@ async function handleIngestedProxy(
 			ctx,
 			apiKeyId,
 			apiKeyName,
-			attemptThroughProbeGate,
+			(account, attempt) =>
+				attemptThroughProbeGate(requestMeta, account, attempt),
 		);
 	}
 
@@ -687,21 +702,40 @@ async function handleIngestedProxy(
 	/** Both missing-model and plan-entitlement responses reject a frozen target.
 	 * Provider routing restrictions are separate and never count toward this terminal. */
 	let modelRejectedAttempts = 0;
+	/**
+	 * Counted apart from `modelRejectedAttempts` on purpose. That one produces a
+	 * 400 whose message says the account "rejected its resolved model", which is
+	 * the opposite diagnosis: here the upstream accepted the request and answered
+	 * as something else.
+	 */
+	let substitutedAttempts = 0;
+	/** The substitute the last such attempt actually served, for the terminal. */
+	const substitutedServed = new Set<string>();
 	const noteAttemptOutcome = (outcome: ProxyAttemptOutcome): void => {
 		if (
 			outcome.kind === "model_not_entitled" ||
 			outcome.kind === "model_not_found"
 		)
 			modelRejectedAttempts++;
+		if (outcome.kind === "model_substituted") {
+			substitutedAttempts++;
+			substitutedServed.add(outcome.served);
+		}
 	};
 	const countedAttemptThroughProbeGate = (
 		account: Account,
 		attempt: () => Promise<Response | null>,
+		options?: { reprobe?: boolean },
 	): Promise<{ response: Response | null; suppressed: boolean }> =>
-		attemptThroughProbeGate(account, () => {
-			upstreamAttempts++;
-			return attempt();
-		});
+		attemptThroughProbeGate(
+			requestMeta,
+			account,
+			() => {
+				upstreamAttempts++;
+				return attempt();
+			},
+			options,
+		);
 
 	// Every hold that parks a live client connection and re-attempts is built ONCE
 	// per request here (see recovery-holds.ts): the overload hold, the shared
@@ -1321,6 +1355,17 @@ async function handleIngestedProxy(
 		isRefreshTokenLikelyExpired(acc),
 	);
 
+	// Re-check advice carried on the give-up error so `dispatchProxyRequest` can
+	// pace the 503 it builds. An attempt that ended in a 429 leaves its cooldown
+	// on the account object, so the earliest of those is the one dated blocker
+	// this terminal knows about; a failure mode that dates nothing (expired
+	// tokens, upstream 5xx) gets the default interval.
+	const giveUpRetryAfterSeconds = () =>
+		retryAfterFromDeadlines(
+			allAttemptedAccounts.map((acc) => acc.rate_limited_until),
+			Date.now(),
+		);
+
 	/**
 	 * Write the give-up terminal into Request History, the way the synthetic 529s
 	 * already are. Without this the request is a log line only: the client gets a
@@ -1393,6 +1438,28 @@ async function handleIngestedProxy(
 	// The observed cause must outrank the inferred one there. This cannot
 	// swallow a genuine OAuth failure, because a token that actually fails to
 	// resolve produces a non-model outcome and so can never satisfy the
+	// Checked BEFORE the rejection terminal below: when both counters are
+	// non-zero the substitution is the more specific and more actionable
+	// diagnosis, and it is the one whose message names a model the operator can
+	// go and look at.
+	if (
+		upstreamAttempts > 0 &&
+		substitutedAttempts > 0 &&
+		substitutedAttempts + modelRejectedAttempts === upstreamAttempts &&
+		accounts.length >= selectedAccounts.length
+	) {
+		const model = effectiveRequestModel ?? requestMeta.requestedModel ?? null;
+		const served = [...substitutedServed].join(", ");
+		const substitutedMessage =
+			`Every account attempted (${upstreamAttempts}) answered as a different model than it was sent (${served}). Requested model: '${model ?? "unknown"}'. ` +
+			`The provider substituted the model rather than refusing the request; retrying may reach an account it does not substitute for.`;
+		await recordGiveUpTerminal("model_substituted", substitutedMessage, {
+			status: 503,
+			errorType: "model_substituted_error",
+		});
+		throw new ModelSubstitutedError(substitutedMessage, model, served);
+	}
+
 	// unanimity condition below.
 	if (
 		upstreamAttempts > 0 &&
@@ -1426,10 +1493,18 @@ async function handleIngestedProxy(
 		// itself stays account-independent so history's (error, account) grouping
 		// doesn't fragment per account list.
 		await recordGiveUpTerminal("oauth_tokens_expired", message);
-		throw new ServiceUnavailableError(message, ctx.provider.name);
+		throw new ServiceUnavailableError(
+			message,
+			ctx.provider.name,
+			giveUpRetryAfterSeconds(),
+		);
 	}
 
 	const exhaustedMessage = `${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`;
 	await recordGiveUpTerminal("all_accounts_failed", exhaustedMessage);
-	throw new ServiceUnavailableError(exhaustedMessage, ctx.provider.name);
+	throw new ServiceUnavailableError(
+		exhaustedMessage,
+		ctx.provider.name,
+		giveUpRetryAfterSeconds(),
+	);
 }

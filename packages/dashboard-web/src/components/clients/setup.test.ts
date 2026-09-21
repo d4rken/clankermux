@@ -72,6 +72,7 @@ it("escapes model names and secrets in copied setup", () => {
 	expect(setup.snippet).toContain(
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
 	);
+	expect(setup.snippet).toContain("CLAUDE_CODE_GATEWAY_HINT_HEADERS=1");
 });
 it("uses the Responses SDK for OpenCode and declares the selected models", () => {
 	const setup = clientSetup(
@@ -134,6 +135,7 @@ it("offers Claude JSON settings and shell exports with the same credentials", ()
 		ANTHROPIC_BASE_URL: "http://host/wire/anthropic",
 		ANTHROPIC_AUTH_TOKEN: "a'$(secret)",
 		CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+		CLAUDE_CODE_GATEWAY_HINT_HEADERS: "1",
 		ANTHROPIC_MODEL: "claude-test",
 	});
 	expect(exports.find((e) => e.id === "shell")?.snippet).toBe(

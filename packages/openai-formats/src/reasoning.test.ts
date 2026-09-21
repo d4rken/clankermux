@@ -131,6 +131,38 @@ describe("reasoning effort support", () => {
 		);
 	});
 
+	it("requires a known adapter family before using a model profile", () => {
+		expect(getSupportedReasoningEfforts("gpt-6-astra", "codex")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		expect(
+			getSupportedReasoningEfforts("gpt-6-astra", "openrouter"),
+		).toBeNull();
+		expect(
+			getSupportedReasoningEfforts("gpt-6-astra", "unknown-provider"),
+		).toBeNull();
+		expect(
+			getSupportedReasoningEfforts("claude-sonnet-4-6", "anthropic"),
+		).toBeNull();
+	});
+
+	it("clamps targets the advertisement allowlist does not name", () => {
+		// The allowlist is narrow on purpose: it governs what the catalogue
+		// PUBLISHES. Request adaptation must not consult it, or a target absent
+		// from it resolves to null and the effort reaches an endpoint that never
+		// accepted it. Both models below are outside the allowlist.
+		expect(
+			resolveReasoningEffort("max", { targetModel: "gpt-5.6-sol" }).effort,
+		).toBe("xhigh");
+		expect(
+			resolveReasoningEffort("max", { targetModel: "claude-haiku-4-5" }).effort,
+		).toBe("medium");
+	});
+
 	it("passes through effort unchanged when target model is unknown", () => {
 		const resolved = resolveReasoningEffort("xhigh", {
 			sourceModel: "claude-sonnet-4-6",

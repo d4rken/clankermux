@@ -12,7 +12,35 @@ import type {
 } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
 import { AccountModelPermissionService } from "./account-model-permissions";
+import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "./handlers/model-substitution";
 import type { ProxyContext } from "./handlers/proxy-types";
+
+/**
+ * A live suppression's reason, or null when the pair is not suppressed.
+ *
+ * The reason-bearing read is an enrichment over the boolean one. Where a caller
+ * only implements the boolean, the pair is still suppressed correctly and only
+ * the substitution ATTRIBUTION is lost — the right degradation for something
+ * that knows nothing about substitutions.
+ *
+ * Shared by the alias and non-alias branches so the two cannot drift: when only
+ * one of them read the reason, an alias stage emptied by substitutions returned
+ * a 403 while the same condition on a normal route returned the 503.
+ */
+async function readSuppressionReason(
+	ctx: ProxyContext,
+	accountId: string,
+	scope: string,
+	model: string,
+): Promise<string | null> {
+	const routing = ctx.dbOps.routing;
+	if (routing.modelSuppressionReason)
+		return routing.modelSuppressionReason(accountId, scope, model, Date.now());
+	return (await routing.isModelSuppressed(accountId, scope, model, Date.now()))
+		? ""
+		: null;
+}
+
 import { getValidAccessToken } from "./handlers/token-manager";
 import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
@@ -160,19 +188,26 @@ export async function initializeRequestRoute(
 				);
 			}
 			const suppressedPairs = new Set<string>();
+			const substitutedPairs = new Set<string>();
 			await Promise.all(
 				stagePool.map(async (a) => {
 					const p = permissions.get(a.id);
-					if (
-						p &&
-						(await ctx.dbOps.routing.isModelSuppressed(
-							a.id,
-							p.scope,
-							destination.model,
-							Date.now(),
-						))
-					)
-						suppressedPairs.add(JSON.stringify([a.id, destination.model]));
+					if (!p) return;
+					// Same reason-bearing read as the non-alias branch below. Without
+					// it an alias stage emptied by substitution suppressions reports
+					// the generic 403 instead of the retryable substitution terminal,
+					// and the alias path RETURNS that error to the client.
+					const reason = await readSuppressionReason(
+						ctx,
+						a.id,
+						p.scope,
+						destination.model,
+					);
+					if (reason === null) return;
+					const key = JSON.stringify([a.id, destination.model]);
+					suppressedPairs.add(key);
+					if (reason === MODEL_SUBSTITUTION_SUPPRESSION_REASON)
+						substitutedPairs.add(key);
 				}),
 			);
 			stages.push(
@@ -185,6 +220,7 @@ export async function initializeRequestRoute(
 					permissions,
 					priorExclusions,
 					suppressedPairs,
+					substitutedPairs,
 					chatRequirements: getChatContext(meta)?.requirements,
 					alias: { id: alias.id, revision: alias.revision, targetIndex },
 				}),
@@ -214,19 +250,19 @@ export async function initializeRequestRoute(
 		}
 	}
 	const suppressedPairs = new Set<string>();
+	const substitutedPairs = new Set<string>();
 	await Promise.all(
 		pool.map(async (a) => {
 			const p = permissions.get(a.id);
-			if (
-				p &&
-				(await ctx.dbOps.routing.isModelSuppressed(
-					a.id,
-					p.scope,
-					target,
-					Date.now(),
-				))
-			)
-				suppressedPairs.add(JSON.stringify([a.id, target]));
+			if (!p) return;
+			// The REASON, not just the fact: a route emptied by substitution
+			// suppressions must not present as a permission failure.
+			const reason = await readSuppressionReason(ctx, a.id, p.scope, target);
+			if (reason === null) return;
+			const key = JSON.stringify([a.id, target]);
+			suppressedPairs.add(key);
+			if (reason === MODEL_SUBSTITUTION_SUPPRESSION_REASON)
+				substitutedPairs.add(key);
 		}),
 	);
 	installResolvedRoute(
@@ -241,6 +277,7 @@ export async function initializeRequestRoute(
 			priorExclusions,
 			chatRequirements: getChatContext(meta)?.requirements,
 			suppressedPairs,
+			substitutedPairs,
 		}),
 	);
 }

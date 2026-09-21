@@ -11,7 +11,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BunSqlAdapter } from "../bun-sql-adapter";
+import {
+	BUSY_RETRY_MAX_DELAY_MS,
+	BunSqlAdapter,
+	busyRetryDelayMs,
+} from "../bun-sql-adapter";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -204,17 +208,17 @@ describe("BunSqlAdapter withBusyRetry", () => {
 
 	describe("real lock contention with a bounded main busy_timeout", () => {
 		it("resolves via async retry while a second connection holds BEGIN IMMEDIATE, without a multi-second synchronous block", async () => {
-			// Mirrors production: the main connection's busy_timeout is bounded
-			// to 250ms (see MAIN_CONNECTION_BUSY_TIMEOUT_MS), so a write hitting
-			// a worker-held lock blocks the event loop for at most ~250ms at the
-			// C level, then the JS layer yields and retries via setTimeout.
+			// Mirrors production: the main connection's busy_timeout is 0 (see
+			// MAIN_CONNECTION_BUSY_TIMEOUT_MS), so a write hitting a worker-held
+			// lock never blocks the event loop at the C level — the JS layer
+			// yields and retries via setTimeout.
 			const dir = mkdtempSync(join(tmpdir(), "clankermux-busy-contention-"));
 			const dbPath = join(dir, "contention.db");
 			const main = new Database(dbPath, { create: true });
 			const writer = new Database(dbPath);
 			try {
 				main.exec("PRAGMA journal_mode = WAL");
-				main.exec("PRAGMA busy_timeout = 250");
+				main.exec("PRAGMA busy_timeout = 0");
 				main.run(
 					"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)",
 				);
@@ -224,19 +228,18 @@ describe("BunSqlAdapter withBusyRetry", () => {
 				writer.exec("BEGIN IMMEDIATE"); // hold the write lock
 
 				// The synchronous portion of an adapter call is everything up to
-				// the first await: one C-level busy wait of <= busy_timeout. With
-				// the old 10s timeout this took ~10s; bounded it must stay well
-				// under 1s.
+				// the first await. With no C-level busy wait the event loop is
+				// handed back essentially at once.
 				const syncStart = performance.now();
 				const pending = contendedAdapter.run(
 					"INSERT INTO t (id, val) VALUES (?, ?)",
 					[1, "through-retry"],
 				);
 				const syncMs = performance.now() - syncStart;
-				expect(syncMs).toBeLessThan(1000);
+				expect(syncMs).toBeLessThan(100);
 
-				// Release the lock while the adapter is parked in its async
-				// 500ms retry sleep — the next attempt must succeed.
+				// Release the lock while the adapter is parked in an async retry
+				// sleep — the next attempt must succeed.
 				setTimeout(() => writer.exec("COMMIT"), 300);
 				await pending;
 
@@ -258,8 +261,8 @@ describe("BunSqlAdapter withBusyRetry", () => {
 
 	describe("close() under contention", () => {
 		it("does not crash shutdown when another connection holds the write lock", async () => {
-			// close() runs PRAGMA wal_checkpoint(TRUNCATE). With the bounded main
-			// busy_timeout that checkpoint can come back busy while a worker
+			// close() runs PRAGMA wal_checkpoint(TRUNCATE). Even with the widened
+			// shutdown timeout that checkpoint can come back busy while a worker
 			// holds the lock — shutdown must degrade gracefully (skip the
 			// truncate), never throw.
 			const dir = mkdtempSync(join(tmpdir(), "clankermux-busy-close-"));
@@ -268,7 +271,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 			const writer = new Database(dbPath);
 			try {
 				main.exec("PRAGMA journal_mode = WAL");
-				main.exec("PRAGMA busy_timeout = 250");
+				main.exec("PRAGMA busy_timeout = 0");
 				main.run(
 					"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)",
 				);
@@ -284,6 +287,82 @@ describe("BunSqlAdapter withBusyRetry", () => {
 			} finally {
 				try {
 					writer.close();
+				} catch {}
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	describe("retry backoff", () => {
+		it("stays inside [base/2, base) for each attempt, with base capped", () => {
+			const bases = [10, 20, 40, 80, 100, 100, 100];
+			for (const [index, base] of bases.entries()) {
+				const attempt = index + 1;
+				expect(base).toBeLessThanOrEqual(BUSY_RETRY_MAX_DELAY_MS);
+				for (let i = 0; i < 200; i++) {
+					const delay = busyRetryDelayMs(attempt);
+					expect(delay).toBeGreaterThanOrEqual(base / 2);
+					expect(delay).toBeLessThan(base);
+				}
+			}
+		});
+
+		it("never exceeds the ceiling however many attempts have passed", () => {
+			for (const attempt of [8, 20, 64, 1000]) {
+				const delay = busyRetryDelayMs(attempt);
+				expect(delay).toBeGreaterThanOrEqual(BUSY_RETRY_MAX_DELAY_MS / 2);
+				expect(delay).toBeLessThan(BUSY_RETRY_MAX_DELAY_MS);
+			}
+		});
+
+		it("spreads colliding callers instead of waking them together", () => {
+			// Every caller that lost the same writer slot starts its sleep at the
+			// same instant, so an unjittered delay would wake them in lockstep.
+			const seen = new Set<number>();
+			for (let i = 0; i < 200; i++) seen.add(busyRetryDelayMs(5));
+			expect(seen.size).toBeGreaterThan(100);
+		});
+	});
+
+	describe("wake-up latency when the lock is released mid-sleep", () => {
+		it("picks the write back up within tens of milliseconds", async () => {
+			const dir = mkdtempSync(join(tmpdir(), "clankermux-busy-wakeup-"));
+			const dbPath = join(dir, "wakeup.db");
+			const main = new Database(dbPath, { create: true });
+			const writer = new Database(dbPath);
+			try {
+				main.exec("PRAGMA journal_mode = WAL");
+				main.exec("PRAGMA busy_timeout = 0");
+				main.run(
+					"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, val TEXT)",
+				);
+				const contendedAdapter = new BunSqlAdapter(main);
+
+				writer.exec("PRAGMA busy_timeout = 0");
+				writer.exec("BEGIN IMMEDIATE");
+
+				const start = performance.now();
+				const pending = contendedAdapter.run(
+					"INSERT INTO t (id, val) VALUES (?, ?)",
+					[1, "prompt"],
+				);
+				setTimeout(() => writer.exec("COMMIT"), 40);
+				await pending;
+				const elapsed = performance.now() - start;
+
+				// The lock frees at ~40ms; the retry cadence must notice inside
+				// roughly one capped backoff rather than a fixed half-second.
+				expect(elapsed).toBeLessThan(250);
+				const row = main.query("SELECT val FROM t WHERE id = 1").get() as {
+					val: string;
+				} | null;
+				expect(row?.val).toBe("prompt");
+			} finally {
+				try {
+					writer.close();
+				} catch {}
+				try {
+					main.close();
 				} catch {}
 				rmSync(dir, { recursive: true, force: true });
 			}

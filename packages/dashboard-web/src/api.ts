@@ -12,6 +12,7 @@ import type {
 	CodexResetCreditEventResponse,
 	LogEvent,
 	MemoryHistoryResponse,
+	ModelSubstitutionsResponse,
 	PaymentKind,
 	PaymentsSummary,
 	PoolSizingResponse,
@@ -47,6 +48,15 @@ export type RequestSummary = RequestResponse;
 
 // Re-export types directly
 export type { RequestPayload, RequestResponse } from "@clankermux/types";
+
+/** Mirrors `ServedModelSubstitutionMode` in @clankermux/config. */
+export type ServedModelSubstitutionMode = "off" | "observe" | "enforce";
+
+export interface ModelSubstitutionSettings {
+	servedModelSubstitutionMode: ServedModelSubstitutionMode;
+	/** Accepted swaps as `sent>served`; enforcement skips these while still reporting them. */
+	servedModelSubstitutionExceptions: string[];
+}
 
 export interface CacheWarmingResponse {
 	mode: "off" | "static" | "dynamic";
@@ -1204,6 +1214,27 @@ class API extends HttpClient {
 	// history reads, and filter-scoped like the analytics reads: the card sits
 	// on a tab with a filter panel, so it answers for the same selection as the
 	// panels around it.
+	// Where a provider answered as a model other than the one it was sent.
+	// Range-scoped but NOT filter-scoped: the standard request filters key on
+	// the final request's account and model, and the substituting attempt is by
+	// design not that attempt — a sibling serves it — so filtering by account
+	// would hide the substitution on the very account it happened to.
+	async getModelSubstitutions(
+		range: string,
+	): Promise<ModelSubstitutionsResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/model-substitutions?${new URLSearchParams({ range }).toString()}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<ModelSubstitutionsResponse>(url);
+			this.logger.debug(`← GET ${url} - 200 (${Date.now() - startTime}ms)`);
+			return response;
+		} catch (error) {
+			this.logger.debug(`← GET ${url} - failed (${Date.now() - startTime}ms)`);
+			throw error;
+		}
+	}
+
 	async getStopsHistory(
 		range: string,
 		filters?: AnalyticsRequestFilters,
@@ -1900,6 +1931,17 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	async getServedModelSubstitutionMode(): Promise<ModelSubstitutionSettings> {
+		return this.get("/api/config/model-substitution");
+	}
+
+	async setServedModelSubstitutionMode(body: {
+		mode?: ServedModelSubstitutionMode;
+		exceptions?: string[];
+	}): Promise<ModelSubstitutionSettings> {
+		return this.post("/api/config/model-substitution", body);
 	}
 
 	async setCacheWarming(body: {

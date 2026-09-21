@@ -46,6 +46,11 @@ export const queryKeys = {
 	// different filter selection is a different measurement and must not.
 	stopsHistory: (range?: string, filters?: unknown) =>
 		[...queryKeys.all, "stops-history", { range, filters }] as const,
+	// Keyed by range ALONE: the response carries no filter dimension, because
+	// the substituting attempt is not the one that produced the request row the
+	// filters key on. Three surfaces on three different pages share this entry.
+	modelSubstitutions: (range?: string) =>
+		[...queryKeys.all, "model-substitutions", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
 	// Unkeyed: the payload is precomputed over the whole retained history, so

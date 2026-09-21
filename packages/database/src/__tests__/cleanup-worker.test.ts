@@ -21,6 +21,7 @@ import {
 } from "../database-operations";
 import {
 	CLEANUP_DELETE_BATCH_ROWS,
+	deleteOrphanedPayloads,
 	SNAPSHOT_DELETE_BATCH_ROWS,
 } from "../incremental-vacuum-worker";
 
@@ -529,6 +530,134 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 			expect(count(dbPath, "request_headers")).toBe(4);
 		} finally {
 			await dbOps.close();
+		}
+	});
+});
+
+describe("orphaned-payload prune", () => {
+	let tmpDir: string;
+	let dbPath: string;
+
+	beforeEach(async () => {
+		tmpDir = makeTempDir();
+		dbPath = path.join(tmpDir, "orphans.db");
+		const dbOps = new DatabaseOperations(dbPath);
+		await dbOps.close();
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	function open(): Database {
+		const db = new Database(dbPath);
+		db.exec("PRAGMA busy_timeout = 5000");
+		return db;
+	}
+
+	function seedOrphans(db: Database, ids: string[]): void {
+		const ins = db.prepare(
+			"INSERT INTO request_payloads (id, json, timestamp) VALUES (?, '{}', ?)",
+		);
+		for (const id of ids) ins.run(id, Date.now());
+	}
+
+	it("issues no DML at all when there are no orphans", async () => {
+		const db = open();
+		try {
+			db.run(
+				"INSERT INTO requests (id, timestamp, method, path) VALUES ('r1', ?, 'POST', '/v1/m')",
+				[Date.now()],
+			);
+			seedOrphans(db, ["r1"]);
+
+			// The common case on a large blob table: nothing to delete. Taking the
+			// writer slot here costs a full scan for no benefit.
+			const runs: string[] = [];
+			const real = db.run.bind(db);
+			// biome-ignore lint/suspicious/noExplicitAny: test stub replacing the DB method
+			(db as any).run = (...args: any[]) => {
+				if (typeof args[0] === "string") runs.push(args[0]);
+				// biome-ignore lint/suspicious/noExplicitAny: delegating to the real method
+				return (real as any)(...args);
+			};
+
+			let removed: number;
+			try {
+				removed = await deleteOrphanedPayloads(db);
+			} finally {
+				// biome-ignore lint/suspicious/noExplicitAny: restoring the real method
+				(db as any).run = real;
+			}
+
+			expect(removed).toBe(0);
+			expect(runs).toEqual([]);
+			expect(count(dbPath, "request_payloads")).toBe(1);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("removes orphans across more than one batch", async () => {
+		const db = open();
+		try {
+			const ids = Array.from(
+				{ length: 2 * CLEANUP_DELETE_BATCH_ROWS + 7 },
+				(_, i) => `orphan-${i}`,
+			);
+			seedOrphans(db, ids);
+			expect(await deleteOrphanedPayloads(db)).toBe(ids.length);
+			expect(count(dbPath, "request_payloads")).toBe(0);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("spares a payload whose request row arrives after the candidates were chosen", async () => {
+		const db = open();
+		try {
+			seedOrphans(db, ["late-parent", "truly-orphan"]);
+
+			// Land the parent INSERT in the window between the candidate SELECT
+			// and the DELETE — the exact interleave the per-batch re-check exists
+			// for.
+			const real = db.run.bind(db);
+			let injected = false;
+			// biome-ignore lint/suspicious/noExplicitAny: test stub replacing the DB method
+			(db as any).run = (...args: any[]) => {
+				if (!injected) {
+					injected = true;
+					real(
+						"INSERT INTO requests (id, timestamp, method, path) VALUES ('late-parent', ?, 'POST', '/v1/m')",
+						[Date.now()],
+					);
+				}
+				// biome-ignore lint/suspicious/noExplicitAny: delegating to the real method
+				return (real as any)(...args);
+			};
+
+			let removed: number;
+			try {
+				removed = await deleteOrphanedPayloads(db);
+			} finally {
+				// biome-ignore lint/suspicious/noExplicitAny: restoring the real method
+				(db as any).run = real;
+			}
+
+			expect(injected).toBe(true);
+			expect(removed).toBe(1);
+			expect(
+				db
+					.query("SELECT id FROM request_payloads WHERE id = 'late-parent'")
+					.get(),
+			).not.toBeNull();
+			expect(
+				db
+					.query("SELECT id FROM request_payloads WHERE id = 'truly-orphan'")
+					.get(),
+			).toBeNull();
+		} finally {
+			db.close();
 		}
 	});
 });

@@ -21,6 +21,7 @@ import {
 	resetHoldSlots,
 	tryAcquireHoldSlot,
 } from "../handlers/burst-cooldown";
+import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
@@ -378,6 +379,11 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		originalFetch = globalThis.fetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
+		// A burst cooldown arms the single-flight recovery marker, which is keyed
+		// by account id and deliberately never time-expires. These cases reuse the
+		// same ids with freshly-built accounts, so it has to be cleared between
+		// them or the previous case's marker gates the next one.
+		resetRateLimitProbeGatesForTests();
 		resetHoldSlots();
 		// Deterministic hold timing is injected per-call via HOLD_TIMING_OVERRIDE
 		// (see callHandleProxy) — no env var needed. The burst-retry tuning
@@ -391,6 +397,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
+		resetRateLimitProbeGatesForTests();
 		resetHoldSlots();
 	});
 
@@ -980,6 +987,52 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// hold/re-probe budget burned on the exhausted held account.
 		expect(res.status).toBe(200);
 		expect(n).toBe(1);
+	});
+
+	it("a re-probe that classifies as non-transient persists a real cooldown", async () => {
+		// The re-probe short-circuit used to apply a reprobe-mode cooldown (no DB
+		// write, no streak) and report `retryable_429` whatever the classifier
+		// said, so an account the re-probe proved spent came out of the hold with
+		// no persisted cooldown at all.
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			rate_limited_until: Date.now() - 1,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		// No usage seed ⇒ no fresh capacity, and the re-probe carries no
+		// `x-should-retry`: classify429Transient reports no_headroom_no_retry_hint.
+		usageCache.delete("held");
+		markAnthropicBurstThrottle();
+
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				return rl429();
+			}),
+		);
+
+		const ctx = makeContext([held, sibling], "held");
+		await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		const deadlineOnly = ctx.dbOps
+			.markAccountRateLimitedDeadlineOnly as unknown as ReturnType<typeof mock>;
+		const escalating = ctx.dbOps
+			.markAccountRateLimited as unknown as ReturnType<typeof mock>;
+		const heldWrites = [
+			...deadlineOnly.mock.calls,
+			...escalating.mock.calls,
+		].filter((call) => call[0] === "held");
+		expect(heldWrites.length).toBeGreaterThan(0);
 	});
 
 	it("marker active + held account capacity STALE/absent ⇒ single re-probe only (stale_should_retry), not the full 3-attempt budget", async () => {

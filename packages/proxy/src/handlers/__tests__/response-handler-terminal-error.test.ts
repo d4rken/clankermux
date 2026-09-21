@@ -875,3 +875,110 @@ describe("final client stream alert quality", () => {
 		expect(getClientStreamOutcomeCounts()).toEqual(before);
 	});
 });
+
+describe("stream-cut reason reaches the recorder", () => {
+	it("a mid-stream cut with no provider error records the computed read reason", async () => {
+		const { ctx, calls } = makeStreamCtx("anthropic");
+		await drain(
+			await forward(anthropicStream({ messageStop: false }), ctx, {
+				requestId: "cut-transport",
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("error");
+		expect(calls.finishTransport[0]?.errorMessage).toBe("stream_read_error");
+	});
+
+	it("a native passthrough cut after response.failed records that classification", async () => {
+		const { ctx, calls } = makeStreamCtx("codex");
+		const chunks = codexChunks({ terminalEvent: false });
+		chunks.push(
+			'event: response.failed\ndata: {"type":"response.failed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}\n\n',
+		);
+		await drain(
+			await forward(streamFrom(chunks, { error: readError() }), ctx, {
+				requestId: "cut-native-failed",
+				nativeResponses: true,
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("error");
+		expect(calls.finishTransport[0]?.errorMessage).toBe(
+			"native_responses_stream_failed",
+		);
+	});
+
+	it("an in-band SSE error keeps its parsed type when the stream is also cut", async () => {
+		const { ctx, calls } = makeStreamCtx("devin");
+		const chunks = anthropicChunks({ messageStop: false });
+		chunks.push(
+			'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error"}}\n\n',
+		);
+		await drain(
+			await forward(streamFrom(chunks, { error: readError() }), ctx, {
+				requestId: "cut-sse-error",
+				accountProvider: "devin",
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("error");
+		expect(calls.finishTransport[0]?.errorMessage).toBe(
+			"invalid_request_error",
+		);
+	});
+
+	it("a sniffed overload frame reaches history instead of a generic label", async () => {
+		const { ctx, calls } = makeStreamCtx("anthropic");
+		const chunks = anthropicChunks({ messageStop: false });
+		chunks.push(
+			'event: error\ndata: {"type":"error","error":{"type":"overloaded_error"}}\n\n',
+		);
+		await drain(
+			await forward(streamFrom(chunks, { error: readError() }), ctx, {
+				requestId: "cut-overloaded",
+				disableCooldown: true,
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("error");
+		expect(calls.finishTransport[0]?.errorMessage).toBe("overloaded_error");
+	});
+
+	it("a completed-then-cut stream carries no error message", async () => {
+		const { ctx, calls } = makeStreamCtx("codex");
+		await drain(
+			await forward(codexStream({ terminalEvent: true }), ctx, {
+				requestId: "cut-after-terminal",
+				nativeResponses: true,
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("success");
+		expect(calls.finishTransport[0]?.errorMessage).toBeUndefined();
+	});
+
+	it("disconnect and timeout keep the recorder's own generic labels", async () => {
+		const cancelled = makeStreamCtx("codex");
+		const response = await forward(
+			streamFrom(codexChunks({ terminalEvent: false }).slice(0, 1), {
+				hang: true,
+			}),
+			cancelled.ctx,
+			{ requestId: "cut-cancel", nativeResponses: true },
+		);
+		if (!response.body) throw new Error("expected streaming response");
+		const reader = response.body.getReader();
+		await reader.read();
+		await reader.cancel();
+		expect(cancelled.calls.finishTransport[0]?.outcome).toBe("disconnect");
+		expect(cancelled.calls.finishTransport[0]?.errorMessage).toBeUndefined();
+
+		const timedOut = makeStreamCtx("codex");
+		await drain(
+			await forward(
+				streamFrom(codexChunks({ terminalEvent: false }), {
+					error: new Error("Stream timeout: no data received for 300000ms"),
+				}),
+				timedOut.ctx,
+				{ requestId: "cut-timeout", nativeResponses: true },
+			),
+		);
+		expect(timedOut.calls.finishTransport[0]?.outcome).toBe("timeout");
+		expect(timedOut.calls.finishTransport[0]?.errorMessage).toBeUndefined();
+	});
+});

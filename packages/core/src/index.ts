@@ -119,6 +119,7 @@ export {
 	isInvalidGrantMessage,
 	logError,
 	ModelNotServedError,
+	ModelSubstitutedError,
 	OAuthError,
 	OAuthRefreshTokenError,
 	PAUSE_REASON_NEEDS_REAUTH,
@@ -217,6 +218,7 @@ export {
 	LATEST_SONNET_MODEL,
 	MODEL_DISPLAY_NAMES,
 	MODEL_SHORT_NAMES,
+	stripDatedModelSuffix,
 } from "./models";
 export {
 	type ClassBudget,
@@ -288,6 +290,11 @@ export { providerDisplayName } from "./provider-display";
 // an unexported module here is unreachable from http-api.
 export * from "./quota-drift";
 export * from "./rate-limit-status";
+export {
+	getAliasReasoningEfforts,
+	getModelReasoningEfforts,
+	resolveTargetReasoningProfile,
+} from "./reasoning-profiles";
 export * from "./request-events";
 export * from "./routing";
 export {

@@ -122,6 +122,33 @@ describe("all-accounts-failed terminal", () => {
 		expect(meta.failoverAttempts).toBe(1);
 	});
 
+	it("carries re-check advice on the give-up throw", async () => {
+		globalThis.fetch = upstreamOnlyFetch(async () => unauthorized());
+		const account = makeAccount();
+		usageCache.delete(account.id);
+		const ctx = makeContext([account]);
+
+		// Asserted on the thrown error rather than on the 503 the dispatcher
+		// builds from it: a stub installed elsewhere in this suite replaces that
+		// module wholesale, so driving it here would not exercise the real
+		// mapping.
+		const thrown = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		).then(
+			() => null,
+			(err: unknown) => err,
+		);
+
+		expect(thrown).toBeInstanceOf(Error);
+		// Without it the 503 reaches a retry loop with no pacing at all and is
+		// re-sent immediately against an unchanged pool.
+		expect(
+			(thrown as { retryAfterSeconds?: number }).retryAfterSeconds,
+		).toBeGreaterThan(0);
+	});
+
 	it("records the OAuth-expired terminal under its own distinct label", async () => {
 		globalThis.fetch = upstreamOnlyFetch(async () => unauthorized());
 		// An OAuth account whose refresh token is far past its max age: the

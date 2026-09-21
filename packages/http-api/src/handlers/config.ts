@@ -12,10 +12,14 @@ import {
 	clampRiskFactor,
 	KEEPALIVE_REFRESH_1H_MS,
 	MAX_BRIDGE_HOURS,
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	riskFactorToBridgeHours,
 	unmatchedPathTracker,
 } from "@clankermux/proxy";
-import { DEFAULT_PROJECT_ROOTS } from "@clankermux/types";
+import {
+	DEFAULT_PROJECT_ROOTS,
+	parseModelSubstitutionException,
+} from "@clankermux/types";
 import type {
 	ProjectRulesGetResponse,
 	RetentionGetResponse,
@@ -46,6 +50,14 @@ function cacheWarmingResponse(config: Config): Record<string, unknown> {
 export function createConfigHandlers(
 	config: Config,
 	_runtime?: { port: number; tlsEnabled: boolean },
+	/**
+	 * Only the substitution-mode setter needs it, to release the suppressions
+	 * enforcement wrote. Optional so the existing positional callers and every
+	 * test that constructs these handlers are unaffected.
+	 */
+	routing?: {
+		clearModelSuppressionsByReason: (reason: string) => Promise<void>;
+	},
 ) {
 	return {
 		/**
@@ -200,6 +212,100 @@ export function createConfigHandlers(
 
 		getCacheWarming: (): Response => {
 			return jsonResponse(cacheWarmingResponse(config));
+		},
+
+		getServedModelSubstitutionMode: (): Response =>
+			jsonResponse({
+				servedModelSubstitutionMode: config.getServedModelSubstitutionMode(),
+				servedModelSubstitutionExceptions:
+					config.getServedModelSubstitutionExceptions(),
+			}),
+
+		setServedModelSubstitutionMode: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+			// The exception list travels with the mode because it only means
+			// anything relative to it: "accepted" is a statement about what
+			// enforcement skips.
+			//
+			// Both fields are validated before either is written. A body carrying a
+			// good list and a bad mode would otherwise persist the list and answer
+			// 400, leaving the operator's next read disagreeing with the error they
+			// were just shown.
+			const wantsExceptions = body.exceptions !== undefined;
+			if (wantsExceptions) {
+				if (
+					!Array.isArray(body.exceptions) ||
+					body.exceptions.some((entry: unknown) => typeof entry !== "string")
+				) {
+					return errorResponse(
+						BadRequest("Invalid 'exceptions': must be an array of strings"),
+					);
+				}
+				// Reject rather than silently drop: an operator who typed a rule
+				// that does nothing would otherwise see it vanish with no reason
+				// given, and conclude the feature is broken.
+				const invalid = (body.exceptions as string[]).filter(
+					(entry) =>
+						entry.trim().length > 0 &&
+						parseModelSubstitutionException(entry) === null,
+				);
+				if (invalid.length > 0) {
+					return errorResponse(
+						BadRequest(
+							`Invalid exception${invalid.length > 1 ? "s" : ""}: ${invalid.join(", ")}. Use "sent>served"; "*" matches any model on one side, not both.`,
+						),
+					);
+				}
+			}
+			// A list-only edit leaves the mode alone; anything else must name a
+			// valid one.
+			const wantsMode = body.mode !== undefined || !wantsExceptions;
+			if (
+				wantsMode &&
+				body.mode !== "off" &&
+				body.mode !== "observe" &&
+				body.mode !== "enforce"
+			) {
+				return errorResponse(
+					BadRequest("Invalid 'mode': must be off|observe|enforce"),
+				);
+			}
+
+			// Either edit can invalidate a suppression enforcement already wrote:
+			// turning the mode down, or accepting the very swap that caused it.
+			// The suppression gates are unconditional, so without this the account
+			// stays out of rotation for the rest of its five-minute window and the
+			// setting reads as having done nothing — or worse, the operator sees
+			// the swap marked accepted while requests still fail over around it.
+			//
+			// Every substitution suppression goes, not only the newly-accepted
+			// pair: identifying "the rows this exception covers" would need the
+			// proxy's model normalisation down in the repository, and a pair that
+			// is still offending re-suppresses on its next request anyway. The
+			// cost of over-clearing is one extra upstream attempt.
+			let releaseSuppressions = false;
+			if (wantsExceptions) {
+				// Compared across the write, so both sides are the stored form. The
+				// setter trims, lowercases and dedupes, and re-deriving that here
+				// would make a cosmetic edit look like a real one.
+				const before = config.getServedModelSubstitutionExceptions().join("\n");
+				config.setServedModelSubstitutionExceptions(body.exceptions);
+				releaseSuppressions =
+					config.getServedModelSubstitutionExceptions().join("\n") !== before;
+			}
+			if (wantsMode) {
+				config.setServedModelSubstitutionMode(body.mode);
+				if (body.mode !== "enforce") releaseSuppressions = true;
+			}
+			if (releaseSuppressions)
+				await routing?.clearModelSuppressionsByReason(
+					MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+				);
+			return jsonResponse({
+				servedModelSubstitutionMode: config.getServedModelSubstitutionMode(),
+				servedModelSubstitutionExceptions:
+					config.getServedModelSubstitutionExceptions(),
+			});
 		},
 
 		setCacheWarming: async (req: Request): Promise<Response> => {

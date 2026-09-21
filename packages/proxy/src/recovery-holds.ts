@@ -215,6 +215,7 @@ export interface RecoveryHoldsDeps {
 	attemptThroughProbeGate: (
 		account: Account,
 		attempt: () => Promise<Response | null>,
+		options?: { reprobe?: boolean },
 	) => Promise<{ response: Response | null; suppressed: boolean }>;
 }
 
@@ -1043,31 +1044,44 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				})
 				.filter((x) => x.availableAt > nowMs);
 
+			// Two independent things can be worth waiting for: a cooldown deadline,
+			// and the verdict of an in-flight recovery probe on a candidate the last
+			// round could not attempt at all. Take whichever comes FIRST — a sibling
+			// whose deadline is hours out must not decide the wait when a probe is
+			// about to report.
+			const cooldownWaitMs =
+				unavailable.length > 0
+					? Math.max(
+							0,
+							Math.min(...unavailable.map((x) => x.availableAt)) - nowMs,
+						)
+					: null;
+			const probeWaitMs =
+				probeSuppressedIds.size > 0 ? OVERLOAD_HOLD_PROBE_POLL_MS : null;
+			const jitterMs = Math.floor(Math.random() * nonCodexJitterMs);
+
 			let waitMs: number;
 			// True when this pass exists ONLY to wait for an in-flight recovery
-			// probe (no cooldown deadline drove it). Such a pass must re-attempt
-			// exactly the suppressed candidates — see `probeSuppressedIds`.
-			const pollingForProbeVerdict = unavailable.length === 0;
-			if (pollingForProbeVerdict) {
-				// Nothing is cooling down. Normally that means there is nothing to
-				// wait for — unless the last round was recovery-probe suppressed, in
-				// which case an upstream probe IS in flight for a candidate that may
-				// serve this request; short-poll for its verdict instead.
-				if (probeSuppressedIds.size === 0) break;
-				waitMs =
-					OVERLOAD_HOLD_PROBE_POLL_MS +
-					Math.floor(Math.random() * nonCodexJitterMs);
+			// probe. Such a pass must re-attempt exactly the suppressed candidates —
+			// see `probeSuppressedIds`.
+			let pollingForProbeVerdict: boolean;
+			if (
+				probeWaitMs !== null &&
+				(cooldownWaitMs === null || probeWaitMs < cooldownWaitMs)
+			) {
+				pollingForProbeVerdict = true;
+				waitMs = probeWaitMs + jitterMs;
 				log.info(
 					`${label}: waiting ${waitMs}ms for an in-flight recovery probe`,
 				);
-			} else {
-				const soonest = Math.min(...unavailable.map((x) => x.availableAt));
-				waitMs =
-					Math.max(0, soonest - nowMs) +
-					Math.floor(Math.random() * nonCodexJitterMs);
+			} else if (cooldownWaitMs !== null) {
+				pollingForProbeVerdict = false;
+				waitMs = cooldownWaitMs + jitterMs;
 				log.info(
 					`${label}: waiting ${waitMs}ms for account(s): ${unavailable.map((x) => x.account.name).join(", ")}`,
 				);
+			} else {
+				break; // nothing cooling down and no verdict pending
 			}
 
 			if (waitMs > remaining) break; // soonest expiry is beyond budget
@@ -1160,42 +1174,48 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		signal: AbortSignal,
 	): Promise<ReprobeOutcome> => {
 		const captured: { outcome: ProxyAttemptOutcome | null } = { outcome: null };
-		const gated = await attemptThroughProbeGate(probeAccount, () => {
-			logFinalOrderOnce(probeAccount.id);
-			return proxyWithAccount(
-				req,
-				url,
-				probeAccount,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				0,
-				ctx,
-				null,
-				apiKeyId,
-				apiKeyName,
-				requestBodyContext,
-				false,
-				// `fromHold`: log-level only — this re-probe runs inside the burst
-				// hold, which reports its own outcome (see runBurstHold).
-				{
-					reprobe: true,
-					signal,
-					fromHold: true,
-					// No `forwardTransientServerError`: a 5xx on the held account is
-					// forwarded, as it is today. This closure is shared by BOTH
-					// `runBurstHold` callers and they disagree about what a failover
-					// would mean — the ordinary caller has a sibling loop behind it,
-					// while the zero-accounts storm-degrade path explicitly has none
-					// and would replace the real upstream error with the synthetic
-					// burst-retry give-up 429. Expressing that split needs the
-					// caller's disposition threaded in, which is not this change.
-					onOutcome: (outcome) => {
-						captured.outcome = outcome;
+		const gated = await attemptThroughProbeGate(
+			probeAccount,
+			() => {
+				logFinalOrderOnce(probeAccount.id);
+				return proxyWithAccount(
+					req,
+					url,
+					probeAccount,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					0,
+					ctx,
+					null,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					false,
+					// `fromHold`: log-level only — this re-probe runs inside the burst
+					// hold, which reports its own outcome (see runBurstHold).
+					{
+						reprobe: true,
+						signal,
+						fromHold: true,
+						// No `forwardTransientServerError`: a 5xx on the held account is
+						// forwarded, as it is today. This closure is shared by BOTH
+						// `runBurstHold` callers and they disagree about what a failover
+						// would mean — the ordinary caller has a sibling loop behind it,
+						// while the zero-accounts storm-degrade path explicitly has none
+						// and would replace the real upstream error with the synthetic
+						// burst-retry give-up 429. Expressing that split needs the
+						// caller's disposition threaded in, which is not this change.
+						onOutcome: (outcome) => {
+							captured.outcome = outcome;
+						},
 					},
-				},
-			);
-		});
+				);
+			},
+			// The gate arbitrates this attempt for single-flight only: probing a
+			// deadline that has not lapsed yet is the whole point of the hold.
+			{ reprobe: true },
+		);
 		if (gated.suppressed) return { kind: "suppressed" };
 		if (gated.response) return { kind: "response", response: gated.response };
 		// A null response is not itself burst evidence. Quota failures without a

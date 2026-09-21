@@ -2,6 +2,7 @@ import type {
 	AccountResponse,
 	CodexRateLimitResetCreditConsumeOutcome,
 	CodexResetCreditEventResponse,
+	DegradedAccount,
 	DevinGracePeriodStatus,
 } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
@@ -23,6 +24,7 @@ import { randomUUID } from "../../lib/uuid";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { AccountPolicyChips } from "./AccountPolicyChips";
+import { DegradedChip } from "./DegradedChip";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
 import { StatusChip } from "./StatusChip";
 
@@ -84,6 +86,13 @@ interface AccountStatusChipsProps {
 	showAccountDetails?: boolean;
 	/** Usage focuses on capacity and active problems, omitting account settings. */
 	variant?: "account" | "usage";
+	/**
+	 * This account's entry from the substitution endpoint, or undefined when it
+	 * is not currently degraded. A prop rather than a hook call, matching every
+	 * other card in the dashboard: the page owns the query so one fetch serves
+	 * the whole list instead of one per row.
+	 */
+	degraded?: DegradedAccount;
 }
 
 /**
@@ -558,6 +567,7 @@ export function AccountStatusChips({
 	status: providedStatus,
 	showAccountDetails = true,
 	variant = "account",
+	degraded,
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
 	const isUsage = variant === "usage";
@@ -773,6 +783,10 @@ export function AccountStatusChips({
 					Duplicate
 				</StatusChip>
 			)}
+			{/* Transient like the pills above it, and placed among them rather than
+			    with the configuration flags: it describes what the provider is
+			    doing to this account right now, not how the account is set up. */}
+			{!isUsage && <DegradedChip degraded={degraded} />}
 			{/* The account's automation-flag inventory, always last: the pills above
 			    are transient state, these are configuration. A fragment, so they
 			    wrap as individual flex items of this row rather than as a block. */}

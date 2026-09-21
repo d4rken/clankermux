@@ -204,6 +204,9 @@ describe("pin-transient hold", () => {
 			expect(res.headers.get("x-clankermux-pool-status")).toBe(
 				"pinned-target-unavailable",
 			);
+			// Retryable, so it has to pace: a 503 with no Retry-After is re-sent
+			// straight back at a pin that has not changed.
+			expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(0);
 		} finally {
 			clearTimeout(timer);
 		}

@@ -24,7 +24,7 @@ import type { Account } from "@clankermux/types";
 export function createBurstRetryGiveUpResponse(heldAccount: Account): Response {
 	const now = Date.now();
 	const until = heldAccount.rate_limited_until ?? now + 30_000;
-	const retryAfterSeconds = Math.max(1, Math.round((until - now) / 1000));
+	const retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
 	return new Response(
 		JSON.stringify({
 			type: "error",

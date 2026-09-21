@@ -3,6 +3,7 @@ import {
 	registerUIRefresh,
 	servableClassFor,
 } from "@clankermux/core";
+import type { DegradedAccount } from "@clankermux/types";
 import { useEffect, useMemo, useState } from "react";
 import type { Account } from "../../api";
 import {
@@ -23,6 +24,13 @@ interface AccountListProps {
 	 * long enough to serve yesterday's order beside today's dates.
 	 */
 	sortMode: AccountListSortMode;
+	/**
+	 * Accounts a provider is currently answering with a different model, keyed by
+	 * account id. Supplied by the tab rather than fetched here: this component is
+	 * rendered in tests without a QueryClient, and a self-fetching list would
+	 * also re-run the scan for every mount of it.
+	 */
+	degradedByAccount?: ReadonlyMap<string, DegradedAccount>;
 	forcedAccountId?: string | null;
 	onForceAccount?: (account: Account) => void;
 	onDisabledToggle?: (account: Account) => void;
@@ -55,6 +63,7 @@ interface AccountListProps {
 export function AccountList({
 	accounts,
 	sortMode,
+	degradedByAccount,
 	forcedAccountId,
 	onForceAccount,
 	onPauseToggle,
@@ -154,6 +163,7 @@ export function AccountList({
 					key={account.name}
 					account={account}
 					isForced={account.id === forcedAccountId}
+					degraded={degradedByAccount?.get(account.id)}
 					earliestResets={resetExtremes.earliest}
 					latestResets={resetExtremes.latest}
 					poolScopedFamilies={

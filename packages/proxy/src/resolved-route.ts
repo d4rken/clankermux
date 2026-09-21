@@ -31,6 +31,21 @@ export class RoutingPolicyError extends Error {
 		this.name = "RoutingPolicyError";
 	}
 }
+/**
+ * Raised when route construction finds every candidate held back by a
+ * substitution suppression.
+ *
+ * A RoutingPolicyError subclass so it inherits the snapshot/ruleId plumbing and
+ * every existing catch site keeps working, but 503 rather than 403: nothing is
+ * wrong with the request or the permissions, the provider is swapping models and
+ * the condition clears on its own. A 403 here would also be the answer for the
+ * whole suppression window AFTER the first request correctly returned a 503,
+ * which is the inconsistency this class exists to close.
+ */
+export class ModelSubstitutionRouteError extends RoutingPolicyError {
+	override readonly code = "model_substituted";
+	override readonly statusCode = 503;
+}
 export class ChatCapabilityError extends RoutingPolicyError {
 	override readonly code = "unsupported_parameter";
 	override readonly statusCode = 400;
@@ -71,6 +86,14 @@ export interface BuildRouteInput {
 	 */
 	priorExclusions?: ReadonlyMap<string, string>;
 	suppressedPairs?: ReadonlySet<string>;
+	/**
+	 * The subset of {@link suppressedPairs} suppressed because the upstream
+	 * SUBSTITUTED the model rather than refusing it. Carried separately so a
+	 * route emptied entirely by those raises the substitution terminal instead of
+	 * a 403 that says the destination no longer permits the model — the two read
+	 * completely differently to a client, and only one of them is retryable.
+	 */
+	substitutedPairs?: ReadonlySet<string>;
 	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
 	excludeOfficialAnthropic?: boolean;
@@ -223,6 +246,8 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	};
 	let unsupportedProvider = false;
 	let unsupportedField: string | null = null;
+	/** Accounts dropped because the upstream substituted the model on them. */
+	let substitutedExclusions = 0;
 	for (const account of input.accounts) {
 		const blocked = destinationExclusionReason(account, input, winning);
 		if (blocked) {
@@ -256,9 +281,15 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 				JSON.stringify([account.id, resolved.upstreamModel]),
 			)
 		) {
+			const substituted = input.substitutedPairs?.has(
+				JSON.stringify([account.id, resolved.upstreamModel]),
+			);
+			if (substituted) substitutedExclusions++;
 			exclude(
 				account,
-				`model "${resolved.upstreamModel}" is suppressed on this account`,
+				substituted
+					? `upstream answered as a different model than "${resolved.upstreamModel}" on this account`
+					: `model "${resolved.upstreamModel}" is suppressed on this account`,
 			);
 			continue;
 		}
@@ -290,15 +321,32 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	if (!targets.size) {
 		const error = unsupportedField
 			? new ChatCapabilityError(unsupportedField, input.requestedModel)
-			: unsupportedProvider
-				? new RoutingPolicyError(
-						`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
+			: // EVERY account that was dropped, was dropped because the provider
+				// substituted the model on it. Reporting that as a 403 permission
+				// problem would be both wrong and non-retryable, and it is the
+				// answer a client gets for the whole five-minute suppression
+				// window after the first request returned the 503.
+				//
+				// `priorExclusions` counts too: an account this call never even
+				// considered — excluded earlier by an API-key destination, say —
+				// is still a reason the pool is empty that has nothing to do with
+				// substitution, and ignoring it would claim a substitution
+				// diagnosis for a mixed-cause emptying.
+				substitutedExclusions > 0 &&
+					substitutedExclusions ===
+						exclusions.length + (input.priorExclusions?.size ?? 0)
+				? new ModelSubstitutionRouteError(
+						`Every destination for model "${input.requestedModel}" is held back because the provider answered as a different model. This clears on its own; retrying later may reach an account it does not substitute for.`,
 					)
-				: new RoutingPolicyError(
-						`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
-							[...(input.priorExclusions?.values() ?? []), ...exclusions],
-						)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
-					);
+				: unsupportedProvider
+					? new RoutingPolicyError(
+							`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
+						)
+					: new RoutingPolicyError(
+							`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
+								[...(input.priorExclusions?.values() ?? []), ...exclusions],
+							)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
+						);
 		error.routeSnapshot = new ResolvedRoute(input, winning, targets).snapshot;
 		error.ruleId = winning?.id ?? null;
 		if (input.alias) return new ResolvedRoute(input, winning, targets, error);

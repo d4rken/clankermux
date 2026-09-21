@@ -578,9 +578,13 @@ describe("proxyWithAccount — reprobe mode", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {
+	it("a TRANSIENT reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {
+		// A STILL-transient re-probe: the gentle treatment (no streak, no anchor,
+		// no DB write) is reserved for the 429s the classifier calls retryable.
 		globalThis.fetch = mockFetch(
-			mock(async () => rl429Response({ "retry-after": "30" })),
+			mock(async () =>
+				rl429Response({ "retry-after": "30", "x-should-retry": "true" }),
+			),
 		);
 
 		const account = makeOAuthAnthropicAccount({
@@ -620,6 +624,52 @@ describe("proxyWithAccount — reprobe mode", () => {
 			typeof mock
 		>;
 		expect(markMock.mock.calls).toHaveLength(0);
+	});
+
+	it("a non-transient reprobe 429 persists the deadline without escalating the streak", async () => {
+		// Nothing here reads as a burst: no fresh headroom and no `x-should-retry`,
+		// so classify429Transient reports no_headroom_no_retry_hint. The verdict
+		// has to be written down (it used to die with the request) and reported as
+		// terminal so the hold stops re-probing — while the re-probe promise that a
+		// bounded retry never inflates the backoff tier still holds.
+		globalThis.fetch = mockFetch(
+			mock(async () => rl429Response({ "retry-after": "30" })),
+		);
+
+		const account = makeOAuthAnthropicAccount({
+			consecutive_rate_limits: 2,
+			rate_limited_until: Date.now() + 5_000,
+		});
+		const ctx = makeProxyContext();
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const bodyBuffer = makeRequestBody();
+
+		await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ reprobe: true, onOutcome: (o) => outcomes.push(o) },
+		);
+
+		expect(outcomes.at(-1)?.kind).toBe("hard_429");
+		expect(account.consecutive_rate_limits).toBe(2);
+		const escalating = ctx.dbOps.markAccountRateLimited as ReturnType<
+			typeof mock
+		>;
+		expect(escalating.mock.calls).toHaveLength(0);
+		const deadlineOnly = ctx.dbOps
+			.markAccountRateLimitedDeadlineOnly as ReturnType<typeof mock>;
+		expect(deadlineOnly.mock.calls).toHaveLength(1);
 	});
 
 	it("clamps a multi-day retry-after on a reprobe 429 (it never reaches the evidence rungs)", async () => {

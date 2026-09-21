@@ -213,6 +213,38 @@ describe("published model metadata", () => {
 		).toEqual({});
 	});
 
+	it("intersects canonical efforts only for the Codex adapter family", async () => {
+		await loadCatalogue();
+		expect(
+			(
+				await resolveClientModelMetadata({
+					targetModel: "gpt-6-astra",
+					providers: ["codex"],
+				})
+			).supportedReasoningEfforts,
+		).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		expect(
+			(
+				await resolveClientModelMetadata({
+					targetModel: "gpt-6-astra",
+					providers: ["codex", "openrouter"],
+				})
+			).supportedReasoningEfforts,
+		).toBeUndefined();
+	});
+
+	it("does not infer effort support for an unknown provider", async () => {
+		await loadCatalogue();
+		expect(
+			(
+				await resolveClientModelMetadata({
+					targetModel: "gpt-6-astra",
+					providers: ["not-a-provider"],
+				})
+			).supportedReasoningEfforts,
+		).toBeUndefined();
+	});
+
 	it("publishes the verified Codex ceiling rather than the client default", async () => {
 		await loadCatalogue();
 		const metadata = await resolveClientModelMetadata({

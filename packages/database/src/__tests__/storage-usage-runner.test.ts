@@ -15,7 +15,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { dirname, join } from "node:path";
 import { tempDbTracker } from "@clankermux/test-support";
-import { runStorageUsageScanInWorker } from "../storage-usage-runner";
+import {
+	runStorageUsageScanInWorker,
+	validateScanTables,
+} from "../storage-usage-runner";
 
 const tmpDb = tempDbTracker("test-storage-usage-worker");
 
@@ -58,7 +61,10 @@ describe("runStorageUsageScanInWorker", () => {
 		expect(empties?.approxBytes).toBe(0);
 	});
 
-	it("returns zeros for a missing table instead of failing the scan", async () => {
+	it("fails the whole scan for a missing table rather than reporting it as empty", async () => {
+		// Zeros from a table that could not be measured are indistinguishable
+		// from zeros from a table that is genuinely empty, and the card renders
+		// both as a measured size. The measurement is all-or-nothing instead.
 		const path = tmpDb.next();
 		seedDb(path);
 
@@ -69,16 +75,24 @@ describe("runStorageUsageScanInWorker", () => {
 			],
 		});
 
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error).toContain("no_such_table");
+	});
+
+	it("still reports genuine zeros for a table that exists and is empty", async () => {
+		const path = tmpDb.next();
+		seedDb(path);
+
+		const result = await runStorageUsageScanInWorker(path, {
+			tables: [{ key: "empties", table: "empties" }],
+		});
+
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
-		expect(result.types.find((t) => t.key === "ghost")).toEqual({
-			key: "ghost",
-			table: "no_such_table",
-			rowCount: 0,
-			approxBytes: 0,
-		});
-		// The good table still measured.
-		expect(result.types.find((t) => t.key === "things")?.rowCount).toBe(3);
+		expect(result.types).toEqual([
+			{ key: "empties", table: "empties", rowCount: 0, approxBytes: 0 },
+		]);
 	});
 
 	it("reports ok:false when the file cannot be opened", async () => {
@@ -152,5 +166,65 @@ describe("runStorageUsageScanInWorker", () => {
 			blocker.exec("ROLLBACK");
 			blocker.close();
 		}
+	});
+});
+
+describe("validateScanTables", () => {
+	const requested = [
+		{ key: "things", table: "things" },
+		{ key: "empties", table: "empties" },
+	];
+
+	function measured(
+		over: Array<
+			Partial<{
+				key: string;
+				table: string;
+				rowCount: number;
+				approxBytes: number;
+			}>
+		> = [],
+	) {
+		return [
+			{ key: "things", table: "things", rowCount: 3, approxBytes: 153 },
+			{ key: "empties", table: "empties", rowCount: 0, approxBytes: 0 },
+		].map((row, i) => ({ ...row, ...(over[i] ?? {}) }));
+	}
+
+	it("accepts a complete, correctly identified result", () => {
+		expect(validateScanTables(requested, measured())).toBeNull();
+	});
+
+	it("rejects a short result", () => {
+		expect(validateScanTables(requested, measured().slice(0, 1))).toContain(
+			"1 of 2",
+		);
+	});
+
+	it("rejects a result whose entry names a different table", () => {
+		expect(
+			validateScanTables(requested, measured([{ table: "somewhere_else" }])),
+		).toContain("somewhere_else");
+	});
+
+	it("rejects a duplicated table", () => {
+		const dup = measured();
+		dup[1] = { ...dup[0] };
+		expect(validateScanTables(requested, dup)).toContain("things");
+	});
+
+	it("rejects non-numeric or negative measurements", () => {
+		expect(
+			validateScanTables(requested, measured([{ rowCount: Number.NaN }])),
+		).toContain("things");
+		expect(
+			validateScanTables(
+				requested,
+				measured([{ approxBytes: Number.POSITIVE_INFINITY }]),
+			),
+		).toContain("things");
+		expect(
+			validateScanTables(requested, measured([{ approxBytes: -1 }])),
+		).toContain("things");
 	});
 });

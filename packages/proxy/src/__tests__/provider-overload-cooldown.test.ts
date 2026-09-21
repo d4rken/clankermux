@@ -19,12 +19,14 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getOverloadDiagnostics,
 	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadSnapshot,
 	getProviderOverloadUntil,
 	inspectProviderOverload,
 	isProviderOverloaded,
 	type OverloadProbeToken,
+	PROBE_ADMISSION_TTL_MS,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 
@@ -880,6 +882,149 @@ describe("family-scoped overload breaker", () => {
 			clearProviderOverloadCooldown("claude-oauth");
 			expect(getProviderOverloadUntil("anthropic", now)).toBeNull();
 			expect(getProviderOverloadSnapshot("anthropic", now)).toEqual([]);
+		});
+	});
+
+	describe("probe admission deadline", () => {
+		it("displaces and aborts a probe that produced no health evidence", () => {
+			// An upstream that accepts the connection and never sends response
+			// headers settles nothing, so before the admission deadline existed it
+			// held the bucket for the full safety TTL — an hour of every other
+			// same-family request being refused by the very breaker that is
+			// supposed to be testing recovery.
+			const until = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now = until + 1;
+			let aborts = 0;
+			const wedged = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						aborts += 1;
+					},
+				}),
+			);
+
+			// Up to the deadline the bucket stays strictly single-flight.
+			now += PROBE_ADMISSION_TTL_MS - 1;
+			expect(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now),
+			).toEqual({ admitted: false, reason: "probe-active", until: null });
+			expect(aborts).toBe(0);
+			const [beforeDeadline] = getOverloadDiagnostics(now);
+			expect(beforeDeadline?.lease?.admissionTtlMs).toBe(
+				PROBE_ADMISSION_TTL_MS,
+			);
+			expect(beforeDeadline?.lease?.blocksAdmission).toBe(true);
+
+			// Past it the replacement takes the bucket and the wedged attempt is
+			// aborted rather than left outstanding next to it.
+			now += 2;
+			const replacement = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now),
+			);
+			expect(replacement).not.toBeNull();
+			expect(aborts).toBe(1);
+
+			// The displaced probe eventually reports. It must not clear the bucket
+			// out from under the generation the replacement holds.
+			completeProviderOverloadProbe(wedged, "recovered");
+			expect(
+				inspectProviderOverload("anthropic", "claude-haiku-4-5", now).state,
+			).toBe("half-open");
+
+			completeProviderOverloadProbe(replacement, "recovered");
+			expect(
+				inspectProviderOverload("anthropic", "claude-haiku-4-5", now).state,
+			).toBe("closed");
+		});
+
+		it("a re-trip cancels the probe it displaces, and exempts the reporter", () => {
+			// A late 529 from an older request replaces the bucket, and with it B's
+			// lease — the only handle on B's upstream request. Dropping the
+			// canceller there leaves B running where the next admission can no
+			// longer find it, which is how outstanding requests accumulate against
+			// a wedged upstream.
+			const until = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now = until + 1;
+			let aborts = 0;
+			const wedged = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						aborts += 1;
+					},
+				}),
+			);
+
+			// The reporter is NOT the lease holder: an older attempt's 529 arrives.
+			const reopened = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			expect(aborts).toBe(1);
+
+			// …and the request that reports its OWN overload is exempt: its 529 is
+			// forwarded from the very response it is reporting on.
+			now = reopened + 1;
+			let selfAborts = 0;
+			const reporter = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						selfAborts += 1;
+					},
+				}),
+			);
+			applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+				{ probeId: reporter?.probeId },
+			);
+			expect(selfAborts).toBe(0);
+			expect(aborts).toBe(1);
+
+			// Both late completions are no-ops: the re-trips bumped the generation.
+			completeProviderOverloadProbe(wedged, "recovered");
+			completeProviderOverloadProbe(reporter, "recovered");
+			expect(
+				inspectProviderOverload("anthropic", "claude-haiku-4-5", now).state,
+			).toBe("open");
+		});
+
+		it("does not abort a probe that settled before the deadline", () => {
+			const until = applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now = until + 1;
+			let aborts = 0;
+			const token = expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now, {
+					onDisplaced: () => {
+						aborts += 1;
+					},
+				}),
+			);
+			completeProviderOverloadProbe(token, "reopened");
+
+			applyProviderOverloadCooldown(
+				"anthropic",
+				now + 60_000,
+				"claude-haiku-4-5",
+			);
+			now += 60_001 + PROBE_ADMISSION_TTL_MS;
+			expectAdmitted(
+				tryAcquireProviderOverloadProbe("anthropic", "claude-haiku-4-5", now),
+			);
+			expect(aborts).toBe(0);
 		});
 	});
 

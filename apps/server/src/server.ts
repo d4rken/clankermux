@@ -1628,21 +1628,40 @@ export default async function startServer(options?: {
 	}, MEMORY_MONITOR_INTERVAL_MS);
 	memoryMonitorInterval.unref();
 
-	// Warn loudly if bound to a non-loopback address. The management surface
-	// (/api/*) is unauthenticated by design — trust boundary is "can you reach
-	// the port" — so anything besides loopback exposes account management,
-	// debug endpoints, key administration, and request logs to the network.
-	// Operators should put a reverse proxy with auth in front for non-local
-	// deployments.
+	// Startup diagnostic, fired when this process is bound off loopback and no
+	// management password is set. Never awaited: the lookup is a DB read that
+	// can queue behind write contention for minutes, and nothing else in
+	// startup depends on its answer.
 	const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
 	if (!loopbackHosts.has(hostname)) {
-		log.warn(
-			`ClankerMux is bound to '${hostname}' and the management API ` +
-				"(/api/*) is unauthenticated. Anyone who can reach this port can " +
-				"manage accounts, create/revoke API keys, read request logs, and " +
-				"download heap snapshots. Bind to localhost (set CLANKERMUX_HOST=127.0.0.1) " +
-				"or put ClankerMux behind a reverse proxy that enforces authentication.",
-		);
+		void sessionAuth
+			.isConfigured()
+			.then(
+				(managementPasswordSet) => {
+					if (managementPasswordSet) return;
+					log.warn(
+						`ClankerMux is bound to '${hostname}' and no management password is ` +
+							"set, so the management API (/api/*) admits anyone who can reach " +
+							"this port: account management, API key creation and revocation, " +
+							"request logs, and heap snapshots. Set one with " +
+							"`bun run auth:password --set`, bind to localhost (set " +
+							"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
+							"proxy that enforces authentication.",
+					);
+				},
+				(err) => {
+					log.warn(
+						`ClankerMux is bound to '${hostname}' and could not determine ` +
+							`whether a management password is set (${err}). If none is, the ` +
+							"management API (/api/*) admits anyone who can reach this port; " +
+							"check with `bun run auth:password --status`.",
+					);
+				},
+			)
+			// log.warn emits synchronously to subscribers this module does not own,
+			// so a throwing subscriber would surface as an unhandled rejection on a
+			// chain nothing awaits.
+			.catch(() => {});
 	}
 
 	// Log server startup (async)
