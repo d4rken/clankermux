@@ -70,6 +70,7 @@ import {
 	PIN_HOLD_MAX_MS,
 	type RecoveryHolds,
 } from "./recovery-holds";
+import { retryAfterFromDeadlines } from "./retry-after";
 
 // Same channel name as handleProxy's own logger: this module was carved out of
 // it, and the log lines below must keep their historical prefix.
@@ -172,6 +173,19 @@ export async function resolveZeroAccountsOutcome(
 		logFinalOrderOnce,
 		attemptThroughProbeGate,
 	} = deps;
+
+	// Re-check advice for the pinned terminals below: the earliest dated blocker
+	// this call can see, which is a cooldown on a candidate account or a
+	// provider-overload deadline. Nothing dated (a paused account, a rejected
+	// pin header, an empty selection) falls back to the default interval.
+	const pinnedRetryAfterSeconds = () =>
+		retryAfterFromDeadlines(
+			[
+				...selectedAccounts.map((account) => account.rate_limited_until),
+				...providerOverloadedAccounts.map((overloaded) => overloaded.until),
+			],
+			Date.now(),
+		);
 
 	/** The one model an attempt against this account would send. */
 	const resolvedModelFor = (account: Account): string =>
@@ -317,6 +331,7 @@ export async function resolveZeroAccountsOutcome(
 	if (requestMeta.pinFailure) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(
 			requestMeta.pinFailure,
+			pinnedRetryAfterSeconds(),
 		);
 		await recordSyntheticErrorResponse(
 			pinnedResponse,
@@ -741,11 +756,14 @@ export async function resolveZeroAccountsOutcome(
 		(requestMeta.pin || requestMeta.excludeOfficialAnthropic) &&
 		!requestMeta.pinFailure
 	) {
-		const pinnedResponse = createPinnedTargetUnavailableResponse({
-			code: "pinned_target_unavailable",
-			message:
-				"The account/provider pinned to this API key has no available account for this request.",
-		});
+		const pinnedResponse = createPinnedTargetUnavailableResponse(
+			{
+				code: "pinned_target_unavailable",
+				message:
+					"The account/provider pinned to this API key has no available account for this request.",
+			},
+			pinnedRetryAfterSeconds(),
+		);
 		await recordSyntheticErrorResponse(
 			pinnedResponse,
 			"pinned_target_unavailable",

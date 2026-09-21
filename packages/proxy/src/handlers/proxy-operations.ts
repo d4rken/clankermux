@@ -3845,23 +3845,36 @@ export function createContextWindowExceededResponse(
  * account. `failure.code` becomes the error `type` so the operator sees exactly
  * which pin rule fired (pinned_account_missing / pinned_account_unavailable /
  * pinned_no_available_account / pinned_header_rejected / pinned_resolution_error).
+ *
+ * `retryAfterSeconds` is the caller's clamped re-check advice, derived from
+ * whatever dated blocker it can see; the default covers a refusal whose cause
+ * carries no date at all (a paused account, a rejected pin header).
  */
-export function createPinnedTargetUnavailableResponse(failure: {
-	code: string;
-	message: string;
-}): Response {
+export function createPinnedTargetUnavailableResponse(
+	failure: {
+		code: string;
+		message: string;
+	},
+	retryAfterSeconds: number = DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+): Response {
 	return new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
 				type: failure.code,
 				message: failure.message,
+				// A retryable 503 with no pacing invites an immediate re-send
+				// against unchanged state, so the header is always set — but a pin
+				// can stay unsatisfiable indefinitely, and the body says so rather
+				// than letting the header imply a recovery time.
+				availability_guaranteed: false,
 			},
 		}),
 		{
 			status: 503,
 			headers: {
 				"Content-Type": "application/json",
+				"Retry-After": String(retryAfterSeconds),
 				"x-clankermux-pool-status": "pinned-target-unavailable",
 			},
 		},

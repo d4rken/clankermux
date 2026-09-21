@@ -67,6 +67,7 @@ import {
 	getResolvedRoute,
 	RoutingPolicyError,
 } from "./resolved-route";
+import { retryAfterFromDeadlines } from "./retry-after";
 import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
@@ -423,11 +424,14 @@ async function handleIngestedProxy(
 			log.warn(
 				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a deny-official-anthropic (Codex CLI) request`,
 			);
-			return createPinnedTargetUnavailableResponse({
-				code: "anthropic_excluded_no_account",
-				message:
-					"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
-			});
+			return createPinnedTargetUnavailableResponse(
+				{
+					code: "anthropic_excluded_no_account",
+					message:
+						"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
+				},
+				retryAfterFromDeadlines([forcedAccount.rate_limited_until], Date.now()),
+			);
 		}
 
 		requestMeta.routing = {
@@ -1335,6 +1339,17 @@ async function handleIngestedProxy(
 		isRefreshTokenLikelyExpired(acc),
 	);
 
+	// Re-check advice carried on the give-up error so `dispatchProxyRequest` can
+	// pace the 503 it builds. An attempt that ended in a 429 leaves its cooldown
+	// on the account object, so the earliest of those is the one dated blocker
+	// this terminal knows about; a failure mode that dates nothing (expired
+	// tokens, upstream 5xx) gets the default interval.
+	const giveUpRetryAfterSeconds = () =>
+		retryAfterFromDeadlines(
+			allAttemptedAccounts.map((acc) => acc.rate_limited_until),
+			Date.now(),
+		);
+
 	/**
 	 * Write the give-up terminal into Request History, the way the synthetic 529s
 	 * already are. Without this the request is a log line only: the client gets a
@@ -1462,10 +1477,18 @@ async function handleIngestedProxy(
 		// itself stays account-independent so history's (error, account) grouping
 		// doesn't fragment per account list.
 		await recordGiveUpTerminal("oauth_tokens_expired", message);
-		throw new ServiceUnavailableError(message, ctx.provider.name);
+		throw new ServiceUnavailableError(
+			message,
+			ctx.provider.name,
+			giveUpRetryAfterSeconds(),
+		);
 	}
 
 	const exhaustedMessage = `${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`;
 	await recordGiveUpTerminal("all_accounts_failed", exhaustedMessage);
-	throw new ServiceUnavailableError(exhaustedMessage, ctx.provider.name);
+	throw new ServiceUnavailableError(
+		exhaustedMessage,
+		ctx.provider.name,
+		giveUpRetryAfterSeconds(),
+	);
 }
