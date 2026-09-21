@@ -134,6 +134,13 @@ export interface RequestData extends GatewayHintMetadata {
 	 */
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
+	/**
+	 * Character count of the inbound `x-codex-turn-state` header, never its
+	 * value. Absent on the usage-patch re-upsert like the two above, so it
+	 * COALESCEs the stored value. 0 and null mean different things — see
+	 * {@link codexTurnStateLength}.
+	 */
+	codexTurnStateLen?: number | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -197,12 +204,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_largest_tool_chars, context_largest_tool_name,
 					context_binary_chars, usage_finalized_at,
 					session_key, cache_prefix_hashes,
-					client_user_agent, client_harness,
+					client_user_agent, client_harness, codex_turn_state_len,
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
 					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -252,6 +259,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				cache_prefix_hashes = COALESCE(EXCLUDED.cache_prefix_hashes, requests.cache_prefix_hashes),
 				client_user_agent = COALESCE(EXCLUDED.client_user_agent, requests.client_user_agent),
 				client_harness = COALESCE(EXCLUDED.client_harness, requests.client_harness),
+				codex_turn_state_len = COALESCE(EXCLUDED.codex_turn_state_len, requests.codex_turn_state_len),
 				-- All four are facts that, once known, never become unknown again:
 				-- the usage-patch re-upsert carries no ingress facts and the ingress
 				-- upsert carries no response facts, so each side must preserve what
@@ -314,6 +322,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.cachePrefixHashes ? JSON.stringify(data.cachePrefixHashes) : null,
 				data.clientUserAgent ?? null,
 				data.clientHarness ?? null,
+				// `?? null`, NEVER `|| null`: 0 is "the header was present and
+				// empty", which the distribution has to keep apart from absent.
+				data.codexTurnStateLen ?? null,
 				data.stopReason ?? null,
 				data.refusalCategory ?? null,
 				// NULL, not 0, for "no credit": the column is a marker, and a 0

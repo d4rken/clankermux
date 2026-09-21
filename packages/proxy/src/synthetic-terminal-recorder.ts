@@ -1,4 +1,7 @@
-import { sanitizeRequestHeaders } from "@clankermux/http-common";
+import {
+	codexTurnStateLength,
+	sanitizeRequestHeaders,
+} from "@clankermux/http-common";
 import type { RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import type { RecordMeta } from "./request-recorder";
@@ -85,6 +88,7 @@ export function createSyntheticTerminalRecorder(
 			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 			clientUserAgent: requestMeta.clientUserAgent ?? null,
 			clientHarness: requestMeta.clientHarness ?? null,
+			codexTurnStateLen: codexTurnStateLength(req.headers),
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,
