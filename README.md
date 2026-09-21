@@ -18,9 +18,10 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](./LICENSE)
 
-A proxy for the model accounts you already pay for. Point your coding clients at
-one endpoint; ClankerMux spreads requests across the accounts, decides per
-client what each can reach, and shows you how much quota is left.
+A gateway that puts the model accounts you pay for behind one API. Your coding
+clients point at ClankerMux instead of a provider; it picks which account serves
+each request, tries another on rate limits or temporary failures, and enforces
+what each client may reach.
 
 ## Highlights
 
