@@ -158,7 +158,7 @@ function availableOnly(accs: Account[]): Account[] {
 function makeContext(
 	accounts: Account[],
 	opts: ContextOptions = {},
-): { ctx: ProxyContext; recordedErrors: string[] } {
+): { ctx: ProxyContext; recordedErrors: string[]; recordedIds: string[] } {
 	const {
 		providerName = "anthropic",
 		pin = null,
@@ -167,6 +167,7 @@ function makeContext(
 	} = opts;
 	const byId = new Map(accounts.map((a) => [a.id, a]));
 	const recordedErrors: string[] = [];
+	const recordedIds: string[] = [];
 	const strategy = heldAccountId
 		? {
 				select: (accs: Account[], meta: RequestMeta) => {
@@ -243,15 +244,16 @@ function makeContext(
 			finishTransport: mock(() => {}),
 			attachUsageSummary: mock(() => {}),
 			markUsageUnavailable: mock(() => {}),
-			recordSynthetic: mock((_meta: unknown, _kind: string, error: string) => {
+			recordSynthetic: mock((meta: unknown, _kind: string, error: string) => {
 				recordedErrors.push(error);
+				recordedIds.push((meta as { requestId: string }).requestId);
 			}),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
 		} as never,
 		server: { timeout: mock(() => {}) } as never,
 	};
-	return { ctx, recordedErrors };
+	return { ctx, recordedErrors, recordedIds };
 }
 
 function makeRequest(
@@ -616,6 +618,28 @@ describe("zero-accounts terminal recorder labels", () => {
 		expect(res.status).toBe(503);
 		expect(res.headers.get("x-clankermux-pool-status")).toBe("exhausted");
 		expect(recordedErrors).toEqual(["pool_exhausted"]);
+	});
+
+	it("answers a terminal with the id its row is written under", async () => {
+		// A refusal never passes through `forwardToClient`, which is where a
+		// forwarded response picks up this header. Without it the one answer a
+		// client cannot look up afterwards is the one it most needs to.
+		const { ctx, recordedIds } = makeContext(
+			[makeAccount({ paused: true, provider: "codex" })],
+			{ providerName: "codex" },
+		);
+
+		const res = await callHandleProxy(
+			makeRequest("claude-sonnet-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(res.status).toBe(503);
+		const header = res.headers.get("x-clankermux-request-id");
+		expect(header).toBeTruthy();
+		// Same id the row is keyed by, or the lookup it enables answers 404.
+		expect(recordedIds).toEqual([header as string]);
 	});
 
 	it("usage-throttled terminal records usage_throttled", async () => {

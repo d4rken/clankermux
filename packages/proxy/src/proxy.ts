@@ -69,6 +69,7 @@ import {
 	getResolvedRoute,
 	RoutingPolicyError,
 } from "./resolved-route";
+import { CLIENT_REQUEST_ID_HEADER } from "./response-handler";
 import { retryAfterFromDeadlines } from "./retry-after";
 import {
 	eligibleRouteAccounts,
@@ -255,6 +256,34 @@ export async function handleProxy(
 	 * also has to read a marker that OUTLIVES the request, because a
 	 * non-streaming response can be fully summarized before we get here.
 	 */
+	/**
+	 * Give a locally produced terminal the same request id a forwarded response
+	 * gets from `forwardToClient`, which a refusal never passes through.
+	 *
+	 * Without it the one kind of answer a client cannot look up afterwards is
+	 * the kind it most often needs to: it holds a refusal, no id, and no way to
+	 * ask what happened. Unconditional for the same reason the forwarded case
+	 * is: the header identifies the request, not a row. A request that Request
+	 * History filters out still answers with its id, and the lookup route's 404
+	 * keeps the meaning the published contract already gives it.
+	 */
+	const withRequestId = (response: Response): Response => {
+		if (response.headers.has(CLIENT_REQUEST_ID_HEADER)) return response;
+		try {
+			response.headers.set(CLIENT_REQUEST_ID_HEADER, requestMeta.id);
+		} catch (error) {
+			// A Response whose headers are guarded throws rather than ignoring the
+			// write. Losing the id is the status quo for this response; losing the
+			// response is not.
+			log.debug(
+				`Could not stamp the request id on a terminal response: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+		return response;
+	};
+
 	const retractIfNeverStarted = (statusCode: number | null): void => {
 		if (!announced) return;
 		if (consumeRequestStarted(requestMeta.id)) return;
@@ -277,7 +306,7 @@ export async function handleProxy(
 			burstHoldTimingOverride,
 		);
 		retractIfNeverStarted(response.status);
-		return response;
+		return withRequestId(response);
 	} catch (error) {
 		// A later alias stage can reject after an earlier attempt staged a cache body.
 		cacheBodyStore.discardStaged(requestMeta.id);
@@ -332,7 +361,7 @@ export async function handleProxy(
 				apiKeyId,
 				apiKeyName,
 			)(response, error.code);
-			return response;
+			return withRequestId(response);
 		}
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.

@@ -701,6 +701,15 @@ function applyPoolHeadroomHeaders(
 	return response;
 }
 
+/**
+ * The id a client looks its own request up by under `/client/v1/requests/{id}`.
+ *
+ * It identifies the REQUEST, not a stored row: it is set whether or not the
+ * request is one Request History keeps, so a 404 from that route still has the
+ * causes the published contract lists.
+ */
+export const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
 export async function forwardToClient(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
@@ -724,7 +733,7 @@ export async function forwardToClient(
 		//
 		// Not inside `applyPoolHeadroomHeaders`: that returns early for internal
 		// dispatches and for a null account, and the id depends on neither.
-		response.headers.set("x-clankermux-request-id", options.requestId);
+		response.headers.set(CLIENT_REQUEST_ID_HEADER, options.requestId);
 		return response;
 	} catch (err) {
 		// A throw during setup would otherwise orphan the probe lease until the
