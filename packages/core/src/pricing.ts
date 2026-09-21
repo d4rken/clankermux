@@ -315,18 +315,21 @@ BUNDLED_PRICING.minimax = {
 /**
  * Pricing for the Codex-served OpenAI models (dollars per 1M tokens).
  *
- * Scope is exactly the slug set in `MODEL_CONTEXT_WINDOWS` (model-mappings.ts) —
- * the models a Codex account can actually be routed to. A test asserts the two
- * lists stay in lockstep, so a new routable slug fails CI until it is priced
- * here. The keys are string literals rather than an import: pricing.ts must not
- * depend on model-mappings.ts, which builds a Logger at import time.
+ * Scope covers the slug set in `MODEL_CONTEXT_WINDOWS` (model-mappings.ts) —
+ * the models a Codex account can actually be routed to. A test asserts every
+ * one of those is priced here, so a new routable slug fails CI until it is. The
+ * converse does not hold: a slug may be priced here without being routable,
+ * because `requests.model` records the model the upstream NAMED, which need not
+ * be the one that was sent. The keys are string literals rather than an import:
+ * pricing.ts must not depend on model-mappings.ts, which builds a Logger at
+ * import time.
  *
- * Every rate is a VERBATIM snapshot of the models.dev base tier, not an
- * independent estimate. That is deliberate: bundled values only ever fill holes
- * (mergePricingData backfills per field, remote wins wherever it is defined), so
- * a bundled number that disagreed with remote would be a silent second opinion
- * that surfaces only when the network is down. Mirroring makes the merge a
- * no-op against a live catalogue.
+ * Every rate is a VERBATIM snapshot of the models.dev base tier unless its own
+ * comment says otherwise, not an independent estimate. That is deliberate:
+ * bundled values only ever fill holes (mergePricingData backfills per field,
+ * remote wins wherever it is defined), so a bundled number that disagreed with
+ * remote would be a silent second opinion that surfaces only when the network
+ * is down. Mirroring makes the merge a no-op against a live catalogue.
  *
  * `cache_write` is omitted wherever models.dev omits it. Codex uses an automatic
  * prompt cache and never reports cache-creation tokens, so `estimateCostUSD`
@@ -345,10 +348,9 @@ BUNDLED_PRICING.minimax = {
  */
 BUNDLED_PRICING.openai = {
 	models: {
-		// GPT-6 Astra: models.dev did not list it yet when this was added
-		// (2026-09-04), so these are the Standard-tier rates from OpenAI's own
-		// pricing page (input $10, cached $1, cache write $12.50, output $50),
-		// not a models.dev mirror. Remote still wins per field once it appears.
+		// Seeded from OpenAI's own Standard-tier pricing page on 2026-09-04,
+		// before models.dev listed the model. models.dev has since listed it at
+		// the same four rates, so this is a mirror again.
 		"gpt-6-astra": {
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",
@@ -359,34 +361,50 @@ BUNDLED_PRICING.openai = {
 				cache_write: 12.5,
 			},
 		},
+		// Priced but NOT routable: nothing here sends it. The Codex backend
+		// answers some `gpt-5.6-luna` sends with it, and `requests.model` takes
+		// the model `response.created` names. An ESTIMATE, not a mirror —
+		// neither models.dev nor OpenAI publishes a rate. It applies the one
+		// observed GPT-6 step to the tier below: astra is 2.5x sol on all four
+		// fields, so this is 2.5x luna.
+		"gpt-6-luna": {
+			id: "gpt-6-luna",
+			name: "GPT-6 Luna",
+			cost: {
+				input: 0.5,
+				output: 3,
+				cache_read: 0.05,
+				cache_write: 0.625,
+			},
+		},
 		"gpt-5.6-sol": {
 			id: "gpt-5.6-sol",
 			name: "GPT-5.6 Sol",
 			cost: {
-				input: 5,
-				output: 30,
-				cache_read: 0.5,
-				cache_write: 6.25,
+				input: 4,
+				output: 20,
+				cache_read: 0.4,
+				cache_write: 5,
 			},
 		},
 		"gpt-5.6-terra": {
 			id: "gpt-5.6-terra",
 			name: "GPT-5.6 Terra",
 			cost: {
-				input: 2.5,
-				output: 15,
-				cache_read: 0.25,
-				cache_write: 3.125,
+				input: 2,
+				output: 12,
+				cache_read: 0.2,
+				cache_write: 2.5,
 			},
 		},
 		"gpt-5.6-luna": {
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
 			cost: {
-				input: 1,
-				output: 6,
-				cache_read: 0.1,
-				cache_write: 1.25,
+				input: 0.2,
+				output: 1.2,
+				cache_read: 0.02,
+				cache_write: 0.25,
 			},
 		},
 		"gpt-5.5": {
