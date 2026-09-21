@@ -9,6 +9,7 @@ import {
 import type { ReactElement } from "react";
 import { useState } from "react";
 import { useStorageInfo, useTriggerIntegrityCheck } from "../../hooks/queries";
+import { ageLabel } from "../../lib/age-label";
 import { staleAgeLabel } from "../../lib/data-availability";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -17,11 +18,7 @@ function formatRelative(iso: string | null): string {
 	if (!iso) return "never";
 	const ts = Date.parse(iso);
 	if (Number.isNaN(ts)) return "—";
-	const deltaSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-	if (deltaSec < 60) return `${deltaSec}s ago`;
-	if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-	if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-	return `${Math.floor(deltaSec / 86400)}d ago`;
+	return ageLabel(ts, Date.now());
 }
 
 /**

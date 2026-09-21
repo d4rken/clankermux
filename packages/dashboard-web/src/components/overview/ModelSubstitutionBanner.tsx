@@ -2,8 +2,18 @@ import type { ModelSubstitutionPair } from "@clankermux/types";
 import { substitutionShare } from "@clankermux/types";
 import { ArrowDownRight } from "lucide-react";
 import { useModelSubstitutions } from "../../hooks/queries";
+import { ageLabel } from "../../lib/age-label";
 import { Button } from "../ui/button";
 import { useAcknowledgedSubstitutions } from "./useAcknowledgedSubstitutions";
+
+/**
+ * The window the list is drawn from, and the words the banner uses for it.
+ *
+ * Kept as one pair in one file: the copy states the bound, so a range changed
+ * without the prose is a banner that says the wrong number of hours.
+ */
+const RANGE = "24h";
+const RANGE_LABEL = "24 hours";
 
 /**
  * Presentational half, split out so both render directions can be asserted
@@ -16,9 +26,12 @@ import { useAcknowledgedSubstitutions } from "./useAcknowledgedSubstitutions";
  */
 export function ModelSubstitutionBannerView({
 	pairs,
+	now,
 	onAcknowledge,
 }: {
 	pairs: ModelSubstitutionPair[];
+	/** The page's clock, so every age on Overview advances on one tick. */
+	now: number;
 	onAcknowledge?: () => void;
 }) {
 	if (pairs.length === 0) return null;
@@ -32,10 +45,15 @@ export function ModelSubstitutionBannerView({
 				<p className="font-medium text-warning-strong">
 					A provider served a different model than it was asked for
 				</p>
+				{/* Bounded by the window, because that is the only claim these rows
+				    support: they are the whole range, never the server's `degraded`
+				    set, so the oldest can be most of a day old. Neither "still
+				    happening" nor "handled" fits — the suppression behind the latter
+				    is five minutes per hit, in `enforce` mode only. Each row's age
+				    is what answers it per pair. */}
 				<p className="text-muted-foreground">
-					These accounts answered as another model. Requests are routed around
-					them while it continues. Dismiss hides each pair below until a
-					different one appears.
+					These accounts answered as another model in the last {RANGE_LABEL}.
+					Dismiss hides each pair below until a different one appears.
 				</p>
 				<ul className="mt-item space-y-tight">
 					{pairs.map((pair) => (
@@ -55,6 +73,23 @@ export function ModelSubstitutionBannerView({
 							{" · "}
 							{pair.substituted} of {pair.comparable} requests (
 							{Math.round(substitutionShare(pair) * 100)}%)
+							{" · last seen "}
+							{/* The age ticks, and this list sits inside role="alert".
+							    A live region re-announces content that changes, so the
+							    ticking half is hidden from assistive tech and the
+							    absolute instant — which never changes — is read
+							    instead. Otherwise the whole warning is spoken again
+							    every clock tick, with nothing new to report. */}
+							<time
+								className="whitespace-nowrap"
+								dateTime={new Date(pair.lastAtMs).toISOString()}
+								title={new Date(pair.lastAtMs).toLocaleString()}
+							>
+								<span aria-hidden="true">{ageLabel(pair.lastAtMs, now)}</span>
+								<span className="sr-only">
+									{new Date(pair.lastAtMs).toLocaleString()}
+								</span>
+							</time>
 						</li>
 					))}
 				</ul>
@@ -90,15 +125,16 @@ export function unacknowledgedSubstitutions(
 	return pairs.filter((pair) => !pair.accepted && !isAcknowledged(pair));
 }
 
-export function ModelSubstitutionBanner() {
+export function ModelSubstitutionBanner({ now }: { now: number }) {
 	// Same range and therefore the same cache entry as the Accounts page uses,
 	// so opening both pages does not run the scan twice.
-	const { data } = useModelSubstitutions("24h");
+	const { data } = useModelSubstitutions(RANGE);
 	const { acknowledge, isAcknowledged } = useAcknowledgedSubstitutions();
 	const unseen = unacknowledgedSubstitutions(data?.pairs ?? [], isAcknowledged);
 	return (
 		<ModelSubstitutionBannerView
 			pairs={unseen}
+			now={now}
 			onAcknowledge={() => acknowledge(unseen)}
 		/>
 	);

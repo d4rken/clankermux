@@ -221,7 +221,7 @@ export const OverviewTab = React.memo(() => {
 
 			{/* Only renders for a substitution pair this browser has not been
 			    shown before; the standing condition lives on the Accounts chip */}
-			<ModelSubstitutionBanner />
+			<ModelSubstitutionBanner now={now} />
 
 			{/* Visually hidden, but structurally load-bearing. The shell already
 			    renders the page's only visible title as an h1, so printing
