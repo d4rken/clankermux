@@ -32,6 +32,7 @@ import {
 import {
 	APIRouter,
 	AuthService,
+	ClientRouter,
 	closeAllSseStreams,
 	PublicRouter,
 	refreshOpenRouterAccountsOnStartup,
@@ -953,6 +954,13 @@ export default async function startServer(options?: {
 		getStrategy: () => currentStrategy,
 	});
 
+	// The credential-scoped client API, a second sibling of the wire mounts. It
+	// is reached with the same client key the caller proxies AI traffic with, so
+	// like the widget surface it sits outside `/api/*` — the session gate is a
+	// path-prefix decision, and an exemption inside `/api/*` would be the only
+	// thing between a client key and the whole management surface.
+	const clientRouter = new ClientRouter({ config });
+
 	// Initialize AuthService for proxy authentication. It also answers the
 	// front door's `session` requirement for `/api/*`, so it is handed the same
 	// SessionAuthService the API router uses.
@@ -1482,8 +1490,10 @@ export default async function startServer(options?: {
 	const routerDeps: RequestRouterDeps = {
 		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
 		handlePublicRequest: (req, url) => publicRouter.handle(req, url),
-		authenticate: (req, path, method, requirement) =>
-			authService.authenticateRequest(req, path, method, requirement),
+		handleClientRequest: (req, url, apiKeyId) =>
+			clientRouter.handle(req, url, { apiKeyId }),
+		authenticate: (req, path, method, requirement, options) =>
+			authService.authenticateRequest(req, path, method, requirement, options),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
 			dispatchProxyRequest(req, url, proxyContext, apiKeyId, apiKeyName),
 		handleChatCompletions: (req, url, apiKeyId, apiKeyName) =>
