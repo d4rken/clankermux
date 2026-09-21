@@ -32,6 +32,7 @@ import {
 	clearAnthropicBurstThrottle,
 	resetHoldSlots,
 } from "../handlers/burst-cooldown";
+import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
@@ -354,6 +355,11 @@ describe("client-abort terminals", () => {
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
 		clearProviderOverloadCooldown();
+		// A burst cooldown arms the single-flight recovery marker, which is keyed
+		// by account id and deliberately never time-expires. These cases reuse the
+		// same ids with freshly-built accounts, so it has to be cleared between
+		// them or the previous case's marker gates the next one.
+		resetRateLimitProbeGatesForTests();
 		cacheBodyStore.setEnabled(false);
 	});
 
@@ -362,6 +368,7 @@ describe("client-abort terminals", () => {
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
 		clearProviderOverloadCooldown();
+		resetRateLimitProbeGatesForTests();
 		// Restore the singleton's default state (setEnabled(false) also clears any
 		// staged entry a test left behind).
 		cacheBodyStore.setEnabled(false);

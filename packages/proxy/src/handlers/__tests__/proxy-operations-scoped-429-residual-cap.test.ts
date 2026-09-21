@@ -27,7 +27,9 @@ import {
 import type { ProxyContext } from "../proxy-types";
 import {
 	getRateLimitProbeAdmission,
+	holdRateLimitProbeLease,
 	markCapacityRestoredProbePending,
+	type RateLimitProbeLease,
 	resetRateLimitProbeGatesForTests,
 } from "../rate-limit-cooldown";
 
@@ -216,13 +218,21 @@ async function drive(
 	ctx: ProxyContext,
 	account: Account,
 	model?: string,
+	/**
+	 * The recovery-probe lease this attempt owns, as the admission chokepoint
+	 * would have handed it over. Settling is ownership-checked, so an attempt
+	 * that does not carry the lease cannot release it.
+	 */
+	probeLease?: RateLimitProbeLease,
 ): Promise<Response | null> {
 	const bodyBuffer = makeRequestBody(model);
+	const requestMeta = makeRequestMeta();
+	if (probeLease) holdRateLimitProbeLease(requestMeta, probeLease);
 	return proxyWithAccount(
 		makeRequest(bodyBuffer),
 		new URL("https://proxy.local/v1/messages"),
 		account,
-		makeRequestMeta(),
+		requestMeta,
 		bodyBuffer,
 		() => undefined,
 		0,
@@ -315,10 +325,16 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 			makeProxyContext();
 		const account = makeAccount({});
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
+		const admission = getRateLimitProbeAdmission(account);
+		expect(admission.decision).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
 
-		const result = await drive(ctx, account);
+		const result = await drive(
+			ctx,
+			account,
+			undefined,
+			admission.decision === "admitted" ? admission.lease : undefined,
+		);
 
 		expect(result).toBeNull();
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
@@ -326,7 +342,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		expect(escalatingCalls).toHaveLength(0);
 		expect(account.rate_limited_until).toBeNull();
 		expect(account.rate_limited_reason).toBeNull();
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		expect(routingAttempts(ctx)).toHaveLength(1);
 		expect(routingAttempts(ctx)[0]?.error).toBe("model_quota_exhausted");

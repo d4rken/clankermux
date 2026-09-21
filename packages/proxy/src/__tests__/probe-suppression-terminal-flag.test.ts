@@ -33,6 +33,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 	markCapacityRestoredProbePending,
+	type RateLimitProbeLease,
 	resetRateLimitProbeGatesForTests,
 } from "../handlers/rate-limit-cooldown";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
@@ -157,7 +158,7 @@ const OVERLOADED_BODY = JSON.stringify({
 });
 
 /** Take the codex account's probe lease, as a concurrent mid-probe request would. */
-function holdCodexProbeLease(): void {
+function holdCodexProbeLease(): RateLimitProbeLease {
 	markCapacityRestoredProbePending(CODEX_ID);
 	const admission = getRateLimitProbeAdmission({
 		id: CODEX_ID,
@@ -165,9 +166,12 @@ function holdCodexProbeLease(): void {
 		consecutive_rate_limits: 0,
 		rate_limited_until: null,
 	} as unknown as Account);
-	if (admission !== "admitted") {
-		throw new Error(`expected to take the probe lease, got ${admission}`);
+	if (admission.decision !== "admitted") {
+		throw new Error(
+			`expected to take the probe lease, got ${admission.decision}`,
+		);
 	}
+	return admission.lease;
 }
 
 function installFetch() {
@@ -281,7 +285,7 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 			refresh_token: "rt-codex",
 			access_token: "at-codex",
 		});
-		holdCodexProbeLease();
+		const codexLease = holdCodexProbeLease();
 
 		const state = { anthropicCalls: 0, codexCalls: 0 };
 		let releaseHead: (() => void) | undefined;
@@ -318,7 +322,7 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 		}
 		// The tail's own probe reaches a verdict and releases the lease (the marker
 		// is deliberately retained), making it attemptable again.
-		completeRateLimitProbe(codex, "abandoned");
+		completeRateLimitProbe(codex, "abandoned", codexLease);
 		releaseHead?.();
 
 		const response = await pending;

@@ -1117,7 +1117,11 @@ async function forwardToClientInner(
 							// The SSE error frame carries no headers, so this deadline is
 							// OUR default, not upstream's hint — say so, or the trip line
 							// claims a reset source that never existed.
-							{ syntheticReset: true, accountName: account.name },
+							{
+								syntheticReset: true,
+								accountName: account.name,
+								probeId: streamProbeToken?.probeId,
+							},
 						);
 						// Probe verdict: the probe stream itself carried the overload.
 						// The trip above invalidated the tripped bucket's lease;

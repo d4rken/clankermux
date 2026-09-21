@@ -14,7 +14,7 @@ import {
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -48,7 +48,9 @@ import {
 import { createClientAbortResponse } from "./handlers/client-abort-response";
 import {
 	completeRateLimitProbe,
+	dropRateLimitProbeLease,
 	getRateLimitProbeAdmission,
+	holdRateLimitProbeLease,
 } from "./handlers/rate-limit-cooldown";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
@@ -141,18 +143,25 @@ type GatedAttempt = {
  *    must not consume an account's single recovery probe.
  */
 async function attemptThroughProbeGate(
+	requestMeta: RequestMeta,
 	account: Account,
 	attempt: () => Promise<Response | null>,
+	options?: { reprobe?: boolean },
 ): Promise<GatedAttempt> {
-	const admission = getRateLimitProbeAdmission(account);
-	if (admission === "suppressed") {
+	const admission = getRateLimitProbeAdmission(account, Date.now(), options);
+	if (admission.decision === "suppressed") {
 		return { response: null, suppressed: true };
 	}
+	const lease = admission.decision === "admitted" ? admission.lease : undefined;
+	// Custody for the whole attempt: the settle sites inside it read the lease
+	// back off the request, so each one releases THIS attempt's lease or none.
+	if (lease) holdRateLimitProbeLease(requestMeta, lease);
 	try {
 		return { response: await attempt(), suppressed: false };
 	} finally {
-		if (admission === "admitted") {
-			completeRateLimitProbe(account, "abandoned");
+		if (lease) {
+			completeRateLimitProbe(account, "abandoned", lease);
+			dropRateLimitProbeLease(requestMeta, account.id);
 		}
 	}
 }
@@ -471,7 +480,8 @@ async function handleIngestedProxy(
 			ctx,
 			apiKeyId,
 			apiKeyName,
-			attemptThroughProbeGate,
+			(account, attempt) =>
+				attemptThroughProbeGate(requestMeta, account, attempt),
 		);
 	}
 
@@ -715,11 +725,17 @@ async function handleIngestedProxy(
 	const countedAttemptThroughProbeGate = (
 		account: Account,
 		attempt: () => Promise<Response | null>,
+		options?: { reprobe?: boolean },
 	): Promise<{ response: Response | null; suppressed: boolean }> =>
-		attemptThroughProbeGate(account, () => {
-			upstreamAttempts++;
-			return attempt();
-		});
+		attemptThroughProbeGate(
+			requestMeta,
+			account,
+			() => {
+				upstreamAttempts++;
+				return attempt();
+			},
+			options,
+		);
 
 	// Every hold that parks a live client connection and re-attempts is built ONCE
 	// per request here (see recovery-holds.ts): the overload hold, the shared

@@ -1236,8 +1236,10 @@ it("live five-hour quota evidence uses guarded polling recovery and a single pro
 		// Model the DB compare-and-clear's resulting account snapshot.
 		account.rate_limited_until = null;
 		account.rate_limited_reason = null;
-		expect(getRateLimitProbeAdmission(account, NOW)).toBe("admitted");
-		expect(getRateLimitProbeAdmission(account, NOW)).toBe("suppressed");
+		expect(getRateLimitProbeAdmission(account, NOW).decision).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account, NOW).decision).toBe(
+			"suppressed",
+		);
 	} finally {
 		resetRateLimitProbeGatesForTests();
 	}

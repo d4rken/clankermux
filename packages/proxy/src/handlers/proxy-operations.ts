@@ -120,6 +120,7 @@ import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
+	findRateLimitProbeLease,
 } from "./rate-limit-cooldown";
 import { validateProviderPath } from "./request-handler";
 import {
@@ -1159,6 +1160,16 @@ export async function proxyWithAccount(
 	// every non-forwarding exit. Completion is idempotent
 	// and generation-checked, so belt-and-suspenders double-completion is safe.
 	let overloadProbeToken: OverloadProbeToken | null = null;
+	// Cancels THIS attempt's upstream request when a later request displaces its
+	// half-open probe lease. Null until a lease is actually taken; composed into
+	// the outbound fetch's signal below, so a probe that never produced health
+	// evidence stops rather than lingering alongside its replacement.
+	let overloadProbeDisplaced: AbortController | null = null;
+	// This attempt's single-flight recovery-probe lease, when the admission
+	// chokepoint handed it one. Read at each use rather than captured: the lease
+	// is released and forgotten the moment a terminal outcome settles it.
+	const heldProbeLease = () => findRateLimitProbeLease(requestMeta, account.id);
+
 	// Release the held probe lease locally and drop ownership. `fail()` calls
 	// this with "abandoned" as the universal chokepoint; the 529 trip site calls
 	// it with "reopened" first (fail's later "abandoned" then no-ops on null).
@@ -1545,9 +1556,19 @@ export async function proxyWithAccount(
 		}
 
 		if (!isLocalCountTokens) {
+			const displaced = new AbortController();
 			const overloadAdmission = tryAcquireProviderOverloadProbe(
 				account.provider,
 				overloadAttributionModel,
+				Date.now(),
+				{
+					onDisplaced: () =>
+						displaced.abort(
+							new Error(
+								"Overload probe displaced: no health evidence within the admission deadline",
+							),
+						),
+				},
 			);
 			if (!overloadAdmission.admitted) {
 				const refusalLine = `Overload probe admission refused for account ${account.name} (${overloadAdmission.reason}) — failing over without an upstream attempt`;
@@ -1562,6 +1583,9 @@ export async function proxyWithAccount(
 				});
 			}
 			overloadProbeToken = overloadAdmission.token;
+			// Only a real lease can be displaced; with every bucket closed there is
+			// nothing holding this attempt to a deadline.
+			overloadProbeDisplaced = overloadAdmission.token ? displaced : null;
 		}
 
 		// Every authenticated upstream attempt in this function goes through this
@@ -1581,6 +1605,18 @@ export async function proxyWithAccount(
 				ctx,
 			);
 
+		// The caller's own deadline (a hold's budget) composed with the
+		// overload-probe displacement abort, so a probe that is taken over stops
+		// its upstream request instead of running on beside its replacement.
+		const attemptSignal = (): AbortSignal | undefined => {
+			const signals = [
+				...(options?.signal ? [options.signal] : []),
+				...(overloadProbeDisplaced ? [overloadProbeDisplaced.signal] : []),
+			];
+			if (signals.length === 0) return undefined;
+			return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+		};
+
 		const forwardAttempt = async (
 			attemptRequest: Request,
 		): Promise<Response> => {
@@ -1594,7 +1630,7 @@ export async function proxyWithAccount(
 					account,
 					requestMeta,
 					ctx,
-					options?.signal,
+					attemptSignal(),
 					attemptAudit,
 					getDevinRequestProvenance(outgoing) ?? devinRequestProvenance,
 					async (raw) => {
@@ -1614,7 +1650,7 @@ export async function proxyWithAccount(
 			const response = await send();
 			if (account.provider !== "zai") return response;
 			try {
-				return await recoverZaiOverload(response, send, options?.signal);
+				return await recoverZaiOverload(response, send, attemptSignal());
 			} catch (error) {
 				// A failed/aborted peek may own a retry response already. Release
 				// it even when the cache-control retry's local catch keeps its 400.
@@ -1831,7 +1867,9 @@ export async function proxyWithAccount(
 				_model: string | null,
 				source: "claims" | "usage",
 			): Promise<Response | null> => {
-				applyRateLimitCooldown(account, quota, ctx);
+				applyRateLimitCooldown(account, quota, ctx, {
+					probeLease: heldProbeLease(),
+				});
 				// The helper sets this synchronously, including adaptive no-reset
 				// backoff. Outcomes must report the applied deadline, not a default.
 				const cooldownUntil = account.rate_limited_until as number;
@@ -1892,15 +1930,14 @@ export async function proxyWithAccount(
 				}
 				// Same ceiling as the burst intercept, for the same reason and with
 				// more force: a re-probe only happens INSIDE an active hold, so this
-				// 429 is by construction one the orchestrator is still treating as
-				// transient, and it reaches here without passing the account-wide or
-				// family rungs at all (they sit below this short-circuit). Copying a
-				// multi-day `retry-after` verbatim would push the held account's
-				// in-memory deadline out to that value, which both ends the hold on
-				// `cooldownWait > remaining` and — because the give-up terminal
-				// derives its client-facing `Retry-After` from this same field — hands
-				// the caller a 92-hour retry instruction while describing the
-				// condition as brief. See BURST_RETRY_COOLDOWN_CAP_MS.
+				// 429 reaches here without passing the account-wide or family rungs at
+				// all (they sit below this short-circuit), i.e. with no corroborating
+				// evidence for a long lock. Copying a multi-day `retry-after` verbatim
+				// would push the held account's in-memory deadline out to that value,
+				// which both ends the hold on `cooldownWait > remaining` and — because
+				// the give-up terminal derives its client-facing `Retry-After` from
+				// this same field — hands the caller a 92-hour retry instruction while
+				// describing the condition as brief. See BURST_RETRY_COOLDOWN_CAP_MS.
 				const cooldownUntil = Math.min(
 					extractCooldownUntil(
 						rawResponse,
@@ -1909,21 +1946,42 @@ export async function proxyWithAccount(
 					),
 					Date.now() + BURST_RETRY_COOLDOWN_CAP_MS,
 				);
+				if (!classification.retryable) {
+					// The same live-evidence classifier first attempts use says this
+					// account is spent, not bursting. The gentle re-probe treatment is
+					// then the wrong one twice over: it persists nothing, so the verdict
+					// dies with the request, and it reports a retryable outcome, so the
+					// hold keeps re-probing an account that has no quota left. Write the
+					// deadline for real — as a server-directed reset, which still does
+					// NOT escalate the streak, keeping the re-probe promise that a
+					// bounded retry never inflates the backoff tier — and report a
+					// terminal outcome so the hold declines instead of waiting.
+					applyRateLimitCooldown(
+						account,
+						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
+						ctx,
+						{ probeLease: heldProbeLease() },
+					);
+					log.warn(
+						`Re-probe of held account ${account.name} got a non-transient 429 (${classification.reason}) — cooling down until ${new Date(cooldownUntil).toISOString()} and ending the hold`,
+					);
+					return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
+				}
 				applyRateLimitCooldown(
 					account,
 					{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 					ctx,
 					{ reprobe: true },
 				);
-				// `confidence` here is NOT consumed by the hold orchestrator: a
-				// re-probe outcome is collapsed to `Response | null` (see ReprobeFn)
-				// before it reaches `holdAndRetryCacheAccount`, which branches solely
-				// on the confidence it captured at hold entry. This hardcoded value is
-				// therefore inert for orchestration and must not be relied upon for it.
+				// `confidence` is NOT consumed by the hold orchestrator: a re-probe
+				// outcome is collapsed to `Response | null` (see ReprobeFn) before it
+				// reaches `holdAndRetryCacheAccount`, which branches solely on the
+				// confidence it captured at hold entry. It is reported for the outcome
+				// sink and the audit trail, not relied upon for orchestration.
 				return await fail(
 					{
 						kind: "retryable_429",
-						confidence: "fresh_headroom",
+						confidence: classification.confidence,
 						cooldownUntil,
 					},
 					rawResponse,
@@ -1944,7 +2002,9 @@ export async function proxyWithAccount(
 				const reason: RateLimitReason = "out_of_credits";
 				// floorUntil bypasses the exponential-backoff min() cap so the long
 				// cooldown actually sticks (see applyRateLimitCooldown.floorUntil).
-				applyRateLimitCooldown(account, { floorUntil, reason }, ctx);
+				applyRateLimitCooldown(account, { floorUntil, reason }, ctx, {
+					probeLease: heldProbeLease(),
+				});
 				// Persist the 429's unified-status header so the dashboard chip
 				// doesn't freeze at the last successful response's value.
 				persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -2177,7 +2237,11 @@ export async function proxyWithAccount(
 						familyExclusion.resetAt,
 						now,
 					);
-					completeRateLimitProbe(account, "abandoned");
+					completeRateLimitProbe(
+						account,
+						"abandoned",
+						findRateLimitProbeLease(requestMeta, account.id),
+					);
 					// Persist the 429's unified-status header so the dashboard chip
 					// reflects the live value rather than the last success.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -2285,6 +2349,7 @@ export async function proxyWithAccount(
 						account,
 						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 						ctx,
+						{ probeLease: heldProbeLease() },
 					);
 					// Persist the 429's unified-status header (status/reset/remaining).
 					// This short-circuit never reaches processProxyResponse /
@@ -2368,7 +2433,11 @@ export async function proxyWithAccount(
 				// status-meta persistence (a no-op for Codex, which has no
 				// unified-status header).
 				if (cooldownUntil === null) {
-					completeRateLimitProbe(account, "abandoned");
+					completeRateLimitProbe(
+						account,
+						"abandoned",
+						findRateLimitProbeLease(requestMeta, account.id),
+					);
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 				} else if (account.provider === "codex") {
 					applyCodexObservation(account, rawResponse, ctx, {
@@ -2383,6 +2452,7 @@ export async function proxyWithAccount(
 						account,
 						{ resetTime: cooldownUntil, reason },
 						ctx,
+						{ probeLease: heldProbeLease() },
 					);
 					// Persist the 429's unified-status header (status/reset/remaining).
 					// This short-circuit never reaches processProxyResponse /
@@ -2450,7 +2520,9 @@ export async function proxyWithAccount(
 			// Share the existing escalating cooldown counter deliberately (30s to
 			// 5min). Access denials are not quotas; the distinct reason excludes them
 			// from quota recovery and transient holds despite sharing that storage.
-			applyRateLimitCooldown(account, { reason }, ctx);
+			applyRateLimitCooldown(account, { reason }, ctx, {
+				probeLease: heldProbeLease(),
+			});
 			log.warn(
 				`Account ${account.name} org_permission_denied (403): organization disabled OAuth/Claude Code access; cooling down this account`,
 			);
@@ -2811,7 +2883,7 @@ export async function proxyWithAccount(
 				account.provider,
 				rateLimitInfo.resetTime,
 				overloadAttributionModel,
-				{ accountName: account.name },
+				{ accountName: account.name, probeId: overloadProbeToken?.probeId },
 			);
 			// Probe verdict: the probe itself hit the overload. The trip above
 			// already invalidated the lease on the tripped bucket (generation
@@ -2984,31 +3056,38 @@ export async function proxyWithAccount(
 			response.status === 529 && isTerminalAttempt()
 				? response.clone()
 				: response;
-		const isRateLimited = orgPermissionDenied
-			? false
-			: await processProxyResponse(
-					responseForRateLimitCheck,
-					account,
-					{
-						...ctx,
-						provider,
-					},
-					requestMeta,
-				);
-		// processProxyResponse only needed the rate-limit view (headers, or a
-		// provider body-parse that consumes it). When it was a distinct clone
-		// (final-529 path), release its tee branch now — the original `response`
-		// is what gets forwarded/returned below.
-		//
-		// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
-		// above), so `!== response` implies it is a `response.clone()` on every
-		// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
-		// drained: draining it would make the tee keep pulling and buffering for
-		// the twin that is about to be streamed to the client. And it must never
-		// be awaited — a tee branch's cancel does not settle until BOTH branches
-		// cancel, and the twin here is the live response.
-		if (responseForRateLimitCheck !== response) {
-			discardTeeBranch(responseForRateLimitCheck);
+		let isRateLimited: boolean;
+		try {
+			isRateLimited = orgPermissionDenied
+				? false
+				: await processProxyResponse(
+						responseForRateLimitCheck,
+						account,
+						{
+							...ctx,
+							provider,
+						},
+						requestMeta,
+						{ locallySynthesized: isLocalCountTokens },
+					);
+		} finally {
+			// processProxyResponse only needed the rate-limit view (headers, or a
+			// provider body-parse that consumes it). When it was a distinct clone
+			// (final-529 path), release its tee branch — the original `response`
+			// is what gets forwarded/returned below. In a `finally` because the
+			// attempt-wide catch disposes `liveUpstream`, i.e. the original, and
+			// nothing else owns the branch.
+			//
+			// `responseForRateLimitCheck` has exactly ONE assignment (the ternary
+			// above), so `!== response` implies it is a `response.clone()` on every
+			// reachable path — i.e. a TEE BRANCH, which must be CANCELLED, not
+			// drained: draining it would make the tee keep pulling and buffering for
+			// the twin that is about to be streamed to the client. And it must never
+			// be awaited — a tee branch's cancel does not settle until BOTH branches
+			// cancel, and the twin here is the live response.
+			if (responseForRateLimitCheck !== response) {
+				discardTeeBranch(responseForRateLimitCheck);
+			}
 		}
 		if (isRateLimited) {
 			if (response.status === 529 && isTerminalAttempt()) {
