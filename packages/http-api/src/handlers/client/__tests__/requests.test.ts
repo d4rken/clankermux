@@ -90,6 +90,22 @@ async function call(
 	};
 }
 
+/**
+ * The machine-readable half of the namespace's error envelope, asserting the
+ * whole envelope on the way past. Every non-2xx here carries
+ * `{type:"error",error:{type,message}}` — the same body the mount produces for
+ * its own 401 and namespace 404.
+ */
+function errorType(body: unknown): string {
+	const envelope = body as {
+		type: string;
+		error: { type: string; message: string };
+	};
+	expect(envelope.type).toBe("error");
+	expect(typeof envelope.error.message).toBe("string");
+	return envelope.error.type;
+}
+
 interface ListBody {
 	schema: string;
 	requests: Array<{ id: string; timestamp: number }>;
@@ -172,7 +188,7 @@ describe("GET /client/v1/requests/{id}", () => {
 			);
 			expect(status).toBe(404);
 			expect(cacheControl).toBe("private, no-store");
-			expect((body as { error: string }).error).toBe("not_found");
+			expect(errorType(body)).toBe("not_found");
 		}
 	});
 
@@ -288,9 +304,7 @@ describe("GET /client/v1/requests?tag=", () => {
 			);
 			expect(status).toBe(400);
 			expect(cacheControl).toBe("private, no-store");
-			expect((body as unknown as { error: string }).error).toBe(
-				"invalid_request",
-			);
+			expect(errorType(body)).toBe("invalid_request");
 		}
 	});
 
@@ -308,9 +322,7 @@ describe("GET /client/v1/requests?tag=", () => {
 		for (const query of queries) {
 			const { status, body } = await list(query);
 			expect(status).toBe(400);
-			expect((body as unknown as { error: string }).error).toBe(
-				"invalid_request",
-			);
+			expect(errorType(body)).toBe("invalid_request");
 		}
 	});
 
@@ -318,9 +330,7 @@ describe("GET /client/v1/requests?tag=", () => {
 		for (const limit of ["0", "201", "-1", "1.5", "many"]) {
 			const { status, body } = await list(`tag=${TAG}&limit=${limit}`);
 			expect(status).toBe(400);
-			expect((body as unknown as { error: string }).error).toBe(
-				"invalid_request",
-			);
+			expect(errorType(body)).toBe("invalid_request");
 		}
 	});
 });

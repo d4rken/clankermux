@@ -90,11 +90,20 @@ class FakeDbOps {
 	}
 	/**
 	 * The client router builds a `RequestRepository` over this at construction.
-	 * The routes this file exercises never issue a query, so an empty adapter is
-	 * enough; the request routes have their own tests against a real database.
+	 * An adapter that finds nothing is enough for the errors this file drives —
+	 * the miss IS the case, since a row nobody can read is what the by-id 404
+	 * answers. What a hit looks like is tested against a real database in
+	 * `packages/http-api/src/handlers/client/__tests__/requests.test.ts`.
 	 */
 	getAdapter(): unknown {
-		return {};
+		return {
+			async get() {
+				return null;
+			},
+			async all() {
+				return [];
+			},
+		};
 	}
 }
 
@@ -166,6 +175,23 @@ function request(
 }
 
 const RETENTION = "/client/v1/retention";
+const KEYED = { "x-api-key": VALID_KEY };
+
+interface ErrorEnvelope {
+	type: string;
+	error: { type: string; message: string };
+}
+
+/** The envelope, structure only — the prose and the status differ per case. */
+function expectEnvelope(body: unknown): ErrorEnvelope {
+	const envelope = body as ErrorEnvelope;
+	expect(Object.keys(envelope).sort()).toEqual(["error", "type"]);
+	expect(envelope.type).toBe("error");
+	expect(Object.keys(envelope.error).sort()).toEqual(["message", "type"]);
+	expect(envelope.error.type).toMatch(/^[a-z_]+$/);
+	expect(envelope.error.message.length).toBeGreaterThan(0);
+	return envelope;
+}
 
 describe("the credential", () => {
 	it("serves a valid key both credential spellings", async () => {
@@ -235,6 +261,72 @@ describe("the namespace", () => {
 		const text = JSON.stringify(await res.json());
 		expect(text).toContain("not_found");
 		expect(text).not.toContain("doctype");
+	});
+});
+
+/**
+ * Two layers refuse requests on this surface, and a consumer parses one body.
+ *
+ * The mount answers the 401 and the namespace 404 from `jsonError` in
+ * `request-router.ts`; the router answers 400, 405 and the by-id 404 from
+ * `clientError` in the http-api package. Neither helper can import the other,
+ * so this is the only thing that keeps their two bodies the same body.
+ */
+describe("the error envelope", () => {
+	const cases: [string, () => Request][] = [
+		["the mount's 401 for a missing credential", () => request(RETENTION)],
+		[
+			"the mount's 404 for a path no route serves",
+			() => request("/client/v1/inventory", { headers: KEYED }),
+		],
+		[
+			"the router's 400 for a rejected tag",
+			() => request("/client/v1/requests?tag=", { headers: KEYED }),
+		],
+		[
+			"the router's 405 for a write",
+			() => request(RETENTION, { method: "POST", headers: KEYED }),
+		],
+		[
+			"the router's 404 for an unresolvable request id",
+			() => request("/client/v1/requests/never-issued", { headers: KEYED }),
+		],
+	];
+
+	for (const [what, build] of cases) {
+		it(`is what ${what} carries`, async () => {
+			const { deps } = makeDeps();
+			const res = await routeRequest(build(), deps);
+
+			expect(res.status).toBeGreaterThanOrEqual(400);
+			expect(res.headers.get("Content-Type")).toBe("application/json");
+			expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+			expectEnvelope(await res.json());
+		});
+	}
+
+	// The status a consumer sees most, and the one that arrives from both
+	// layers: an unknown URL and an unreadable row must be told apart by the
+	// message, never by the shape.
+	it("says not_found the same way for an unknown route and an unknown row", async () => {
+		const { deps } = makeDeps();
+		const unknownRoute = await routeRequest(
+			request("/client/v1/inventory", { headers: KEYED }),
+			deps,
+		);
+		const unknownRow = await routeRequest(
+			request("/client/v1/requests/never-issued", { headers: KEYED }),
+			deps,
+		);
+
+		expect(unknownRoute.status).toBe(404);
+		expect(unknownRow.status).toBe(404);
+		expect(expectEnvelope(await unknownRoute.json()).error.type).toBe(
+			"not_found",
+		);
+		expect(expectEnvelope(await unknownRow.json()).error.type).toBe(
+			"not_found",
+		);
 	});
 });
 

@@ -63,6 +63,13 @@ describe("the client API routes", () => {
 		expect(res?.status).toBe(405);
 		expect(res?.headers.get("Allow")).toBe("GET");
 		expect(res?.headers.get("Cache-Control")).toBe("private, no-store");
+		expect(await res?.json()).toEqual({
+			type: "error",
+			error: {
+				type: "method_not_allowed",
+				message: "/client/v1/retention is read-only.",
+			},
+		});
 	});
 
 	// The mount claims the whole `/client` prefix, so the 404 for a path no

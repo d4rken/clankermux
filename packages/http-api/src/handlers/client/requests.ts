@@ -19,6 +19,7 @@ import {
 	encodeClientRequestCursor,
 } from "./cursor";
 import { toClientRequestDto, toClientRequestsDto } from "./dto";
+import { clientError } from "./errors";
 import type { ClientRequestContext } from "./router";
 
 /** The page size a caller gets when it names none. */
@@ -41,10 +42,6 @@ export interface ClientRequestReader {
 		limit: number;
 		after?: ClientRequestCursor | null;
 	}): Promise<ClientRequestRow[]>;
-}
-
-function clientError(status: number, error: string, message: string): Response {
-	return jsonResponse({ error, message }, status, CLIENT_NO_STORE_HEADERS);
 }
 
 /**

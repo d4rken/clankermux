@@ -5,6 +5,7 @@ import {
 } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import { CLIENT_NO_STORE_HEADERS } from "./cache-headers";
+import { clientError } from "./errors";
 import {
 	createClientRequestByIdHandler,
 	createClientRequestSearchHandler,
@@ -124,13 +125,11 @@ export class ClientRouter {
 		const matched = this.match(url.pathname);
 		if (!matched) return null;
 		if (req.method !== "GET") {
-			return jsonResponse(
-				{
-					error: "method_not_allowed",
-					message: `${url.pathname} is read-only.`,
-				},
+			return clientError(
 				405,
-				{ ...CLIENT_NO_STORE_HEADERS, Allow: "GET" },
+				"method_not_allowed",
+				`${url.pathname} is read-only.`,
+				{ Allow: "GET" },
 			);
 		}
 		return await matched.handler(req, url, ctx, matched.params);
