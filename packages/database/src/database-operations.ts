@@ -1005,23 +1005,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		// readers don't block this connection's writer. An in-memory DB cannot
 		// be shared with a worker, so it scans inline — it is by definition
 		// small enough not to block anything.
-		if (isInMemoryDbPath(this.resolvedDbPath)) {
-			const types = await Promise.all(
-				RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
-					const { rowCount, approxBytes } =
-						await this.measureTableLogicalSize(table);
-					return { key, table, rowCount, approxBytes };
-				}),
-			);
-			return { available: true, measuredAt, dbBytes, walBytes, types };
-		}
-
-		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
-			tables: RETENTION_USAGE_TABLES,
-			busyTimeoutMs: 10000,
-		});
-		if (!scan.ok) {
-			console.warn(`[storage-usage] scan worker failed: ${scan.error}`);
+		// `available: false` still carries the per-type list so the response
+		// shape is constant; the zeros in it are placeholders the card must not
+		// render as sizes, which is what the flag is for.
+		const unavailable = (reason: string): RetentionStorageUsage => {
+			console.warn(`[storage-usage] measurement unavailable: ${reason}`);
 			return {
 				available: false,
 				measuredAt,
@@ -1034,16 +1022,42 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 					approxBytes: 0,
 				})),
 			};
+		};
+
+		if (isInMemoryDbPath(this.resolvedDbPath)) {
+			try {
+				const types = await Promise.all(
+					RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
+						const { rowCount, approxBytes } =
+							await this.measureTableLogicalSize(table);
+						return { key, table, rowCount, approxBytes };
+					}),
+				);
+				return { available: true, measuredAt, dbBytes, walBytes, types };
+			} catch (err) {
+				return unavailable(err instanceof Error ? err.message : String(err));
+			}
 		}
+
+		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
+			tables: RETENTION_USAGE_TABLES,
+			busyTimeoutMs: 10000,
+		});
+		if (!scan.ok) return unavailable(`scan worker failed: ${scan.error}`);
 		// Re-key by table so response order is the constant list's order even if
 		// a worker ever reordered its output.
 		const byTable = new Map(scan.types.map((t) => [t.table, t]));
-		const types = RETENTION_USAGE_TABLES.map(({ key, table }) => ({
-			key,
-			table,
-			rowCount: byTable.get(table)?.rowCount ?? 0,
-			approxBytes: byTable.get(table)?.approxBytes ?? 0,
-		}));
+		const types: StorageUsageType[] = [];
+		for (const { key, table } of RETENTION_USAGE_TABLES) {
+			const measured = byTable.get(table);
+			if (!measured) return unavailable(`scan omitted "${table}"`);
+			types.push({
+				key,
+				table,
+				rowCount: measured.rowCount,
+				approxBytes: measured.approxBytes,
+			});
+		}
 		return { available: true, measuredAt, dbBytes, walBytes, types };
 	}
 
@@ -1053,8 +1067,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * cannot meaningfully block. File-backed databases always go through
 	 * `runStorageUsageScanInWorker`; this method blocks the event loop for the
 	 * whole scan and must not be pointed at one. Same approximation as the
-	 * worker: `SUM(LENGTH(col))` over every column, zeros on error (never
-	 * throws) so one bad table can't sink the whole measurement.
+	 * worker: `SUM(LENGTH(col))` over every column, and the same all-or-nothing
+	 * contract — it throws rather than passing off an unmeasured table as an
+	 * empty one.
 	 */
 	private async measureTableLogicalSize(
 		table: string,
@@ -1065,7 +1080,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			const cols = await this.adapter.query<{ name: string }>(
 				`PRAGMA table_info("${table}")`,
 			);
-			if (cols.length === 0) return { rowCount: 0, approxBytes: 0 };
+			if (cols.length === 0) {
+				throw new Error(
+					"no such table (PRAGMA table_info returned no columns)",
+				);
+			}
 			const lengthExpr = cols
 				.map((c) => `COALESCE(LENGTH("${c.name}"), 0)`)
 				.join(" + ");
@@ -1075,13 +1094,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			}>(
 				`SELECT COUNT(*) AS rowCount, SUM(${lengthExpr}) AS approxBytes FROM "${table}"`,
 			);
+			if (!row) throw new Error("the aggregate query returned no row");
 			return {
-				rowCount: row?.rowCount ?? 0,
-				approxBytes: row?.approxBytes ?? 0,
+				rowCount: row.rowCount ?? 0,
+				approxBytes: row.approxBytes ?? 0,
 			};
 		} catch (err) {
-			console.debug(`[measureTableLogicalSize] ${table} failed:`, err);
-			return { rowCount: 0, approxBytes: 0 };
+			throw new Error(
+				`table "${table}": ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 
