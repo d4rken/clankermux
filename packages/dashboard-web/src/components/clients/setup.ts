@@ -138,9 +138,10 @@ export function clientSetup(
 				`export ANTHROPIC_BASE_URL=${shell(`${origin}/wire/anthropic`)}`,
 				`export ANTHROPIC_AUTH_TOKEN=${shell(secret)}`,
 				"export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+				"export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1",
 				...(selected ? [`export ANTHROPIC_MODEL=${shell(selected)}`] : []),
 			].join("\n"),
-			note: "Start a new Claude Code session. Gateway model discovery caches by base URL; switching keys may require clearing ~/.claude/cache/gateway-models.json. An empty compatible list may show built-in models.",
+			note: "Start a new Claude Code session. Gateway model discovery caches by base URL; switching keys may require clearing ~/.claude/cache/gateway-models.json. An empty compatible list may show built-in models. Hint headers label requests by class and agent type in Request Details on Claude Code 2.1.273+.",
 		};
 	if (application === "codex")
 		return {
@@ -312,6 +313,7 @@ export function clientSetupExports(
 							ANTHROPIC_BASE_URL: `${origin}/wire/anthropic`,
 							ANTHROPIC_AUTH_TOKEN: secret,
 							CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+							CLAUDE_CODE_GATEWAY_HINT_HEADERS: "1",
 							...(selected ? { ANTHROPIC_MODEL: selected } : {}),
 						},
 					},

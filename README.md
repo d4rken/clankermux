@@ -89,11 +89,6 @@ providers, all except selected providers, or one account. For example, excluding
 you add later. Claude API-key accounts (`claude-console-api`) are a separate
 provider. These restrictions also apply to explicit account requests and fallbacks.
 
-Claude Code 2.1.273 or newer can send extra request diagnostics when launched
-with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Request Details shows the request
-class and agent type; its Metadata tab also shows tool-duration and compaction
-hints. These remain available when payload storage is disabled.
-
 ## Integrations
 
 * Model metadata discovery: client keys can add `?clankermux_metadata=1` to
