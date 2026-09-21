@@ -849,8 +849,9 @@ export function createAnthropicReauthCallbackHandler(
 				// retry-after the usage endpoint imposed, and the access recheck now
 				// honours that deadline rather than spending a request against it. A
 				// marker left behind would therefore defer the first test of the new
-				// token. The restarter drops the Anthropic cache and the marker with
-				// it; it reports per-server failures itself and never rejects.
+				// token. Restarting drops it (see the usage-fetcher test covering
+				// that contract); the restart reports per-server failures itself and
+				// never rejects.
 				await restartUsagePollingForAccount(account.id);
 
 				log.info(`Successfully re-authenticated Anthropic account '${name}'`);
