@@ -4,10 +4,13 @@ import type {
 	ContextComposition,
 	RequestResponse,
 } from "@clankermux/types";
-// Import the recorder (and the re-exported NO_ACCOUNT_ID) FIRST: the recorder
-// pulls @clankermux/core before @clankermux/types, which is the load order that
-// avoids the latent types↔core module-eval cycle. A standalone value-import of
-// `@clankermux/types` here would trip it (see request-recorder.ts).
+// correlation-tag.ts imports nothing, so it cannot disturb the load order the
+// comment below pins.
+import { CORRELATION_TAG_HEADER } from "../correlation-tag";
+// Import the recorder (and the re-exported NO_ACCOUNT_ID) before any standalone
+// value-import of `@clankermux/types`: the recorder pulls @clankermux/core
+// first, which is the load order that avoids the latent types↔core module-eval
+// cycle (see request-recorder.ts).
 import {
 	NO_ACCOUNT_ID,
 	type RecordMeta,
@@ -46,6 +49,8 @@ interface SaveRequestCall {
 	refusalCategory: string | null | undefined;
 	fallbackCreditClaimed: boolean | undefined;
 	fallbackFromModel: string | null | undefined;
+	correlationTag: string | null | undefined;
+	usageSource: string | null | undefined;
 }
 
 type EnqueuedKind =
@@ -65,7 +70,9 @@ class FakeDbOps {
 		usage: unknown;
 		usageFinalizedAt?: number | null;
 		response?: { stopReason?: string; refusalCategory?: string };
+		usageSource?: string | null;
 	}> = [];
+	markUsageSourceCalls: Array<{ id: string; usageSource: string }> = [];
 	pauseCalls: Array<{ accountId: string; reason: string }> = [];
 	updateAccountUsageCalls: string[] = [];
 	// Shared ordered log: pushed synchronously at invocation (before any await
@@ -109,6 +116,8 @@ class FakeDbOps {
 		refusalCategory?: string | null;
 		fallbackCreditClaimed?: boolean;
 		fallbackFromModel?: string | null;
+		correlationTag?: string | null;
+		usageSource?: string | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -138,6 +147,8 @@ class FakeDbOps {
 			refusalCategory: data.refusalCategory,
 			fallbackCreditClaimed: data.fallbackCreditClaimed,
 			fallbackFromModel: data.fallbackFromModel,
+			correlationTag: data.correlationTag,
+			usageSource: data.usageSource,
 		});
 	}
 
@@ -180,13 +191,22 @@ class FakeDbOps {
 		usage: unknown,
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string; refusalCategory?: string },
+		usageSource?: string | null,
 	): Promise<void> {
 		this.updateUsageCalls.push({
 			id: requestId,
 			usage,
 			usageFinalizedAt,
 			response,
+			usageSource,
 		});
+	}
+
+	async markRequestUsageSource(
+		requestId: string,
+		usageSource: string,
+	): Promise<void> {
+		this.markUsageSourceCalls.push({ id: requestId, usageSource });
 	}
 
 	async pauseAccount(accountId: string, reason: string): Promise<void> {
@@ -2479,4 +2499,257 @@ it("emits gateway hints for a synthetic rejection without payload storage", asyn
 	expect(h.emitted[0]?.gatewayHintCompaction).toBe("false");
 	expect(h.dbOps.savePayloadCalls).toHaveLength(0);
 	h.recorder.dispose();
+});
+
+describe("RequestRecorder — correlation_tag", () => {
+	const MAX_TAG = "a".repeat(128);
+
+	function metaWithTag(tag: string): RecordMeta {
+		return makeMeta({
+			requestHeaders: {
+				"content-type": "application/json",
+				[CORRELATION_TAG_HEADER]: tag,
+			},
+		});
+	}
+
+	it("round-trips a 128-byte all-printable tag into the row", async () => {
+		const h = makeHarness();
+		h.recorder.begin(metaWithTag(MAX_TAG));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBe(MAX_TAG);
+	});
+
+	it("stores NULL when the request carried no tag", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBeNull();
+	});
+
+	// Each of these has an obvious repair available, and a repaired tag would
+	// come back matched to some other request. The row must carry NULL — and the
+	// request itself must be entirely unaffected, because a metadata header may
+	// never cost a paid model call.
+	const REJECTED: Array<[string, string]> = [
+		["a 129-byte tag", `${MAX_TAG}a`],
+		["a tag containing TAB", "run\t42"],
+		["a tag containing DEL", "run\x7f42"],
+		["an empty tag", ""],
+	];
+	for (const [label, tag] of REJECTED) {
+		it(`stores NULL for ${label} and still records the request`, async () => {
+			const h = makeHarness();
+			h.recorder.begin(metaWithTag(tag));
+			h.recorder.attachUsageSummary("req-1", makeSummary());
+			h.recorder.finishTransport("req-1", "success");
+			await h.flush();
+
+			expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+			const call = h.dbOps.saveRequestCalls[0];
+			expect(call.correlationTag).toBeNull();
+			// The rest of the row is exactly what an untagged request writes.
+			expect(call.id).toBe("req-1");
+			expect(call.success).toBe(true);
+			expect(call.usage).toMatchObject({ model: "claude-opus-4-8" });
+			expect(h.dbOps.savePayloadCalls).toHaveLength(1);
+			expect(h.emitted).toHaveLength(1);
+		});
+	}
+
+	it("stores the tag on a synthetic terminal", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(
+			metaWithTag("run-42"),
+			"error",
+			"pool_exhausted",
+		);
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBe("run-42");
+	});
+});
+
+describe("RequestRecorder — usage_source", () => {
+	it("writes 'provider' for a cleanly-ended stream", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("provider");
+	});
+
+	it("writes 'approximate' when the stream did not end cleanly", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: true }),
+		);
+		h.recorder.finishTransport("req-1", "error", "stream error");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("approximate");
+	});
+
+	// The case a naive implementation gets wrong: the SUMMARY is present, so a
+	// derivation keyed on `record.usage` would say 'provider' — but
+	// toRequestUsage drops a summary carrying neither a model nor a reported
+	// charge, so the row is persisted with no token vector at all.
+	it("writes 'none' for a summary with no model and no reported charge", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({
+				usage: {
+					model: undefined as unknown as string,
+					inputTokens: 100,
+					outputTokens: 50,
+					totalTokens: 150,
+					costUsd: 0.5,
+					costSource: "estimated",
+				},
+				outputApproximate: false,
+			}),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const call = h.dbOps.saveRequestCalls[0];
+		expect(call.usage).toBeUndefined();
+		expect(call.usageSource).toBe("none");
+	});
+
+	it("writes 'none' when usage was waived", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes 'none' on a synthetic terminal", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(makeMeta(), "error", "pool_exhausted");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes NULL when grace elapsed, and a late patch fills it in", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace elapses → persist without usage
+		await h.flush();
+		// NULL is the one recoverable state: a patch can still settle it.
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls).toHaveLength(1);
+		expect(h.dbOps.updateUsageCalls[0].usageSource).toBe("provider");
+	});
+
+	it("settles a late patch that yields no token vector at 'none'", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// The patch window closes with this call, so "not finished yet" is no
+		// longer true even though no vector arrived.
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ usage: { inputTokens: 1, outputTokens: 2 } }),
+		);
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls[0].usage).toBeUndefined();
+		expect(h.dbOps.updateUsageCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes 'none' when the patch-record TTL expires with no usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
+
+	it("writes 'none' when the SWEEP drops the patch record first", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// Move the clock WITHOUT firing timers, so the sweep reaches the record
+		// before its own patch timer does — the other of the two expiry paths.
+		h.timers.current += 6_000;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.recorder.getRecordCount()).toBe(0);
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
+
+	it("does NOT write on the TTL drop when usage already arrived", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// The patch lands, then dropRecord runs from patchUsage — the same drop
+		// the TTL would have done, but usage is in, so 'none' would be a lie.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.timers.advance(10_000);
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+	});
+
+	it("does NOT write on the TTL drop for a row that persisted WITH usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		h.timers.advance(10_000);
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+	});
 });

@@ -15,8 +15,10 @@ import {
 	type RequestResponse,
 	resolveCostSource,
 	type ToolCallStat,
+	type UsageSource,
 } from "@clankermux/types";
 
+import { extractCorrelationTag } from "./correlation-tag";
 import { extractGatewayHints } from "./gateway-hint-headers";
 
 const log = new Logger("RequestRecorder");
@@ -324,6 +326,19 @@ interface SaveRequestData extends GatewayHintMetadata {
 	fallbackCreditClaimed?: boolean;
 	/** Refused-model origin — mirrors `RequestData.fallbackFromModel`. */
 	fallbackFromModel?: string | null;
+	/**
+	 * The client's correlation tag, verbatim — mirrors
+	 * `RequestData.correlationTag`. Read off the captured request headers by the
+	 * recorder itself, so it never travels through `RecordMeta`.
+	 */
+	correlationTag?: string | null;
+	/**
+	 * Provenance of the token vector this row actually carries — mirrors
+	 * `RequestData.usageSource`. Derived at persist time, never supplied by a
+	 * caller. Absent/null only for the one recoverable state (see
+	 * {@link RequestRecorder.deriveUsageSource}).
+	 */
+	usageSource?: UsageSource | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -357,6 +372,15 @@ interface DbOpsLike {
 		usage: unknown,
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string; refusalCategory?: string },
+		usageSource?: UsageSource | null,
+	): Promise<void>;
+	/**
+	 * Settle `requests.usage_source` on an already-persisted row. Write-once in
+	 * SQL, so a second call can never contradict the first.
+	 */
+	markRequestUsageSource(
+		requestId: string,
+		usageSource: UsageSource,
 	): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
 	updateAccountUsage(accountId: string): Promise<void>;
@@ -441,6 +465,12 @@ const PLAN_PROVIDERS = new Set([
 
 interface InternalRecord {
 	gatewayHints: GatewayHintMetadata;
+	/**
+	 * The client's correlation tag, verbatim, or null when it sent none or sent
+	 * one the validator refused. Captured at record creation because the headers
+	 * are what carry it; nothing downstream re-reads them.
+	 */
+	correlationTag: string | null;
 	meta: RecordMeta;
 	billingType: string;
 	/** Captured request body bytes (base64-encodable), null when discarded. */
@@ -603,6 +633,7 @@ export class RequestRecorder {
 
 		const record: InternalRecord = {
 			gatewayHints: extractGatewayHints(meta.requestHeaders),
+			correlationTag: extractCorrelationTag(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -740,6 +771,7 @@ export class RequestRecorder {
 				// instant a 30-min stream persists, which would defeat invariant 2.
 				const anchor = record.persistedAt ?? record.createdAt;
 				if (now - anchor > this.config.PATCH_RECORD_TTL_MS) {
+					this.closeUnresolvedUsageSource(record);
 					this.dropRecord(id);
 				}
 				continue;
@@ -805,6 +837,9 @@ export class RequestRecorder {
 		// identical to upstream responses.
 		const record: InternalRecord = {
 			gatewayHints: extractGatewayHints(meta.requestHeaders),
+			// A request that never reached a provider still has to be findable by
+			// its tag — that is the case a client most wants to look up.
+			correlationTag: extractCorrelationTag(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -937,6 +972,7 @@ export class RequestRecorder {
 			this.releaseBuffers(record);
 			record.patchTimer = this.scheduleTimer(() => {
 				record.patchTimer = null;
+				this.closeUnresolvedUsageSource(record);
 				this.dropRecord(requestId);
 			}, this.config.PATCH_RECORD_TTL_MS);
 		}
@@ -961,6 +997,14 @@ export class RequestRecorder {
 		usage: unknown,
 	): void {
 		const meta = record.meta;
+		// Derived here rather than at each caller so the synthetic path and the
+		// ordinary path answer the question the same way: what is actually about
+		// to be written into the token columns?
+		const usageSource = this.deriveUsageSource(
+			usage,
+			record.usage,
+			record.usage === null && !record.usageWaived,
+		);
 		const storePayloads = this.getStorePayloads();
 		// Read independently of storePayloads: headers are captured even when the
 		// envelope is dropped for the byte budget or payload storage is off, so
@@ -1035,6 +1079,8 @@ export class RequestRecorder {
 					refusalCategory: record.usage?.refusalCategory,
 					fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
 					fallbackFromModel: meta.fallbackFromModel ?? undefined,
+					correlationTag: record.correlationTag,
+					usageSource,
 				});
 				requestRowSaved = true;
 			} catch (error) {
@@ -1140,12 +1186,65 @@ export class RequestRecorder {
 		}
 	}
 
+	/**
+	 * What `requests.usage_source` should say about the row being written.
+	 *
+	 * Keyed on `usage` — the vector that is actually about to be STORED — not on
+	 * the summary that produced it. The two disagree exactly where it matters:
+	 * `toRequestUsage` returns undefined for a summary carrying neither a model
+	 * nor a reported charge, and the row still persists, so reading the summary
+	 * would label a row `provider` that holds no tokens at all.
+	 *
+	 * `recoverable` is the one state that gets NULL: transport finished, no
+	 * summary, not waived, patch window still open. Every other absence is final
+	 * (`'none'`) — waived usage, a synthetic terminal, a vector-less summary.
+	 */
+	private deriveUsageSource(
+		usage: unknown,
+		summary: SlimUsageSummary | null,
+		recoverable: boolean,
+	): UsageSource | null {
+		if (usage !== undefined) {
+			// `outputApproximate` is always stated by the collector, so `false` is a
+			// positive claim that the provider reported the output count.
+			return summary?.outputApproximate ? "approximate" : "provider";
+		}
+		return recoverable ? null : "none";
+	}
+
+	/**
+	 * Close the row's accounting when the patch window shuts without usage.
+	 *
+	 * A row persisted with `usage_source` NULL is saying "not finished yet", and
+	 * the in-memory record is the only thing that could still finish it. Once it
+	 * is dropped, nothing will — so state `'none'` on the way out.
+	 *
+	 * Guarded on the RECORD's state, not on the call site: `dropRecord` is also
+	 * reached from `patchUsage`, where usage did arrive and this write would be
+	 * a lie. Write-once in SQL, so it can never overwrite that patch's value.
+	 */
+	private closeUnresolvedUsageSource(record: InternalRecord): void {
+		if (record.usage !== null || record.usageWaived) return;
+		const requestId = record.meta.requestId;
+		this.asyncWriter.enqueue(async () => {
+			try {
+				await this.dbOps.markRequestUsageSource(requestId, "none");
+			} catch (error) {
+				log.error(`Failed to close usage source for ${requestId}:`, error);
+			}
+		});
+	}
+
 	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
 		const usage = this.toRequestUsage(summary);
 		// The stamp rides along with the late patch — the row was persisted before
 		// usage existed, so its column is still NULL. The repository COALESCEs the
 		// stored value first, so this can only ever fill it in, never move it.
 		const usageFinalizedAt = record.usageFinalizedAt;
+		// The patch window closes the moment this runs (the record is dropped
+		// below), so nothing is recoverable any more: a summary that yields no
+		// vector settles the column at 'none' rather than leaving it NULL.
+		const usageSource = this.deriveUsageSource(usage, summary, false);
 		this.asyncWriter.enqueue(async () => {
 			try {
 				await this.dbOps.updateRequestUsage(
@@ -1158,6 +1257,7 @@ export class RequestRecorder {
 						stopReason: summary.stopReason,
 						refusalCategory: summary.refusalCategory,
 					},
+					usageSource,
 				);
 			} catch (error) {
 				log.error(`Failed to patch usage for ${record.meta.requestId}:`, error);

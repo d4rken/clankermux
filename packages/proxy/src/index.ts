@@ -63,6 +63,14 @@ export {
 	type PolledCodexAccount,
 } from "./codex-usage-poller";
 export { computeContextAndToolStats } from "./context-composition";
+// Exported so the client API validates a correlation-tag query parameter with
+// the exact function that decided what could reach the column.
+export {
+	CORRELATION_TAG_HEADER,
+	CORRELATION_TAG_MAX_BYTES,
+	extractCorrelationTag,
+	validateCorrelationTag,
+} from "./correlation-tag";
 export { dispatchProxyRequest } from "./dispatch";
 // clearFamilyWeeklyExhaustedForAccount is called by the account-removal
 // handler in http-api; the record/get pair rides along so its integration test
