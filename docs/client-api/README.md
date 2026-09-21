@@ -150,11 +150,13 @@ never be contradicted by a later write.
 `false` means a token vector may still land, and `usageSource` is null.
 
 One residual is worth planning for. A row that persisted without usage stays
-open for a late patch for about sixty seconds. If the process restarts inside
-that window, nothing is left to close the row, and it stays `finalized: false`
-permanently. No row-level evidence distinguishes it from a row that is still
-waiting. Resolve such a row as unknown when your own reconciliation window
-closes.
+open for a late patch for about sixty seconds. A shutdown the server performs
+itself closes those rows on the way out, and a settling write the server cannot
+queue at the time is retried later, so what remains is the process dying
+abruptly (a crash, a kill, or a power loss) inside that window. Nothing is then
+left to close the row and it stays `finalized: false` permanently. No row-level
+evidence distinguishes it from a row that is still waiting. Resolve such a row
+as unknown when your own reconciliation window closes.
 
 ## `usageSource`
 
