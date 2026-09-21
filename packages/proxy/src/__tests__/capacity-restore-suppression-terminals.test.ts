@@ -390,6 +390,76 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		expect(suppressedCalls).toBe(1);
 	}, 30_000);
 
+	it("polls for the probe verdict instead of waiting out a distant sibling deadline", async () => {
+		// The wait has to take whichever comes first. A sibling cooling down for
+		// ten minutes is not a reason to stop short-polling a probe that is about
+		// to report — and its deadline is past the hold budget, so keying the
+		// choice on "is anything cooling down" ends the hold immediately.
+		const codex = makeAccount({
+			id: "codex-too-small",
+		});
+		const suppressed = makeAccount({
+			id: ACCOUNT_ID,
+			name: "anthropic-suppressed",
+			provider: "anthropic",
+			api_key: "key-suppressed",
+			access_token: "key-suppressed",
+			rate_limited_until: Date.now() + 200,
+		});
+		const distant = makeAccount({
+			id: "acc-distant",
+			name: "anthropic-distant",
+			provider: "anthropic",
+			api_key: "key-distant",
+			access_token: "key-distant",
+			priority: 1,
+			rate_limited_until: Date.now() + 10 * 60 * 1000,
+		});
+		const ctx = makeContext([codex, suppressed, distant]);
+		(ctx.provider as unknown as { name: string }).name = "anthropic";
+		holdProbeLease();
+		setTimeout(() => resetRateLimitProbeGatesForTests(), 700);
+
+		let distantCalls = 0;
+		let suppressedCalls = 0;
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				const credential = `${headers.get("x-api-key") ?? ""} ${headers.get("authorization") ?? ""}`;
+				if (credential.includes("key-distant")) {
+					distantCalls += 1;
+					throw new Error("connection refused");
+				}
+				suppressedCalls += 1;
+				suppressed.rate_limited_until = null;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-opus-4-7",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}),
+		);
+
+		const response = await callHandleProxy(
+			makeSizedRequest(500_000),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(suppressedCalls).toBe(1);
+		expect(distantCalls).toBe(0);
+	}, 30_000);
+
 	it("still returns the size 400 when NO candidate fits even the full window", async () => {
 		// Same suppressed lease, but 500_000 tokens exceeds gpt-5.5's full window,
 		// so there is no fitting candidate at all — the size verdict is correct.
