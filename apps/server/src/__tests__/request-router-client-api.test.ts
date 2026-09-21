@@ -330,6 +330,52 @@ describe("the error envelope", () => {
 	});
 });
 
+/**
+ * A throw is still an answer from this namespace, and the contract does not
+ * have an exception clause: `private, no-store` and the documented envelope
+ * hold for every status the mount can emit.
+ *
+ * Both paths below are reachable from ordinary operation — the auth service
+ * talks to the database, and so does the reader — so "it only happens when
+ * something is already broken" describes most of what a client's error
+ * handling exists for.
+ */
+describe("the namespace's exception paths", () => {
+	it("keeps the contract when AUTHENTICATION throws", async () => {
+		const { deps } = makeDeps();
+		deps.authenticate = async () => {
+			throw new Error("auth store unreachable");
+		};
+
+		const res = await routeRequest(
+			request(RETENTION, { headers: KEYED }),
+			deps,
+		);
+
+		expect(res.status).toBeGreaterThanOrEqual(400);
+		expect(res.headers.get("Content-Type")).toBe("application/json");
+		expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+		expectEnvelope(await res.json());
+	});
+
+	it("keeps the contract when the READER throws", async () => {
+		const { deps } = makeDeps();
+		deps.handleClientRequest = async () => {
+			throw new Error("reader unreachable");
+		};
+
+		const res = await routeRequest(
+			request(RETENTION, { headers: KEYED }),
+			deps,
+		);
+
+		expect(res.status).toBeGreaterThanOrEqual(400);
+		expect(res.headers.get("Content-Type")).toBe("application/json");
+		expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+		expectEnvelope(await res.json());
+	});
+});
+
 describe("reads do not count as client usage", () => {
 	it("does not ask the database to bump last_used or usage_count", async () => {
 		const { deps, db } = makeDeps();

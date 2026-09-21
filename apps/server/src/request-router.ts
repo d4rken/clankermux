@@ -557,6 +557,24 @@ async function routeClientApiRequest(
 	url: URL,
 	deps: Pick<RequestRouterDeps, "handleClientRequest" | "authenticate">,
 ): Promise<Response> {
+	const response = await answerClientApiRequest(req, url, deps);
+	// EVERY answer from this namespace, including the two exception paths below
+	// and whatever the client router produced, leaves with the cache directive.
+	// A throw is still an answer about one specific credential, and the two
+	// paths that produce one — `terminalForRequestError` here, which is shared
+	// with the wire mounts and so cannot carry this header itself — would
+	// otherwise be the surface's only responses a shared cache may retain.
+	for (const [name, value] of Object.entries(CLIENT_NO_STORE_HEADERS)) {
+		response.headers.set(name, value);
+	}
+	return response;
+}
+
+async function answerClientApiRequest(
+	req: Request,
+	url: URL,
+	deps: Pick<RequestRouterDeps, "handleClientRequest" | "authenticate">,
+): Promise<Response> {
 	const p = url.pathname;
 	let authResult: AuthenticationResult;
 	try {
@@ -579,11 +597,21 @@ async function routeClientApiRequest(
 		);
 	}
 
-	const clientResponse = await deps.handleClientRequest(
-		req,
-		url,
-		authResult.apiKeyId,
-	);
+	// The reader talks to the database, so it throws for the same ordinary
+	// reasons the auth service does. Without a boundary here the throw escapes
+	// the namespace entirely and the client gets neither the documented error
+	// envelope nor the cache directive — from the surface whose whole job is to
+	// be reconciled against.
+	let clientResponse: Response | null;
+	try {
+		clientResponse = await deps.handleClientRequest(
+			req,
+			url,
+			authResult.apiKeyId,
+		);
+	} catch (dispatchError) {
+		return terminalForRequestError(req, dispatchError, "dispatch", p);
+	}
 	if (clientResponse) return clientResponse;
 	return jsonError(
 		HTTP_STATUS.NOT_FOUND,
