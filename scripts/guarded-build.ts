@@ -73,6 +73,11 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 			"packages/dashboard-web/styles/**/*",
 			...dashboardConfigGlobs,
 			...workspaceDepGlobs,
+			// The repo-root package.json, which packages/dashboard-web/src/lib/
+			// version.ts imports to bake the release version into the bundle.
+			// dashboardConfigGlobs carries packages/dashboard-web/package.json,
+			// a different file.
+			"package.json",
 			"bun.lock",
 		],
 		outputGlobs: ["packages/dashboard-web/dist/embedded.ts"],
@@ -109,6 +114,9 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 			"!packages/ui-common/**",
 			"!packages/ui-constants/**",
 			"packages/*/package.json",
+			// packages/core/src/version.ts imports the repo-root package.json,
+			// and the database barrel re-exports getAppVersionSync().
+			"package.json",
 			"packages/database/scripts/build-workers.ts",
 			// The manifest decides which sources get bundled into which inline
 			// output; editing it alone can change the blobs while every source
