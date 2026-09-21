@@ -197,10 +197,14 @@ export const OverviewTab = React.memo(() => {
 		[analytics],
 	);
 
-	// Use analytics data for model distribution
+	// Use analytics data for model distribution. A substituted row is labelled
+	// with both models: the count belongs to the model that answered, but
+	// reading it as demand for that model would be wrong — nobody asked for it.
 	const modelData =
 		analytics?.modelDistribution?.map((model) => ({
-			name: model.model || "Unknown",
+			name: model.substitutedFrom
+				? `${model.model || "Unknown"} (sent as ${model.substitutedFrom})`
+				: model.model || "Unknown",
 			value: model.count,
 		})) || [];
 

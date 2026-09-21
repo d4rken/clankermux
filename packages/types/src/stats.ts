@@ -498,7 +498,17 @@ export interface AnalyticsResponse {
 	totals?: AnalyticsTotals;
 	timeSeries?: TimePoint[];
 	tokenBreakdown?: TokenBreakdown;
-	modelDistribution?: Array<{ model: string; count: number }>;
+	modelDistribution?: Array<{
+		model: string;
+		count: number;
+		/**
+		 * Present only when these requests were answered by `model` after being
+		 * SENT as something else, which makes them a separate row rather than
+		 * part of one blended count. Absent is ordinary usage, and absent rather
+		 * than null so adding this never changed a field of any existing row.
+		 */
+		substitutedFrom?: string;
+	}>;
 	accountPerformance?: Array<{
 		name: string;
 		requests: number;
@@ -518,6 +528,8 @@ export interface AnalyticsResponse {
 		costUsd: number;
 		requests: number;
 		totalTokens?: number;
+		/** See `modelDistribution.substitutedFrom`. */
+		substitutedFrom?: string;
 	}>;
 	accountModelUsage?: Array<{ account: string; model: string; count: number }>;
 	/**
