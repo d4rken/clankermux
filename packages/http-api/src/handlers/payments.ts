@@ -134,15 +134,18 @@ export function assemblePaymentsSummary(
 	let amortizedMonthlyUsd = 0;
 
 	for (const config of data.renewalConfigs) {
-		const monthly = amortizedMonthlyFor(
-			config.renewal_price_usd_micros,
-			config.renewal_cadence,
-		);
+		// A `derived` price is a list price looked up from the plan tier, not an
+		// invoice anyone read. It is shown on the account so it can be confirmed
+		// in one click, and it stays out of every total until it is — the same
+		// line the payments auto-recorder draws, for the same reason.
+		const priceUsdMicros =
+			config.renewal_price_source === "derived"
+				? null
+				: config.renewal_price_usd_micros;
+		const monthly = amortizedMonthlyFor(priceUsdMicros, config.renewal_cadence);
 		amortizedMonthlyUsd += monthly;
 
-		const hasPrice =
-			config.renewal_price_usd_micros != null &&
-			config.renewal_price_usd_micros > 0;
+		const hasPrice = priceUsdMicros != null && priceUsdMicros > 0;
 		const hasLedger = ledgerByAccount.has(config.id);
 		if (!hasPrice && !hasLedger && !tokenCostByAccount.has(config.id)) continue;
 
@@ -154,9 +157,7 @@ export function assemblePaymentsSummary(
 		perAccount.push({
 			accountId: config.id,
 			accountName: config.name,
-			priceUsd: hasPrice
-				? microsToUsd(config.renewal_price_usd_micros as number)
-				: null,
+			priceUsd: hasPrice ? microsToUsd(priceUsdMicros as number) : null,
 			cadence: config.renewal_cadence,
 			nextDueDate: renewal.nextDate ? formatLocalDate(renewal.nextDate) : null,
 			amortizedMonthlyUsd: monthly,

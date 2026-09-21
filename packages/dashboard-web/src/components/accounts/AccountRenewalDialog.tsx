@@ -20,6 +20,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { formatIdentityPlanLabel } from "./AccountIdentity";
 
 interface AccountRenewalDialogProps {
 	account: Account | null;
@@ -157,6 +158,18 @@ export function AccountRenewalDialog({
 	// input is disabled and the save sends null.
 	const priceDisabled = cadence === "none";
 
+	// A price looked up from the plan tier fills the field like any other, but
+	// nothing books it: this note is the only place that says saving is what
+	// turns the estimate into a recorded amount. The tier goes in it because the
+	// number is only as right as the tier it came from — a plan billed in
+	// another currency or at a discount reads wrong here and is meant to be
+	// typed over.
+	const derivedPriceTier = account ? formatIdentityPlanLabel(account) : null;
+	const priceNote =
+		account?.renewalPriceSource === "derived"
+			? `Estimated from the ${derivedPriceTier ?? "plan"} list price. Nothing is recorded until you save it.`
+			: null;
+
 	const parsedPrice = Number.parseFloat(price);
 	const priceValid =
 		priceDisabled ||
@@ -291,10 +304,16 @@ export function AccountRenewalDialog({
 								onChange={(e) => setPrice(e.target.value)}
 								disabled={priceDisabled}
 							/>
-							{priceDisabled && (
+							{priceDisabled ? (
 								<p className="mt-tight text-xs text-muted-foreground">
 									One-time dates aren't auto-recorded — use Record Payment.
 								</p>
+							) : (
+								priceNote && (
+									<p className="mt-tight text-xs text-muted-foreground">
+										{priceNote}
+									</p>
+								)
 							)}
 						</div>
 					</div>

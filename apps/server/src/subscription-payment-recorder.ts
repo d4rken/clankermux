@@ -4,8 +4,9 @@
  *
  * Design notes:
  *  - An account is auto-recordable when its renewal anchor is set, its cadence
- *    is monthly/yearly, and its price is > 0. PAUSED accounts are deliberately
- *    NOT skipped — a paused subscription still costs money.
+ *    is monthly/yearly, and its price is > 0 and not a `derived` estimate.
+ *    PAUSED accounts are deliberately NOT skipped — a paused subscription still
+ *    costs money.
  *  - `renewal_auto_start_date` is the lower bound for due-date generation:
  *    occurrences before it are never auto-booked (historical rows come only
  *    from manual backfill). The API sets it whenever a price is set; if it is
@@ -40,6 +41,7 @@ export interface AccountRenewalConfig {
 	renewal_anchor: string | null;
 	renewal_cadence: string | null;
 	renewal_price_usd_micros: number | null;
+	renewal_price_source: string | null;
 	renewal_auto_start_date: string | null;
 	paused: number;
 }
@@ -161,6 +163,15 @@ export class SubscriptionPaymentRecorder {
 		if (!anchor) return 0;
 		if (cadence !== "monthly" && cadence !== "yearly") return 0;
 		if (typeof price !== "number" || !(price > 0)) return 0;
+		// A 'derived' price is a list price looked up from the captured plan
+		// tier — an estimate of an invoice nobody read, which a subscription
+		// billed in another currency, at a regional rate or on a promotion does
+		// not match. Booking one would write an amount the operator never saw
+		// into the ledger, every month, silently. Saving the price in the dialog
+		// makes it 'manual', and that is what authorises booking it. A NULL
+		// source is an operator price from before the column existed and books
+		// as it always did.
+		if (config.renewal_price_source === "derived") return 0;
 
 		// Lower bound: never auto-book due dates before the auto-start date.
 		// Null is defensive (the API always sets it alongside a price) — fall

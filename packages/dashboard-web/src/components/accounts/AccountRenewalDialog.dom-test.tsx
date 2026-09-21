@@ -20,6 +20,9 @@ function account(overrides: Partial<Account> = {}): Account {
 		renewalAnchorSource: null,
 		renewalCadence: null,
 		renewalPriceUsd: null,
+		renewalPriceSource: null,
+		identityPlanTier: null,
+		identityRateLimitTier: null,
 		identitySubscriptionStartedAt: null,
 		identitySubscriptionEndsAt: null,
 		identitySubscriptionWillRenew: null,
@@ -188,5 +191,80 @@ describe("AccountRenewalDialog — the three tracking states read differently", 
 		);
 
 		expect(dialogText().toLowerCase()).toContain("date you set");
+	});
+});
+
+describe("AccountRenewalDialog — a price derived from the plan tier", () => {
+	function priceInput(): HTMLInputElement | null {
+		return document.querySelector<HTMLInputElement>("#renewal-price");
+	}
+
+	it("fills the field and says nothing is recorded until it is saved", async () => {
+		await mount(
+			account({
+				renewalAnchor: "2026-01-14",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "derived",
+				identityPlanTier: "max",
+				identityRateLimitTier: "20x",
+			}),
+		);
+
+		expect(priceInput()?.value).toBe("200");
+		expect(dialogText()).toContain("Estimated from the Max 20x list price");
+		expect(dialogText()).toContain("Nothing is recorded until you save it");
+	});
+
+	it("saves the estimate as the operator's own amount, unchanged", async () => {
+		const calls: Array<[string | null, string, number | null]> = [];
+		await mount(
+			account({
+				renewalAnchor: "2026-01-14",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "derived",
+				identityPlanTier: "max",
+				identityRateLimitTier: "20x",
+			}),
+			{
+				onUpdateRenewal: async (_id, anchor, cadence, priceUsd) => {
+					calls.push([anchor, cadence, priceUsd]);
+				},
+			},
+		);
+
+		await click("Save");
+
+		expect(calls).toEqual([["2026-01-14", "monthly", 200]]);
+	});
+
+	it("says nothing for a price the operator entered", async () => {
+		await mount(
+			account({
+				renewalAnchor: "2026-01-14",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "manual",
+				identityPlanTier: "max",
+				identityRateLimitTier: "20x",
+			}),
+		);
+
+		expect(priceInput()?.value).toBe("200");
+		expect(dialogText()).not.toContain("Estimated from the");
+	});
+
+	it("falls back to naming no tier when none was captured", async () => {
+		await mount(
+			account({
+				renewalAnchor: "2026-01-14",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "derived",
+			}),
+		);
+
+		expect(dialogText()).toContain("Estimated from the plan list price");
 	});
 });

@@ -65,6 +65,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
+			renewal_price_source TEXT,
 			renewal_auto_start_date TEXT,
 			identity_external_id TEXT,
 			identity_email TEXT,
@@ -485,9 +486,11 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		expect(account?.renewal_anchor).toBe("2026-04-10");
 		expect(account?.renewal_cadence).toBe("monthly");
 		expect(account?.renewal_anchor_source).toBe("derived");
-		// A derived date must never feed the payments auto-recorder, which is
-		// gated on a price being set.
+		// Max is sold at two prices and this identity carries no rate-limit
+		// multiplier, so the price derivation has nothing to offer and leaves
+		// both price columns alone.
 		expect(account?.renewal_price_usd_micros).toBeNull();
+		expect(account?.renewal_price_source).toBeNull();
 	});
 
 	it("never overwrites an anchor the operator already set", async () => {
@@ -533,9 +536,8 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		const account = await repo.findById("sub-5");
 		expect(account?.renewal_anchor).toBe("2026-07-20");
 		expect(account?.renewal_anchor_source).toBe("derived");
-		// Re-deriving stays as far from the payments auto-recorder as the first
-		// seed does: still a guess, still no price.
 		expect(account?.renewal_price_usd_micros).toBeNull();
+		expect(account?.renewal_price_source).toBeNull();
 	});
 
 	it("leaves a derived anchor alone when the start is unchanged", async () => {

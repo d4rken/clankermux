@@ -1522,6 +1522,16 @@ OAuth tokens will need to be re-authenticated.
 		return this.accounts.syncProviderRenewalAnchor(accountId, sync);
 	}
 
+	/**
+	 * Offer the account's tier list price as an estimate, for a creation path
+	 * that wrote its identity columns with a direct INSERT rather than through
+	 * the identity transaction that normally derives it.
+	 * See {@link AccountRepository.resyncDerivedRenewalPrice}.
+	 */
+	async resyncDerivedRenewalPrice(accountId: string): Promise<void> {
+		return this.accounts.resyncDerivedRenewalPrice(accountId);
+	}
+
 	async getAccountRenewalConfigs(): Promise<
 		Array<{
 			id: string;
@@ -1529,6 +1539,7 @@ OAuth tokens will need to be re-authenticated.
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
 			renewal_price_usd_micros: number | null;
+			renewal_price_source: string | null;
 			renewal_auto_start_date: string | null;
 			paused: number;
 		}>

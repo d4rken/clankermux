@@ -237,6 +237,33 @@ describe("AccountStatusChips — renewal chip wording", () => {
 		expect(html).toContain("Renews");
 		expect(html).not.toContain("Renewal date passed");
 	});
+
+	it("marks a derived price with '~' and says nothing records it yet", () => {
+		const html = render(
+			makeAccount({
+				renewalAnchor: "2024-01-08",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "derived",
+			}),
+		);
+		expect(html).toContain("~$200.00/renewal");
+		expect(html).toContain("no payment is recorded until you confirm it");
+	});
+
+	it("shows a confirmed price unmarked", () => {
+		const html = render(
+			makeAccount({
+				renewalAnchor: "2024-01-08",
+				renewalCadence: "monthly",
+				renewalPriceUsd: 200,
+				renewalPriceSource: "manual",
+			}),
+		);
+		expect(html).toContain("$200.00/renewal");
+		expect(html).not.toContain("~$200.00/renewal");
+		expect(html).not.toContain("no payment is recorded");
+	});
 });
 
 describe("AccountStatusChips — refresh-token re-auth chip", () => {
