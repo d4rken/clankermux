@@ -18,6 +18,7 @@ function makeConfig() {
 		setUsageThrottlingWeeklyEnabled: mock(() => {}),
 		getPayloadRetentionHours: () => 72,
 		getRequestRetentionDays: () => 90,
+		getHeaderRetentionDays: () => 90,
 		getUsageSnapshotRetentionDays: () => 90,
 		getMemorySnapshotRetentionDays: () => 30,
 		getCacheKeepaliveSnapshotRetentionDays: () => cacheKeepaliveSnapshotDays,
@@ -25,6 +26,7 @@ function makeConfig() {
 			cacheKeepaliveSnapshotDays = v;
 		}),
 		getStorePayloads: () => true,
+		getStoreHeaders: () => true,
 		getPayloadMaxMb: () => payloadMaxMb,
 		setPayloadMaxMb: mock((v: number) => {
 			payloadMaxMb = v;

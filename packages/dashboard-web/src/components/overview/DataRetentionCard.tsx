@@ -37,6 +37,7 @@ export function DataRetentionCard() {
 	const [requestDays, setRequestDays] = useState<number>(
 		data?.requestDays ?? 3650,
 	);
+	const [headerDays, setHeaderDays] = useState<number>(data?.headerDays ?? 90);
 	const [usageSnapshotDays, setUsageSnapshotDays] = useState<number>(
 		// Matches the server default (getUsageSnapshotRetentionDays = 90); avoids
 		// the UI briefly flashing the old 3650 before the config query resolves.
@@ -54,6 +55,7 @@ export function DataRetentionCard() {
 		if (typeof data?.payloadMaxMb === "number")
 			setPayloadMaxGb(data.payloadMaxMb / 1024);
 		if (typeof data?.requestDays === "number") setRequestDays(data.requestDays);
+		if (typeof data?.headerDays === "number") setHeaderDays(data.headerDays);
 		if (typeof data?.usageSnapshotDays === "number")
 			setUsageSnapshotDays(data.usageSnapshotDays);
 		if (typeof data?.memorySnapshotDays === "number")
@@ -64,6 +66,7 @@ export function DataRetentionCard() {
 		data?.payloadHours,
 		data?.payloadMaxMb,
 		data?.requestDays,
+		data?.headerDays,
 		data?.usageSnapshotDays,
 		data?.memorySnapshotDays,
 		data?.cacheKeepaliveSnapshotDays,
@@ -77,6 +80,8 @@ export function DataRetentionCard() {
 		Number.isFinite(payloadMaxGb) && payloadMaxGb >= 0 && payloadMaxGb <= 1024;
 	const validRequests =
 		Number.isFinite(requestDays) && requestDays >= 1 && requestDays <= 3650;
+	const validHeaders =
+		Number.isFinite(headerDays) && headerDays >= 1 && headerDays <= 3650;
 	const validUsageSnapshots =
 		Number.isFinite(usageSnapshotDays) &&
 		usageSnapshotDays >= 1 &&
@@ -100,6 +105,7 @@ export function DataRetentionCard() {
 		...keys: Array<
 			| "payloads"
 			| "requests"
+			| "headers"
 			| "usage_snapshots"
 			| "usage_scoped_snapshots"
 			| "unified_claim_observations"
@@ -197,6 +203,25 @@ export function DataRetentionCard() {
 					/>
 
 					<SettingRow
+						label="Headers"
+						control={
+							<SettingNumberControl
+								value={headerDays}
+								unit="days"
+								min={1}
+								max={3650}
+								disabled={disabled}
+								canSave={validHeaders}
+								onChange={(raw) => setHeaderDays(parseInt(raw || "0", 10))}
+								onSave={() => setRetention.mutate({ headerDays })}
+							/>
+						}
+						value={usageFigure("headers")}
+						summary="Sanitized request and response headers, about 2 KB per request."
+						detail="Auth, cookies and session identifiers are stripped before storage, as are four per-response-unique keys that carry no analytic signal. Kept apart from the payload bodies so they outlive the payload window."
+					/>
+
+					<SettingRow
 						label="Usage snapshots"
 						control={
 							<SettingNumberControl
@@ -279,6 +304,21 @@ export function DataRetentionCard() {
 						}
 						summary="Save full request/response bodies (conversation text, images)."
 						detail="Turning this off reduces database size and memory pressure; token counts, costs and analytics are recorded either way. Left on, payloads can grow the database substantially over time — the two limits above are what bound it."
+					/>
+
+					<SettingRow
+						label="Store headers"
+						control={
+							<Switch
+								checked={data?.storeHeaders ?? true}
+								disabled={isLoading || setRetention.isPending}
+								onCheckedChange={(checked) =>
+									setRetention.mutate({ storeHeaders: checked })
+								}
+							/>
+						}
+						summary="Save the sanitized header sets for long-range client and provider analytics."
+						detail="Separate from the payload switch on purpose: headers are a fraction of a percent of a payload's size and keep being captured when payloads are dropped over the byte budget, so the series has no gaps during heavy traffic."
 					/>
 				</div>
 

@@ -62,6 +62,7 @@ describe("DatabaseOperations.getRetentionStorageUsage", () => {
 		expect(u.types.map((t) => t.key)).toEqual([
 			"payloads",
 			"requests",
+			"headers",
 			"usage_snapshots",
 			"usage_scoped_snapshots",
 			"unified_claim_observations",
@@ -77,6 +78,7 @@ describe("DatabaseOperations.getRetentionStorageUsage", () => {
 		expect(u.types.map((t) => t.table)).toEqual([
 			"request_payloads",
 			"requests",
+			"request_headers",
 			"usage_snapshots",
 			"usage_scoped_snapshots",
 			"unified_claim_observations",

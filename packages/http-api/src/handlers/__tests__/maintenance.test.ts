@@ -25,7 +25,9 @@ function makeConfig(
 		// window is configured in HOURS, unlike the sibling *_days settings.
 		getPayloadRetentionMs: () => payloadHours * 3_600_000,
 		getRequestRetentionDays: () => requestDays,
+		getHeaderRetentionDays: () => 90,
 		getStorePayloads: () => storePayloads ?? true,
+		getStoreHeaders: () => true,
 		getUsageSnapshotRetentionDays: () => usageSnapshotDays,
 		getMemorySnapshotRetentionDays: () => memorySnapshotDays,
 		// Byte budget in BYTES — same accessor the scheduled cleanup uses, so the

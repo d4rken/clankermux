@@ -24,6 +24,8 @@ import {
 	SNAPSHOT_DELETE_BATCH_ROWS,
 } from "../incremental-vacuum-worker";
 
+const DAY = 24 * 60 * 60 * 1000;
+
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-cleanup-test-"));
 }
@@ -59,10 +61,16 @@ function seed(
 		const insToolErr = db.prepare(
 			"INSERT INTO request_tool_errors (request_id, tool_name) VALUES (?, 't')",
 		);
+		// Unlike the three above, this child has BOTH an age pass of its own and
+		// the cascade, so it is seeded with a real `created_at`.
+		const insHeaders = db.prepare(
+			'INSERT INTO request_headers (request_id, request_headers, response_headers, created_at) VALUES (?, \'{"accept":"application/json"}\', \'{"content-type":"application/json"}\', ?)',
+		);
 		const insChildren = (id: string, ts: number): void => {
 			insRouting.run(id, ts);
 			insToolCall.run(id);
 			insToolErr.run(id);
+			insHeaders.run(id, ts);
 		};
 		db.exec("BEGIN");
 		for (let i = 0; i < oldCount; i++) {
@@ -464,7 +472,61 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 				removedInternalDispatchSpend: 0,
 				removedCodexWindowObservations: 0,
 				removedOpenAiBucketObservations: 0,
+				removedHeaders: 0,
 			});
+		} finally {
+			await dbOps.close();
+		}
+	});
+
+	it("prunes request_headers on its own cutoff, not the requests one", async () => {
+		const now = Date.now();
+		const oldTs = now - 120 * DAY;
+		const recentTs = now - 30 * DAY;
+		seed(dbPath, oldTs, recentTs, 4, 4);
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			// Request retention spans both ages, so nothing cascades; only the
+			// 90-day header cutoff may delete, and only the 120-day-old sets.
+			const res = await dbOps.cleanupOldRequests(
+				3650 * DAY,
+				3650 * DAY,
+				3650 * DAY,
+				3650 * DAY,
+				0,
+				90 * DAY,
+			);
+			expect(res.removedRequests).toBe(0);
+			expect(res.removedHeaders).toBe(4);
+			expect(count(dbPath, "request_headers")).toBe(4);
+			expect(count(dbPath, "requests")).toBe(8);
+		} finally {
+			await dbOps.close();
+		}
+	});
+
+	it("cascades header rows away when their request row ages out", async () => {
+		const now = Date.now();
+		const oldTs = now - 120 * DAY;
+		const recentTs = now - 30 * DAY;
+		seed(dbPath, oldTs, recentTs, 4, 4);
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			// Header retention outlives request retention here. The aged requests
+			// go, and FK cascade must take their headers with them rather than
+			// leaving rows whose request_id resolves to nothing.
+			const res = await dbOps.cleanupOldRequests(
+				3650 * DAY,
+				90 * DAY,
+				3650 * DAY,
+				3650 * DAY,
+				0,
+				3650 * DAY,
+			);
+			expect(res.removedRequests).toBe(4);
+			expect(count(dbPath, "request_headers")).toBe(4);
 		} finally {
 			await dbOps.close();
 		}

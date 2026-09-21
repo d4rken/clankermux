@@ -37,12 +37,18 @@ export function createCleanupHandler(
 		const payloadMaxBytes = config.getStorePayloads()
 			? config.getPayloadMaxBytes()
 			: 0;
+		// Same reasoning as the payload window: with header capture disabled the
+		// manual pass means "delete everything", so the cutoff collapses to now.
+		const headerMs = config.getStoreHeaders()
+			? config.getHeaderRetentionDays() * DAY_MS
+			: 0;
 		const { removedRequests, removedPayloads } = await dbOps.cleanupOldRequests(
 			payloadMs,
 			requestMs,
 			usageSnapshotMs,
 			memorySnapshotMs,
 			payloadMaxBytes,
+			headerMs,
 		);
 		const now = Date.now();
 		const payload: CleanupResponse = {

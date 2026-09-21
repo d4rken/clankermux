@@ -90,6 +90,7 @@ import {
 } from "./repositories/quota-drift-result.repository";
 import {
 	type RequestData,
+	type RequestHeadersData,
 	RequestRepository,
 	type RequestRoutingData,
 } from "./repositories/request.repository";
@@ -311,6 +312,14 @@ const DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS = 14 * TIME_CONSTANTS.DAY;
 export const UNIFIED_CLAIM_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 
 /**
+ * Fallback retention for `request_headers` when `cleanupOldRequests()` is
+ * called without an explicit headerRetentionMs. 90 days mirrors the default
+ * returned by config.getHeaderRetentionDays(); the server's hourly/startup
+ * cleanup passes the configured value explicitly.
+ */
+const DEFAULT_HEADER_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * Retention for the `unified_summary_observations` series. FIXED, and
  * deliberately the SAME 90 days as the claim series: the two are captured from
  * one response and are only useful together, so a shorter window on either side
@@ -351,6 +360,11 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 }> = [
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
+	// Sanitized raw header sets, on their own retention control
+	// (header_retention_days) rather than riding the requests one: the row is
+	// ~2.2 KB where a requests row is a few hundred bytes, so the two windows
+	// have to be settable apart.
+	{ key: "headers", table: "request_headers" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
 	// Rides the usage-snapshot retention control (one knob for one series
 	// family), so it has no control of its own — the card sums the two.
@@ -1603,6 +1617,14 @@ OAuth tokens will need to be re-authenticated.
 		await this.requests.saveRouting(data);
 	}
 
+	async saveRequestHeaders(data: RequestHeadersData): Promise<void> {
+		await this.requests.saveHeaders(data);
+	}
+
+	async getRequestHeaders(requestId: string) {
+		return this.requests.getHeaders(requestId);
+	}
+
 	async saveRequestToolCalls(
 		requestId: string,
 		stats: ToolCallStat[],
@@ -1854,12 +1876,14 @@ OAuth tokens will need to be re-authenticated.
 		snapshotRetentionMs?: number,
 		memorySnapshotRetentionMs?: number,
 		payloadMaxBytes = 0,
+		headerRetentionMs?: number,
 	): Promise<{
 		removedRequests: number;
 		removedPayloads: number;
 		removedPayloadsBySize: number;
 		removedSnapshots: number;
 		removedMemorySnapshots: number;
+		removedHeaders: number;
 		removedUnifiedClaimObservations: number;
 		removedUnifiedSummaryObservations: number;
 		removedInternalDispatchSpend: number;
@@ -1904,6 +1928,12 @@ OAuth tokens will need to be re-authenticated.
 			now - INTERNAL_DISPATCH_SPEND_RETENTION_MS;
 		const providerWindowObservationCutoff =
 			now - PROVIDER_WINDOW_OBSERVATION_RETENTION_MS;
+		const headerCutoff =
+			now -
+			(typeof headerRetentionMs === "number" &&
+			Number.isFinite(headerRetentionMs)
+				? headerRetentionMs
+				: DEFAULT_HEADER_RETENTION_MS);
 
 		const empty = {
 			removedRequests: 0,
@@ -1911,6 +1941,7 @@ OAuth tokens will need to be re-authenticated.
 			removedPayloadsBySize: 0,
 			removedSnapshots: 0,
 			removedMemorySnapshots: 0,
+			removedHeaders: 0,
 			removedUnifiedClaimObservations: 0,
 			removedUnifiedSummaryObservations: 0,
 			removedInternalDispatchSpend: 0,
@@ -1937,6 +1968,7 @@ OAuth tokens will need to be re-authenticated.
 					unifiedSummaryObservationCutoff,
 					internalDispatchSpendCutoff,
 					providerWindowObservationCutoff,
+					headerCutoff,
 					payloadMaxBytes,
 				});
 			});
