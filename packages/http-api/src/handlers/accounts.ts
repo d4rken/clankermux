@@ -492,6 +492,7 @@ export async function listAccountResponses(
 			renewal_anchor_source: string | null;
 			renewal_cadence: string | null;
 			renewal_price_usd_micros: number | null;
+			renewal_price_source: string | null;
 			identity_external_id: string | null;
 			identity_email: string | null;
 			identity_organization_name: string | null;
@@ -548,6 +549,7 @@ export async function listAccountResponses(
 					renewal_anchor_source,
 					renewal_cadence,
 					renewal_price_usd_micros,
+					renewal_price_source,
 					identity_external_id,
 					identity_email,
 					identity_organization_name,
@@ -1281,6 +1283,9 @@ export async function listAccountResponses(
 						account.renewal_price_usd_micros != null
 							? microsToUsd(account.renewal_price_usd_micros)
 							: null,
+					renewalPriceSource:
+						(account.renewal_price_source as "manual" | "derived" | null) ??
+						null,
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					activeSessionCount: activeSessionCountsByAccount.get(account.id) ?? 0,
 					isPrimary: account.id === primaryId,
@@ -2490,9 +2495,11 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 			const account = await db.get<{
 				name: string;
 				renewal_price_usd_micros: number | null;
+				renewal_price_source: string | null;
 				renewal_auto_start_date: string | null;
 			}>(
-				`SELECT name, renewal_price_usd_micros, renewal_auto_start_date
+				`SELECT name, renewal_price_usd_micros, renewal_price_source,
+				        renewal_auto_start_date
 				 FROM accounts WHERE id = ?`,
 				[accountId],
 			);
@@ -2505,14 +2512,20 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 			// newly-set price stamps today; a kept/changed price keeps the
 			// existing auto-start (defensively falling back to today if it was
 			// somehow never stamped — mirrors the auto-recorder's fallback).
+			//
+			// A `derived` price is not a price the account HAD: nothing booked
+			// against it, so confirming one today is a first price and must stamp
+			// today rather than reach for an auto-start that was never set.
+			const hadBookablePrice =
+				account.renewal_price_usd_micros != null &&
+				account.renewal_price_source !== "derived";
 			let storedPriceMicros: number | null = null;
 			let storedAutoStart: string | null = null;
 			if (anchor !== null && priceUsd !== null) {
 				storedPriceMicros = usdToMicros(priceUsd);
-				storedAutoStart =
-					account.renewal_price_usd_micros != null
-						? (account.renewal_auto_start_date ?? localTodayDate())
-						: localTodayDate();
+				storedAutoStart = hadBookablePrice
+					? (account.renewal_auto_start_date ?? localTodayDate())
+					: localTodayDate();
 			}
 
 			await dbOps.setAccountRenewal(

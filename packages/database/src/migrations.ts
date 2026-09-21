@@ -66,6 +66,7 @@ export function ensureSchema(db: Database): void {
 			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
+			renewal_price_source TEXT,
 			renewal_auto_start_date TEXT,
 			notes TEXT,
 			identity_external_id TEXT,
@@ -1652,6 +1653,18 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_subscription_checked_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_checked_at INTEGER",
+	},
+	// Provenance of renewal_price_usd_micros: 'manual' (operator-entered,
+	// including a deliberate clear) or 'derived' (a list price looked up from
+	// the captured plan tier). It is the payments auto-recorder's permission
+	// slip: a 'derived' price is an estimate of an invoice nobody read, so the
+	// recorder books nothing from it until a save turns it manual. NULL with a
+	// non-null price is an operator amount from before this column existed and
+	// books exactly as it always did.
+	{
+		table: "accounts",
+		column: "renewal_price_source",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_price_source TEXT",
 	},
 ];
 

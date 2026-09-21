@@ -445,6 +445,12 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						name,
 					);
 
+					// The INSERT above writes the tier columns itself, so it never
+					// passes through the identity transaction that offers a tier
+					// list price. Without this the account shows no estimated price
+					// until its first token refresh.
+					await dbOps.resyncDerivedRenewalPrice(accountId);
+
 					codexSessions.set(sessionId, {
 						status: "complete",
 						accountName: name,

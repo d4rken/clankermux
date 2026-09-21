@@ -68,14 +68,16 @@ describe("SubscriptionPaymentRecorder", () => {
 			anchor?: string | null;
 			cadence?: string | null;
 			price?: number | null;
+			priceSource?: string | null;
 			autoStart?: string | null;
 			paused?: boolean;
 		} = {},
 	): Promise<void> {
 		await dbOps.getAdapter().run(
 			`INSERT INTO accounts (id, name, provider, created_at, paused,
-					renewal_anchor, renewal_cadence, renewal_price_usd_micros, renewal_auto_start_date)
-				 VALUES (?, ?, 'anthropic', ?, ?, ?, ?, ?, ?)`,
+					renewal_anchor, renewal_cadence, renewal_price_usd_micros,
+					renewal_price_source, renewal_auto_start_date)
+				 VALUES (?, ?, 'anthropic', ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				id,
 				id,
@@ -84,6 +86,7 @@ describe("SubscriptionPaymentRecorder", () => {
 				opts.anchor ?? null,
 				opts.cadence ?? null,
 				opts.price ?? null,
+				opts.priceSource ?? null,
 				opts.autoStart ?? null,
 			],
 		);
@@ -219,6 +222,42 @@ describe("SubscriptionPaymentRecorder", () => {
 		expect(paused.map((r) => r.paid_date)).toEqual([TODAY_STR]);
 	});
 
+	it("never books a 'derived' price, and books it once it is confirmed", async () => {
+		const base = {
+			anchor: "2024-06-09",
+			cadence: "monthly",
+			price: 20_000_000,
+			autoStart: TODAY_STR,
+		};
+		// Same price, same dates — only the provenance differs.
+		await seedAccount("estimated", { ...base, priceSource: "derived" });
+		await seedAccount("confirmed", { ...base, priceSource: "manual" });
+		// A price predating the provenance column books as it always did.
+		await seedAccount("legacy", { ...base, priceSource: null });
+
+		await makeRecorder().tick();
+
+		expect(await paymentsFor("estimated")).toHaveLength(0);
+		expect((await paymentsFor("confirmed")).map((r) => r.paid_date)).toEqual([
+			TODAY_STR,
+		]);
+		expect((await paymentsFor("legacy")).map((r) => r.paid_date)).toEqual([
+			TODAY_STR,
+		]);
+
+		// Confirming the estimate is what releases it into the ledger.
+		await dbOps
+			.getAdapter()
+			.run(
+				`UPDATE accounts SET renewal_price_source = 'manual' WHERE id = 'estimated'`,
+			);
+		await makeRecorder().tick();
+
+		expect((await paymentsFor("estimated")).map((r) => r.paid_date)).toEqual([
+			TODAY_STR,
+		]);
+	});
+
 	it("falls back to today when auto_start_date is null (defensive: no invented history)", async () => {
 		await seedAccount("acc-1", {
 			anchor: "2024-06-09",
@@ -258,6 +297,7 @@ describe("SubscriptionPaymentRecorder", () => {
 			renewal_anchor: "2024-06-09",
 			renewal_cadence: "monthly",
 			renewal_price_usd_micros: 20_000_000,
+			renewal_price_source: null,
 			renewal_auto_start_date: TODAY_STR,
 			paused: 0,
 		});

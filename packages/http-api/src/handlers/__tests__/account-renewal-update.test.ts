@@ -271,6 +271,40 @@ describe("createAccountRenewalUpdateHandler", () => {
 			expect(stored.renewal_auto_start_date).toBe("2026-02-01");
 		});
 
+		it("stamps today when a derived estimate is confirmed, never an older auto_start", async () => {
+			const id = await insertAccount(dbOps, "price-derived");
+			await dbOps.setAccountRenewal(
+				id,
+				"2026-01-14",
+				"monthly",
+				20_000_000,
+				"2026-02-01",
+			);
+			// Nothing booked against an estimate, so confirming one is a FIRST
+			// price: reaching for the stored auto_start would backfill every due
+			// date since it into the ledger.
+			await dbOps
+				.getAdapter()
+				.run(
+					`UPDATE accounts SET renewal_price_source = 'derived' WHERE id = ?`,
+					[id],
+				);
+
+			const response = await handler(
+				makeRequest({
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+					renewalPriceUsd: 20,
+				}),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_price_usd_micros).toBe(20_000_000);
+			expect(stored.renewal_auto_start_date).toBe(localToday());
+		});
+
 		it("clears auto_start when the price is cleared", async () => {
 			const id = await insertAccount(dbOps, "price3");
 			await dbOps.setAccountRenewal(

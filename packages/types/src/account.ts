@@ -381,6 +381,7 @@ export interface AccountRow {
 	renewal_anchor_source?: string | null; // 'manual'=operator-entered, 'derived'=seeded from the provider's subscription start; null=never set either way
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros?: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
+	renewal_price_source?: string | null; // 'manual'=operator-entered, 'derived'=list price looked up from the plan tier; null=never set either way
 	renewal_auto_start_date?: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
 	identity_external_id?: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email?: string | null; // Account email captured from token claims or profile endpoint
@@ -439,6 +440,7 @@ export interface Account {
 	renewal_anchor_source: string | null; // 'manual'=operator-entered, 'derived'=seeded from the provider's subscription start; null=never set either way
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
+	renewal_price_source: string | null; // 'manual'=operator-entered, 'derived'=list price looked up from the plan tier; null=never set either way
 	renewal_auto_start_date: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
 	identity_external_id: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email: string | null; // Account email captured from token claims or profile endpoint
@@ -644,6 +646,18 @@ export interface AccountResponse {
 	renewalAnchorSource?: "manual" | "derived" | "provider" | null;
 	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	renewalPriceUsd?: number | null; // Subscription price in USD (API boundary speaks USD floats)
+	/**
+	 * Where {@link renewalPriceUsd} came from:
+	 *
+	 *   "manual"  — an amount the operator entered, including a clear.
+	 *   "derived" — a list price looked up from the captured plan tier. An
+	 *               estimate of an invoice nobody read, so it is shown with a
+	 *               "~" and the payments auto-recorder books nothing from it.
+	 *
+	 * Null when no price was ever set either way — or when one was set before
+	 * the provenance existed, which counts as the operator's and books.
+	 */
+	renewalPriceSource?: "manual" | "derived" | null;
 	sessionStats: SessionStats | null;
 	/** Distinct active-client sessions for this account in the trailing active-session
 	 *  window (TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS, 15m), keyed off
@@ -918,6 +932,7 @@ export function toAccount(row: AccountRow): Account {
 		renewal_anchor_source: row.renewal_anchor_source || null,
 		renewal_cadence: row.renewal_cadence || null,
 		renewal_price_usd_micros: toNumOrNull(row.renewal_price_usd_micros),
+		renewal_price_source: row.renewal_price_source || null,
 		renewal_auto_start_date: row.renewal_auto_start_date || null,
 		identity_external_id: row.identity_external_id ?? null,
 		identity_email: row.identity_email ?? null,
@@ -1030,6 +1045,8 @@ export function toAccountResponse(account: Account): AccountResponse {
 			account.renewal_price_usd_micros != null
 				? microsToUsd(account.renewal_price_usd_micros)
 				: null,
+		renewalPriceSource:
+			(account.renewal_price_source as "manual" | "derived" | null) ?? null,
 		sessionStats: null,
 		isPrimary: false,
 		identityExternalId: account.identity_external_id,

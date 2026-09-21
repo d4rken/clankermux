@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { getAppVersionSync, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import { anchorDateFromInstant } from "@clankermux/core/renewal";
+import { deriveSubscriptionPriceUsdMicros } from "@clankermux/core/subscription-pricing";
 import {
 	type Account,
 	type AccountIdentity,
@@ -47,9 +48,9 @@ interface StoredTiers {
  * Cadence a seeded anchor is given. No provider reports one — Anthropic's
  * profile says `stripe_subscription` and nothing about the interval — so this is
  * the majority guess, not an observation, which is why the row is marked
- * `derived` and why seeding never touches `renewal_price_usd_micros`: the
- * payments auto-recorder requires a price, so a guessed date can never invent a
- * ledger entry.
+ * `derived`. Nothing seeded here can invent a ledger entry: the payments
+ * auto-recorder requires a price whose source is not `derived`, and neither
+ * seeder writes one of those.
  */
 const SEEDED_RENEWAL_CADENCE = "monthly";
 
@@ -159,6 +160,105 @@ function seedRenewalAnchorFromSubscription(
 	);
 }
 
+/** The account's stored pricing inputs, before a derivation attempt. */
+interface StoredPrice {
+	provider: string | null;
+	identity_plan_tier: string | null;
+	identity_rate_limit_tier: string | null;
+	renewal_cadence: string | null;
+	renewal_price_usd_micros: number | null;
+	renewal_price_source: string | null;
+}
+
+const STORED_PRICE_SQL = `SELECT provider, identity_plan_tier, identity_rate_limit_tier,
+        renewal_cadence, renewal_price_usd_micros, renewal_price_source
+ FROM accounts WHERE id = ?`;
+
+const DERIVED_PRICE_UPDATE_SQL = `UPDATE accounts
+ SET renewal_price_usd_micros = ?, renewal_price_source = ?
+ WHERE id = ?`;
+
+/**
+ * Decide what a row's price columns should hold, or `undefined` for "leave
+ * them alone". The pure half of the derivation, so the two callers — the
+ * identity transaction and the provider cadence sync — cannot drift apart on
+ * who may be overwritten.
+ *
+ * Two dispositions write:
+ *
+ * FIRST SEED — price and source both NULL. Both halves matter, for the same
+ * reason they do for the anchor: a null price with source='manual' is a price
+ * the operator DELETED, and gating on the price alone would re-offer it on
+ * every capture. A non-null price with a NULL source predates this column and
+ * is the operator's, so it is never touched either.
+ *
+ * RE-DERIVE — source is 'derived' and the table now says something else. An
+ * upgrade from Max 5x to Max 20x moves the plan tier, and an estimate that did
+ * not move with it would sit on the row forever showing the old plan's price.
+ * The comparison is against the CURRENT inputs rather than a remembered value,
+ * which makes an unchanged tier write nothing and a derivation that has become
+ * ambiguous — a plan tier that no longer resolves, or a cadence that turned
+ * yearly — clear the estimate instead of leaving a stale one behind.
+ */
+function derivedPriceFor(stored: StoredPrice): number | null | undefined {
+	const isFirstSeed =
+		stored.renewal_price_usd_micros === null &&
+		stored.renewal_price_source === null;
+	const isDerived = stored.renewal_price_source === "derived";
+	if (!isFirstSeed && !isDerived) return undefined;
+
+	const price = deriveSubscriptionPriceUsdMicros({
+		provider: stored.provider,
+		planTier: stored.identity_plan_tier,
+		rateLimitTier: stored.identity_rate_limit_tier,
+		cadence: stored.renewal_cadence,
+	});
+	if (price === stored.renewal_price_usd_micros) return undefined;
+	// Nothing to offer on a first seed leaves the row untouched, so an account
+	// on a per-seat plan never acquires a source it did not need.
+	if (price === null && isFirstSeed) return undefined;
+	return price;
+}
+
+/** Bind parameters for {@link DERIVED_PRICE_UPDATE_SQL}. */
+function derivedPriceParams(
+	price: number | null,
+	accountId: string,
+): Array<string | number | null> {
+	return [price, price === null ? null : "derived", accountId];
+}
+
+/**
+ * Offer a list price for the account's captured plan tier, as an ESTIMATE the
+ * operator can confirm rather than a figure anything spends against.
+ *
+ * No provider reports what it charges, so this is a table lookup, and a
+ * subscription billed in another currency, at a regional rate, on a promotion
+ * or at a grandfathered price pays something the table cannot know. The whole
+ * safety of writing it at all rests on `renewal_price_source = 'derived'`,
+ * which the payments auto-recorder refuses to book. Saving in the dialog turns
+ * it `manual`, and that is the act that lets it reach the ledger.
+ *
+ * Runs after {@link seedRenewalAnchorFromSubscription} in the same transaction
+ * so a cadence that call just seeded is already visible — the table holds
+ * monthly prices and resolves nothing for a yearly cycle.
+ */
+function seedDerivedRenewalPrice(db: Database, accountId: string): void {
+	const stored = db.query(STORED_PRICE_SQL).get(accountId) as
+		| StoredPrice
+		| null
+		| undefined;
+	if (!stored) return;
+
+	const price = derivedPriceFor(stored);
+	if (price === undefined) return;
+
+	db.run(
+		DERIVED_PRICE_UPDATE_SQL,
+		derivedPriceParams(price, accountId) as never[],
+	);
+}
+
 export interface DevinCredentialReplacement {
 	apiKey: string;
 	expiresAt: number | null;
@@ -236,6 +336,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			if (changes === 0 || !before) return changes;
 
 			seedRenewalAnchorFromSubscription(db, accountId, identity);
+			seedDerivedRenewalPrice(db, accountId);
 
 			// COALESCE-merged effective values — exactly what the UPDATE just wrote.
 			const planTier = identity.planTier ?? before.plan_tier;
@@ -290,6 +391,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
+				renewal_price_source,
 				renewal_auto_start_date,
 				identity_external_id,
 				identity_email,
@@ -339,6 +441,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
+				renewal_price_source,
 				renewal_auto_start_date,
 				identity_external_id,
 				identity_email,
@@ -1175,7 +1278,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			`UPDATE accounts
 			 SET renewal_anchor = ?, renewal_cadence = ?,
 			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?,
-			     renewal_anchor_source = 'manual'
+			     renewal_anchor_source = 'manual', renewal_price_source = 'manual'
 			 WHERE id = ?`,
 			[anchor, cadence, priceUsdMicros, autoStartDate, accountId],
 		);
@@ -1188,17 +1291,18 @@ export class AccountRepository extends BaseRepository<Account> {
 	 *
 	 * `renewal_anchor_source` is the half that reopens the gate, but the price
 	 * has to go with it and that is a safety requirement rather than tidiness:
-	 * the payments auto-recorder fires on anchor + cadence + price, and the
-	 * anchor this account is about to receive is a guess. Leaving a price behind
-	 * would let that guess invent ledger entries — exactly what seeding's refusal
-	 * to touch the price exists to prevent.
+	 * the payments auto-recorder fires on anchor + cadence + a price it is
+	 * allowed to book, and the anchor this account is about to receive is a
+	 * guess. Leaving a `manual` price behind would let that guess invent ledger
+	 * entries. Clearing `renewal_price_source` too is what puts the price back
+	 * in reach of {@link seedDerivedRenewalPrice}, whose estimate books nothing.
 	 */
 	async resetRenewalToAutomatic(accountId: string): Promise<void> {
 		await this.run(
 			`UPDATE accounts
 			 SET renewal_anchor = NULL, renewal_cadence = NULL,
 			     renewal_price_usd_micros = NULL, renewal_auto_start_date = NULL,
-			     renewal_anchor_source = NULL
+			     renewal_anchor_source = NULL, renewal_price_source = NULL
 			 WHERE id = ?`,
 			[accountId],
 		);
@@ -1317,9 +1421,11 @@ export class AccountRepository extends BaseRepository<Account> {
 	 *                renewal schedule.
 	 *
 	 * The predicate lives in the WHERE so the row is re-checked at write time.
-	 * `renewal_price_usd_micros` is never touched, which is what keeps the
-	 * payments auto-recorder (gated on a price) unable to fire from a
-	 * provider-reported date.
+	 * A reported period end says nothing about an amount, so no price is read
+	 * off it. The CADENCE it carries does bear on one, which is why a landed
+	 * write re-runs {@link AccountRepository.resyncDerivedRenewalPrice}: this is
+	 * the only writer that can turn a cycle yearly, and a monthly estimate
+	 * standing beside a yearly cycle is one the operator could confirm.
 	 *
 	 * Returns true when this call moved the anchor.
 	 */
@@ -1347,7 +1453,36 @@ export class AccountRepository extends BaseRepository<Account> {
 			        OR (renewal_anchor_source IS NULL AND renewal_anchor IS NULL))`,
 			[anchor, cadence ?? PROVIDER_FALLBACK_CADENCE, accountId],
 		);
+		if (changes > 0) await this.resyncDerivedRenewalPrice(accountId);
 		return changes > 0;
+	}
+
+	/**
+	 * Re-run the tier price derivation outside an identity write.
+	 *
+	 * Same rules as the in-transaction seeding: `manual` and pre-provenance
+	 * prices are never touched, and only an estimate this derivation itself
+	 * wrote can be moved or taken back.
+	 *
+	 * Two callers need it, both of which reach an account the identity
+	 * transaction does not: a provider cadence sync (where a cycle can turn
+	 * yearly and invalidate a monthly estimate), and an account created by a
+	 * direct INSERT that writes its tier columns itself.
+	 *
+	 * Not transactional, deliberately: nothing else in the row depends on it,
+	 * and a lost race just leaves an estimate one capture behind.
+	 */
+	async resyncDerivedRenewalPrice(accountId: string): Promise<void> {
+		const stored = await this.get<StoredPrice>(STORED_PRICE_SQL, [accountId]);
+		if (!stored) return;
+
+		const price = derivedPriceFor(stored);
+		if (price === undefined) return;
+
+		await this.run(
+			DERIVED_PRICE_UPDATE_SQL,
+			derivedPriceParams(price, accountId),
+		);
 	}
 
 	/**
@@ -1363,6 +1498,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			renewal_anchor: string | null;
 			renewal_cadence: string | null;
 			renewal_price_usd_micros: number | null;
+			renewal_price_source: string | null;
 			renewal_auto_start_date: string | null;
 			paused: number;
 		}>
@@ -1370,7 +1506,8 @@ export class AccountRepository extends BaseRepository<Account> {
 		return this.query(
 			`
 			SELECT id, name, renewal_anchor, renewal_cadence,
-			       renewal_price_usd_micros, renewal_auto_start_date,
+			       renewal_price_usd_micros, renewal_price_source,
+			       renewal_auto_start_date,
 			       COALESCE(paused, 0) as paused
 			FROM accounts WHERE disabled = 0
 		`,

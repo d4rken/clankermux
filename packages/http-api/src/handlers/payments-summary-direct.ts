@@ -88,6 +88,7 @@ export interface PaymentsSummaryData {
 		renewal_anchor: string | null;
 		renewal_cadence: string | null;
 		renewal_price_usd_micros: number | null;
+		renewal_price_source: string | null;
 	}>;
 	recentPayments: AccountPaymentRow[];
 }
@@ -207,9 +208,11 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 					renewal_anchor: string | null;
 					renewal_cadence: string | null;
 					renewal_price_usd_micros: number | null;
+					renewal_price_source: string | null;
 				}>(
 					`
-					SELECT id, name, renewal_anchor, renewal_cadence, renewal_price_usd_micros
+					SELECT id, name, renewal_anchor, renewal_cadence,
+					       renewal_price_usd_micros, renewal_price_source
 					FROM accounts WHERE disabled = 0
 				`,
 					[],

@@ -89,6 +89,7 @@ export function makeAccount(overrides: Partial<Account> = {}): Account {
 		renewal_anchor_source: null,
 		renewal_cadence: null,
 		renewal_price_usd_micros: null,
+		renewal_price_source: null,
 		renewal_auto_start_date: null,
 		identity_external_id: null,
 		identity_email: null,
