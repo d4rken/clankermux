@@ -75,6 +75,14 @@ export function ModelSubstitutionCard({
 									</td>
 									<td className="py-tight font-mono text-xs">
 										{pair.reportedModel}
+										{/* Without this the row reads as a failure of enforcement:
+										    an accepted swap keeps happening on purpose, and at a
+										    share near 100% that is the obvious question to ask. */}
+										{pair.accepted ? (
+											<span className="ml-tight font-sans text-muted-foreground">
+												accepted
+											</span>
+										) : null}
 									</td>
 									<td className="py-tight text-right">
 										{Math.round(substitutionShare(pair) * 100)}%

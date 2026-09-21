@@ -43,6 +43,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 	PROVIDER_NAMES,
+	parseModelSubstitutionExceptions,
 	type RateLimitReason,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
@@ -106,6 +107,7 @@ import {
 } from "./family-weekly-gate";
 import {
 	isModelSubstitution,
+	isSubstitutionExcepted,
 	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	SERVED_MODEL_SUPPRESSION_MS,
 } from "./model-substitution";
@@ -2524,10 +2526,20 @@ export async function proxyWithAccount(
 			servedModel !== null &&
 			isModelSubstitution(resolvedTargetModel, servedModel)
 		) {
-			log.warn(
-				`Account ${account.name} answered as ${servedModel} for ${resolvedTargetModel}`,
+			// An accepted swap is still a swap: it is logged, it is written onto
+			// the attempt row by the observer, and it reaches every dashboard
+			// surface. Only the failover is waived.
+			const excepted = isSubstitutionExcepted(
+				resolvedTargetModel,
+				servedModel,
+				parseModelSubstitutionExceptions(
+					ctx.config.getServedModelSubstitutionExceptions?.() ?? [],
+				),
 			);
-			if (substitutionMode === "enforce") {
+			log.warn(
+				`Account ${account.name} answered as ${servedModel} for ${resolvedTargetModel}${excepted ? " (accepted by exception)" : ""}`,
+			);
+			if (substitutionMode === "enforce" && !excepted) {
 				// Fire-and-forget: this governs LATER requests. The SAME request is
 				// covered synchronously by excludeModelForRequest inside fail(),
 				// which keys off MODEL_REJECTION_OUTCOMES.

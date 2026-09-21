@@ -1,9 +1,14 @@
 import { AccountRepository, RoutingRepository } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
-import { BACKEND_RESOLVED_SLUGS, isModelSubstitution } from "@clankermux/proxy";
+import {
+	BACKEND_RESOLVED_SLUGS,
+	isModelSubstitution,
+	isSubstitutionExcepted,
+} from "@clankermux/proxy";
 import type {
 	Account,
 	DegradedAccount,
+	ModelSubstitutionException,
 	ModelSubstitutionPair,
 	ModelSubstitutionPoint,
 	ModelSubstitutionsResponse,
@@ -12,6 +17,7 @@ import {
 	MODEL_SUBSTITUTION_ACTIVE_MIN_ATTEMPTS,
 	MODEL_SUBSTITUTION_ACTIVE_MIN_SHARE,
 	MODEL_SUBSTITUTION_ACTIVE_WINDOW_MS,
+	parseModelSubstitutionExceptions,
 	substitutionShare,
 } from "@clankermux/types";
 import type { APIContext } from "../types";
@@ -66,10 +72,20 @@ function isRealSubstitution(outgoing: string, reported: string): boolean {
 	return isModelSubstitution(outgoing, reported);
 }
 
+/**
+ * Query param carrying the operator's accepted swaps, repeated once per entry.
+ *
+ * A param rather than a config read because this handler runs inside the
+ * analytics worker too, where there is no Config. The router strips any
+ * client-supplied copy before appending the real one.
+ */
+export const MODEL_SUBSTITUTION_EXCEPTIONS_PARAM = "exception";
+
 export function computeModelSubstitutions(
 	raw: Awaited<ReturnType<ModelSubstitutionSources["getModelSubstitutions"]>>,
 	accounts: readonly Account[],
 	nowMs: number,
+	exceptions: readonly ModelSubstitutionException[] = [],
 ): ModelSubstitutionsResponse {
 	const nameById = new Map(accounts.map((a) => [a.id, a.name]));
 	const comparableByKey = new Map(
@@ -86,6 +102,11 @@ export function computeModelSubstitutions(
 			provider: p.provider,
 			outgoingModel: p.outgoingModel,
 			reportedModel: p.reportedModel,
+			accepted: isSubstitutionExcepted(
+				p.outgoingModel,
+				p.reportedModel,
+				exceptions,
+			),
 			substituted: p.substituted,
 			comparable:
 				comparableByKey.get(`${p.accountId}\u0000${p.outgoingModel}`) ??
@@ -100,6 +121,10 @@ export function computeModelSubstitutions(
 	const activeSince = nowMs - MODEL_SUBSTITUTION_ACTIVE_WINDOW_MS;
 	const byAccount = new Map<string, ModelSubstitutionPair[]>();
 	for (const pair of pairs) {
+		// An accepted swap is not a degradation. It stays in `pairs` so the
+		// analytics card can still show it happening; what it must not do is
+		// raise a chip telling an operator to go fix a decision they made.
+		if (pair.accepted) continue;
 		if (pair.lastAtMs < activeSince) continue;
 		if (pair.comparable < MODEL_SUBSTITUTION_ACTIVE_MIN_ATTEMPTS) continue;
 		if (substitutionShare(pair) < MODEL_SUBSTITUTION_ACTIVE_MIN_SHARE) continue;
@@ -135,11 +160,16 @@ export function createModelSubstitutionsHandlerFromSources(
 		const { bucketMs, windowMs } = getRangeConfig(range);
 		const nowMs = sources.now?.() ?? Date.now();
 		const sinceMs = windowMs === null ? 0 : nowMs - windowMs;
+		const exceptions = parseModelSubstitutionExceptions(
+			params.getAll(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM),
+		);
 		const [raw, accounts] = await Promise.all([
 			sources.getModelSubstitutions({ sinceMs, bucketMs }),
 			sources.getAllAccounts(),
 		]);
-		return jsonResponse(computeModelSubstitutions(raw, accounts, nowMs));
+		return jsonResponse(
+			computeModelSubstitutions(raw, accounts, nowMs, exceptions),
+		);
 	};
 }
 
