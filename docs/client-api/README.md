@@ -61,6 +61,10 @@ The proxy returns `x-clankermux-request-id` on the response to the proxied
 request. That value is the `{id}` these routes take, and it is set for every
 provider, so a client cannot tell from the header which backend served it.
 
+The header rides a forwarded provider response. A request the gateway refuses
+on its own, before or during an upstream attempt, answers without it, so a
+client that needs those requests back has to find them by correlation tag.
+
 ## Correlation tags
 
 Send `x-clankermux-correlation-tag` on a proxied request to label it with an
@@ -96,10 +100,10 @@ ingest header uses, so a tag that can be stored can always be searched for.
 | `error` | string \| null | The recorded error text, null when none was recorded |
 | `model` | string \| null | The model the accounting was recorded against |
 | `requestedModel` | string \| null | The model the client asked for |
-| `inputTokens` | number \| null | As stored |
-| `outputTokens` | number \| null | As stored |
-| `cacheReadInputTokens` | number \| null | As stored |
-| `cacheCreationInputTokens` | number \| null | As stored |
+| `inputTokens` | number \| null | Prompt tokens that neither cache class covers |
+| `outputTokens` | number \| null | Generated tokens |
+| `cacheReadInputTokens` | number \| null | Prompt tokens served from the cache |
+| `cacheCreationInputTokens` | number \| null | Prompt tokens written to the cache |
 | `usageSource` | `provider` \| `approximate` \| `none` \| null | Provenance of the token vector |
 | `project` | string \| null | The project the proxy attributed the request to |
 | `apiKeyId` | string | The client id the row is scoped to |
@@ -182,15 +186,36 @@ usable.
 
 ## Token counts
 
-Each count is `number | null`, reported as stored and not normalised.
+The four classes are DISJOINT and ADDITIVE. `inputTokens` excludes both cache
+classes, so `inputTokens + cacheReadInputTokens + cacheCreationInputTokens` is
+the whole prompt and adding `outputTokens` gives the billable total. No class
+contains another, and summing any subset double counts nothing.
 
-A null is genuinely ambiguous. Either the provider reported nothing for that
-class, or it reported zero and the write path collapsed the zero to null. The
-surface publishes null rather than a `0` the row does not claim, so a consumer
-that needs a number must decide which reading to apply.
+Providers do not agree on this. Some report a prompt total with the cache
+classes as parts of it; the proxy subtracts them at the translation boundary so
+one convention reaches this surface. Where a provider's counters disagree with
+their own total, cache reads are clamped to the total and cache writes to what
+remains, so the additive input can never go negative.
 
-Values are upstream-reported and are not validated for sign or bound. The
-schemas constrain neither.
+`null` means one thing: no count for that class was received. A provider that
+reports zero is stating that none of that class was consumed, and that is
+published as `0`.
+
+Rows written before this guarantee existed are not backfilled, and on those a
+null may still be a collapsed zero. A client whose traffic begins after the
+version that publishes this document has no such rows.
+
+Values are otherwise upstream-reported and are not validated for sign or bound.
+The schemas constrain neither.
+
+Two caveats:
+
+- Devin reports its cache reads disjoint from its input, which matches this
+  convention and was confirmed against recorded traffic. Its cache-write
+  counter has never been observed above zero, so that half is unobserved
+  rather than verified.
+- `usageSource: "provider"` says the counts came from a provider. It does not
+  certify the convention, which this section does.
 
 ## `timestamp`
 

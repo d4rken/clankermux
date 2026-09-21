@@ -13,7 +13,7 @@
       "inputTokens": 1284,
       "outputTokens": 903,
       "cacheReadInputTokens": 18432,
-      "cacheCreationInputTokens": null,
+      "cacheCreationInputTokens": 0,
       "usageSource": "provider",
       "project": "invoice-extractor",
       "apiKeyId": "8c2e0a97-6f41-4c8e-9a0b-1d3f5e7c9a20",

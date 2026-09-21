@@ -38,10 +38,11 @@ export interface ClientRequestDto {
 	model: string | null;
 	requestedModel: string | null;
 	/**
-	 * Token counts AS STORED. A null is genuinely ambiguous — the provider
-	 * reported nothing for that class, or reported zero and the write path
-	 * collapsed it — so it is published as null rather than resolved to a 0 the
-	 * row does not claim.
+	 * Four DISJOINT classes: `inputTokens` excludes both cache classes, so the
+	 * three prompt classes sum to the whole prompt and none contains another.
+	 * `null` means no count for that class was received; a provider-reported
+	 * zero is published as 0. Rows written before that guarantee are not
+	 * backfilled, so on those a null may still be a collapsed zero.
 	 */
 	inputTokens: number | null;
 	outputTokens: number | null;
