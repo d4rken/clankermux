@@ -88,6 +88,14 @@ class FakeDbOps {
 	async getManagementPassword(): Promise<null> {
 		return null;
 	}
+	/**
+	 * The client router builds a `RequestRepository` over this at construction.
+	 * The routes this file exercises never issue a query, so an empty adapter is
+	 * enough; the request routes have their own tests against a real database.
+	 */
+	getAdapter(): unknown {
+		return {};
+	}
 }
 
 function makeDeps(): {
@@ -104,6 +112,7 @@ function makeDeps(): {
 		config: {
 			getRequestRetentionDays: () => RETENTION_DAYS,
 		} as unknown as Config,
+		dbOps: db as unknown as DatabaseOperations,
 	});
 	const dispatched: string[] = [];
 
@@ -216,7 +225,7 @@ describe("the namespace", () => {
 	it("404s an unknown route in JSON rather than with the dashboard shell", async () => {
 		const { deps } = makeDeps();
 		const res = await routeRequest(
-			request("/client/v1/requests", { headers: { "x-api-key": VALID_KEY } }),
+			request("/client/v1/inventory", { headers: { "x-api-key": VALID_KEY } }),
 			deps,
 		);
 

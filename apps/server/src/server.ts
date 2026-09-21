@@ -959,7 +959,7 @@ export default async function startServer(options?: {
 	// like the widget surface it sits outside `/api/*` — the session gate is a
 	// path-prefix decision, and an exemption inside `/api/*` would be the only
 	// thing between a client key and the whole management surface.
-	const clientRouter = new ClientRouter({ config });
+	const clientRouter = new ClientRouter({ config, dbOps });
 
 	// Initialize AuthService for proxy authentication. It also answers the
 	// front door's `session` requirement for `/api/*`, so it is handed the same
