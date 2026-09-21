@@ -7,6 +7,7 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
+import { isModelSubstitution } from "@clankermux/proxy";
 import { type AnalyticsSection, NO_ACCOUNT_ID } from "@clankermux/types";
 import type {
 	ActiveSessionsAnalytics,
@@ -221,6 +222,78 @@ type AdditionalDataBranch = {
 // untruncated branch instead. Both belong to the `projectBreakdown` section, so
 // requesting it always emits the pair and the NULL bucket can never be ranked
 // out.
+/**
+ * The model a request was SENT as, when the answer it got came back under a
+ * different name. NULL for ordinary usage.
+ *
+ * Find the attempt FIRST, then ask whether it substituted. The order is the
+ * whole correctness argument, and doing it the other way round is subtly wrong:
+ * filtering on a mismatch before picking the newest attempt makes a mismatched
+ * EARLIER attempt the only candidate, so a request that account A substituted
+ * and account B then served correctly gets attributed to A's model. That is the
+ * ordinary shape of an enforced failover, so it would report every successful
+ * routing-around as a downgrade.
+ *
+ * So the inner query says only "the attempt that answered this request": the
+ * newest `upstream_send` that returned 200. The `CASE` outside it then compares
+ * what that one attempt sent against what it reported.
+ *
+ * The comparison is raw inequality, which calls `claude-haiku-4-5` answered by
+ * `claude-haiku-4-5-20251001` a swap. That makes this a CANDIDATE, not a
+ * verdict: `isModelSubstitution` decides, over in `foldSubstitutedModelRows`.
+ * SQL cannot reach that normalisation, so the query over-selects on purpose.
+ *
+ * Correlated rather than a joined derived table: this drives off
+ * `idx_routing_attempts_request` once per request in the range, where the
+ * derived table materialised every mismatched attempt ever recorded. On the
+ * 15 GB production database over a 24h range that was 1.13s against 0.43s, and
+ * only the correlated form stays flat as the history grows.
+ */
+const SUBSTITUTION_ORIGIN_MODEL = `(
+						SELECT CASE
+							WHEN answered.outgoing_model <> answered.reported_model
+							THEN answered.outgoing_model
+						END
+						FROM (
+							SELECT ra.outgoing_model, ra.reported_model
+							FROM routing_attempts ra
+							WHERE ra.request_id = r.id
+							  AND ra.kind = 'upstream_send'
+							  AND ra.status = 200
+							  AND ra.reported_model IS NOT NULL
+							ORDER BY ra.started_at DESC
+							LIMIT 1
+						) answered
+					)`;
+
+/**
+ * Collapse the SQL's over-selected substitution candidates into final rows.
+ *
+ * A candidate the real comparison rejects is folded back into its model's
+ * ordinary row, so a dated snapshot or a vendor-prefixed spelling never appears
+ * as a separate line, and its count is not lost with it.
+ *
+ * Surviving origins are grouped by the spelling the database holds, NOT by a
+ * canonical form. Two spellings of one origin model would therefore render as
+ * two rows. Left alone deliberately: canonicalising would mean picking one
+ * spelling to show, and the row is meant to say what actually went on the wire.
+ */
+function foldSubstitutedModelRows<T extends { model: string }>(
+	rows: ReadonlyArray<{ row: T; origin: string | null }>,
+	add: (into: T, from: T) => void,
+): Array<T & { substitutedFrom?: string }> {
+	const byKey = new Map<string, T & { substitutedFrom?: string }>();
+	for (const { row, origin } of rows) {
+		const real =
+			origin !== null && isModelSubstitution(origin, row.model) ? origin : null;
+		const key = JSON.stringify([row.model, real]);
+		const existing = byKey.get(key);
+		if (existing) add(existing, row);
+		else byKey.set(key, { ...row, ...(real ? { substitutedFrom: real } : {}) });
+	}
+	return [...byKey.values()];
+}
+
 function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 	return [
 		{
@@ -229,8 +302,11 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 			sql: `			SELECT * FROM (
 				SELECT
 					'model_distribution' as data_type,
-					model as name,
-					CAST(NULL AS TEXT) as secondary_name,
+					r.model as name,
+					-- Splitting this row keeps "1,034 requests really asked for
+					-- luna" from being reported as the same thing as "2,740 asked
+					-- for astra and got luna" (one live day, 2026-09-21).
+					${SUBSTITUTION_ORIGIN_MODEL} as secondary_name,
 					COUNT(*) as count,
 					CAST(NULL AS BIGINT) as requests,
 					CAST(NULL AS DOUBLE PRECISION) as success_rate,
@@ -243,12 +319,32 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					CAST(NULL AS BIGINT) as inferred_requests,
 					CAST(NULL AS BIGINT) as ambiguous_requests
 				FROM requests r
-				WHERE ${whereClause} AND model IS NOT NULL
-				GROUP BY model
+				WHERE ${whereClause} AND r.model IS NOT NULL
+				-- Rank MODELS, then return every row belonging to the ones that
+				-- won. Cutting the SPLIT rows at ten instead would throw away
+				-- candidates before the fold has decided which of them are real,
+				-- and a discarded candidate takes its count with it: eleven
+				-- spellings that all normalise to ordinary usage would come back
+				-- as one row counting ten.
+				  AND r.model IN (
+					SELECT ranked.model FROM (
+						SELECT model, COUNT(*) AS model_count
+						FROM requests r
+						WHERE ${whereClause} AND r.model IS NOT NULL
+						GROUP BY model
+						ORDER BY model_count DESC
+						LIMIT 10
+					) ranked
+				)
+				-- Positional, so the correlated subquery is written once. Naming
+				-- the alias would bind to a source column instead (SQLite prefers
+				-- those), and there is no source column here to bind to.
+				GROUP BY 2, 3
 				ORDER BY count DESC
-				LIMIT 10
 			) q1`,
-			binds: (qp) => [...qp],
+			// The inner ranking repeats the same window predicate, so the range
+			// and filter binds are supplied twice.
+			binds: (qp) => [...qp, ...qp],
 		},
 		{
 			section: "accountPerformance",
@@ -298,8 +394,8 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 			sql: `			SELECT * FROM (
 				SELECT
 					'cost_by_model' as data_type,
-					model as name,
-					CAST(NULL AS TEXT) as secondary_name,
+					r.model as name,
+					${SUBSTITUTION_ORIGIN_MODEL} as secondary_name,
 					CAST(NULL AS BIGINT) as count,
 					COUNT(*) as requests,
 					CAST(NULL AS DOUBLE PRECISION) as success_rate,
@@ -312,12 +408,30 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					CAST(NULL AS BIGINT) as inferred_requests,
 					CAST(NULL AS BIGINT) as ambiguous_requests
 				FROM requests r
-				WHERE ${whereClause} AND COALESCE(cost_usd, 0) > 0 AND model IS NOT NULL
-				GROUP BY model
+				WHERE ${whereClause} AND COALESCE(r.cost_usd, 0) > 0 AND r.model IS NOT NULL
+				-- Rank MODELS, then take every row belonging to the ones that won,
+				-- rather than ranking the split rows and cutting at ten.
+				-- ModelAnalytics sums these back into a per-model total, so a model
+				-- whose rows were partly truncated would not read "not shown" - it
+				-- would read a smaller cost over fewer tokens, and a cost per 1K
+				-- computed from the wrong denominator.
+				  AND r.model IN (
+					SELECT ranked.model FROM (
+						SELECT model, SUM(COALESCE(cost_usd, 0)) AS model_cost
+						FROM requests r
+						WHERE ${whereClause} AND COALESCE(r.cost_usd, 0) > 0 AND r.model IS NOT NULL
+						GROUP BY model
+						ORDER BY model_cost DESC
+						LIMIT 10
+					) ranked
+				)
+				-- Positional for the same reason as q1.
+				GROUP BY 2, 3
 				ORDER BY cost_usd DESC
-				LIMIT 10
 			) q3`,
-			binds: (qp) => [...qp],
+			// The inner ranking repeats the same window predicate, so the
+			// range and filter binds are supplied twice.
+			binds: (qp) => [...qp, ...qp],
 		},
 		{
 			section: "apiKeyPerformance",
@@ -762,12 +876,17 @@ export function createAnalyticsHandler(context: APIContext) {
 			// Parse the combined results
 			const modelDistribution = !want("modelDistribution")
 				? undefined
-				: additionalData
-						.filter((row) => row.data_type === "model_distribution")
-						.map((row) => ({
-							model: row.name,
-							count: Number(row.count) || 0,
-						}));
+				: foldSubstitutedModelRows(
+						additionalData
+							.filter((row) => row.data_type === "model_distribution")
+							.map((row) => ({
+								row: { model: row.name, count: Number(row.count) || 0 },
+								origin: row.secondary_name,
+							})),
+						(into, from) => {
+							into.count += from.count;
+						},
+					).sort((a, b) => b.count - a.count);
 
 			const accountPerformance = !want("accountPerformance")
 				? undefined
@@ -784,14 +903,24 @@ export function createAnalyticsHandler(context: APIContext) {
 
 			const costByModel = !want("costByModel")
 				? undefined
-				: additionalData
-						.filter((row) => row.data_type === "cost_by_model")
-						.map((row) => ({
-							model: row.name,
-							costUsd: Number(row.cost_usd) || 0,
-							requests: Number(row.requests) || 0,
-							totalTokens: Number(row.total_tokens) || 0,
-						}));
+				: foldSubstitutedModelRows(
+						additionalData
+							.filter((row) => row.data_type === "cost_by_model")
+							.map((row) => ({
+								row: {
+									model: row.name,
+									costUsd: Number(row.cost_usd) || 0,
+									requests: Number(row.requests) || 0,
+									totalTokens: Number(row.total_tokens) || 0,
+								},
+								origin: row.secondary_name,
+							})),
+						(into, from) => {
+							into.costUsd += from.costUsd;
+							into.requests += from.requests;
+							into.totalTokens += from.totalTokens;
+						},
+					).sort((a, b) => b.costUsd - a.costUsd);
 
 			const apiKeyPerformance = !want("apiKeyPerformance")
 				? undefined

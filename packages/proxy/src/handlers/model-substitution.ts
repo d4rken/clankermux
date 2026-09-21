@@ -1,4 +1,8 @@
 import { stripDatedModelSuffix } from "@clankermux/core";
+import {
+	MODEL_SUBSTITUTION_EXCEPTION_WILDCARD,
+	type ModelSubstitutionException,
+} from "@clankermux/types";
 
 /**
  * Decides whether the model a provider says it served is a DIFFERENT model from
@@ -107,4 +111,37 @@ export function isModelSubstitution(sent: string, served: string): boolean {
 	const sentAliases = aliases(sent);
 	const servedAliases = aliases(served);
 	return !sentAliases.some((candidate) => servedAliases.includes(candidate));
+}
+
+/**
+ * Whether an operator has declared this particular swap acceptable.
+ *
+ * Runs through the SAME normalisation as `isModelSubstitution`, so an exception
+ * written against the undated alias also covers the dated snapshot, and one
+ * written for `anthropic/claude-opus-5` also covers the bare id. Writing the
+ * rule one way and having it silently miss the other spelling of the same model
+ * is exactly the failure this comparison exists to avoid.
+ *
+ * `*` on either side matches any model. Both sides wildcarded is rejected at
+ * parse time.
+ */
+export function isSubstitutionExcepted(
+	sent: string,
+	served: string,
+	exceptions: readonly ModelSubstitutionException[],
+): boolean {
+	if (exceptions.length === 0) return false;
+	const sentAliases = aliases(sent);
+	const servedAliases = aliases(served);
+	return exceptions.some(
+		(exception) =>
+			matchesSide(exception.sent, sentAliases) &&
+			matchesSide(exception.served, servedAliases),
+	);
+}
+
+function matchesSide(pattern: string, candidates: readonly string[]): boolean {
+	if (pattern === MODEL_SUBSTITUTION_EXCEPTION_WILDCARD) return true;
+	const patternAliases = aliases(pattern);
+	return patternAliases.some((alias) => candidates.includes(alias));
 }

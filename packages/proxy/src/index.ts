@@ -140,6 +140,7 @@ export {
 export {
 	BACKEND_RESOLVED_SLUGS,
 	isModelSubstitution,
+	isSubstitutionExcepted,
 	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	SERVED_MODEL_SUPPRESSION_MS,
 } from "./handlers/model-substitution";

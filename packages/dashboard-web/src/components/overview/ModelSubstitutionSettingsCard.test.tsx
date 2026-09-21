@@ -15,13 +15,14 @@ import { ModelSubstitutionSettingsCard } from "./ModelSubstitutionSettingsCard";
 
 type Mode = "off" | "observe" | "enforce";
 
-function render(mode: Mode | undefined): string {
+function render(mode: Mode | undefined, exceptions: string[] = []): string {
 	const queryClient = new QueryClient({
 		defaultOptions: { queries: { retry: false, refetchOnMount: false } },
 	});
 	if (mode !== undefined) {
 		queryClient.setQueryData(["model-substitution-mode"], {
 			servedModelSubstitutionMode: mode,
+			servedModelSubstitutionExceptions: exceptions,
 		});
 	}
 	return renderToStaticMarkup(
@@ -60,5 +61,31 @@ describe("ModelSubstitutionSettingsCard", () => {
 	it("assumes the server default while loading", () => {
 		const html = render(undefined);
 		expect(html).toContain("Fail the attempt over");
+	});
+});
+
+describe("ModelSubstitutionSettingsCard — accepted swaps", () => {
+	it("offers the exception editor", () => {
+		const html = render("enforce");
+		expect(html).toContain("Accepted swaps");
+		expect(html).toContain("Add swap");
+	});
+
+	// The row has to say what an exception does NOT do, or it reads as a mute
+	// button and an operator loses the data along with the alert.
+	it("says an accepted swap is still reported", () => {
+		const html = render("enforce");
+		expect(html).toContain("report but not act on");
+	});
+
+	it("shows the configured pairs as editable fields", () => {
+		const html = render("enforce", ["gpt-5.6-luna>gpt-6-luna"]);
+		expect(html).toContain('value="gpt-5.6-luna"');
+		expect(html).toContain('value="gpt-6-luna"');
+	});
+
+	it("says so when nothing is accepted", () => {
+		const html = render("enforce");
+		expect(html).toContain("every substitution is treated the same way");
 	});
 });

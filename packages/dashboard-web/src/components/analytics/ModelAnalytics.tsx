@@ -26,6 +26,7 @@ interface ModelAnalyticsProps {
 		costUsd: number;
 		requests: number;
 		totalTokens?: number;
+		substitutedFrom?: string;
 	}>;
 	loading?: boolean;
 }
@@ -43,8 +44,26 @@ export function ModelAnalytics({
 	costByModel,
 	loading = false,
 }: ModelAnalyticsProps) {
+	// Cost arrives split by how the model was reached: a row for ordinary usage
+	// and a row per model it was substituted FOR. The performance table has one
+	// row per model, so the split has to be folded back here — taking the first
+	// match would charge a model with only the subset that happened to sort
+	// first. The substitution breakdown has its own card.
+	const costByModelName = new Map<
+		string,
+		{ costUsd: number; totalTokens: number }
+	>();
+	for (const entry of costByModel) {
+		const sum = costByModelName.get(entry.model) ?? {
+			costUsd: 0,
+			totalTokens: 0,
+		};
+		sum.costUsd += entry.costUsd;
+		sum.totalTokens += entry.totalTokens ?? 0;
+		costByModelName.set(entry.model, sum);
+	}
 	const rows: ModelPerformanceRow[] = modelPerformance.map((perf) => {
-		const cost = costByModel.find((c) => c.model === perf.model);
+		const cost = costByModelName.get(perf.model);
 		const totalCost = cost?.costUsd ?? 0;
 		const totalTokens = cost?.totalTokens ?? 0;
 		// Cost per 1K tokens; null when we have no token volume to divide by.

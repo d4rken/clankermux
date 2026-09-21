@@ -858,12 +858,15 @@ export const useServedModelSubstitutionMode = () => {
 export const useSetServedModelSubstitutionMode = () => {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (body: { mode: ServedModelSubstitutionMode }) =>
-			api.setServedModelSubstitutionMode(body),
+		mutationFn: (body: {
+			mode?: ServedModelSubstitutionMode;
+			exceptions?: string[];
+		}) => api.setServedModelSubstitutionMode(body),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["model-substitution-mode"] });
-			// Leaving `enforce` releases the suppressions enforcement wrote, so the
-			// chip and banner are stale the moment the mode changes.
+			// Leaving `enforce` releases the suppressions enforcement wrote, and an
+			// exception edit changes which pairs count as degraded, so the chip and
+			// banner are stale the moment either one changes.
 			queryClient.invalidateQueries({
 				queryKey: queryKeys.modelSubstitutions(),
 				exact: false,
