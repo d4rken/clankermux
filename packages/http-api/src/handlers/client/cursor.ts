@@ -29,16 +29,23 @@ export function encodeClientRequestCursor(cursor: ClientRequestCursor): string {
  * tell that from a page of genuinely new rows. Refusing is recoverable;
  * restarting is not.
  *
- * `Buffer.from(…, "base64url")` ignores bytes outside the alphabet rather than
- * failing, so the structural check below — not the decode — is what rejects
- * damaged input.
+ * `Buffer.from(…, "base64url")` IGNORES bytes outside the alphabet rather than
+ * failing, so damaged input decodes to the same object the intact cursor does
+ * and the structural check never sees it: `<cursor>!`, `<cursor> `, `!<cursor>`
+ * and a `*` spliced into the middle all yield a valid page. Re-encoding what
+ * was decoded and demanding the original back is what catches them — the
+ * encoder emits one canonical spelling per cursor, so anything else is a
+ * cursor this server did not issue.
  */
 export function decodeClientRequestCursor(
 	raw: string,
 ): ClientRequestCursor | null {
+	if (raw === "") return null;
+	const decoded = Buffer.from(raw, "base64url");
+	if (decoded.toString("base64url") !== raw) return null;
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+		parsed = JSON.parse(decoded.toString("utf8"));
 	} catch {
 		return null;
 	}

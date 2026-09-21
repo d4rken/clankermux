@@ -308,6 +308,34 @@ describe("GET /client/v1/requests?tag=", () => {
 		}
 	});
 
+	// `Buffer.from(…, "base64url")` DISCARDS bytes outside the alphabet rather
+	// than failing, so one character of transit damage decodes to the SAME
+	// object the intact cursor does and the structural check never sees it.
+	// Each of these is a cursor this server did not issue.
+	it("400s a cursor whose base64url did not survive transit", async () => {
+		await seed({ id: "id-a", tag: TAG, timestamp: 1 });
+		await seed({ id: "id-b", tag: TAG, timestamp: 2 });
+		const { body: firstPage } = await list(`tag=${TAG}&limit=1`);
+		const valid = firstPage.next ?? "";
+		expect(valid).not.toBe("");
+
+		const damaged = [
+			`${valid}!`,
+			`${valid} `,
+			`!${valid}`,
+			`${valid.slice(0, 3)}*${valid.slice(3)}`,
+		];
+
+		for (const cursor of damaged) {
+			const { status, cacheControl, body } = await list(
+				`tag=${TAG}&after=${encodeURIComponent(cursor)}`,
+			);
+			expect(status).toBe(400);
+			expect(cacheControl).toBe("private, no-store");
+			expect(errorType(body)).toBe("invalid_request");
+		}
+	});
+
 	// The query parameter goes through the ingest validator, so the searchable
 	// set is exactly the storable set.
 	it("400s a missing tag and any tag the column could not have held", async () => {
