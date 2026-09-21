@@ -7,6 +7,10 @@ node_modules/
 .claude/scheduled_tasks.lock
 .planning/
 .codex
+
+# pi agent scratch: worktrees and caches are local, project settings are not.
+.pi/*
+!.pi/settings.json
 clankermux.db
 clankermux.db-wal
 clankermux.db-shm
