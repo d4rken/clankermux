@@ -2,6 +2,7 @@ import { EMBEDDED_STORAGE_USAGE_WORKER_CODE } from "./inline-storage-usage-worke
 import type {
 	StorageUsageScanRequest,
 	StorageUsageScanResult,
+	StorageUsageTableResult,
 } from "./storage-usage-worker";
 
 /**
@@ -19,6 +20,43 @@ function resolveTimeoutMs(timeoutMs: number | undefined): number {
 	if (timeoutMs === undefined) return DEFAULT_WORKER_TIMEOUT_MS;
 	if (!Number.isFinite(timeoutMs)) return DEFAULT_WORKER_TIMEOUT_MS;
 	return Math.max(MIN_WORKER_TIMEOUT_MS, Math.trunc(timeoutMs));
+}
+
+/**
+ * Check a worker result against the tables that were asked for, returning a
+ * reason string when it cannot be trusted and `null` when it can.
+ *
+ * The runner is the boundary the caller's `available` flag is derived at, and
+ * the failure mode being guarded is a result that LOOKS measured: a missing
+ * entry, a mismatched one, or a non-numeric total all become zeros by the time
+ * they reach the card, where a zero is rendered as a real size. A genuinely
+ * empty table measuring zero rows and zero bytes is a valid result and passes.
+ */
+export function validateScanTables(
+	requested: StorageUsageScanRequest["tables"],
+	measured: readonly StorageUsageTableResult[],
+): string | null {
+	if (measured.length !== requested.length) {
+		return `scan measured ${measured.length} of ${requested.length} tables`;
+	}
+	const seen = new Set<string>();
+	for (const [index, want] of requested.entries()) {
+		const got = measured[index];
+		if (got.key !== want.key || got.table !== want.table) {
+			return `scan entry ${index} is ${got.key}/${got.table}, expected ${want.key}/${want.table}`;
+		}
+		if (seen.has(got.table)) return `table "${got.table}" measured twice`;
+		seen.add(got.table);
+		for (const [field, value] of [
+			["rowCount", got.rowCount],
+			["approxBytes", got.approxBytes],
+		] as const) {
+			if (!Number.isFinite(value) || value < 0) {
+				return `table "${got.table}" reported ${field} = ${value}`;
+			}
+		}
+	}
+	return null;
 }
 
 /**
@@ -97,6 +135,10 @@ export async function runStorageUsageScanInWorker(
 				error: err instanceof Error ? err.message : String(err),
 			}),
 		);
+		if (result.ok) {
+			const problem = validateScanTables(options.tables, result.types);
+			if (problem) return { ok: false, error: problem };
+		}
 		return result;
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);

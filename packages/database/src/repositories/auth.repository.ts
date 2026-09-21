@@ -49,9 +49,10 @@ export interface AuthSessionRecord {
  *    leave stolen cookies valid, and a clear-then-set could reactivate sessions
  *    issued under the password before the clear.
  *
- * The transactional methods run through `bun:sqlite`'s `db.transaction()`, whose
+ * The transactional methods run through `BunSqlAdapter.runTransaction`, whose
  * callback is synchronous — nothing can interleave inside the `BEGIN`, so no
- * unrelated write can be swept into it.
+ * unrelated write can be swept into it — and which re-runs the whole body when
+ * another connection holds the writer slot.
  */
 export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 	async getPassword(): Promise<StoredPasswordVerifier | null> {
@@ -78,9 +79,8 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 		updatedAt: number,
 	): Promise<number> {
 		const db = this.adapter.getSQLiteDb();
-		let revoked = 0;
-		db.transaction(() => {
-			revoked = db.run(`DELETE FROM auth_sessions`).changes;
+		return this.adapter.runTransaction(() => {
+			const revoked = db.run(`DELETE FROM auth_sessions`).changes;
 			db.run(
 				`INSERT INTO auth_password (id, verifier, params, updated_at)
 				 VALUES (1, ?, ?, ?)
@@ -90,8 +90,8 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 					updated_at = excluded.updated_at`,
 				[verifier, params, updatedAt],
 			);
-		})();
-		return revoked;
+			return revoked;
+		});
 	}
 
 	/**
@@ -100,12 +100,11 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 	 */
 	async clearPassword(): Promise<number> {
 		const db = this.adapter.getSQLiteDb();
-		let revoked = 0;
-		db.transaction(() => {
-			revoked = db.run(`DELETE FROM auth_sessions`).changes;
+		return this.adapter.runTransaction(() => {
+			const revoked = db.run(`DELETE FROM auth_sessions`).changes;
 			db.run(`DELETE FROM auth_password`);
-		})();
-		return revoked;
+			return revoked;
+		});
 	}
 
 	/**

@@ -3,15 +3,34 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
 /**
  * busy_timeout for the shutdown `wal_checkpoint(TRUNCATE)` in `close()`.
  *
- * The main connection runs with a deliberately small busy_timeout (see
+ * The main connection runs with busy_timeout = 0 (see
  * MAIN_CONNECTION_BUSY_TIMEOUT_MS in database-operations.ts) so SQLITE_BUSY
- * fails fast instead of freezing the event loop. At shutdown that protection
- * is counterproductive: blocking a couple of seconds is fine, and giving the
- * checkpoint a real chance to truncate the WAL beats leaving a fat WAL behind.
- * If the lock is still held past this window the truncate is skipped with a
- * log — shutdown must never crash on a busy checkpoint.
+ * surfaces immediately instead of freezing the event loop. At shutdown that
+ * protection is counterproductive: blocking a couple of seconds is fine, and
+ * giving the checkpoint a real chance to truncate the WAL beats leaving a fat
+ * WAL behind. If the lock is still held past this window the truncate is
+ * skipped with a log — shutdown must never crash on a busy checkpoint.
  */
 const CLOSE_CHECKPOINT_BUSY_TIMEOUT_MS = 2000;
+
+/** Ceiling for the async busy-retry backoff. */
+export const BUSY_RETRY_MAX_DELAY_MS = 100;
+
+/**
+ * Delay before the nth (1-based) async busy retry.
+ *
+ * Exponential from 10ms up to {@link BUSY_RETRY_MAX_DELAY_MS}, then jittered
+ * down into `[base / 2, base)`. The jitter is what keeps the backoff useful:
+ * every caller that collided with the same writer starts its sleep at the same
+ * instant, so a fixed delay would wake them all together and hand the writer
+ * slot to whichever one SQLite happens to serve first, again and again.
+ *
+ *   attempt 1 -> 5-10ms   attempt 3 -> 20-40ms   attempt 5+ -> 50-100ms
+ */
+export function busyRetryDelayMs(attempt: number): number {
+	const base = Math.min(BUSY_RETRY_MAX_DELAY_MS, 10 * 2 ** (attempt - 1));
+	return base / 2 + Math.random() * (base / 2);
+}
 
 /**
  * SQL adapter that wraps bun:sqlite behind an async, Promise-returning API.
@@ -39,15 +58,20 @@ export class BunSqlAdapter {
 	 * locked by another connection (SQLITE_BUSY / errno 5).
 	 *
 	 * SQLite's built-in busy_timeout retries at the C level via usleep(), which
-	 * blocks the Bun event loop for the entire wait.  This wrapper instead lets
-	 * the busy_timeout exhaust normally (giving the C layer a short chance to
-	 * self-resolve), then catches the resulting error and re-schedules with
-	 * setTimeout so the event loop stays free between attempts.  This is
-	 * necessary when a long-running exclusive operation such as VACUUM is running
-	 * on a separate Worker connection.
+	 * blocks the Bun event loop for the entire wait.  The main connection
+	 * therefore runs with busy_timeout = 0, and this wrapper catches the
+	 * immediate SQLITE_BUSY and re-schedules with setTimeout so the event loop
+	 * stays free between attempts.  This is necessary when a long-running
+	 * exclusive operation such as VACUUM is running on a separate Worker
+	 * connection.
+	 *
+	 * The backoff is {@link busyRetryDelayMs}: short enough that a lock released
+	 * after a few milliseconds is picked up almost at once, bounded so a long
+	 * VACUUM does not spin.
 	 */
 	private async withBusyRetry<T>(fn: () => T): Promise<T> {
 		const deadline = Date.now() + 10 * 60 * 1000; // retry for up to 10 minutes
+		let attempt = 0;
 		while (true) {
 			try {
 				return fn();
@@ -57,7 +81,10 @@ export class BunSqlAdapter {
 					"code" in err &&
 					(err as { code?: string }).code?.startsWith("SQLITE_BUSY") === true;
 				if (isBusy && Date.now() < deadline) {
-					await new Promise<void>((resolve) => setTimeout(resolve, 500));
+					attempt++;
+					await new Promise<void>((resolve) =>
+						setTimeout(resolve, busyRetryDelayMs(attempt)),
+					);
 					continue;
 				}
 				throw err;
@@ -118,12 +145,12 @@ export class BunSqlAdapter {
 	 * Run a caller-supplied SYNCHRONOUS transaction body under the same async
 	 * busy-retry loop {@link runWithChanges} uses, returning whatever it produced.
 	 *
-	 * Multi-statement writes that need atomicity used to bypass the adapter and
-	 * call `db.transaction(fn)()` on the raw handle. That silently downgrades them
-	 * to the bounded C-level busy_timeout (250ms in production), so a write racing
-	 * the vacuum/cleanup worker for the writer slot fails outright instead of
-	 * retrying for up to ten minutes — and the writes doing this are token
-	 * refreshes, whose failure takes an account out of the pool.
+	 * A multi-statement write that needs atomicity must not call
+	 * `db.transaction(fn)()` on the raw handle: that bypasses the retry loop
+	 * entirely, so a write racing the vacuum/cleanup worker for the writer slot
+	 * fails outright instead of retrying for up to ten minutes — and the writes
+	 * doing this are token refreshes, whose failure takes an account out of the
+	 * pool.
 	 *
 	 * Retrying is safe because a SQLITE_BUSY transaction is rolled back in full:
 	 * each attempt starts from the same state the first one saw. The body must
@@ -139,7 +166,7 @@ export class BunSqlAdapter {
 	 * Close the database connection.
 	 *
 	 * Best-effort WAL truncate first: the main connection's busy_timeout is
-	 * bounded (fail-fast for event-loop safety), so temporarily widen it for
+	 * zero (fail-fast for event-loop safety), so temporarily widen it for
 	 * the shutdown checkpoint and tolerate a still-busy database — a skipped
 	 * truncate only leaves WAL frames for the next open to checkpoint, whereas
 	 * a thrown SQLITE_BUSY here would crash shutdown.

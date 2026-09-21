@@ -200,6 +200,82 @@ describe("rotation invalidates sessions", () => {
 		expect(await repo.getSession("a")).not.toBeNull();
 		expect((await repo.getPassword())?.verifier).toBe("old");
 	});
+
+	it("retries the whole rotation when the writer slot is busy", async () => {
+		await repo.setPassword("old", "{}", 1);
+		await mintSession(session("a"));
+		await mintSession(session("b"));
+
+		// The writer slot is held by another connection (a vacuum or cleanup
+		// worker) when the rotation first tries to write. Going through the
+		// adapter, the busy attempt is rolled back whole and re-run; calling the
+		// raw handle instead would surface SQLITE_BUSY to the operator.
+		const real = db.run.bind(db);
+		let bodyStarts = 0;
+		// biome-ignore lint/suspicious/noExplicitAny: test stub replacing the DB method
+		(db as any).run = (...args: any[]) => {
+			const sql = typeof args[0] === "string" ? args[0] : "";
+			if (sql.includes("DELETE FROM auth_sessions")) {
+				bodyStarts++;
+				if (bodyStarts === 1) {
+					throw Object.assign(new Error("database is locked"), {
+						code: "SQLITE_BUSY",
+					});
+				}
+			}
+			// biome-ignore lint/suspicious/noExplicitAny: delegating to the real method
+			return (real as any)(...args);
+		};
+
+		let revoked: number;
+		try {
+			revoked = await repo.setPassword("new", "{}", 2);
+		} finally {
+			// biome-ignore lint/suspicious/noExplicitAny: restoring the real method
+			(db as any).run = real;
+		}
+
+		expect(bodyStarts).toBe(2);
+		expect(revoked).toBe(2);
+		expect((await repo.getPassword())?.verifier).toBe("new");
+		expect(await repo.getSession("a")).toBeNull();
+		expect(await repo.getSession("b")).toBeNull();
+	});
+
+	it("retries a clear when the writer slot is busy", async () => {
+		await repo.setPassword("old", "{}", 1);
+		await mintSession(session("a"));
+
+		const real = db.run.bind(db);
+		let deleteAttempts = 0;
+		// biome-ignore lint/suspicious/noExplicitAny: test stub replacing the DB method
+		(db as any).run = (...args: any[]) => {
+			const sql = typeof args[0] === "string" ? args[0] : "";
+			if (sql.includes("DELETE FROM auth_sessions")) {
+				deleteAttempts++;
+				if (deleteAttempts === 1) {
+					throw Object.assign(new Error("database is locked"), {
+						code: "SQLITE_BUSY",
+					});
+				}
+			}
+			// biome-ignore lint/suspicious/noExplicitAny: delegating to the real method
+			return (real as any)(...args);
+		};
+
+		let revoked: number;
+		try {
+			revoked = await repo.clearPassword();
+		} finally {
+			// biome-ignore lint/suspicious/noExplicitAny: restoring the real method
+			(db as any).run = real;
+		}
+
+		expect(deleteAttempts).toBe(2);
+		expect(revoked).toBe(1);
+		expect(await repo.getPassword()).toBeNull();
+		expect(await repo.getSession("a")).toBeNull();
+	});
 });
 
 describe("a session is bound to the password that authorized it", () => {

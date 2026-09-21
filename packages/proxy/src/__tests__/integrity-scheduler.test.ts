@@ -93,7 +93,9 @@ mock.module("@clankermux/database", () => ({
 //
 // CONTRACT: a `dbPath` used by a future test in this file must be added to this
 // set. If it isn't, the call delegates to the real `statSync` and fails loudly
-// with ENOENT rather than silently fabricating a `Stats`.
+// with ENOENT rather than silently fabricating a `Stats`. One test relies on
+// that ENOENT deliberately, to drive the scheduler's stat-failure fallback; it
+// says so at its own path.
 const SYNTHETIC_DB_PATHS = new Set([
 	"/tmp/test.db",
 	"/tmp/huge.db",
@@ -120,6 +122,7 @@ mock.module("node:fs", () => ({ ...nodeFs, statSync: mockStatSync }));
 
 import {
 	runIntegrityCheckOnDemand,
+	runScheduledIntegrityCheck,
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "../integrity-scheduler";
@@ -557,42 +560,38 @@ describe("runCheckLocked verdict mapping", () => {
 		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
 	});
 
-	it("size-skip: a full over the ceiling runs a quick verdict + marks full skipped, holding the mutex", async () => {
+	it("an on-demand full over the ceiling still runs the full worker", async () => {
+		// The ceiling contains AUTOMATIC scanning. An operator who asks for a
+		// check on a huge database has chosen to pay for it, and a database too
+		// big to ever check by hand would be worse than the scan.
 		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
 		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling
-		workerResultByKind.quick = { ok: true };
+		workerResultByKind.full = { ok: true };
 
 		const out = await runIntegrityCheckOnDemand(dbOps, "full");
 		expect(out.ok).toBe(true);
-		if (out.ok) expect(out.result).toBe("skipped");
-
-		// The mutex was claimed once by runIntegrityCheckOnDemand; the size-skip
-		// branch must NOT claim it again (it already holds it).
-		expect(
-			(dbOps.markIntegrityCheckRunning as ReturnType<typeof mock>).mock.calls
-				.length,
-		).toBe(1);
-
-		// Records the quick verdict first, then the full skip — both synchronously.
-		const calls = (dbOps.recordIntegrityResult as ReturnType<typeof mock>).mock
-			.calls;
-		expect(calls[0][0]).toBe("quick");
-		expect(calls[0][1]).toBe("ok");
-		expect(calls[1][0]).toBe("full");
-		expect(calls[1][1]).toBe("skipped");
-		expect(calls[1][2]).toContain("exceeds full-check ceiling");
-
-		// The worker ran exactly once — the quick check, NOT a full check.
+		if (out.ok) expect(out.result).toBe("ok");
 		expect(mockRunIntegrityCheckInWorker).toHaveBeenCalledTimes(1);
+		expect(mockRunIntegrityCheckInWorker.mock.calls[0][1]).toEqual({
+			kind: "full",
+		});
+		expect(dbOps.getIntegrityStatus().status).toBe("ok");
+	});
+
+	it("an on-demand quick over the ceiling still runs the quick worker", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3;
+		workerResultByKind.quick = { ok: true };
+
+		const out = await runIntegrityCheckOnDemand(dbOps, "quick");
+		expect(out.ok).toBe(true);
+		if (out.ok) expect(out.result).toBe("ok");
 		expect(mockRunIntegrityCheckInWorker.mock.calls[0][1]).toEqual({
 			kind: "quick",
 		});
-
-		// Collapsed status is skipped (quick ok, full skipped, nothing corrupt).
-		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
 	});
 
-	it("size-skip does not trigger below the ceiling (normal full worker path)", async () => {
+	it("the ceiling does not trigger below it (normal on-demand full worker path)", async () => {
 		const dbOps = makeDbOps({ dbPath: "/tmp/normal.db" });
 		statSize = 1024; // well under the ceiling
 		workerResultByKind.full = { ok: true };
@@ -604,34 +603,6 @@ describe("runCheckLocked verdict mapping", () => {
 		expect(mockRunIntegrityCheckInWorker.mock.calls[0][1]).toEqual({
 			kind: "full",
 		});
-	});
-
-	it("size-skip: if the substitute quick worker THROWS, the outer catch records the FULL kind skipped and releases the mutex", async () => {
-		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
-		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling — takes the size-skip branch
-		// The substitute quick worker blows up (e.g. worker onerror). The outer
-		// catch must record the ORIGINAL kind ("full") as skipped — NOT corrupt
-		// — and still release the mutex.
-		workerThrows = new Error("quick worker blew up");
-
-		const out = await runIntegrityCheckOnDemand(dbOps, "full");
-		expect(out.ok).toBe(true);
-		if (out.ok) expect(out.result).toBe("skipped");
-
-		const s = dbOps.getIntegrityStatus();
-		expect(s.status).not.toBe("corrupt");
-		expect(s.status).toBe("skipped");
-		expect(s.lastFullSkipReason).toContain("quick worker blew up");
-
-		// The recorded outcome is the full kind, skipped (from the outer catch).
-		const last = (
-			dbOps.recordIntegrityResult as ReturnType<typeof mock>
-		).mock.calls.at(-1);
-		expect(last?.[0]).toBe("full");
-		expect(last?.[1]).toBe("skipped");
-
-		// Mutex released — a fresh claim succeeds.
-		expect(dbOps.markIntegrityCheckRunning("full")).toBe(true);
 	});
 
 	it("Fix A: a non-ok worker result WITHOUT a verdict (stale old-protocol worker) fails safe to corrupt", async () => {
@@ -696,10 +667,10 @@ describe("runCheckLocked verdict mapping", () => {
 		expect(dbOps.getIntegrityStatus().status).toBe("skipped");
 	});
 
-	it("Fix D: size-skip whose substitute quick check PROVES corruption returns corrupt, not skipped", async () => {
+	it("an on-demand check over the ceiling that PROVES corruption is recorded corrupt", async () => {
 		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
-		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling → size-skip branch
-		workerResultByKind.quick = {
+		statSize = 70 * 1024 ** 3;
+		workerResultByKind.full = {
 			ok: false,
 			verdict: "corrupt",
 			error: "*** page 5 is corrupt",
@@ -708,21 +679,110 @@ describe("runCheckLocked verdict mapping", () => {
 		const out = await runIntegrityCheckOnDemand(dbOps, "full");
 		expect(out.ok).toBe(true);
 		if (out.ok) {
-			// The awaited return + the ERROR log must reflect the real corruption,
-			// NOT a benign "skipped".
 			expect(out.result).toBe("corrupt");
 			expect(out.error).toContain("page 5 is corrupt");
 		}
-		// Collapsed status is corrupt (the quick-corrupt record wins over the
-		// full-skip record).
 		expect(dbOps.getIntegrityStatus().status).toBe("corrupt");
+	});
+});
 
-		const calls = (dbOps.recordIntegrityResult as ReturnType<typeof mock>).mock
-			.calls;
-		expect(calls[0][0]).toBe("quick");
-		expect(calls[0][1]).toBe("corrupt");
-		expect(calls[1][0]).toBe("full");
-		expect(calls[1][1]).toBe("skipped");
+describe("automatic-check size ceiling", () => {
+	it("a scheduled full over the ceiling scans nothing", async () => {
+		// PRAGMA quick_check walks every b-tree page and the freelist, so
+		// substituting it above the ceiling only changes WHICH whole-file scan
+		// runs on a timer. The scheduled probe has to not scan.
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3; // > 64 GiB ceiling
+
+		await runScheduledIntegrityCheck(dbOps, "full");
+
+		expect(mockRunIntegrityCheckInWorker).not.toHaveBeenCalled();
+		expect(dbOps.runFullIntegrityCheck).not.toHaveBeenCalled();
+		expect(dbOps.runQuickIntegrityCheck).not.toHaveBeenCalled();
+
+		const last = (
+			dbOps.recordIntegrityResult as ReturnType<typeof mock>
+		).mock.calls.at(-1);
+		expect(last?.[0]).toBe("full");
+		expect(last?.[1]).toBe("skipped");
+		expect(last?.[2]).toContain("exceeds the automatic-check ceiling");
+
+		// Mutex released — a fresh claim succeeds.
+		expect(dbOps.markIntegrityCheckRunning("full")).toBe(true);
+	});
+
+	it("a scheduled quick over the ceiling scans nothing either", async () => {
+		// The quick timer consulted no ceiling at all, so above it the 6-hourly
+		// whole-file scan kept running regardless of what the full timer did.
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+		statSize = 70 * 1024 ** 3;
+
+		await runScheduledIntegrityCheck(dbOps, "quick");
+
+		expect(mockRunIntegrityCheckInWorker).not.toHaveBeenCalled();
+		const last = (
+			dbOps.recordIntegrityResult as ReturnType<typeof mock>
+		).mock.calls.at(-1);
+		expect(last?.[0]).toBe("quick");
+		expect(last?.[1]).toBe("skipped");
+		expect(last?.[2]).toContain("exceeds the automatic-check ceiling");
+		expect(dbOps.markIntegrityCheckRunning("quick")).toBe(true);
+	});
+
+	it("a skipped scheduled check never surfaces as ok or healthy", async () => {
+		const dbOps = makeDbOps({ dbPath: "/tmp/huge.db" });
+
+		// Start from a verified-healthy surface.
+		statSize = 1024;
+		workerResultByKind.quick = { ok: true };
+		await runScheduledIntegrityCheck(dbOps, "quick");
+		expect(dbOps.getIntegrityStatus().status).toBe("ok");
+
+		// The database grows past the ceiling; the next scheduled probe skips.
+		statSize = 70 * 1024 ** 3;
+		await runScheduledIntegrityCheck(dbOps, "full");
+
+		const status = dbOps.getIntegrityStatus();
+		expect(status.status).toBe("skipped");
+		expect(status.status).not.toBe("ok");
+		expect(status.lastFullSkipReason).toContain(
+			"exceeds the automatic-check ceiling",
+		);
+		// The stale green verdict is still on record but no longer the surface.
+		expect(status.lastQuickResult).toBe("ok");
+	});
+
+	it("both scheduled kinds still run below the ceiling", async () => {
+		statSize = 1024;
+
+		const quickOps = makeDbOps({ dbPath: "/tmp/normal.db" });
+		workerResultByKind.quick = { ok: true };
+		await runScheduledIntegrityCheck(quickOps, "quick");
+		expect(mockRunIntegrityCheckInWorker.mock.calls.at(-1)?.[1]).toEqual({
+			kind: "quick",
+		});
+		expect(quickOps.getIntegrityStatus().status).toBe("ok");
+
+		const fullOps = makeDbOps({ dbPath: "/tmp/normal.db" });
+		workerResultByKind.full = { ok: true };
+		await runScheduledIntegrityCheck(fullOps, "full");
+		expect(mockRunIntegrityCheckInWorker.mock.calls.at(-1)?.[1]).toEqual({
+			kind: "full",
+		});
+		expect(fullOps.getIntegrityStatus().status).toBe("ok");
+	});
+
+	it("a scheduled check whose stat fails falls through to the normal worker path", async () => {
+		// An unreadable size must not become a silent skip — the check runs and
+		// produces a real verdict. This path is deliberately OUTSIDE
+		// SYNTHETIC_DB_PATHS so the real statSync throws ENOENT.
+		const dbOps = makeDbOps({ dbPath: "/tmp/unstattable.db" });
+		workerResultByKind.full = { ok: true };
+
+		await runScheduledIntegrityCheck(dbOps, "full");
+
+		expect(mockRunIntegrityCheckInWorker).toHaveBeenCalledTimes(1);
+		expect(dbOps.getIntegrityStatus().status).toBe("ok");
 	});
 });
 

@@ -110,8 +110,8 @@ export interface DatabaseConfig {
 	/**
 	 * SQLite busy timeout in milliseconds for WORKER connections (vacuum,
 	 * integrity-check). The MAIN connection deliberately does NOT use this —
-	 * it is bounded to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} so a C-level
-	 * busy wait can never freeze the event loop for seconds.
+	 * it is pinned to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} so a C-level
+	 * busy wait can never freeze the event loop at all.
 	 */
 	busyTimeoutMs?: number;
 	/** Cache size in pages (negative value = KB) */
@@ -140,23 +140,47 @@ export interface DatabaseRetryConfig {
 /**
  * busy_timeout for the MAIN-thread connection only.
  *
- * bun:sqlite's busy handler waits at the C level (usleep) — the entire Bun
- * event loop freezes for however long this is whenever a main-thread call
- * hits SQLITE_BUSY (e.g. while the vacuum/integrity worker holds the write
- * lock). Keep it just long enough to absorb a brief write burst from a
- * worker connection; anything longer is handled asynchronously by
- * `BunSqlAdapter.withBusyRetry`, which catches SQLITE_BUSY and retries via
- * setTimeout (500ms cadence, up to 10 minutes) with the event loop free
- * between attempts.
+ * Zero, so a contended main-thread call gets SQLITE_BUSY back immediately.
+ * bun:sqlite's busy handler waits at the C level (usleep) inside
+ * `sqlite3_step`, which freezes the entire Bun event loop for the whole wait
+ * — there is no amount of that which a request-path write can afford, and the
+ * pre-dispatch attempt recording sits on exactly that path. Contention is
+ * handled asynchronously instead, by `BunSqlAdapter.withBusyRetry`, which
+ * catches SQLITE_BUSY and retries via setTimeout (jittered 5-100ms backoff,
+ * up to 10 minutes) with the event loop free between attempts.
+ *
+ * Under WAL this costs nothing for reads, which do not queue behind a writer;
+ * it only re-routes writer-slot collisions from the C layer to the JS layer.
  *
  * The separate `dbConfig.busyTimeoutMs` (default 10 000) is still passed to
  * WORKER connections (vacuum / integrity-check / dashboard workers), where
  * long C-level blocking is fine — workers have no event loop to protect.
  */
-export const MAIN_CONNECTION_BUSY_TIMEOUT_MS = 250;
+export const MAIN_CONNECTION_BUSY_TIMEOUT_MS = 0;
+
+/**
+ * busy_timeout for the main connection during construction only.
+ *
+ * `runMigrations` and `runOneShotBackfills` write through the raw handle
+ * before the adapter — and therefore the async busy-retry loop — exists, so
+ * for them a zero timeout means a transient lock aborts the constructor and
+ * the process never boots. The lock is not hypothetical: a restart opens the
+ * new process's handle while the outgoing one may still be inside its shutdown
+ * `wal_checkpoint(TRUNCATE)`, which takes the database exclusively for up to
+ * CLOSE_CHECKPOINT_BUSY_TIMEOUT_MS.
+ *
+ * Blocking here is free — nothing is being served yet, which is exactly the
+ * property that makes it unacceptable afterwards. The constructor drops the
+ * connection to {@link MAIN_CONNECTION_BUSY_TIMEOUT_MS} as its last step.
+ */
+export const STARTUP_BUSY_TIMEOUT_MS = 10_000;
 
 /**
  * Apply SQLite pragmas for optimal performance on distributed filesystems.
+ *
+ * Assumes the caller has already installed STARTUP_BUSY_TIMEOUT_MS on the
+ * handle: `journal_mode = WAL` needs a lock, and on a rollback-journal database
+ * a concurrent writer blocks it.
  *
  * Note: `PRAGMA integrity_check` is NOT run here. The check is moved to a
  * background worker (see `packages/proxy/src/integrity-scheduler.ts`) so it
@@ -204,14 +228,6 @@ function configureSqlite(db: Database, config: DatabaseConfig): void {
 				db.run("PRAGMA journal_mode = DELETE");
 			}
 		}
-
-		// Bound the C-level busy wait on the main connection. Deliberately NOT
-		// config.busyTimeoutMs (that value is for worker connections): a long
-		// busy_timeout here parks the whole event loop inside SQLite's busy
-		// handler whenever a worker holds the write lock. The adapter's async
-		// busy-retry layer takes over past this bound. See
-		// MAIN_CONNECTION_BUSY_TIMEOUT_MS.
-		db.run(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
 
 		// Configure cache size
 		if (config.cacheSize !== undefined) {
@@ -565,6 +581,16 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 		this.sqliteDb = new Database(resolvedPath, { create: true });
 
+		// FIRST statement on the handle, before any read or write. bun opens
+		// every connection at busy_timeout 0, and the next two operations —
+		// reading `PRAGMA auto_vacuum` and switching journal_mode — both need a
+		// lock another connection may briefly hold. Anything installed later
+		// leaves them to fail outright. The constructor lowers the connection to
+		// MAIN_CONNECTION_BUSY_TIMEOUT_MS once the schema work is done.
+		// Deliberately NOT config.busyTimeoutMs — that value is for worker
+		// connections.
+		this.sqliteDb.run(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+
 		// Capture the persisted auto_vacuum mode BEFORE configureSqlite's
 		// leading PRAGMA flips the connection-local view. See the field
 		// docstring for the SQLite quirk this works around. (Greptile #230)
@@ -583,6 +609,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		// schema is complete, and each pass records that it ran so it never
 		// repeats (see backfills.ts).
 		runOneShotBackfills(this.sqliteDb);
+
+		// Schema work is done and the adapter's async busy-retry takes over from
+		// here, so give the event loop back its guarantee: a contended call now
+		// returns SQLITE_BUSY instead of parking inside sqlite3_step.
+		this.sqliteDb.run(
+			`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`,
+		);
 
 		this.adapter = new BunSqlAdapter(this.sqliteDb);
 
@@ -1002,23 +1035,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		// readers don't block this connection's writer. An in-memory DB cannot
 		// be shared with a worker, so it scans inline — it is by definition
 		// small enough not to block anything.
-		if (isInMemoryDbPath(this.resolvedDbPath)) {
-			const types = await Promise.all(
-				RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
-					const { rowCount, approxBytes } =
-						await this.measureTableLogicalSize(table);
-					return { key, table, rowCount, approxBytes };
-				}),
-			);
-			return { available: true, measuredAt, dbBytes, walBytes, types };
-		}
-
-		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
-			tables: RETENTION_USAGE_TABLES,
-			busyTimeoutMs: 10000,
-		});
-		if (!scan.ok) {
-			console.warn(`[storage-usage] scan worker failed: ${scan.error}`);
+		// `available: false` still carries the per-type list so the response
+		// shape is constant; the zeros in it are placeholders the card must not
+		// render as sizes, which is what the flag is for.
+		const unavailable = (reason: string): RetentionStorageUsage => {
+			console.warn(`[storage-usage] measurement unavailable: ${reason}`);
 			return {
 				available: false,
 				measuredAt,
@@ -1031,16 +1052,42 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 					approxBytes: 0,
 				})),
 			};
+		};
+
+		if (isInMemoryDbPath(this.resolvedDbPath)) {
+			try {
+				const types = await Promise.all(
+					RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
+						const { rowCount, approxBytes } =
+							await this.measureTableLogicalSize(table);
+						return { key, table, rowCount, approxBytes };
+					}),
+				);
+				return { available: true, measuredAt, dbBytes, walBytes, types };
+			} catch (err) {
+				return unavailable(err instanceof Error ? err.message : String(err));
+			}
 		}
+
+		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
+			tables: RETENTION_USAGE_TABLES,
+			busyTimeoutMs: 10000,
+		});
+		if (!scan.ok) return unavailable(`scan worker failed: ${scan.error}`);
 		// Re-key by table so response order is the constant list's order even if
 		// a worker ever reordered its output.
 		const byTable = new Map(scan.types.map((t) => [t.table, t]));
-		const types = RETENTION_USAGE_TABLES.map(({ key, table }) => ({
-			key,
-			table,
-			rowCount: byTable.get(table)?.rowCount ?? 0,
-			approxBytes: byTable.get(table)?.approxBytes ?? 0,
-		}));
+		const types: StorageUsageType[] = [];
+		for (const { key, table } of RETENTION_USAGE_TABLES) {
+			const measured = byTable.get(table);
+			if (!measured) return unavailable(`scan omitted "${table}"`);
+			types.push({
+				key,
+				table,
+				rowCount: measured.rowCount,
+				approxBytes: measured.approxBytes,
+			});
+		}
 		return { available: true, measuredAt, dbBytes, walBytes, types };
 	}
 
@@ -1050,8 +1097,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 * cannot meaningfully block. File-backed databases always go through
 	 * `runStorageUsageScanInWorker`; this method blocks the event loop for the
 	 * whole scan and must not be pointed at one. Same approximation as the
-	 * worker: `SUM(LENGTH(col))` over every column, zeros on error (never
-	 * throws) so one bad table can't sink the whole measurement.
+	 * worker: `SUM(LENGTH(col))` over every column, and the same all-or-nothing
+	 * contract — it throws rather than passing off an unmeasured table as an
+	 * empty one.
 	 */
 	private async measureTableLogicalSize(
 		table: string,
@@ -1062,7 +1110,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			const cols = await this.adapter.query<{ name: string }>(
 				`PRAGMA table_info("${table}")`,
 			);
-			if (cols.length === 0) return { rowCount: 0, approxBytes: 0 };
+			if (cols.length === 0) {
+				throw new Error(
+					"no such table (PRAGMA table_info returned no columns)",
+				);
+			}
 			const lengthExpr = cols
 				.map((c) => `COALESCE(LENGTH("${c.name}"), 0)`)
 				.join(" + ");
@@ -1072,13 +1124,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			}>(
 				`SELECT COUNT(*) AS rowCount, SUM(${lengthExpr}) AS approxBytes FROM "${table}"`,
 			);
+			if (!row) throw new Error("the aggregate query returned no row");
 			return {
-				rowCount: row?.rowCount ?? 0,
-				approxBytes: row?.approxBytes ?? 0,
+				rowCount: row.rowCount ?? 0,
+				approxBytes: row.approxBytes ?? 0,
 			};
 		} catch (err) {
-			console.debug(`[measureTableLogicalSize] ${table} failed:`, err);
-			return { rowCount: 0, approxBytes: 0 };
+			throw new Error(
+				`table "${table}": ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 
@@ -2142,6 +2196,25 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Run `fn` with `db`'s busy_timeout widened to
+	 * {@link STARTUP_BUSY_TIMEOUT_MS}, restoring the steady-state value
+	 * afterwards even if it throws.
+	 *
+	 * For startup work that runs AFTER the constructor, and so cannot use the
+	 * constructor's window, and that cannot borrow the adapter's async retry
+	 * either because it may not run inside a transaction. Blocking the thread
+	 * is acceptable only because every such caller runs before HTTP binds.
+	 */
+	private withStartupBusyTimeout<T>(db: Database, fn: () => T): T {
+		db.exec(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+		try {
+			return fn();
+		} finally {
+			db.exec(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
+		}
+	}
+
+	/**
 	 * One-time migration: promote the DB from auto_vacuum=NONE (mode 0) to
 	 * INCREMENTAL (mode 2).
 	 *
@@ -2225,12 +2298,13 @@ OAuth tokens will need to be re-authenticated.
 		// session. Cheap to re-issue, and removes a "spooky action at a
 		// distance" failure mode where the next VACUUM doesn't flip the mode
 		// because the PRAGMA wasn't actually set on this connection.
-		this.sqliteDb.exec("PRAGMA auto_vacuum = INCREMENTAL");
-		this.sqliteDb.exec("VACUUM");
-
-		const { auto_vacuum: modeAfter } = this.sqliteDb
-			.query("PRAGMA auto_vacuum")
-			.get() as { auto_vacuum: number };
+		const db = this.sqliteDb;
+		const modeAfter = this.withStartupBusyTimeout(db, () => {
+			db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+			db.exec("VACUUM");
+			return (db.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number })
+				.auto_vacuum;
+		});
 
 		// VACUUM committed the new mode to the header, so update our captured
 		// value too — otherwise a second `bootstrapAutoVacuum()` call (rare,

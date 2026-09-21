@@ -42,8 +42,12 @@ export type StorageUsageScanResult =
  * LENGTH counts the text representation of values (raw bytes for BLOBs), so
  * this undercounts SQLite's varint integer encoding and ignores index/page
  * overhead — an intentional "content bytes" approximation, labeled as such in
- * the UI. Returns zeros (never throws) so one bad table can't sink the whole
- * measurement.
+ * the UI.
+ *
+ * Throws, naming the table, when the table is absent or the scan errors. A
+ * zero row count and a zero byte total are what an empty table measures to, so
+ * they cannot also mean "this did not measure" — the caller reports the whole
+ * scan as unavailable instead.
  */
 function measureTable(
 	db: Database,
@@ -57,7 +61,9 @@ function measureTable(
 		const cols = db
 			.query<{ name: string }, []>(`PRAGMA table_info("${table}")`)
 			.all();
-		if (cols.length === 0) return { key, table, rowCount: 0, approxBytes: 0 };
+		if (cols.length === 0) {
+			throw new Error("no such table (PRAGMA table_info returned no columns)");
+		}
 		const lengthExpr = cols
 			.map((c) => `COALESCE(LENGTH("${c.name}"), 0)`)
 			.join(" + ");
@@ -66,14 +72,17 @@ function measureTable(
 				`SELECT COUNT(*) AS rowCount, SUM(${lengthExpr}) AS approxBytes FROM "${table}"`,
 			)
 			.get();
+		if (!row) throw new Error("the aggregate query returned no row");
 		return {
 			key,
 			table,
-			rowCount: row?.rowCount ?? 0,
-			approxBytes: row?.approxBytes ?? 0,
+			rowCount: row.rowCount ?? 0,
+			approxBytes: row.approxBytes ?? 0,
 		};
-	} catch {
-		return { key, table, rowCount: 0, approxBytes: 0 };
+	} catch (err) {
+		throw new Error(
+			`table "${table}": ${err instanceof Error ? err.message : String(err)}`,
+		);
 	}
 }
 
