@@ -148,6 +148,18 @@ expected is the tell** — this never reports a missing file, only fewer tests, 
 compare the file and test counts, not just pass/fail. Never commit the generated
 `.ts` files.
 
+A **stale** blob looks nothing like a missing one. The suite is the normal size
+and one test fails on its assertion, so it reads as a bug in the change rather
+than a build artifact. Merging a branch that rebuilt its own workers does not
+rebuild this checkout's: the blobs are gitignored, so they never travel with the
+merge. A test can therefore pass on the branch, pass again when the merge is
+verified there, and fail on `main` against source that is byte-identical. Run
+`bun run build:db-workers` in the live checkout after merging anything inside a
+worker's bundle closure, and treat "green on the branch" as saying nothing about
+`main`. Production is insulated: the systemd unit runs
+`build:db-workers:guarded` as an `ExecStartPre`, and that target hashes the
+closure.
+
 `packages/proxy/src/{inline-worker,embedded-tiktoken-wasm}.ts` are **retired** —
 no longer generated or imported. Stale gitignored copies may linger in the live
 checkout; they're dead weight. Don't hand-edit, commit, or recreate them.
