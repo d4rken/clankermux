@@ -306,6 +306,22 @@ describe("convertAnthropicRequestToOpenAI — messages conversion", () => {
 		expect(toolMsg?.content).toBe("Sunny, 22°C");
 	});
 
+	it("clamps reasoning effort for an account whose provider is known", () => {
+		// Regression pin. The catalogue's advertisement allowlist names only
+		// verified (model, adapter) pairs; gpt-5.6-sol is not one. Routing the
+		// account's provider into effort resolution made this target resolve to
+		// "no known efforts" and pass `max` straight through to an endpoint that
+		// tops out at xhigh. Conversion must clamp regardless of the account.
+		const result = convertAnthropicRequestToOpenAI(
+			anthropicRequest({
+				model: "gpt-5.6-sol",
+				reasoning: { effort: "max" },
+			}),
+			{ provider: "openai-compatible" } as never,
+		);
+		expect(result.reasoning?.effort).toBe("xhigh");
+	});
+
 	it("sets reasoning_content from a single thinking block", () => {
 		const result = convertAnthropicRequestToOpenAI(
 			anthropicRequest({

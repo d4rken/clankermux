@@ -24,8 +24,19 @@ export function aliasCodexMetadata(
 		display_name: model.displayName,
 		description: "Model alias with ordered availability fallbacks",
 		base_instructions: "You are a coding assistant.",
-		supported_reasoning_levels: [],
-		default_reasoning_level: null,
+		...(metadata?.supportedReasoningEfforts === undefined
+			? {}
+			: {
+					supported_reasoning_levels: metadata.supportedReasoningEfforts.map(
+						(effort) => ({
+							effort,
+							description:
+								"Accepted by the alias; mapped to the selected fallback target",
+						}),
+					),
+					default_reasoning_level:
+						metadata.supportedReasoningEfforts[0] ?? null,
+				}),
 		shell_type: "shell_command",
 		visibility: "list",
 		supported_in_api: true,

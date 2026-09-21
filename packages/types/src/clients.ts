@@ -19,6 +19,16 @@ export interface ClientModel {
 	metadataCapturedAt?: number;
 	metadataScope?: string;
 }
+export const ALIAS_REASONING_EFFORTS = [
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+export type AliasReasoningEffort = (typeof ALIAS_REASONING_EFFORTS)[number];
+
 export interface ClientModelCostTier {
 	inputTokensAbove: number;
 	input: number;
@@ -73,6 +83,8 @@ export interface ClientModelMetadata {
 	contextWindow?: number;
 	maxOutputTokens?: number;
 	reasoning?: boolean;
+	/** Canonical effort values accepted by every substantiated alias route. */
+	supportedReasoningEfforts?: AliasReasoningEffort[];
 	inputModalities?: Array<"text" | "image">;
 	cost?: ClientModelCost;
 	cachePolicy?: ModelCachePolicy;

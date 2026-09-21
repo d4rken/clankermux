@@ -290,6 +290,11 @@ export { providerDisplayName } from "./provider-display";
 // an unexported module here is unreachable from http-api.
 export * from "./quota-drift";
 export * from "./rate-limit-status";
+export {
+	getAliasReasoningEfforts,
+	getModelReasoningEfforts,
+	resolveTargetReasoningProfile,
+} from "./reasoning-profiles";
 export * from "./request-events";
 export * from "./routing";
 export {

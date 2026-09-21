@@ -1,4 +1,5 @@
 import type {
+	AliasReasoningEffort,
 	ClientModelCost,
 	ClientModelCostTier,
 	ClientModelMetadata,
@@ -6,6 +7,7 @@ import type {
 import { PROVIDER_NAMES } from "@clankermux/types";
 import { resolveModelMaxContextWindow } from "./model-mappings";
 import { type CatalogueLookupResult, lookupCatalogueEntry } from "./pricing";
+import { getAliasReasoningEfforts } from "./reasoning-profiles";
 
 type CatalogueEntry = NonNullable<CatalogueLookupResult["entry"]>;
 
@@ -83,6 +85,13 @@ function candidateFor(
 ): ClientModelMetadata {
 	const limit = entry?.limit;
 	const metadata: ClientModelMetadata = {};
+	const supportedReasoningEfforts = getAliasReasoningEfforts(
+		targetModel,
+		provider,
+	);
+	if (supportedReasoningEfforts) {
+		metadata.supportedReasoningEfforts = [...supportedReasoningEfforts];
+	}
 	const contextWindow = contextWindowFor(targetModel, provider, entry);
 	if (contextWindow !== undefined) metadata.contextWindow = contextWindow;
 	const maxOutputTokens = tokenCount(limit?.output);
@@ -204,6 +213,14 @@ export function reduceClientModelMetadata(
 	const reasoning = candidates.map((c) => c.reasoning);
 	if (reasoning.every((r) => r !== undefined))
 		metadata.reasoning = reasoning.every((r) => r);
+	const efforts = candidates.map((c) => c.supportedReasoningEfforts);
+	if (efforts.every((e) => e !== undefined)) {
+		const shared = (efforts[0] ?? []).filter((effort) =>
+			efforts.every((candidate) => candidate?.includes(effort)),
+		);
+		if (shared.length)
+			metadata.supportedReasoningEfforts = shared as AliasReasoningEffort[];
+	}
 	const modalities = candidates.map((c) => c.inputModalities);
 	if (modalities.every((m) => m !== undefined)) {
 		const shared = INPUT_MODALITIES.filter((modality) =>
