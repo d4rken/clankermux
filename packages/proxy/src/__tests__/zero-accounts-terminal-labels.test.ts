@@ -12,8 +12,9 @@
  *     which differ in kind: the EARLY one records `requestMeta.pinFailure.code`
  *     VERBATIM (so a selection-failure code reaches history unchanged), the
  *     LATER one records the fixed `pinned_target_unavailable`;
- *   - the NO-RECORD contract of the terminals that deliberately write nothing
- *     (usage-throttled, context-window size 400).
+ *   - the labels of the two pacing/size terminals (usage-throttled,
+ *     context-window size 400), which are what lets the dashboard separate a
+ *     local refusal from a provider failure.
  *
  * The `pinned_account_unavailable` case additionally runs the pin-transient hold
  * to a give-up, which exercises the save/restore triangle around
@@ -617,7 +618,7 @@ describe("zero-accounts terminal recorder labels", () => {
 		expect(recordedErrors).toEqual(["pool_exhausted"]);
 	});
 
-	it("usage-throttled terminal records NOTHING", async () => {
+	it("usage-throttled terminal records usage_throttled", async () => {
 		const accId = uniqueId("anthropic");
 		const account = makeAccount({ id: accId, name: "Throttled" });
 		seedThrottled(accId);
@@ -632,10 +633,14 @@ describe("zero-accounts terminal recorder labels", () => {
 		);
 
 		expect(res.status).toBe(529);
-		expect(recordedErrors).toEqual([]);
+		expect(res.headers.get("Retry-After")).toBeTruthy();
+		// The recorder only ever clones: the client still gets the whole body.
+		const body = (await res.json()) as { error: { type: string } };
+		expect(body.error.type).toBe("overloaded_error");
+		expect(recordedErrors).toEqual(["usage_throttled"]);
 	});
 
-	it("context-window size-400 terminal records NOTHING", async () => {
+	it("context-window size-400 terminal records context_window_exceeded", async () => {
 		// gpt-5.5's window is smaller than the estimate even UNMARGINED, so the
 		// last-resort relaxation has no candidate and the size verdict stands. The
 		// request names that model directly: the gate scores what will be sent.
@@ -659,6 +664,6 @@ describe("zero-accounts terminal recorder labels", () => {
 		expect(res.status).toBe(400);
 		const body = (await res.json()) as { error: { type: string } };
 		expect(body.error.type).toBe("context_window_exceeded");
-		expect(recordedErrors).toEqual([]);
+		expect(recordedErrors).toEqual(["context_window_exceeded"]);
 	});
 });
