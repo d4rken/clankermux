@@ -5,6 +5,7 @@ import type {
 	GatewayHintMetadata,
 	ProjectAttributionSource,
 	ToolCallStat,
+	UsageSource,
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
@@ -134,6 +135,23 @@ export interface RequestData extends GatewayHintMetadata {
 	 */
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
+	/**
+	 * The client's `x-clankermux-correlation-tag`, verbatim. Ingress-derived and
+	 * absent on the usage-patch re-upsert, so it COALESCEs EXCLUDED first like
+	 * `sessionKey` — a later usage write must not null it.
+	 */
+	correlationTag?: string | null;
+	/**
+	 * Provenance of the row's token vector. WRITE-ONCE: both the upsert and
+	 * {@link RequestRepository.updateUsage} COALESCE the STORED value first, so
+	 * a value that is already there survives every later write.
+	 *
+	 * That immutability is the column's whole purpose — a reader treats a
+	 * non-NULL value as a guarantee that accounting for the row is finished and
+	 * will not change. Absent/null leaves the column NULL, which says the
+	 * opposite: not finished yet.
+	 */
+	usageSource?: UsageSource | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -200,9 +218,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					client_user_agent, client_harness,
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
-					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted
+					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted,
+					correlation_tag, usage_source
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -264,7 +283,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_agent_type = COALESCE(EXCLUDED.gateway_hint_agent_type, requests.gateway_hint_agent_type),
 				gateway_hint_prev_tool_durations = COALESCE(EXCLUDED.gateway_hint_prev_tool_durations, requests.gateway_hint_prev_tool_durations),
 				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
-				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted)
+				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted),
+				correlation_tag = COALESCE(EXCLUDED.correlation_tag, requests.correlation_tag),
+				-- Stored value FIRST, unlike the token columns above: a non-NULL
+				-- usage_source is a promise that accounting for this row is
+				-- finished, so nothing may overwrite one.
+				usage_source = COALESCE(requests.usage_source, EXCLUDED.usage_source)
 		`,
 			[
 				data.id,
@@ -329,6 +353,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintPrevToolDurations ?? null,
 				data.gatewayHintCompaction ?? null,
 				data.gatewayHintContextCompacted ?? null,
+				data.correlationTag ?? null,
+				data.usageSource ?? null,
 			],
 		);
 	}
@@ -474,12 +500,19 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * column records the earliest moment a usable usage vector existed, so a late
 	 * patch may fill it in but must never move it forward. Same rule as the
 	 * upsert in {@link RequestRepository.save}.
+	 *
+	 * `usageSource` goes through {@link RequestRepository.markUsageSource} rather
+	 * than riding the usage half, because the two answer different questions: a
+	 * late summary that yields NO token vector still settles the provenance to
+	 * `'none'`, and folding it into the `if (usage)` branch would leave exactly
+	 * that row NULL forever.
 	 */
 	async updateUsage(
 		requestId: string,
 		usage: RequestData["usage"],
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string | null; refusalCategory?: string | null },
+		usageSource?: UsageSource | null,
 	): Promise<void> {
 		// The usage columns and the response-shape columns are independent
 		// patches: a summary can carry a stop reason while the token vector was
@@ -549,6 +582,27 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				],
 			);
 		}
+
+		if (usageSource) await this.markUsageSource(requestId, usageSource);
+	}
+
+	/**
+	 * Settle `requests.usage_source` for a row, once.
+	 *
+	 * `COALESCE(usage_source, ?)` — stored value FIRST. A non-NULL value is the
+	 * row's statement that its accounting is finished, so a second write is a
+	 * no-op rather than a correction. The recorder uses this both to record the
+	 * provenance a late patch established and to close the patch window with
+	 * `'none'` when no usage ever arrived.
+	 */
+	async markUsageSource(
+		requestId: string,
+		usageSource: UsageSource,
+	): Promise<void> {
+		await this.run(
+			`UPDATE requests SET usage_source = COALESCE(usage_source, ?) WHERE id = ?`,
+			[usageSource, requestId],
+		);
 	}
 
 	// Payload management

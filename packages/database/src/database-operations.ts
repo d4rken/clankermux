@@ -34,6 +34,7 @@ import type {
 	UnifiedSummaryObservationRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
+	UsageSource,
 } from "@clankermux/types";
 import { parsePinnedProviders } from "@clankermux/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
@@ -1648,13 +1649,26 @@ OAuth tokens will need to be re-authenticated.
 		usage: RequestData["usage"],
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string | null; refusalCategory?: string | null },
+		usageSource?: UsageSource | null,
 	): Promise<void> {
 		await this.requests.updateUsage(
 			requestId,
 			usage,
 			usageFinalizedAt,
 			response,
+			usageSource,
 		);
+	}
+
+	/**
+	 * Settle `requests.usage_source` once. Write-once at the SQL level, so this
+	 * can never contradict a value an earlier write established.
+	 */
+	async markRequestUsageSource(
+		requestId: string,
+		usageSource: UsageSource,
+	): Promise<void> {
+		await this.requests.markUsageSource(requestId, usageSource);
 	}
 
 	/**
