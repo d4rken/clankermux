@@ -660,6 +660,34 @@ describe("AsyncDbWriter", () => {
 		expect(finished).toBe(true);
 	});
 
+	test("enqueue and the poll interval attach no waiter to an in-flight tick", async () => {
+		const w = new AsyncDbWriter();
+		const internals = w as unknown as { runningPromise: Promise<void> | null };
+
+		// Stand in for a tick that is blocked, and count the reactions registered
+		// on it. `then` sees exactly the adoption an async coalescer performs
+		// (`await p` resolves a native promise internally and never reads it), so
+		// a non-zero count means waiters are piling up per enqueue and per poll.
+		let release: () => void = () => {};
+		const inFlight = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const attach = spyOn(inFlight, "then");
+		internals.runningPromise = inFlight;
+
+		for (let i = 0; i < 40; i++) {
+			w.enqueue(() => {});
+		}
+		await sleep(350);
+
+		expect(attach).not.toHaveBeenCalled();
+		expect(w.getHealth().metadataQueuedJobs).toBe(40);
+
+		internals.runningPromise = null;
+		release();
+		await w.dispose();
+	});
+
 	test("MAX_JOBS_PER_TICK budget is honored (~50 jobs / 100 ms tick)", async () => {
 		writer = new AsyncDbWriter();
 
