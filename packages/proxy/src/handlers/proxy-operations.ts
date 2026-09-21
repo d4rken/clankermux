@@ -31,6 +31,7 @@ import {
 	isAnthropicOutOfCredits,
 	isDevinSessionAuthenticationFailure,
 	isDevinSubscriptionLapseFailure,
+	peekDevinServedModel,
 	usageCache,
 } from "@clankermux/providers";
 import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
@@ -98,15 +99,16 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { createClientAbortResponse } from "./client-abort-response";
 import { applyCodexObservation } from "./codex-observation";
 import {
-	CODEX_PEEK_TIMEOUT_MS,
-	peekCodexStreamPrefix,
-} from "./codex-stream-prefix";
-import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	hasAccountWideUnifiedRejection,
 	resolveFamilyWeeklyExclusion,
 	resolveFamilyWeeklyExclusionFromHeaders,
 } from "./family-weekly-gate";
+import {
+	isModelSubstitution,
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+	SERVED_MODEL_SUPPRESSION_MS,
+} from "./model-substitution";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
@@ -118,6 +120,10 @@ import {
 	persistRateLimitStatusMeta,
 	processProxyResponse,
 } from "./response-processor";
+import {
+	peekServedModel,
+	SERVED_MODEL_PEEK_TIMEOUT_MS,
+} from "./served-model-peek";
 import {
 	canAttemptStaleTokenRefresh,
 	getValidAccessToken,
@@ -259,6 +265,12 @@ export type ProxyAttemptOutcome =
 	| { kind: "model_route_restricted" }
 	/** The model exists, but the account plan cannot serve it. */
 	| { kind: "model_not_entitled" }
+	/**
+	 * HTTP 200, but the upstream named a DIFFERENT model than the one it was
+	 * sent. `served` is that model, carried so the terminal can name it without
+	 * re-reading the stream it has already discarded.
+	 */
+	| { kind: "model_substituted"; served: string }
 	| { kind: "server_error"; status: number }
 	| { kind: "network_error"; beforeDispatch?: boolean }
 	| { kind: "invalid_request" }
@@ -271,7 +283,7 @@ export type ProxyAttemptOutcome =
  * outcomes and leave the pair eligible (see the `fail` helper).
  */
 const MODEL_REJECTION_OUTCOMES: ReadonlySet<ProxyAttemptOutcome["kind"]> =
-	new Set(["model_not_found", "model_not_entitled"]);
+	new Set(["model_not_found", "model_not_entitled", "model_substituted"]);
 
 /**
  * Optional, behaviour-only extension bag for {@link proxyWithAccount}. Every
@@ -1211,6 +1223,12 @@ export async function proxyWithAccount(
 				ctx,
 				reason,
 				response?.status ?? null,
+				// Taken from the outcome rather than a parameter, so the one path
+				// that discards its body before the observer can read the served
+				// model cannot forget to supply it. Without this the attempt the
+				// proxy ACTED on is the one row with no `reported_model`, and the
+				// dashboard surfaces would show nothing for it.
+				outcome.kind === "model_substituted" ? outcome.served : null,
 			);
 		} catch (error) {
 			log.warn("Could not persist routing attempt outcome", error);
@@ -2437,6 +2455,109 @@ export async function proxyWithAccount(
 			options?.onOutcome?.({ kind: "org_permission_denied" });
 		}
 
+		// Did the upstream answer as a DIFFERENT model than it was sent?
+		//
+		// Read here, on the RAW body, because every adapter below seeds its model
+		// from the `x-clankermux-resolved-model` header set a few lines down —
+		// what this proxy SENT — and overwrites it only if a chunk names one. A
+		// reader placed after processResponse can compare the sent model with
+		// itself and never see anything.
+		//
+		// ONE pass answers both this and the Codex in-band failure question below.
+		// Two readers over one body would tee a branch of a branch and would each
+		// charge a 90s deadline against the same request clock, so the second
+		// could begin already expired — silently disabling whichever feature ran
+		// second. The DECISIONS stay where they are; only the reading is shared.
+		//
+		// Production always supplies a real Config, which defaults this to
+		// `enforce`. A context WITHOUT the accessor is a test double that predates
+		// the feature, and those carry arbitrary mock bodies — one answers a
+		// `claude-sonnet-4-5` request with `qwen/qwen3.6-plus:free`. Switching
+		// enforcement on for them would assert fixture tidiness, not behaviour, so
+		// they opt in explicitly instead. The dedicated lanes in
+		// served-model-failover / served-model-anthropic-passthrough are where
+		// this rung is actually exercised.
+		const substitutionMode =
+			ctx.config.getServedModelSubstitutionMode?.() ?? "off";
+		const prefixBudgetMs = Math.max(
+			0,
+			SERVED_MODEL_PEEK_TIMEOUT_MS - (Date.now() - requestMeta.timestamp),
+		);
+		const wantServedModel =
+			rawResponse.status === 200 &&
+			!requestMeta.internal &&
+			substitutionMode !== "off" &&
+			requestMeta.path !== "/v1/messages/count_tokens";
+		// The Codex failure question is NOT gated on the substitution setting:
+		// that rung predates this feature and must keep working with it off.
+		// `nativeUpstreamAttempt` is the request-side predictor of the response
+		// header that rung checks — the provider sets one from the other.
+		const wantCodexFailure =
+			account.provider === "codex" &&
+			!requestMeta.internal &&
+			nativeUpstreamAttempt &&
+			rawResponse.status === 200;
+		// Devin speaks Connect protobuf, so the SSE/JSON reader cannot see its
+		// model. It does report one, on a field the existing channel only
+		// surfaces after the client has consumed the stream.
+		const isDevin = account.provider === "devin";
+		const prefix =
+			wantCodexFailure || (wantServedModel && !isDevin)
+				? await peekServedModel(rawResponse, {
+						signal: req.signal,
+						codexFailure: wantCodexFailure,
+						skipModel: !wantServedModel,
+						timeoutMs: prefixBudgetMs,
+					})
+				: null;
+		// Consumed by the Codex in-band failure rung further down, which must not
+		// read the stream a second time.
+		const codexPrefixFailure = prefix?.codexFailureCode ?? null;
+		const servedModel =
+			wantServedModel && isDevin
+				? await peekDevinServedModel(rawResponse, {
+						timeoutMs: prefixBudgetMs,
+						signal: req.signal,
+					})
+				: (prefix?.servedModel ?? null);
+		if (
+			servedModel !== null &&
+			isModelSubstitution(resolvedTargetModel, servedModel)
+		) {
+			log.warn(
+				`Account ${account.name} answered as ${servedModel} for ${resolvedTargetModel}`,
+			);
+			if (substitutionMode === "enforce") {
+				// Fire-and-forget: this governs LATER requests. The SAME request is
+				// covered synchronously by excludeModelForRequest inside fail(),
+				// which keys off MODEL_REJECTION_OUTCOMES.
+				void ctx.dbOps.routing
+					.suppressModel(
+						account.id,
+						getAttemptTarget(requestMeta, account).scope,
+						resolvedTargetModel,
+						Date.now() + SERVED_MODEL_SUPPRESSION_MS,
+						MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+					)
+					.catch((error) =>
+						log.warn("Could not persist substitution suppression", error),
+					);
+				// Cancelled, not drained: draining would read the substituted
+				// model's entire answer only to throw it away. The usual reason to
+				// drain is to feed the response observer the bytes it classifies,
+				// but the served model is already in hand and `fail` writes it onto
+				// the attempt row directly rather than relying on the observer
+				// finishing after the body is gone.
+				discardTeeBranch(rawResponse);
+				return await fail(
+					{ kind: "model_substituted", served: servedModel },
+					null,
+					undefined,
+					MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+				);
+			}
+		}
+
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID without needing the original request object.
 		const responseHeaders = new Headers(rawResponse.headers);
@@ -2757,14 +2878,11 @@ export async function proxyWithAccount(
 			!requestMeta.internal &&
 			response.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER) === "1"
 		) {
-			// Native requests cannot re-arm the client socket. Charge header waits,
-			// retry holds and earlier attempts against the same prelude deadline.
-			const prefixFailure = await peekCodexStreamPrefix(response, req.signal, {
-				timeoutMs: Math.max(
-					0,
-					CODEX_PEEK_TIMEOUT_MS - (Date.now() - requestMeta.timestamp),
-				),
-			});
+			// Read ALREADY, by the single prefix pass before processResponse. The
+			// decision stays here, where the native header is known and a response
+			// about to be discarded has not yet mutated account metadata or settled
+			// the probe; only the reading moved.
+			const prefixFailure = codexPrefixFailure;
 			if (prefixFailure) {
 				// A backend that fails in-band is usually serving again within
 				// seconds, and the sibling this would otherwise move to has a cold

@@ -202,6 +202,24 @@ export class ModelNotServedError extends AppError {
 }
 
 /**
+ * Every candidate answered HTTP 200 as a different model than it was sent.
+ *
+ * 503 rather than the 400 {@link ModelNotServedError} carries, because nothing
+ * about the request was wrong and the condition is provider-side and
+ * transient: a client that retries can reach an account the provider is not
+ * substituting for. A 400 would tell every SDK not to bother.
+ */
+export class ModelSubstitutedError extends AppError {
+	constructor(
+		message: string,
+		public readonly model: string | null,
+		public readonly servedModel: string,
+	) {
+		super(message, "MODEL_SUBSTITUTED", 503, { model, servedModel });
+	}
+}
+
+/**
  * Service unavailable errors
  */
 export class ServiceUnavailableError extends AppError {

@@ -3,6 +3,7 @@ import {
 	getModelFamily,
 	isDebugEnabled,
 	ModelNotServedError,
+	ModelSubstitutedError,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
@@ -687,12 +688,25 @@ async function handleIngestedProxy(
 	/** Both missing-model and plan-entitlement responses reject a frozen target.
 	 * Provider routing restrictions are separate and never count toward this terminal. */
 	let modelRejectedAttempts = 0;
+	/**
+	 * Counted apart from `modelRejectedAttempts` on purpose. That one produces a
+	 * 400 whose message says the account "rejected its resolved model", which is
+	 * the opposite diagnosis: here the upstream accepted the request and answered
+	 * as something else.
+	 */
+	let substitutedAttempts = 0;
+	/** The substitute the last such attempt actually served, for the terminal. */
+	const substitutedServed = new Set<string>();
 	const noteAttemptOutcome = (outcome: ProxyAttemptOutcome): void => {
 		if (
 			outcome.kind === "model_not_entitled" ||
 			outcome.kind === "model_not_found"
 		)
 			modelRejectedAttempts++;
+		if (outcome.kind === "model_substituted") {
+			substitutedAttempts++;
+			substitutedServed.add(outcome.served);
+		}
 	};
 	const countedAttemptThroughProbeGate = (
 		account: Account,
@@ -1393,6 +1407,28 @@ async function handleIngestedProxy(
 	// The observed cause must outrank the inferred one there. This cannot
 	// swallow a genuine OAuth failure, because a token that actually fails to
 	// resolve produces a non-model outcome and so can never satisfy the
+	// Checked BEFORE the rejection terminal below: when both counters are
+	// non-zero the substitution is the more specific and more actionable
+	// diagnosis, and it is the one whose message names a model the operator can
+	// go and look at.
+	if (
+		upstreamAttempts > 0 &&
+		substitutedAttempts > 0 &&
+		substitutedAttempts + modelRejectedAttempts === upstreamAttempts &&
+		accounts.length >= selectedAccounts.length
+	) {
+		const model = effectiveRequestModel ?? requestMeta.requestedModel ?? null;
+		const served = [...substitutedServed].join(", ");
+		const substitutedMessage =
+			`Every account attempted (${upstreamAttempts}) answered as a different model than it was sent (${served}). Requested model: '${model ?? "unknown"}'. ` +
+			`The provider substituted the model rather than refusing the request; retrying may reach an account it does not substitute for.`;
+		await recordGiveUpTerminal("model_substituted", substitutedMessage, {
+			status: 503,
+			errorType: "model_substituted_error",
+		});
+		throw new ModelSubstitutedError(substitutedMessage, model, served);
+	}
+
 	// unanimity condition below.
 	if (
 		upstreamAttempts > 0 &&

@@ -1,6 +1,11 @@
-import { HTTP_STATUS, ModelNotServedError } from "@clankermux/core";
+import {
+	HTTP_STATUS,
+	ModelNotServedError,
+	ModelSubstitutedError,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { handleProxy, type ProxyContext } from "./proxy";
+import { ModelSubstitutionRouteError } from "./resolved-route";
 
 const log = new Logger("ProxyDispatch");
 
@@ -46,6 +51,19 @@ export async function dispatchProxyRequest(
 		// status so a future 400 from anywhere else does not inherit the
 		// passthrough by accident.
 		const isModelNotServed = proxyError instanceof ModelNotServedError;
+		// Also a 503, so it would otherwise be serialized as a generic
+		// "Service temporarily unavailable" and lose the two model names that
+		// are the whole point of the terminal. Its own type as well: a client
+		// that wants to distinguish "the provider swapped my model" from an
+		// ordinary outage cannot do it from the status alone.
+		// BOTH substitution terminals. The first request of a window raises
+		// ModelSubstitutedError from the attempt loop; every request for the rest
+		// of the suppression window is stopped earlier, at route construction,
+		// and raises ModelSubstitutionRouteError. Same condition, same status, so
+		// they must not report different error types depending on timing.
+		const isModelSubstituted =
+			proxyError instanceof ModelSubstitutedError ||
+			proxyError instanceof ModelSubstitutionRouteError;
 		const message =
 			(isServiceUnavailable || isModelNotServed) && proxyError instanceof Error
 				? proxyError.message
@@ -57,14 +75,16 @@ export async function dispatchProxyRequest(
 			JSON.stringify({
 				type: "error",
 				error: {
-					type: isServiceUnavailable
-						? "service_unavailable_error"
-						: isModelNotServed
-							? // Anthropic's vocabulary for a 400 about the request
-								// itself, so a client's existing error handling reads it
-								// as a request problem rather than a transport one.
-								"invalid_request_error"
-							: "proxy_error",
+					type: isModelSubstituted
+						? "model_substituted_error"
+						: isServiceUnavailable
+							? "service_unavailable_error"
+							: isModelNotServed
+								? // Anthropic's vocabulary for a 400 about the request
+									// itself, so a client's existing error handling reads it
+									// as a request problem rather than a transport one.
+									"invalid_request_error"
+								: "proxy_error",
 					message,
 				},
 			}),

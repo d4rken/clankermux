@@ -410,10 +410,43 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		model: string,
 		now: number,
 	): Promise<boolean> {
-		return !!(await this.get(
-			"SELECT 1 FROM account_model_suppressions WHERE account_id=? AND scope=? AND model=? AND until_at>?",
+		return (
+			(await this.modelSuppressionReason(accountId, scope, model, now)) !== null
+		);
+	}
+	/**
+	 * The `reason` of a live suppression, or null when the pair is not suppressed.
+	 *
+	 * Route construction needs the reason, not just the fact: a route emptied by
+	 * substitution suppressions must raise the substitution terminal rather than
+	 * the generic 403 that says the destination no longer permits the model.
+	 * A row with a NULL reason reads as "" so a caller can still distinguish it
+	 * from "not suppressed".
+	 */
+	async modelSuppressionReason(
+		accountId: string,
+		scope: string,
+		model: string,
+		now: number,
+	): Promise<string | null> {
+		const row = await this.get<{ reason: string | null }>(
+			"SELECT reason FROM account_model_suppressions WHERE account_id=? AND scope=? AND model=? AND until_at>?",
 			[accountId, scope, model, now],
-		));
+		);
+		return row ? (row.reason ?? "") : null;
+	}
+	/**
+	 * Drop every suppression this proxy wrote for a given reason.
+	 *
+	 * The suppression gates are unconditional, so turning the substitution
+	 * setting down would otherwise leave accounts out of rotation for the rest of
+	 * their window. Keyed on the reason so genuine `upstream_model_rejected`
+	 * suppressions are untouched.
+	 */
+	async clearModelSuppressionsByReason(reason: string): Promise<void> {
+		await this.run("DELETE FROM account_model_suppressions WHERE reason=?", [
+			reason,
+		]);
 	}
 	async clearModelSuppression(
 		accountId: string,
@@ -472,15 +505,128 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 			[finishedAt, status, error, reportedModel, id],
 		);
 	}
+	/**
+	 * `reportedModel` fills the served model for an attempt whose body was
+	 * DISCARDED before the response observer could finish it. A substitution
+	 * failover is exactly that case, and without this the row for the attempt
+	 * the proxy acted on is the one row missing the evidence it acted on.
+	 *
+	 * COALESCE, so an observer that did finish first still wins.
+	 */
 	async annotateAttempt(
 		id: string,
 		error: string,
 		status: number | null,
+		reportedModel: string | null = null,
 	): Promise<void> {
 		await this.run(
-			"UPDATE routing_attempts SET error=?,status=COALESCE(status,?) WHERE id=?",
-			[error, status, id],
+			"UPDATE routing_attempts SET error=?,status=COALESCE(status,?),reported_model=COALESCE(reported_model,?) WHERE id=?",
+			[error, status, reportedModel, id],
 		);
+	}
+
+	/**
+	 * (account, sent model, served model) counts where the provider answered as
+	 * something other than what it was sent.
+	 *
+	 * Aggregated over `routing_attempts`, and deliberately NOT joined to
+	 * `requests` for filtering. The standard request filters key on the FINAL
+	 * row's `account_used` and `model`, and a substituted attempt is by design
+	 * not the attempt that produced that row — the next account serves it. So
+	 * filtering this by the request's account would hide account A's
+	 * substitution in exactly the case the feature exists for.
+	 *
+	 * `comparable` counts attempts that sent the same model on the same account
+	 * AND got some model back, so the share has an honest denominator: an
+	 * attempt the provider never named a model for is "could not tell", not
+	 * evidence of correct service.
+	 *
+	 * Virtual slugs are excluded by the caller, which owns that vocabulary.
+	 */
+	async getModelSubstitutions(opts: {
+		sinceMs: number;
+		bucketMs: number;
+	}): Promise<{
+		pairs: Array<{
+			accountId: string;
+			provider: string;
+			outgoingModel: string;
+			reportedModel: string;
+			substituted: number;
+			firstAtMs: number;
+			lastAtMs: number;
+		}>;
+		comparable: Array<{
+			accountId: string;
+			outgoingModel: string;
+			comparable: number;
+		}>;
+		series: Array<{
+			bucketMs: number;
+			substituted: number;
+			comparable: number;
+		}>;
+	}> {
+		// One predicate, three shapes. `started_at` carries the only index that
+		// matters here (idx_routing_attempts_started); everything else is a
+		// filter over the window it selects.
+		const live =
+			"kind='upstream_send' AND reported_model IS NOT NULL AND outgoing_model IS NOT NULL AND started_at>=?";
+		const [pairs, comparable, series] = await Promise.all([
+			this.query<{
+				account_id: string;
+				provider: string;
+				outgoing_model: string;
+				reported_model: string;
+				c: number;
+				first_ms: number;
+				last_ms: number;
+			}>(
+				`SELECT account_id,provider,outgoing_model,reported_model,COUNT(*) AS c,MIN(started_at) AS first_ms,MAX(started_at) AS last_ms
+				 FROM routing_attempts WHERE ${live} AND reported_model<>outgoing_model
+				 GROUP BY account_id,provider,outgoing_model,reported_model`,
+				[opts.sinceMs],
+			),
+			this.query<{
+				account_id: string;
+				outgoing_model: string;
+				c: number;
+			}>(
+				`SELECT account_id,outgoing_model,COUNT(*) AS c
+				 FROM routing_attempts WHERE ${live}
+				 GROUP BY account_id,outgoing_model`,
+				[opts.sinceMs],
+			),
+			this.query<{ bucket: number; subs: number; total: number }>(
+				`SELECT (started_at/?)*? AS bucket,
+				        SUM(CASE WHEN reported_model<>outgoing_model THEN 1 ELSE 0 END) AS subs,
+				        COUNT(*) AS total
+				 FROM routing_attempts WHERE ${live}
+				 GROUP BY bucket ORDER BY bucket`,
+				[opts.bucketMs, opts.bucketMs, opts.sinceMs],
+			),
+		]);
+		return {
+			pairs: pairs.map((r) => ({
+				accountId: r.account_id,
+				provider: r.provider,
+				outgoingModel: r.outgoing_model,
+				reportedModel: r.reported_model,
+				substituted: r.c,
+				firstAtMs: r.first_ms,
+				lastAtMs: r.last_ms,
+			})),
+			comparable: comparable.map((r) => ({
+				accountId: r.account_id,
+				outgoingModel: r.outgoing_model,
+				comparable: r.c,
+			})),
+			series: series.map((r) => ({
+				bucketMs: r.bucket,
+				substituted: r.subs,
+				comparable: r.total,
+			})),
+		};
 	}
 
 	async listAttempts(requestId: string): Promise<RoutingAttempt[]> {
