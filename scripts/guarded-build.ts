@@ -115,7 +115,7 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 			"!packages/ui-constants/**",
 			"packages/*/package.json",
 			// packages/core/src/version.ts imports the repo-root package.json,
-			// and the database barrel re-exports getAppVersionSync().
+			// and core is inside the bundle closure described above.
 			"package.json",
 			"packages/database/scripts/build-workers.ts",
 			// The manifest decides which sources get bundled into which inline
