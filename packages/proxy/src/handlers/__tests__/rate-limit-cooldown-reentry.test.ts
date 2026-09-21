@@ -5,11 +5,24 @@ import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
+	type RateLimitProbeLease,
 	resetRateLimitProbeGatesForTests,
 } from "../rate-limit-cooldown";
 
 const NOW = Date.UTC(2026, 6, 9, 3, 0, 0);
 const realDateNow = Date.now;
+
+/**
+ * Take the lease, asserting the account was admitted. Completion is
+ * ownership-checked, so settling a probe means handing back the very token its
+ * admission returned.
+ */
+function admit(account: Account): RateLimitProbeLease {
+	const admission = getRateLimitProbeAdmission(account);
+	if (admission.decision !== "admitted")
+		throw new Error(`expected admitted, got ${admission.decision}`);
+	return admission.lease;
+}
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -90,7 +103,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("does not gate accounts still within an active cooldown window", () => {
@@ -100,7 +113,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW + 60_000,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("does not gate mature accounts with no cooldown deadline set", () => {
@@ -110,7 +123,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: null,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("treats the exact cooldown boundary as expired", () => {
@@ -120,7 +133,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("admits only one concurrent probe for a mature expired cooldown", () => {
@@ -130,11 +143,11 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		// A second concurrent request selecting the same account is suppressed
 		// and must fall through to the next account instead of stampeding it.
-		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
-		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
 	});
 
 	it("releases the probe lease when the probe succeeds", () => {
@@ -144,9 +157,8 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		completeRateLimitProbe(account, "recovered");
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		completeRateLimitProbe(account, "recovered", admit(account));
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("releases the probe lease when cooldown is reapplied via a fresh 429 (Lever B reset)", () => {
@@ -157,7 +169,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		});
 		const { ctx } = makeCtx();
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		// Server-directed reset in the future -> Lever B path applies a fresh
 		// cooldown; the probe lease must be released as part of that.
 		applyRateLimitCooldown(account, { resetTime: NOW + 120_000 }, ctx);
@@ -165,7 +177,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 
 		// The reapplied cooldown released the old lease. Once it expires again,
 		// and the streak is still mature, a fresh probe is admitted.
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("releases the probe lease when cooldown is reapplied via a no-reset 429 (escalating path)", () => {
@@ -176,7 +188,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		});
 		const { ctx } = makeCtx();
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		// No reset time -> escalating no-reset path; still a fresh cooldown that
 		// must release the probe lease.
 		applyRateLimitCooldown(account, {}, ctx);
@@ -185,7 +197,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		// eligible; the lease was released so a fresh probe is admitted.
 		Date.now = () => (account.rate_limited_until as number) + 1;
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("does not release the lease on a reprobe 429 (gentle in-request retry)", () => {
@@ -196,14 +208,14 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		});
 		const { ctx } = makeCtx();
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		// A reprobe is a bounded within-request retry of a held account and is
 		// NOT a terminal outcome — it must not release the cross-request probe
 		// lease. With no reset time the reprobe leaves in-memory cooldown state
 		// untouched (still expired), so a concurrent request must still be
 		// suppressed by the held lease rather than admitted.
 		applyRateLimitCooldown(account, {}, ctx, { reprobe: true });
-		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
 	});
 
 	it("releases an abandoned probe immediately", () => {
@@ -213,9 +225,8 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		completeRateLimitProbe(account, "abandoned");
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		completeRateLimitProbe(account, "abandoned", admit(account));
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("self-heals a leaked probe after the bounded lease window expires", () => {
@@ -225,11 +236,11 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			rate_limited_until: NOW - 1,
 		});
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		// Never completed, simulating a crash or unhandled path. Self-heals once
 		// the lease window elapses.
 		Date.now = () => NOW + 120_001;
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 	});
 
 	it("evicts the oldest lease once the in-memory map hits the cap", () => {
@@ -239,7 +250,7 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 			consecutive_rate_limits: 9,
 			rate_limited_until: NOW - 1,
 		});
-		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(first).decision).toBe("admitted");
 
 		// Fill the map with distinct accounts up to the eviction cap so the
 		// oldest lease (acc-evict-me) gets pruned.
@@ -255,7 +266,47 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 
 		// The original account's lease was evicted, so a fresh probe is admitted
 		// again instead of being suppressed.
-		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(first).decision).toBe("admitted");
+	});
+});
+
+/**
+ * Completion settles the lease the caller PROVES it holds, never whichever
+ * lease the account currently has. Without that, any terminal path of any
+ * request could free a probe it was never admitted for.
+ */
+describe("probe lease ownership", () => {
+	it("a request holding no lease cannot release the live one", () => {
+		Date.now = () => NOW;
+		const account = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		admit(account);
+
+		// An ordinary request: it reached a terminal outcome for this account but
+		// was never admitted, so it has nothing to hand back.
+		completeRateLimitProbe(account, "recovered", undefined);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+	});
+
+	it("an expired owner cannot delete the lease that replaced it", () => {
+		Date.now = () => NOW;
+		const account = makeAccount({
+			consecutive_rate_limits: 9,
+			rate_limited_until: NOW - 1,
+		});
+		const expired = admit(account);
+
+		// The first attempt outlives its lease (one attempt spans the stale-token
+		// 401 recursion and the Codex transient hold), and the next request is
+		// admitted under a fresh one.
+		Date.now = () => NOW + 120_001;
+		admit(account);
+
+		// The first attempt finally reaches its terminal path.
+		completeRateLimitProbe(account, "recovered", expired);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
 	});
 });
 
@@ -268,9 +319,9 @@ it("single-flights org-denial recovery from the first failure, including after t
 			consecutive_rate_limits: 1,
 			rate_limited_until: deadline,
 		});
-		expect(getRateLimitProbeAdmission(acc)).toBe("admitted");
-		expect(getRateLimitProbeAdmission(acc)).toBe("suppressed");
-		completeRateLimitProbe(acc, "abandoned");
-		expect(getRateLimitProbeAdmission(acc)).toBe("admitted");
+		const lease = admit(acc);
+		expect(getRateLimitProbeAdmission(acc).decision).toBe("suppressed");
+		completeRateLimitProbe(acc, "abandoned", lease);
+		expect(getRateLimitProbeAdmission(acc).decision).toBe("admitted");
 	}
 });

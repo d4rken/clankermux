@@ -690,7 +690,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		setSystemTime(new Date(SESSION_RESET + 1));
 		account.expires_at = Date.now() + 3_600_000;
 		expect(account.rate_limited_until).toBeLessThan(Date.now());
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				quotaIncidentResponse({

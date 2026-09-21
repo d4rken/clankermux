@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type CodexCreditsInfo, usageCache } from "@clankermux/providers";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
-import type { Account } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
@@ -9,6 +9,7 @@ import {
 import type { ProxyContext } from "../proxy-types";
 import {
 	getRateLimitProbeAdmission,
+	holdRateLimitProbeLease,
 	markCapacityRestoredProbePending,
 	resetRateLimitProbeGatesForTests,
 } from "../rate-limit-cooldown";
@@ -1102,6 +1103,30 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 		expect(clearCalls()).toHaveLength(1);
 	});
 
+	it("a locally-synthesized success neither clears the cooldown nor settles a probe", async () => {
+		// The count_tokens estimate is answered from the proxy's own tokenizer
+		// once every account is gated out, so its 200 arrives for an account that
+		// is rate-limited and may be mid-probe for somebody else.
+		const account = makeAccount({
+			rate_limited_until: Date.now() + 60_000,
+			rate_limited_reason: "model_fallback_429",
+			rate_limited_at: Date.now() - 60_000,
+		});
+		const { ctx, clearCalls } = makeClearCtx();
+		markCapacityRestoredProbePending(account.id);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
+
+		await processProxyResponse(ok200(), account, ctx, undefined, {
+			locallySynthesized: true,
+		});
+
+		expect(account.rate_limited_until).not.toBeNull();
+		expect(account.rate_limited_reason).toBe("model_fallback_429");
+		expect(clearCalls()).toHaveLength(0);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+		resetRateLimitProbeGatesForTests();
+	});
+
 	it("clears a stale reason left behind after the cooldown sweep nulled until (the lingering-label shape)", async () => {
 		const account = makeAccount({
 			rate_limited_until: null,
@@ -1274,8 +1299,20 @@ describe("processProxyResponse — live scoped rejection with lagging fresh usag
 				guard === "custom_endpoint" ? "https://relay.example" : null,
 		});
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
+		const admission = getRateLimitProbeAdmission(account);
+		expect(admission.decision).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+		// Settling is ownership-checked, so this attempt has to carry the lease
+		// the admission handed out — as the chokepoint does in production.
+		const requestMeta: RequestMeta = {
+			id: "req-scoped",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			headers: new Headers(),
+		};
+		if (admission.decision === "admitted")
+			holdRateLimitProbeLease(requestMeta, admission.lease);
 		usageCache.set(account.id, {
 			five_hour: { utilization: 61, resets_at: null },
 			seven_day: { utilization: 57, resets_at: null },
@@ -1320,7 +1357,9 @@ describe("processProxyResponse — live scoped rejection with lagging fresh usag
 			);
 		}
 
-		expect(await processProxyResponse(response, account, ctx)).toBe(true);
+		expect(
+			await processProxyResponse(response, account, ctx, requestMeta),
+		).toBe(true);
 		if (guard === null) {
 			expect(calls.markRateLimited).toHaveLength(0);
 			expect(account.rate_limited_until).toBeNull();
@@ -1330,7 +1369,7 @@ describe("processProxyResponse — live scoped rejection with lagging fresh usag
 			expect(calls.markRateLimited).toHaveLength(1);
 			expect(account.rate_limited_until).toBeGreaterThan(Date.now());
 		}
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
 });

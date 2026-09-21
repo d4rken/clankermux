@@ -210,8 +210,10 @@ function holdProbeLease(): void {
 		consecutive_rate_limits: 0,
 		rate_limited_until: null,
 	} as unknown as Account);
-	if (admission !== "admitted") {
-		throw new Error(`expected to take the probe lease, got ${admission}`);
+	if (admission.decision !== "admitted") {
+		throw new Error(
+			`expected to take the probe lease, got ${admission.decision}`,
+		);
 	}
 }
 

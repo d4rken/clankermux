@@ -19,6 +19,7 @@ import {
 	applyRateLimitCooldown,
 	applySuccessRateLimitClear,
 	completeRateLimitProbe,
+	findRateLimitProbeLease,
 } from "./rate-limit-cooldown";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
@@ -230,6 +231,14 @@ export async function processProxyResponse(
 	ctx: ProxyContext,
 	requestMeta?: Pick<RequestMeta, "headers" | "internal"> &
 		Partial<Pick<RequestMeta, "timestamp" | "method" | "path">>,
+	options?: {
+		/**
+		 * The response was synthesized locally and never reached upstream (the
+		 * count_tokens estimate answered from a provider's own tokenizer). It is
+		 * evidence about nothing.
+		 */
+		locallySynthesized?: boolean;
+	},
 ): Promise<boolean> {
 	// Scoped projection BEFORE any consumer: both the cooldown applied below
 	// and the status-meta persisted via updateAccountMetadata must see the
@@ -310,7 +319,11 @@ export async function processProxyResponse(
 			// it must never become a cooldown or shared burst marker.
 			// With no known family to memoize, later requests may re-ask it;
 			// that is the accepted cost of preserving other models' availability.
-			completeRateLimitProbe(account, "abandoned");
+			completeRateLimitProbe(
+				account,
+				"abandoned",
+				findRateLimitProbeLease(requestMeta, account.id),
+			);
 		} else if (isKeepalive) {
 			log.warn(
 				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
@@ -399,7 +412,11 @@ export async function processProxyResponse(
 	// floor without evidence of recovery. The request's start time is the
 	// stale-response guard bound: a delayed 200 issued before a NEWER 429
 	// landed must not erase that newer state.
-	if (!rateLimitInfo.isRateLimited) {
+	// A locally-synthesized response is excluded from BOTH follow-throughs: it
+	// answers from the proxy's own tokenizer, so it neither settles a recovery
+	// probe nor proves the account serves. Reached with the pool exhausted, so
+	// the account it is answered from is routinely one under a live cooldown.
+	if (!rateLimitInfo.isRateLimited && !options?.locallySynthesized) {
 		// Single-flight recovery probe terminal outcome: this attempt got a
 		// non-rate-limited response, so any in-flight probe lease for this account
 		// is resolved. `response.ok` means the account genuinely recovered; a
@@ -413,7 +430,11 @@ export async function processProxyResponse(
 			(account.rate_limited_reason !== "org_permission_denied" ||
 				(requestMeta?.method === "POST" &&
 					requestMeta.path === "/v1/messages"));
-		completeRateLimitProbe(account, provesAccess ? "recovered" : "abandoned");
+		completeRateLimitProbe(
+			account,
+			provesAccess ? "recovered" : "abandoned",
+			findRateLimitProbeLease(requestMeta, account.id),
+		);
 
 		if (provesAccess) {
 			applySuccessRateLimitClear(

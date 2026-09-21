@@ -8,6 +8,7 @@ import {
 	getRateLimitProbeAdmission,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
+	type RateLimitProbeLease,
 	resetRateLimitProbeGatesForTests,
 	rollbackCapacityRestoredProbePending,
 	wouldSuppressProbe,
@@ -85,11 +86,30 @@ function makeCtx() {
 	return { ctx };
 }
 
+/**
+ * The lease the most recent admitted probe took. Completion is
+ * ownership-checked, so a test that settles a probe has to hand back the very
+ * token its admission returned.
+ */
+let lastLease: RateLimitProbeLease | undefined;
+
+/** Take the lease, asserting the account was admitted. */
+function admit(account: Account): RateLimitProbeLease {
+	const admission = getRateLimitProbeAdmission(account);
+	if (admission.decision !== "admitted")
+		throw new Error(`expected admitted, got ${admission.decision}`);
+	return admission.lease;
+}
+
 /** How many of N concurrently-selected requests would reach upstream. */
 function admittedOutOf(account: Account, n: number): number {
 	let admitted = 0;
 	for (let i = 0; i < n; i++) {
-		if (getRateLimitProbeAdmission(account) === "admitted") admitted++;
+		const admission = getRateLimitProbeAdmission(account);
+		if (admission.decision === "admitted") {
+			admitted++;
+			lastLease = admission.lease;
+		}
 	}
 	return admitted;
 }
@@ -105,7 +125,7 @@ describe("capacity-restored single-flight marker", () => {
 		// Post-clear state: streak 0, NO deadline. The mature-streak gate says
 		// "not_required" for exactly this shape.
 		const account = makeAccount();
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 
 		markCapacityRestoredProbePending(account.id);
 		expect(admittedOutOf(account, 8)).toBe(1);
@@ -116,10 +136,9 @@ describe("capacity-restored single-flight marker", () => {
 		const account = makeAccount();
 
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", admit(account));
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("a stale probe's success does NOT clear a newer restore's marker", () => {
@@ -128,12 +147,12 @@ describe("capacity-restored single-flight marker", () => {
 
 		// Generation 1 is admitted and still in flight…
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		const stale = admit(account);
 		// …meanwhile the account is re-locked and released again (generation 2).
 		markCapacityRestoredProbePending(account.id);
 
 		// The old probe finally succeeds: it must not consume generation 2.
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", stale);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
 		expect(admittedOutOf(account, 5)).toBe(1);
 	});
@@ -143,8 +162,7 @@ describe("capacity-restored single-flight marker", () => {
 		const account = makeAccount();
 
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
-		completeRateLimitProbe(account, "abandoned");
+		completeRateLimitProbe(account, "abandoned", admit(account));
 
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
 		// The lease is released, so exactly one NEW probe is admitted.
@@ -162,7 +180,7 @@ describe("capacity-restored single-flight marker", () => {
 		const { ctx } = makeCtx();
 
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 
 		applyRateLimitCooldown(account, { resetTime: NOW + 60_000 }, ctx);
 		expect(account.consecutive_rate_limits).toBe(0);
@@ -192,7 +210,7 @@ describe("capacity-restored single-flight marker", () => {
 		markCapacityRestoredProbePending(account.id);
 
 		// No admission was ever taken, so this is a no-op in both maps.
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", undefined);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
 	});
 
@@ -247,7 +265,7 @@ describe("capacity-restored single-flight marker", () => {
 		rollbackCapacityRestoredProbePending(second);
 
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("unwinds past a whole run of failed predecessors to a live one", () => {
@@ -272,7 +290,7 @@ describe("capacity-restored single-flight marker", () => {
 
 		clearCapacityRestoredProbePending(account.id);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
-		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
 	});
 
 	it("still admits one probe when the mature-streak condition ALSO holds", () => {
@@ -286,7 +304,7 @@ describe("capacity-restored single-flight marker", () => {
 		expect(admittedOutOf(account, 5)).toBe(1);
 		// A mature-streak probe that recovers also consumes the capacity marker it
 		// was admitted with.
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", lastLease);
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
 	});
 
@@ -296,11 +314,11 @@ describe("capacity-restored single-flight marker", () => {
 			consecutive_rate_limits: 9,
 			rate_limited_until: NOW - 1,
 		});
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		const unmarked = admit(account);
 
 		// The poller releases capacity while that probe is still in flight.
 		markCapacityRestoredProbePending(account.id);
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", unmarked);
 
 		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
 	});
@@ -326,10 +344,10 @@ describe("wouldSuppressProbe", () => {
 		// not suppressed.
 		expect(wouldSuppressProbe(account)).toBe(false);
 
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		const held = admit(account);
 		expect(wouldSuppressProbe(account)).toBe(true);
 
-		completeRateLimitProbe(account, "recovered");
+		completeRateLimitProbe(account, "recovered", held);
 		expect(wouldSuppressProbe(account)).toBe(false);
 	});
 
@@ -340,7 +358,7 @@ describe("wouldSuppressProbe", () => {
 			rate_limited_until: NOW - 1,
 		});
 		expect(wouldSuppressProbe(account)).toBe(false);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		expect(wouldSuppressProbe(account)).toBe(true);
 	});
 
@@ -350,7 +368,7 @@ describe("wouldSuppressProbe", () => {
 			consecutive_rate_limits: 9,
 			rate_limited_until: NOW - 1,
 		});
-		expect(getRateLimitProbeAdmission(mature)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(mature).decision).toBe("admitted");
 		// Same id, but no longer a gated shape: neither arm engages, so the lingering
 		// lease is irrelevant.
 		expect(
@@ -373,7 +391,7 @@ describe("wouldSuppressProbe", () => {
 		Date.now = () => NOW;
 		const account = makeAccount();
 		markCapacityRestoredProbePending(account.id);
-		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account).decision).toBe("admitted");
 		expect(wouldSuppressProbe(account)).toBe(true);
 		// Past the two-minute lease.
 		const later = NOW + 3 * 60 * 1000;

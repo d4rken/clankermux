@@ -115,6 +115,7 @@ import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
+	findRateLimitProbeLease,
 } from "./rate-limit-cooldown";
 import { validateProviderPath } from "./request-handler";
 import {
@@ -2172,7 +2173,11 @@ export async function proxyWithAccount(
 						familyExclusion.resetAt,
 						now,
 					);
-					completeRateLimitProbe(account, "abandoned");
+					completeRateLimitProbe(
+						account,
+						"abandoned",
+						findRateLimitProbeLease(requestMeta, account.id),
+					);
 					// Persist the 429's unified-status header so the dashboard chip
 					// reflects the live value rather than the last success.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -2363,7 +2368,11 @@ export async function proxyWithAccount(
 				// status-meta persistence (a no-op for Codex, which has no
 				// unified-status header).
 				if (cooldownUntil === null) {
-					completeRateLimitProbe(account, "abandoned");
+					completeRateLimitProbe(
+						account,
+						"abandoned",
+						findRateLimitProbeLease(requestMeta, account.id),
+					);
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 				} else if (account.provider === "codex") {
 					applyCodexObservation(account, rawResponse, ctx, {
@@ -2991,6 +3000,7 @@ export async function proxyWithAccount(
 							provider,
 						},
 						requestMeta,
+						{ locallySynthesized: isLocalCountTokens },
 					);
 		} finally {
 			// processProxyResponse only needed the rate-limit view (headers, or a
