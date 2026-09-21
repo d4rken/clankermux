@@ -1888,15 +1888,14 @@ export async function proxyWithAccount(
 				}
 				// Same ceiling as the burst intercept, for the same reason and with
 				// more force: a re-probe only happens INSIDE an active hold, so this
-				// 429 is by construction one the orchestrator is still treating as
-				// transient, and it reaches here without passing the account-wide or
-				// family rungs at all (they sit below this short-circuit). Copying a
-				// multi-day `retry-after` verbatim would push the held account's
-				// in-memory deadline out to that value, which both ends the hold on
-				// `cooldownWait > remaining` and — because the give-up terminal
-				// derives its client-facing `Retry-After` from this same field — hands
-				// the caller a 92-hour retry instruction while describing the
-				// condition as brief. See BURST_RETRY_COOLDOWN_CAP_MS.
+				// 429 reaches here without passing the account-wide or family rungs at
+				// all (they sit below this short-circuit), i.e. with no corroborating
+				// evidence for a long lock. Copying a multi-day `retry-after` verbatim
+				// would push the held account's in-memory deadline out to that value,
+				// which both ends the hold on `cooldownWait > remaining` and — because
+				// the give-up terminal derives its client-facing `Retry-After` from
+				// this same field — hands the caller a 92-hour retry instruction while
+				// describing the condition as brief. See BURST_RETRY_COOLDOWN_CAP_MS.
 				const cooldownUntil = Math.min(
 					extractCooldownUntil(
 						rawResponse,
@@ -1905,21 +1904,41 @@ export async function proxyWithAccount(
 					),
 					Date.now() + BURST_RETRY_COOLDOWN_CAP_MS,
 				);
+				if (!classification.retryable) {
+					// The same live-evidence classifier first attempts use says this
+					// account is spent, not bursting. The gentle re-probe treatment is
+					// then the wrong one twice over: it persists nothing, so the verdict
+					// dies with the request, and it reports a retryable outcome, so the
+					// hold keeps re-probing an account that has no quota left. Write the
+					// deadline for real — as a server-directed reset, which still does
+					// NOT escalate the streak, keeping the re-probe promise that a
+					// bounded retry never inflates the backoff tier — and report a
+					// terminal outcome so the hold declines instead of waiting.
+					applyRateLimitCooldown(
+						account,
+						{ resetTime: cooldownUntil, reason: "model_fallback_429" },
+						ctx,
+					);
+					log.warn(
+						`Re-probe of held account ${account.name} got a non-transient 429 (${classification.reason}) — cooling down until ${new Date(cooldownUntil).toISOString()} and ending the hold`,
+					);
+					return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
+				}
 				applyRateLimitCooldown(
 					account,
 					{ resetTime: cooldownUntil, reason: "model_fallback_429" },
 					ctx,
 					{ reprobe: true },
 				);
-				// `confidence` here is NOT consumed by the hold orchestrator: a
-				// re-probe outcome is collapsed to `Response | null` (see ReprobeFn)
-				// before it reaches `holdAndRetryCacheAccount`, which branches solely
-				// on the confidence it captured at hold entry. This hardcoded value is
-				// therefore inert for orchestration and must not be relied upon for it.
+				// `confidence` is NOT consumed by the hold orchestrator: a re-probe
+				// outcome is collapsed to `Response | null` (see ReprobeFn) before it
+				// reaches `holdAndRetryCacheAccount`, which branches solely on the
+				// confidence it captured at hold entry. It is reported for the outcome
+				// sink and the audit trail, not relied upon for orchestration.
 				return await fail(
 					{
 						kind: "retryable_429",
-						confidence: "fresh_headroom",
+						confidence: classification.confidence,
 						cooldownUntil,
 					},
 					rawResponse,
