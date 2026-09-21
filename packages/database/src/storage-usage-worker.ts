@@ -14,8 +14,9 @@ import { Database } from "bun:sqlite";
  *
  * Mirrors `integrity-check-worker.ts`: the worker opens its own handle with
  * `readonly: true` — WAL mode supports concurrent readers alongside the
- * main-thread writer — runs the scans, posts one combined result, and is
- * terminated by the runner.
+ * main-thread writer — runs the scans, posts one combined result, posts a
+ * second message acknowledging that the handle closed, and is terminated by
+ * the runner.
  */
 
 export type StorageUsageScanRequest = {
@@ -35,6 +36,25 @@ export type StorageUsageTableResult = {
 export type StorageUsageScanResult =
 	| { ok: true; types: StorageUsageTableResult[] }
 	| { ok: false; error: string };
+
+/**
+ * Posted once the SQLite handle has been closed, whatever the scan did. It is
+ * what separates "this thread is finished with the file" from "this thread was
+ * terminated and may still be reading it": the runner has no other signal,
+ * since `Worker.terminate()` reports nothing back.
+ */
+export type StorageUsageCloseAck =
+	| { kind: "close"; closed: true }
+	| { kind: "close"; closed: false; error: string };
+
+/** Everything the worker posts. The runner routes on `kind`. */
+export type StorageUsageWorkerMessage =
+	| { kind: "result"; result: StorageUsageScanResult }
+	| StorageUsageCloseAck;
+
+function post(message: StorageUsageWorkerMessage): void {
+	postMessage(message);
+}
 
 /**
  * Approximate logical byte size + row count of one table, computed as
@@ -112,26 +132,44 @@ self.onmessage = (event: MessageEvent<StorageUsageScanRequest>) => {
 			.get()
 			?.journal_mode?.toLowerCase();
 		if (journalMode !== "wal") {
-			postMessage({
-				ok: false,
-				error: `journal_mode is ${journalMode ?? "unknown"} — the scan only runs against WAL, where readers cannot stall the writer`,
-			} satisfies StorageUsageScanResult);
+			post({
+				kind: "result",
+				result: {
+					ok: false,
+					error: `journal_mode is ${journalMode ?? "unknown"} — the scan only runs against WAL, where readers cannot stall the writer`,
+				},
+			});
 			return;
 		}
 		const types = tables.map(({ key, table }) =>
 			measureTable(db as Database, key, table),
 		);
-		postMessage({ ok: true, types } satisfies StorageUsageScanResult);
+		post({ kind: "result", result: { ok: true, types } });
 	} catch (err) {
-		postMessage({
-			ok: false,
-			error: err instanceof Error ? err.message : String(err),
-		} satisfies StorageUsageScanResult);
+		post({
+			kind: "result",
+			result: {
+				ok: false,
+				error: err instanceof Error ? err.message : String(err),
+			},
+		});
 	} finally {
+		// Posted from inside the `finally`, not after the whole statement: the
+		// journal-mode refusal above returns from inside the `try`, which runs
+		// this block and then skips everything following it — an acknowledgement
+		// placed after the statement would never be sent on that path, and the
+		// runner would quarantine a refusal that ended perfectly cleanly.
 		try {
+			// `db` is undefined when the open itself threw: nothing was ever
+			// held, which is a clean close.
 			db?.close();
-		} catch {
-			// ignore — the handle is being torn down anyway
+			post({ kind: "close", closed: true });
+		} catch (err) {
+			post({
+				kind: "close",
+				closed: false,
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 	}
 };

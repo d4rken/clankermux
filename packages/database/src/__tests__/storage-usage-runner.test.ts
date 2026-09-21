@@ -17,16 +17,20 @@
  */
 
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { dirname, join } from "node:path";
 import { tempDbTracker } from "@clankermux/test-support";
+import { EMBEDDED_STORAGE_USAGE_WORKER_CODE } from "../inline-storage-usage-worker";
 import {
 	resetStorageUsageAdmissionStateForTests,
 	runStorageUsageScanInWorker,
 	setStorageUsageWorkerFactoryForTests,
 	validateScanTables,
 } from "../storage-usage-runner";
-import type { StorageUsageScanResult } from "../storage-usage-worker";
+import type {
+	StorageUsageScanResult,
+	StorageUsageWorkerMessage,
+} from "../storage-usage-worker";
 
 const tmpDb = tempDbTracker("test-storage-usage-worker");
 
@@ -153,6 +157,45 @@ describe("runStorageUsageScanInWorker", () => {
 		expect(result.error).toContain("journal_mode");
 	});
 
+	it("acknowledges its close when it refuses a rollback-journal database", async () => {
+		// The refusal returns from inside the worker's `try`, so it is the path
+		// where the acknowledgement has to be posted from the `finally`. Losing
+		// it would quarantine the path over a scan that ended perfectly cleanly.
+		const path = tmpDb.next();
+		const setup = new Database(path);
+		setup.exec("CREATE TABLE things (id TEXT PRIMARY KEY)");
+		setup.close();
+		const scan = {
+			tables: [{ key: "things", table: "things" }],
+			failureCooldownMs: 0,
+			quarantineMs: 60_000,
+			cleanupGraceMs: 2000,
+		};
+
+		expect((await runStorageUsageScanInWorker(path, scan)).ok).toBe(false);
+
+		// A quarantine would refuse this call instead of scanning again.
+		const second = await runStorageUsageScanInWorker(path, scan);
+		expect(refusalReason(second)).toContain("journal_mode");
+	});
+
+	it("acknowledges its close when the database could not be opened", async () => {
+		// Nothing was ever opened, so there is nothing that could still be
+		// reading the file — a clean close, not an unconfirmed one.
+		const path = join(dirname(tmpDb.next()), "no-such-dir", "x.db");
+		const scan = {
+			tables: [{ key: "things", table: "things" }],
+			failureCooldownMs: 0,
+			quarantineMs: 60_000,
+			cleanupGraceMs: 2000,
+		};
+
+		expect((await runStorageUsageScanInWorker(path, scan)).ok).toBe(false);
+
+		const second = await runStorageUsageScanInWorker(path, scan);
+		expect(refusalReason(second)).not.toContain("quarantine");
+	});
+
 	it("resolves ok:false on timeout instead of hanging", async () => {
 		// In WAL mode readers never block on a writer, so this DB is seeded in
 		// the default rollback-journal mode instead of via seedDb — there a
@@ -187,6 +230,7 @@ type ScanOverrides = {
 	timeoutMs?: number;
 	failureCooldownMs?: number;
 	quarantineMs?: number;
+	cleanupGraceMs?: number;
 };
 
 function startScan(
@@ -214,8 +258,15 @@ type FakeWorker = {
 	onerror: ((event: ErrorEvent) => void) | null;
 	postMessage: (data: unknown) => void;
 	terminate: () => void;
-	/** Finish this worker's scan with `result`. */
+	/**
+	 * Finish this worker's scan with `result` and acknowledge a clean close in
+	 * the same tick — the sequence the real worker posts.
+	 */
 	respond: (result: StorageUsageScanResult) => void;
+	/** Finish the scan and say nothing about the close. */
+	respondWithoutAck: (result: StorageUsageScanResult) => void;
+	/** Acknowledge the close; an `error` makes it a failed one. */
+	acknowledge: (error?: string) => void;
 };
 
 /**
@@ -231,6 +282,9 @@ function installFakeWorkers() {
 
 	setStorageUsageWorkerFactoryForTests(() => {
 		const index = workers.length + 1;
+		const post = (message: StorageUsageWorkerMessage) => {
+			fake.onmessage?.({ data: message } as MessageEvent);
+		};
 		const fake: FakeWorker = {
 			onmessage: null,
 			onerror: null,
@@ -238,8 +292,16 @@ function installFakeWorkers() {
 			terminate: () => {
 				events.push(`terminate:${index}`);
 			},
+			respondWithoutAck: (result) => post({ kind: "result", result }),
+			acknowledge: (error) =>
+				post(
+					error === undefined
+						? { kind: "close", closed: true }
+						: { kind: "close", closed: false, error },
+				),
 			respond: (result) => {
-				fake.onmessage?.({ data: result } as MessageEvent);
+				fake.respondWithoutAck(result);
+				fake.acknowledge();
 			},
 		};
 		workers.push(fake);
@@ -447,6 +509,135 @@ describe("storage-usage scan admission", () => {
 		const admitted = startScan(path, { failureCooldownMs });
 		(await log.nth(2)).respond(measured(1));
 		expect((await admitted).ok).toBe(true);
+	});
+
+	it("releases the path without quarantine once the close is acknowledged", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = { quarantineMs: 60_000, cleanupGraceMs: 2000 };
+
+		const first = startScan(path, windows);
+		const worker1 = await log.nth(1);
+		worker1.respondWithoutAck(measured(1));
+		// A tick behind the result, well inside the grace.
+		await settleQueue();
+		worker1.acknowledge();
+		expect(await first).toEqual(measured(1));
+
+		const second = startScan(path, windows);
+		(await log.nth(2)).respond(measured(2));
+		expect(await second).toEqual(measured(2));
+	});
+
+	it("observes an acknowledgement posted in the same tick as the result", async () => {
+		// With no grace at all, only a listener installed before the result is
+		// awaited can still catch an acknowledgement posted right behind it.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = { quarantineMs: 60_000, cleanupGraceMs: 0 };
+
+		const first = startScan(path, windows);
+		(await log.nth(1)).respond(measured(1));
+		expect(await first).toEqual(measured(1));
+
+		const second = startScan(path, windows);
+		(await log.nth(2)).respond(measured(2));
+		expect(await second).toEqual(measured(2));
+	});
+
+	it("returns the measurement but quarantines a path whose close is never acknowledged", async () => {
+		// The bytes were measured correctly, so the caller gets them. What is
+		// unknown is whether that worker let go of the file.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = { quarantineMs: 60_000, cleanupGraceMs: 30 };
+
+		const first = startScan(path, windows);
+		(await log.nth(1)).respondWithoutAck(measured(1));
+		expect(await first).toEqual(measured(1));
+
+		const refused = await startScan(path, windows);
+		expect(refusalReason(refused)).toContain("quarantine");
+		await settleQueue();
+		expect(log.count).toBe(1);
+	});
+
+	it("quarantines a path whose worker reports a failed close", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = { quarantineMs: 60_000, cleanupGraceMs: 2000 };
+
+		const first = startScan(path, windows);
+		const worker1 = await log.nth(1);
+		worker1.respondWithoutAck(measured(1));
+		worker1.acknowledge("close failed: disk I/O error");
+		expect(await first).toEqual(measured(1));
+
+		const refused = await startScan(path, windows);
+		expect(refusalReason(refused)).toContain("quarantine");
+	});
+
+	it("keeps the quarantine when a timed-out worker acknowledges late", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = {
+			timeoutMs: 1000,
+			failureCooldownMs: 60_000,
+			quarantineMs: 60_000,
+			cleanupGraceMs: 2000,
+		};
+
+		const first = startScan(path, windows);
+		const worker1 = await log.nth(1);
+		expect(refusalReason(await first)).toContain("timed out");
+		// Posted after the runner gave up and terminated: it says nothing about
+		// what that thread was doing while the runner waited.
+		worker1.acknowledge();
+
+		const refused = await startScan(path, windows);
+		expect(refusalReason(refused)).toContain("quarantine");
+	});
+
+	it("revokes the worker blob URL on every path, quarantined ones included", async () => {
+		const log = installFakeWorkers();
+		const created: string[] = [];
+		const revoked: string[] = [];
+		const realCreate = URL.createObjectURL.bind(URL);
+		const realRevoke = URL.revokeObjectURL.bind(URL);
+		const createSpy = spyOn(URL, "createObjectURL").mockImplementation(
+			(blob: Blob) => {
+				const url = realCreate(blob);
+				created.push(url);
+				return url;
+			},
+		);
+		const revokeSpy = spyOn(URL, "revokeObjectURL").mockImplementation(
+			(url: string) => {
+				revoked.push(url);
+				realRevoke(url);
+			},
+		);
+		try {
+			const path = tmpDb.next();
+			const windows = { quarantineMs: 60_000, cleanupGraceMs: 30 };
+
+			const clean = startScan(path, windows);
+			(await log.nth(1)).respond(measured(1));
+			expect((await clean).ok).toBe(true);
+
+			// Same path, straight into quarantine: measured, never acknowledged.
+			const unconfirmed = startScan(path, windows);
+			(await log.nth(2)).respondWithoutAck(measured(2));
+			expect((await unconfirmed).ok).toBe(true);
+
+			expect(revoked).toEqual(created);
+			// A source-mode run (empty embedded constant) builds no blob at all,
+			// so the equality above only claims something when one was built.
+			if (EMBEDDED_STORAGE_USAGE_WORKER_CODE) expect(created.length).toBe(2);
+		} finally {
+			createSpy.mockRestore();
+			revokeSpy.mockRestore();
+		}
 	});
 });
 

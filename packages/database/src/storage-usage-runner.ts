@@ -1,8 +1,10 @@
 import { EMBEDDED_STORAGE_USAGE_WORKER_CODE } from "./inline-storage-usage-worker";
 import type {
+	StorageUsageCloseAck,
 	StorageUsageScanRequest,
 	StorageUsageScanResult,
 	StorageUsageTableResult,
+	StorageUsageWorkerMessage,
 } from "./storage-usage-worker";
 
 /**
@@ -23,11 +25,21 @@ const MIN_WORKER_TIMEOUT_MS = 1000;
 const DEFAULT_FAILURE_COOLDOWN_MS = 60 * 1000;
 
 /**
- * How long a path stays refused after a scan whose worker was terminated
- * without ever reporting. Equal to the failure cooldown today and kept
- * separate because the two answer different questions: one paces retries after
- * a failure that ended cleanly, the other waits out a thread that may still be
- * reading.
+ * How long the runner waits for the worker's close acknowledgement once the
+ * result has landed. Closing the readonly handle after the scan is effectively
+ * instantaneous, and this sits three orders of magnitude below the scan cap
+ * above, so reaching the end of the grace means something is wrong rather than
+ * merely slow.
+ */
+const DEFAULT_CLEANUP_GRACE_MS = 5000;
+
+/**
+ * How long a path stays refused after a scan whose worker never confirmed it
+ * let go of the file — it reported nothing before being terminated, or it
+ * reported the measurement but never acknowledged its close. Equal to the
+ * failure cooldown today and kept separate because the two answer different
+ * questions: one paces retries after a failure that ended cleanly, the other
+ * waits out a thread that may still be reading.
  *
  * The window expires on its timer and the next call is then admitted even
  * though nothing confirmed the old worker stopped — `Worker.terminate()`
@@ -45,6 +57,8 @@ export type StorageUsageScanOptions = {
 	failureCooldownMs?: number;
 	/** Defaults to {@link DEFAULT_QUARANTINE_MS}. */
 	quarantineMs?: number;
+	/** Defaults to {@link DEFAULT_CLEANUP_GRACE_MS}. */
+	cleanupGraceMs?: number;
 };
 
 function resolveTimeoutMs(timeoutMs: number | undefined): number {
@@ -137,7 +151,7 @@ function currentRefusal(
 	if (admission.quarantineUntil > now) {
 		return {
 			ok: false,
-			error: `scan refused: the previous worker was terminated without reporting and may still be reading — quarantine ends in ${admission.quarantineUntil - now}ms`,
+			error: `scan refused: the previous worker never confirmed it closed the database and may still be reading — quarantine ends in ${admission.quarantineUntil - now}ms`,
 		};
 	}
 	if (admission.cooldownUntil > now) {
@@ -149,24 +163,27 @@ function currentRefusal(
 	return null;
 }
 
+/**
+ * Two independent questions, two independent windows: what the scan reported
+ * decides the cooldown, and whether the worker confirmed it let go of the file
+ * decides the quarantine. A measurement that arrived from a worker whose close
+ * was never confirmed is still a good measurement — it opens no cooldown and
+ * is handed to the caller — but the path stays refused until the quarantine
+ * expires.
+ */
 function recordOutcome(
 	admission: PathAdmission,
 	attempt: ScanAttempt,
 	options: StorageUsageScanOptions,
 ): void {
-	if (attempt.result.ok) {
-		admission.cooldownUntil = 0;
-		admission.quarantineUntil = 0;
-		return;
-	}
 	const now = Date.now();
-	admission.cooldownUntil =
-		now +
-		resolveWindowMs(options.failureCooldownMs, DEFAULT_FAILURE_COOLDOWN_MS);
-	if (attempt.unconfirmedStop) {
-		admission.quarantineUntil =
-			now + resolveWindowMs(options.quarantineMs, DEFAULT_QUARANTINE_MS);
-	}
+	admission.cooldownUntil = attempt.result.ok
+		? 0
+		: now +
+			resolveWindowMs(options.failureCooldownMs, DEFAULT_FAILURE_COOLDOWN_MS);
+	admission.quarantineUntil = attempt.unconfirmedStop
+		? now + resolveWindowMs(options.quarantineMs, DEFAULT_QUARANTINE_MS)
+		: 0;
 }
 
 /**
@@ -253,9 +270,12 @@ export function validateScanTables(
  * are the pre-invalidation snapshot it asked to replace. Only one such
  * successor is queued; later callers share that one's result.
  *
- * A failed scan opens a cooldown on the path and a scan whose worker had to be
- * terminated opens a quarantine; calls inside either window return `ok: false`
- * naming it and construct nothing.
+ * A failed scan opens a cooldown on the path and a scan whose worker never
+ * confirmed it closed the database opens a quarantine; calls inside either
+ * window return `ok: false` naming it and construct nothing. The two are
+ * decided separately from what the caller gets back: a measurement that
+ * arrived before an unconfirmed close is still returned, and only the path is
+ * held.
  */
 export function runStorageUsageScanInWorker(
 	dbPath: string,
@@ -285,18 +305,42 @@ export function runStorageUsageScanInWorker(
 type ScanAttempt = {
 	result: StorageUsageScanResult;
 	/**
-	 * The worker was terminated while it may still have been scanning: it never
-	 * reported, and `Worker.terminate()` gives no completion signal.
+	 * The worker was terminated while it may still have held the file open: it
+	 * never reported at all, or it reported the scan and then never
+	 * acknowledged closing its handle. `Worker.terminate()` gives no completion
+	 * signal, so the acknowledgement is the only evidence either way.
 	 */
 	unconfirmedStop: boolean;
 };
 
 /**
+ * The worker's close acknowledgement, or `null` when none arrived inside
+ * `graceMs` — which leaves the caller with an unconfirmed stop.
+ */
+async function awaitCloseAck(
+	ack: Promise<StorageUsageCloseAck>,
+	graceMs: number,
+): Promise<StorageUsageCloseAck | null> {
+	let handle: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			ack,
+			new Promise<null>((resolve) => {
+				handle = setTimeout(() => resolve(null), graceMs);
+			}),
+		]);
+	} finally {
+		if (handle !== undefined) clearTimeout(handle);
+	}
+}
+
+/**
  * Spawn `storage-usage-worker` against a DB file and return the per-table
- * measurement. Mirrors `runIntegrityCheckInWorker` (inline blob URL when the
- * compiled worker is embedded, file URL when running source-mode from a
- * checkout), including the timeout race: on timeout the worker is terminated
- * and an `ok: false` result is returned, which the caller reports as
+ * measurement plus how certain the runner is that the worker let go of the
+ * file. Mirrors `runIntegrityCheckInWorker` (inline blob URL when the compiled
+ * worker is embedded, file URL when running source-mode from a checkout),
+ * including the timeout race: on timeout the worker is terminated and an
+ * `ok: false` result is returned, which the caller reports as
  * `available: false` rather than blocking or throwing.
  */
 async function spawnScan(
@@ -341,10 +385,21 @@ async function spawnScan(
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	let unconfirmedStop = false;
 
+	const closeAck = Promise.withResolvers<StorageUsageCloseAck>();
+
 	try {
 		const result = await new Promise<StorageUsageScanResult>(
 			(resolve, reject) => {
-				worker.onmessage = (event: MessageEvent) => resolve(event.data);
+				// One handler for both messages, installed before anything is
+				// awaited: the worker posts its acknowledgement immediately behind
+				// the result, so a listener attached once the result had settled
+				// could miss it (pinned by the same-tick case in
+				// `__tests__/storage-usage-runner.test.ts`).
+				worker.onmessage = (event: MessageEvent<StorageUsageWorkerMessage>) => {
+					const message = event.data;
+					if (message?.kind === "close") closeAck.resolve(message);
+					else if (message?.kind === "result") resolve(message.result);
+				};
 				worker.onerror = (event: ErrorEvent) => {
 					unconfirmedStop = true;
 					reject(new Error(event.message ?? "storage-usage worker error"));
@@ -370,6 +425,15 @@ async function spawnScan(
 				error: err instanceof Error ? err.message : String(err),
 			}),
 		);
+		if (!unconfirmedStop) {
+			// A worker that never reported is already uncertain; only one that
+			// did can still confirm what it did with its handle.
+			const ack = await awaitCloseAck(
+				closeAck.promise,
+				resolveWindowMs(options.cleanupGraceMs, DEFAULT_CLEANUP_GRACE_MS),
+			);
+			unconfirmedStop = ack === null || !ack.closed;
+		}
 		if (result.ok) {
 			const problem = validateScanTables(options.tables, result.types);
 			if (problem) {
