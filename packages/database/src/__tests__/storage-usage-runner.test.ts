@@ -9,6 +9,11 @@
  * temp-file DBs and assert the sums match direct SQL, plus the operational
  * failure paths (unopenable file, timeout) that must report `ok: false`
  * instead of throwing or hanging.
+ *
+ * The admission tests at the bottom drive a hand-written fake worker instead:
+ * a real scan of a temp DB finishes in milliseconds, so two calls never
+ * actually overlap, and a real worker cannot be held open, failed on demand,
+ * or left silent.
  */
 
 import { Database } from "bun:sqlite";
@@ -16,13 +21,20 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { dirname, join } from "node:path";
 import { tempDbTracker } from "@clankermux/test-support";
 import {
+	resetStorageUsageAdmissionStateForTests,
 	runStorageUsageScanInWorker,
+	setStorageUsageWorkerFactoryForTests,
 	validateScanTables,
 } from "../storage-usage-runner";
+import type { StorageUsageScanResult } from "../storage-usage-worker";
 
 const tmpDb = tempDbTracker("test-storage-usage-worker");
 
 afterEach(() => {
+	// Both resets matter for the real-worker tests: a leaked fake factory would
+	// replace their worker, and a leaked cooldown would refuse their scan.
+	setStorageUsageWorkerFactoryForTests(null);
+	resetStorageUsageAdmissionStateForTests();
 	tmpDb.cleanup();
 });
 
@@ -166,6 +178,275 @@ describe("runStorageUsageScanInWorker", () => {
 			blocker.exec("ROLLBACK");
 			blocker.close();
 		}
+	});
+});
+
+const TABLES = [{ key: "things", table: "things" }] as const;
+
+type ScanOverrides = {
+	timeoutMs?: number;
+	failureCooldownMs?: number;
+	quarantineMs?: number;
+};
+
+function startScan(
+	path: string,
+	overrides: ScanOverrides = {},
+): Promise<StorageUsageScanResult> {
+	return runStorageUsageScanInWorker(path, {
+		tables: [...TABLES],
+		...overrides,
+	});
+}
+
+/** A result distinguishable per scan, so a shared one can be told apart. */
+function measured(rowCount: number): StorageUsageScanResult {
+	return {
+		ok: true,
+		types: [
+			{ key: "things", table: "things", rowCount, approxBytes: rowCount * 10 },
+		],
+	};
+}
+
+type FakeWorker = {
+	onmessage: ((event: MessageEvent) => void) | null;
+	onerror: ((event: ErrorEvent) => void) | null;
+	postMessage: (data: unknown) => void;
+	terminate: () => void;
+	/** Finish this worker's scan with `result`. */
+	respond: (result: StorageUsageScanResult) => void;
+};
+
+/**
+ * Install a worker factory whose workers do nothing on their own: each is
+ * finished by hand with `respond`, or left silent so the runner's timeout
+ * fires. `events` records construction and termination in call order, which is
+ * how "two scans, never at the same time" is asserted.
+ */
+function installFakeWorkers() {
+	const workers: FakeWorker[] = [];
+	const events: string[] = [];
+	const awaited = new Map<number, () => void>();
+
+	setStorageUsageWorkerFactoryForTests(() => {
+		const index = workers.length + 1;
+		const fake: FakeWorker = {
+			onmessage: null,
+			onerror: null,
+			postMessage: () => {},
+			terminate: () => {
+				events.push(`terminate:${index}`);
+			},
+			respond: (result) => {
+				fake.onmessage?.({ data: result } as MessageEvent);
+			},
+		};
+		workers.push(fake);
+		events.push(`construct:${index}`);
+		awaited.get(index)?.();
+		awaited.delete(index);
+		return fake as unknown as Worker;
+	});
+
+	return {
+		events,
+		get count(): number {
+			return workers.length;
+		},
+		/** Resolves once the nth worker (1-based) has been constructed. */
+		async nth(index: number): Promise<FakeWorker> {
+			if (workers.length < index) {
+				await new Promise<void>((resolve) => {
+					awaited.set(index, resolve);
+				});
+			}
+			return workers[index - 1];
+		},
+	};
+}
+
+/** Let every pending continuation run, so "no worker was built" is a real claim. */
+async function settleQueue(): Promise<void> {
+	for (let i = 0; i < 5; i++) await Bun.sleep(0);
+}
+
+function refusalReason(result: StorageUsageScanResult): string {
+	expect(result.ok).toBe(false);
+	return result.ok ? "" : result.error;
+}
+
+function remainingMsIn(reason: string): number {
+	const match = /ends in (\d+)ms/.exec(reason);
+	expect(match).not.toBeNull();
+	return Number(match?.[1]);
+}
+
+describe("storage-usage scan admission", () => {
+	it("runs two overlapping calls as two workers, strictly in sequence", async () => {
+		// The second caller must not adopt the first scan's numbers: it asked
+		// because something invalidated exactly that snapshot.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+
+		const first = startScan(path);
+		const second = startScan(path);
+		const worker1 = await log.nth(1);
+		await settleQueue();
+		expect(log.count).toBe(1);
+
+		worker1.respond(measured(1));
+		expect(await first).toEqual(measured(1));
+
+		const worker2 = await log.nth(2);
+		worker2.respond(measured(2));
+		expect(await second).toEqual(measured(2));
+
+		expect(log.events).toEqual([
+			"construct:1",
+			"terminate:1",
+			"construct:2",
+			"terminate:2",
+		]);
+	});
+
+	it("collapses a third concurrent caller onto the queued successor", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+
+		const first = startScan(path);
+		const second = startScan(path);
+		const third = startScan(path);
+
+		(await log.nth(1)).respond(measured(1));
+		await first;
+		(await log.nth(2)).respond(measured(2));
+
+		expect(await second).toEqual(measured(2));
+		expect(await third).toEqual(measured(2));
+		await settleQueue();
+		expect(log.count).toBe(2);
+	});
+
+	it("queues a fresh successor for a caller arriving after promotion", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+
+		const first = startScan(path);
+		const second = startScan(path);
+		(await log.nth(1)).respond(measured(1));
+		await first;
+		const worker2 = await log.nth(2);
+
+		// The successor is running now. Joining it would hand this caller a scan
+		// that started before it arrived.
+		const third = startScan(path);
+		worker2.respond(measured(2));
+		expect(await second).toEqual(measured(2));
+
+		(await log.nth(3)).respond(measured(3));
+		expect(await third).toEqual(measured(3));
+		expect(log.count).toBe(3);
+	});
+
+	it("refuses the next call after a failed scan, naming the cooldown", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+
+		const first = startScan(path, { failureCooldownMs: 60_000 });
+		(await log.nth(1)).respond({ ok: false, error: "disk went away" });
+		expect((await first).ok).toBe(false);
+
+		const refused = await startScan(path, { failureCooldownMs: 60_000 });
+		expect(refusalReason(refused)).toContain("cooldown");
+		await settleQueue();
+		expect(log.count).toBe(1);
+	});
+
+	it("refuses an already-queued successor when its predecessor times out", async () => {
+		// Admission decided on arrival would have let this one through: it was
+		// queued while the predecessor still looked healthy. That ordering is
+		// the motivating one — a cleanup landing mid-scan on a struggling disk.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = {
+			timeoutMs: 1000,
+			failureCooldownMs: 60_000,
+			quarantineMs: 60_000,
+		};
+
+		const first = startScan(path, windows);
+		await log.nth(1); // held open: never responds, so the runner times out
+		const queued = startScan(path, windows);
+
+		expect(refusalReason(await first)).toContain("timed out");
+		expect(refusalReason(await queued)).toContain("quarantine");
+		expect(log.count).toBe(1);
+	});
+
+	it("admits the next call once the quarantine expires", async () => {
+		// Deliberate: the terminated worker is never confirmed stopped, and
+		// elapsed time is the only evidence there is.
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const windows = {
+			timeoutMs: 1000,
+			failureCooldownMs: 20,
+			quarantineMs: 20,
+		};
+
+		const first = startScan(path, windows);
+		await log.nth(1);
+		expect((await first).ok).toBe(false);
+		await Bun.sleep(80);
+
+		const second = startScan(path, windows);
+		(await log.nth(2)).respond(measured(1));
+		expect(await second).toEqual(measured(1));
+	});
+
+	it("leaves no cooldown behind a successful scan", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+
+		const first = startScan(path);
+		(await log.nth(1)).respond(measured(1));
+		await first;
+
+		const second = startScan(path);
+		(await log.nth(2)).respond(measured(2));
+		expect(await second).toEqual(measured(2));
+	});
+
+	it("does not push the cooldown deadline out on every refusal", async () => {
+		const log = installFakeWorkers();
+		const path = tmpDb.next();
+		const failureCooldownMs = 400;
+
+		const first = startScan(path, { failureCooldownMs });
+		(await log.nth(1)).respond({ ok: false, error: "disk went away" });
+		await first;
+		const failedAt = Date.now();
+
+		const remaining: number[] = [];
+		while (Date.now() - failedAt < 150) {
+			const refused = await startScan(path, { failureCooldownMs });
+			remaining.push(remainingMsIn(refusalReason(refused)));
+			await Bun.sleep(30);
+		}
+		expect(remaining.length).toBeGreaterThan(2);
+		for (let i = 1; i < remaining.length; i++) {
+			expect(remaining[i]).toBeLessThan(remaining[i - 1]);
+		}
+		expect(log.count).toBe(1);
+
+		// The deadline the failure set still governs, refusals notwithstanding.
+		await Bun.sleep(
+			Math.max(0, failedAt + failureCooldownMs + 100 - Date.now()),
+		);
+		const admitted = startScan(path, { failureCooldownMs });
+		(await log.nth(2)).respond(measured(1));
+		expect((await admitted).ok).toBe(true);
 	});
 });
 
