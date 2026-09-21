@@ -316,6 +316,88 @@ describe("handleResponsesRequest", () => {
 		expect(body.error.availability_guaranteed).toBe(false);
 	});
 
+	test("Test 3b2b: only a finite positive integer becomes a Retry-After", async () => {
+		// `Retry-After` takes whole seconds, so anything else would go out as a
+		// literal NaN / Infinity / -1 / 1.5 and be worse than no header.
+		for (const advice of [
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			-1,
+			0,
+			1.5,
+			"23",
+			null,
+		]) {
+			const mockHandleProxy: HandleProxyFn = async () => {
+				throw Object.assign(new Error("give up"), {
+					statusCode: 503,
+					retryAfterSeconds: advice,
+				});
+			};
+
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				mockHandleProxy,
+				{},
+			);
+			expect(resp.status).toBe(503);
+			expect(resp.headers.get("Retry-After")).toBeNull();
+			const body = (await resp.json()) as { error: Record<string, unknown> };
+			expect("availability_guaranteed" in body.error).toBe(false);
+		}
+	});
+
+	test("Test 3b2c: a non-503 throw is not paced", async () => {
+		const mockHandleProxy: HandleProxyFn = async () => {
+			throw Object.assign(new Error("bad request"), {
+				statusCode: 400,
+				retryAfterSeconds: 23,
+			});
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(400);
+		expect(resp.headers.get("Retry-After")).toBeNull();
+		const body = (await resp.json()) as { error: Record<string, unknown> };
+		expect("availability_guaranteed" in body.error).toBe(false);
+	});
+
 	test("Test 3b3: a throw with no advice is serialized exactly as before", async () => {
 		const mockHandleProxy: HandleProxyFn = async () => {
 			throw Object.assign(new Error("boom"), { statusCode: 503 });

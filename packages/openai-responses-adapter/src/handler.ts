@@ -375,17 +375,24 @@ export async function handleResponsesRequest(
 				? (err as { statusCode: number }).statusCode
 				: 503;
 		const isUnavailable = statusCode === 503;
-		// Read the same way as `statusCode` above: the give-up terminals attach
-		// their re-check interval to the error, and this leg has to pace its 503
-		// exactly as the /v1/messages leg does or a Codex retry loop is the only
-		// client left with no guidance.
+		// The give-up terminals attach their re-check interval to the error, and
+		// this leg has to pace its 503 exactly as the /v1/messages leg does or a
+		// Codex retry loop is the only client left with no guidance.
+		//
+		// Unlike `statusCode` above, this value is computed rather than a literal,
+		// and `Retry-After` takes whole seconds: anything that is not a positive
+		// integer would reach the client as `NaN`, `Infinity` or `-1` and make the
+		// header worse than absent. Only a 503 carries it, matching the dispatcher.
+		const rawRetryAfter =
+			typeof err === "object" && err !== null && "retryAfterSeconds" in err
+				? (err as { retryAfterSeconds: unknown }).retryAfterSeconds
+				: undefined;
 		const retryAfterSeconds =
-			typeof err === "object" &&
-			err !== null &&
-			"retryAfterSeconds" in err &&
-			typeof (err as { retryAfterSeconds: unknown }).retryAfterSeconds ===
-				"number"
-				? (err as { retryAfterSeconds: number }).retryAfterSeconds
+			isUnavailable &&
+			typeof rawRetryAfter === "number" &&
+			Number.isInteger(rawRetryAfter) &&
+			rawRetryAfter > 0
+				? rawRetryAfter
 				: undefined;
 		return new Response(
 			JSON.stringify({
