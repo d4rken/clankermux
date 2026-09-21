@@ -21,6 +21,7 @@ import {
 	resetHoldSlots,
 	tryAcquireHoldSlot,
 } from "../handlers/burst-cooldown";
+import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
@@ -378,6 +379,11 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		originalFetch = globalThis.fetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
+		// A burst cooldown arms the single-flight recovery marker, which is keyed
+		// by account id and deliberately never time-expires. These cases reuse the
+		// same ids with freshly-built accounts, so it has to be cleared between
+		// them or the previous case's marker gates the next one.
+		resetRateLimitProbeGatesForTests();
 		resetHoldSlots();
 		// Deterministic hold timing is injected per-call via HOLD_TIMING_OVERRIDE
 		// (see callHandleProxy) — no env var needed. The burst-retry tuning
@@ -391,6 +397,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
+		resetRateLimitProbeGatesForTests();
 		resetHoldSlots();
 	});
 

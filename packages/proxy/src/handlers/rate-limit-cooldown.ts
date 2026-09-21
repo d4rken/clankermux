@@ -7,6 +7,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
+import { isOAuthAnthropicAccount } from "./transparent-retry";
 
 const log = new Logger("RateLimitCooldown");
 
@@ -161,6 +162,14 @@ export interface CapacityProbeReservation {
 	/** The reservation this one displaced, or null if the slot was empty. */
 	previous: CapacityProbeReservation | null;
 	/**
+	 * Cooldown deadline this reservation was armed with, for a marker that came
+	 * from a FRESH 429 rather than an early release. Admission reads it instead
+	 * of trusting `account.rate_limited_until`: every request in flight holds its
+	 * own independently-loaded copy of the account, and the periodic expiry sweep
+	 * nulls the column outright.
+	 */
+	cooldownUntil?: number;
+	/**
 	 * Set once this reservation's clear is known to have failed. A rolled-back
 	 * reservation is never restored as anyone else's predecessor — otherwise two
 	 * overlapping failed clears would leave a marker pending for a restore that
@@ -207,6 +216,35 @@ export function markCapacityRestoredProbePending(
 	};
 	capacityRestoredPending.set(accountId, reservation);
 	return reservation;
+}
+
+/**
+ * Arm the single-flight gate for a reset-bearing burst cooldown, stamped with
+ * the deadline the cooldown just wrote.
+ *
+ * The burst path writes a server-directed deadline WITHOUT escalating
+ * `consecutive_rate_limits`, so the account comes back at streak 0 with an
+ * expired deadline — the shape neither half of the mature-streak gate engages
+ * on. Every concurrent request would then reach the just-throttled account at
+ * the same instant and re-trip the same burst window.
+ *
+ * Armed with NO predecessor: an account that keeps bursting would otherwise
+ * grow a linked reservation chain, one node per 429, and nothing ever rolls a
+ * burst arming back (the rollback path exists for a compare-and-clear that
+ * never committed).
+ */
+function armBurstRecoveryProbe(account: Account, cooldownUntil: number): void {
+	capacityGenerationCounter += 1;
+	capacityRestoredPending.set(account.id, {
+		accountId: account.id,
+		generation: capacityGenerationCounter,
+		previous: null,
+		cooldownUntil,
+		rolledBack: false,
+	});
+	log.info(
+		`[clankermux] account=${account.name} cooldown_probe_armed reason=burst capacity_generation=${capacityGenerationCounter} until=${new Date(cooldownUntil).toISOString()}`,
+	);
 }
 
 /**
@@ -286,6 +324,11 @@ interface ProbeGateInspection {
 	gatingRequired: boolean;
 	/** The pending capacity-restored generation, or undefined when none is owed. */
 	capacityGeneration: number | undefined;
+	/**
+	 * The gating reservation carries a deadline that has not lapsed yet. Probing
+	 * now would land inside the cooldown that armed it.
+	 */
+	coolingDown: boolean;
 }
 
 /**
@@ -302,9 +345,8 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 		account.consecutive_rate_limits >= MATURE_COOLDOWN_STREAK &&
 		account.rate_limited_until != null &&
 		account.rate_limited_until <= now;
-	const capacityGeneration = capacityRestoredPending.get(
-		account.id,
-	)?.generation;
+	const reservation = capacityRestoredPending.get(account.id);
+	const capacityGeneration = reservation?.generation;
 	return {
 		// Keep the reason through the expiry sweep: NULL deadline means the
 		// sweep released it, not that Claude Code access has been confirmed.
@@ -314,6 +356,7 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 			(account.rate_limited_reason === "org_permission_denied" &&
 				(!account.rate_limited_until || account.rate_limited_until <= now)),
 		capacityGeneration,
+		coolingDown: (reservation?.cooldownUntil ?? 0) > now,
 	};
 }
 
@@ -348,9 +391,32 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 export function getRateLimitProbeAdmission(
 	account: Account,
 	now: number = Date.now(),
+	options?: {
+		/**
+		 * This attempt is the burst hold's bounded re-probe of the account it is
+		 * holding, which by design runs INSIDE that account's own cooldown (see
+		 * `applyRateLimitCooldown`'s re-probe semantics). It is the one caller
+		 * whose whole purpose is to test a deadline that has not lapsed, so the
+		 * gate arbitrates it for single-flight only, never for the deadline.
+		 */
+		reprobe?: boolean;
+	},
 ): RateLimitProbeAdmission {
-	const { gatingRequired, capacityGeneration } = inspectProbeGate(account, now);
+	const { gatingRequired, capacityGeneration, coolingDown } = inspectProbeGate(
+		account,
+		now,
+	);
 	if (!gatingRequired) return { decision: "not_required" };
+	if (coolingDown && !options?.reprobe) {
+		// The reservation's own deadline has not lapsed. Hand out no lease: the
+		// probe this account owes belongs to the wave AFTER the cooldown.
+		log.debug(
+			`[clankermux] account=${account.name} cooldown_probe_deferred until=${new Date(
+				capacityRestoredPending.get(account.id)?.cooldownUntil ?? now,
+			).toISOString()}`,
+		);
+		return { decision: "suppressed" };
+	}
 
 	pruneProbeLeases(now);
 	const existingLease = probeLeases.get(account.id);
@@ -518,7 +584,9 @@ export function wouldSuppressProbe(
 	account: Account,
 	now: number = Date.now(),
 ): boolean {
-	if (!inspectProbeGate(account, now).gatingRequired) return false;
+	const { gatingRequired, coolingDown } = inspectProbeGate(account, now);
+	if (!gatingRequired) return false;
+	if (coolingDown) return true;
 	const existingLease = probeLeases.get(account.id);
 	return existingLease !== undefined && existingLease.leaseUntil > now;
 }
@@ -657,6 +725,13 @@ export function applyRateLimitCooldown(
 		account.rate_limited_reason = reason;
 
 		const cooldownUntil = rateLimitInfo.resetTime;
+		// A burst 429 leaves exactly the state nothing else gates on — streak 0,
+		// and a deadline that is about to expire — so arm the single-flight marker
+		// here rather than waiting for a capacity-restored release that will never
+		// come for this cause.
+		if (reason === "model_fallback_429" && isOAuthAnthropicAccount(account)) {
+			armBurstRecoveryProbe(account, cooldownUntil);
+		}
 		ctx.asyncWriter.enqueue(async () => {
 			await ctx.dbOps.markAccountRateLimitedDeadlineOnly(
 				account.id,

@@ -191,6 +191,86 @@ describe("capacity-restored single-flight marker", () => {
 		expect(admittedOutOf(account, 6)).toBe(1);
 	});
 
+	it("single-flights recovery from a reset-bearing burst cooldown", () => {
+		// The burst path writes a server-directed deadline and leaves the streak at
+		// 0, so neither half of the mature-streak gate engages once it expires.
+		// Without a marker every concurrent request reaches the just-throttled
+		// account at the same instant and re-trips the same burst window.
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const { ctx } = makeCtx();
+
+		applyRateLimitCooldown(
+			account,
+			{ resetTime: NOW + 60_000, reason: "model_fallback_429" },
+			ctx,
+		);
+		expect(account.consecutive_rate_limits).toBe(0);
+		// Inside the cooldown there is nothing to probe yet.
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+
+		Date.now = () => NOW + 60_001;
+		expect(admittedOutOf(account, 8)).toBe(1);
+
+		completeRateLimitProbe(account, "recovered", lastLease);
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("not_required");
+	});
+
+	it("a second burst keeps recovery gated after the first probe completes", () => {
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const { ctx } = makeCtx();
+
+		applyRateLimitCooldown(
+			account,
+			{ resetTime: NOW + 60_000, reason: "model_fallback_429" },
+			ctx,
+		);
+		Date.now = () => NOW + 60_001;
+		const first = admit(account);
+
+		// A concurrent request earns its own burst 429 on the same account while
+		// that probe is still in flight.
+		applyRateLimitCooldown(
+			account,
+			{ resetTime: NOW + 120_000, reason: "model_fallback_429" },
+			ctx,
+		);
+
+		// The first probe finally reports success. It observed the account BEFORE
+		// the newer 429, so it must not clear what that 429 armed.
+		completeRateLimitProbe(account, "recovered", first);
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
+		expect(getRateLimitProbeAdmission(account).decision).toBe("suppressed");
+
+		// …including once the expiry sweep has nulled the deadline: the
+		// reservation carries its own, so admission still single-flights.
+		account.rate_limited_until = null;
+		Date.now = () => NOW + 120_001;
+		expect(admittedOutOf(account, 6)).toBe(1);
+	});
+
+	it("arms only for an OAuth-Anthropic burst, not for every reset-bearing 429", () => {
+		Date.now = () => NOW;
+		const { ctx } = makeCtx();
+
+		const otherReason = makeAccount({ id: "acc-other-reason" });
+		applyRateLimitCooldown(otherReason, { resetTime: NOW + 60_000 }, ctx);
+		expect(hasCapacityRestoredProbePending(otherReason.id)).toBe(false);
+
+		const otherProvider = makeAccount({
+			id: "acc-other-provider",
+			provider: "codex",
+		});
+		applyRateLimitCooldown(
+			otherProvider,
+			{ resetTime: NOW + 60_000, reason: "model_fallback_429" },
+			ctx,
+		);
+		expect(hasCapacityRestoredProbePending(otherProvider.id)).toBe(false);
+	});
+
 	it("keeps the marker pending indefinitely while the account is never probed", () => {
 		// A family gate or an open 529 breaker can legitimately delay probing. The
 		// marker must NOT time-expire — expiring it would reopen fan-in exactly when

@@ -215,6 +215,7 @@ export interface RecoveryHoldsDeps {
 	attemptThroughProbeGate: (
 		account: Account,
 		attempt: () => Promise<Response | null>,
+		options?: { reprobe?: boolean },
 	) => Promise<{ response: Response | null; suppressed: boolean }>;
 }
 
@@ -1160,42 +1161,48 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		signal: AbortSignal,
 	): Promise<ReprobeOutcome> => {
 		const captured: { outcome: ProxyAttemptOutcome | null } = { outcome: null };
-		const gated = await attemptThroughProbeGate(probeAccount, () => {
-			logFinalOrderOnce(probeAccount.id);
-			return proxyWithAccount(
-				req,
-				url,
-				probeAccount,
-				requestMeta,
-				finalBodyBuffer,
-				finalCreateBodyStream,
-				0,
-				ctx,
-				null,
-				apiKeyId,
-				apiKeyName,
-				requestBodyContext,
-				false,
-				// `fromHold`: log-level only — this re-probe runs inside the burst
-				// hold, which reports its own outcome (see runBurstHold).
-				{
-					reprobe: true,
-					signal,
-					fromHold: true,
-					// No `forwardTransientServerError`: a 5xx on the held account is
-					// forwarded, as it is today. This closure is shared by BOTH
-					// `runBurstHold` callers and they disagree about what a failover
-					// would mean — the ordinary caller has a sibling loop behind it,
-					// while the zero-accounts storm-degrade path explicitly has none
-					// and would replace the real upstream error with the synthetic
-					// burst-retry give-up 429. Expressing that split needs the
-					// caller's disposition threaded in, which is not this change.
-					onOutcome: (outcome) => {
-						captured.outcome = outcome;
+		const gated = await attemptThroughProbeGate(
+			probeAccount,
+			() => {
+				logFinalOrderOnce(probeAccount.id);
+				return proxyWithAccount(
+					req,
+					url,
+					probeAccount,
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					0,
+					ctx,
+					null,
+					apiKeyId,
+					apiKeyName,
+					requestBodyContext,
+					false,
+					// `fromHold`: log-level only — this re-probe runs inside the burst
+					// hold, which reports its own outcome (see runBurstHold).
+					{
+						reprobe: true,
+						signal,
+						fromHold: true,
+						// No `forwardTransientServerError`: a 5xx on the held account is
+						// forwarded, as it is today. This closure is shared by BOTH
+						// `runBurstHold` callers and they disagree about what a failover
+						// would mean — the ordinary caller has a sibling loop behind it,
+						// while the zero-accounts storm-degrade path explicitly has none
+						// and would replace the real upstream error with the synthetic
+						// burst-retry give-up 429. Expressing that split needs the
+						// caller's disposition threaded in, which is not this change.
+						onOutcome: (outcome) => {
+							captured.outcome = outcome;
+						},
 					},
-				},
-			);
-		});
+				);
+			},
+			// The gate arbitrates this attempt for single-flight only: probing a
+			// deadline that has not lapsed yet is the whole point of the hold.
+			{ reprobe: true },
+		);
 		if (gated.suppressed) return { kind: "suppressed" };
 		if (gated.response) return { kind: "response", response: gated.response };
 		// A null response is not itself burst evidence. Quota failures without a

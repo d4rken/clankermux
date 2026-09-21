@@ -145,8 +145,9 @@ async function attemptThroughProbeGate(
 	requestMeta: RequestMeta,
 	account: Account,
 	attempt: () => Promise<Response | null>,
+	options?: { reprobe?: boolean },
 ): Promise<GatedAttempt> {
-	const admission = getRateLimitProbeAdmission(account);
+	const admission = getRateLimitProbeAdmission(account, Date.now(), options);
 	if (admission.decision === "suppressed") {
 		return { response: null, suppressed: true };
 	}
@@ -720,11 +721,17 @@ async function handleIngestedProxy(
 	const countedAttemptThroughProbeGate = (
 		account: Account,
 		attempt: () => Promise<Response | null>,
+		options?: { reprobe?: boolean },
 	): Promise<{ response: Response | null; suppressed: boolean }> =>
-		attemptThroughProbeGate(requestMeta, account, () => {
-			upstreamAttempts++;
-			return attempt();
-		});
+		attemptThroughProbeGate(
+			requestMeta,
+			account,
+			() => {
+				upstreamAttempts++;
+				return attempt();
+			},
+			options,
+		);
 
 	// Every hold that parks a live client connection and re-attempts is built ONCE
 	// per request here (see recovery-holds.ts): the overload hold, the shared
