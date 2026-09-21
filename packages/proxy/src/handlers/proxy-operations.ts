@@ -81,6 +81,11 @@ import {
 } from "../resolved-route";
 import { forwardToClient } from "../response-handler";
 import {
+	ceilRetryAfterSeconds,
+	clampRetryAfterSeconds,
+	DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+} from "../retry-after";
+import {
 	type RoutingAttemptAudit,
 	recordLocalRoutingOutcome,
 	sendAuthorizedRequest,
@@ -3706,18 +3711,24 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 		.filter((until): until is number => until != null && until > now);
 	const earliestRateLimitedUntil =
 		rateLimitedTimes.length > 0 ? Math.min(...rateLimitedTimes) : null;
+	// The earliest known cooldown expiry across the pool — not a promise that
+	// the account it belongs to becomes eligible then: every other gate is still
+	// applied at that account's next selection.
 	const nextAvailableAt =
 		earliestRateLimitedUntil !== null
 			? new Date(earliestRateLimitedUntil).toISOString()
 			: null;
 
-	// Calculate Retry-After header (seconds) directly from numeric min. Ceiled,
-	// not rounded: a client that retries before the deadline it was handed just
-	// collects the same terminal again.
+	// `Retry-After` is re-check advice, not this deadline: the earliest cooldown
+	// in the pool can be a 5-hour or weekly reset, and a client parked on that
+	// figure sleeps through a gift reset, an operator unpause or an account
+	// added in the meantime. `next_available_at` above keeps the real number.
 	const retryAfterSeconds =
 		earliestRateLimitedUntil !== null
-			? Math.max(1, Math.ceil((earliestRateLimitedUntil - now) / 1000))
-			: 60; // Default 60s if no cooldown info
+			? clampRetryAfterSeconds(
+					ceilRetryAfterSeconds(earliestRateLimitedUntil, now),
+				)
+			: DEFAULT_RECHECK_RETRY_AFTER_SECONDS;
 
 	return new Response(
 		JSON.stringify({

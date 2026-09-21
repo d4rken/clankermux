@@ -16,9 +16,11 @@ import type {
 	AnthropicUsageData,
 	CapacitySignal,
 } from "@clankermux/types";
-
-/** Fallback Retry-After (seconds) when no usable family reset time is known. */
-const RETRY_AFTER_FALLBACK_SECONDS = 60;
+import {
+	ceilRetryAfterSeconds,
+	clampRetryAfterSeconds,
+	DEFAULT_RECHECK_RETRY_AFTER_SECONDS,
+} from "../retry-after";
 
 /**
  * Max age of cached usage data the family-weekly gate will trust (2× the 90s
@@ -243,7 +245,9 @@ export interface TransientSiblingCooldown {
  * Build the fail-clean 429 returned when every candidate account's requested
  * model family is weekly-exhausted. `Retry-After` is derived from the soonest
  * family reset across the excluded accounts (falling back to a fixed default
- * when no finite future reset is known).
+ * when no finite future reset is known) and then clamped to a re-check
+ * interval, since a weekly window resets days out; the deadline itself is
+ * reported in the body instead.
  *
  * When a `transientSibling` is supplied (a family-capable account momentarily
  * unavailable ONLY due to a short cooldown), its recovery — not the family
@@ -279,11 +283,14 @@ export function createFamilyWeeklyExhaustedResponse(
 	let retryAfterSeconds: number;
 	let message: string;
 	let poolStatus: string;
+	// The deadline the advice is derived from, kept unclamped for the body.
+	let earliestKnownResetIso: string | null;
 	if (siblingCooldownMs !== null && transientSibling) {
-		retryAfterSeconds = Math.max(
-			1,
-			Math.ceil((siblingCooldownMs - now) / 1000),
-		);
+		// Deliberately NOT clamped: a transient sibling cooldown is a specific,
+		// near deadline on a specific account, so the honest number is the
+		// useful one. The clamp exists for the multi-day family window below.
+		retryAfterSeconds = ceilRetryAfterSeconds(siblingCooldownMs, now);
+		earliestKnownResetIso = new Date(siblingCooldownMs).toISOString();
 		poolStatus = "family-weekly-sibling-cooldown";
 		message =
 			`The only account(s) with weekly "${family}" quota are temporarily ` +
@@ -292,8 +299,9 @@ export function createFamilyWeeklyExhaustedResponse(
 			`exhausted: ${names}${resetIso ? ` (reset at ${resetIso})` : ""}.`;
 	} else {
 		retryAfterSeconds = hasFutureReset
-			? Math.max(1, Math.ceil((soonestReset - now) / 1000))
-			: RETRY_AFTER_FALLBACK_SECONDS;
+			? clampRetryAfterSeconds(ceilRetryAfterSeconds(soonestReset, now))
+			: DEFAULT_RECHECK_RETRY_AFTER_SECONDS;
+		earliestKnownResetIso = resetIso;
 		poolStatus = "family-weekly-exhausted";
 		message =
 			`All available accounts have exhausted their weekly "${family}" quota ` +
@@ -309,6 +317,10 @@ export function createFamilyWeeklyExhaustedResponse(
 				message,
 				request_model: requestModel,
 				family,
+				// The earliest cooldown/reset known to this refusal, unclamped —
+				// `Retry-After` above is bounded re-check advice, and a weekly
+				// window resets days after the client is told to look again.
+				earliest_known_reset_at: earliestKnownResetIso,
 				excluded_accounts: excluded.map((e) => ({
 					name: e.account.name,
 					resets_at: Number.isFinite(e.resetAt)

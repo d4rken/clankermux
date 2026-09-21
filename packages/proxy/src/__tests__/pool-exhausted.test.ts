@@ -196,9 +196,16 @@ describe("pool exhausted — 503 response", () => {
 
 			expect(response.status).toBe(503);
 			const retryAfter = Number(response.headers.get("Retry-After"));
-			// Should be close to 3600 seconds (within 5s tolerance)
-			expect(retryAfter).toBeGreaterThan(3595);
-			expect(retryAfter).toBeLessThanOrEqual(3600);
+			// An hour-long cooldown is past the re-check ceiling, so the header
+			// carries the jittered interval and the body carries the hour.
+			expect(retryAfter).toBeGreaterThanOrEqual(45);
+			expect(retryAfter).toBeLessThanOrEqual(55);
+
+			const body = (await response.json()) as Record<string, unknown>;
+			const error = body.error as Record<string, unknown>;
+			expect(error.next_available_at).toBe(
+				new Date(cooldownUntil).toISOString(),
+			);
 		} finally {
 			Date.now = realDateNow;
 		}
@@ -224,6 +231,30 @@ describe("pool exhausted — 503 response", () => {
 
 			expect(response.status).toBe(503);
 			expect(response.headers.get("Retry-After")).toBe("2");
+		} finally {
+			Date.now = realDateNow;
+		}
+	});
+
+	it("advertises a cooldown inside the re-check ceiling verbatim", async () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const rateLimitedAccount = makeAccount({
+			id: "acc-rl",
+			name: "rate-limited-account",
+			rate_limited_until: now + 30_000,
+		});
+
+		const realDateNow = Date.now;
+		Date.now = () => now;
+		try {
+			const ctx = makeContext([rateLimitedAccount]);
+			const response = await handleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+
+			expect(response.headers.get("Retry-After")).toBe("30");
 		} finally {
 			Date.now = realDateNow;
 		}

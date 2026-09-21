@@ -310,6 +310,59 @@ describe("createFamilyWeeklyExhaustedResponse", () => {
 		expect(res.headers.get("Retry-After")).toBe("60");
 	});
 
+	it("clamps a multi-day weekly reset and reports it in the body instead", async () => {
+		const familyReset = NOW + 5 * 86_400_000;
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(familyReset, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+		);
+		const retryAfter = Number(res.headers.get("Retry-After"));
+		expect(retryAfter).toBeGreaterThanOrEqual(45);
+		expect(retryAfter).toBeLessThanOrEqual(55);
+
+		const body = (await res.json()) as {
+			error: {
+				earliest_known_reset_at: string;
+				excluded_accounts: Array<{ name: string; resets_at: string }>;
+			};
+		};
+		expect(body.error.earliest_known_reset_at).toBe(
+			new Date(familyReset).toISOString(),
+		);
+		expect(body.error.excluded_accounts[0].name).toBe("Main");
+		expect(body.error.excluded_accounts[0].resets_at).toBe(
+			new Date(familyReset).toISOString(),
+		);
+	});
+
+	it("does not clamp a transient sibling cooldown past the ceiling", () => {
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW + 5 * 86_400_000, "Main")],
+			"fable",
+			"claude-fable-5",
+			NOW,
+			{ name: "Backup1", availableAt: NOW + 200_000 },
+		);
+		// A specific account's cooldown is a deadline worth obeying, unlike the
+		// family window it replaces.
+		expect(res.headers.get("Retry-After")).toBe("200");
+	});
+
+	it("reports no earliest known reset when none is dated", async () => {
+		const res = createFamilyWeeklyExhaustedResponse(
+			[excluded(NOW - 5_000)],
+			"fable",
+			"claude-fable-5",
+			NOW,
+		);
+		const body = (await res.json()) as {
+			error: { earliest_known_reset_at: string | null };
+		};
+		expect(body.error.earliest_known_reset_at).toBeNull();
+	});
+
 	it("carries a rate_limit_error body naming the family and excluded accounts", async () => {
 		const res = createFamilyWeeklyExhaustedResponse(
 			[excluded(NOW + 60_000, "Backup1")],
