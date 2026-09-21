@@ -159,8 +159,7 @@ describe("reasoning effort support", () => {
 			resolveReasoningEffort("max", { targetModel: "gpt-5.6-sol" }).effort,
 		).toBe("xhigh");
 		expect(
-			resolveReasoningEffort("max", { targetModel: "claude-haiku-4-5" })
-				.effort,
+			resolveReasoningEffort("max", { targetModel: "claude-haiku-4-5" }).effort,
 		).toBe("medium");
 	});
 
