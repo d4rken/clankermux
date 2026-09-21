@@ -167,14 +167,6 @@ export function ensureSchema(db: Database): void {
 			-- never writes one back — which is what keeps this column's meaning
 			-- "measured" rather than "best guess at the time".
 			client_harness TEXT,
-			-- Character count of the inbound x-codex-turn-state header, never its
-			-- value (that is an opaque per-turn credential, stripped from
-			-- request_headers by sanitizeRequestHeaders). NULL = the request
-			-- carried no such header, which is every non-Codex-CLI client and
-			-- every row written before this column existed; 0 = present and empty.
-			-- Exists to test the claim that the token's size tracks an account's
-			-- service tier — compare distributions grouped by account_used.
-			codex_turn_state_len INTEGER,
 			-- Safety-refusal / fallback-credit capture.
 			-- stop_reason: the provider's terminal stop_reason, stored raw for
 			-- every provider and every reason ('end_turn', 'tool_use',
@@ -1544,13 +1536,6 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "client_harness",
 		ddl: "ALTER TABLE requests ADD COLUMN client_harness TEXT",
-	},
-	// Length of the Codex CLI turn-state token, never the token. NULL = the
-	// request carried no such header or predates the column; 0 = present, empty.
-	{
-		table: "requests",
-		column: "codex_turn_state_len",
-		ddl: "ALTER TABLE requests ADD COLUMN codex_turn_state_len INTEGER",
 	},
 	// Opaque Claude Code diagnostics. NULL means absent or recorded before support.
 	{

@@ -139,11 +139,6 @@ export interface RecordMeta {
 	 */
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
-	/**
-	 * Length of the inbound `x-codex-turn-state` header, never its value (see
-	 * `codexTurnStateLength`). Optional like the two above; null = absent.
-	 */
-	codexTurnStateLen?: number | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -321,8 +316,6 @@ interface SaveRequestData extends GatewayHintMetadata {
 	clientUserAgent?: string | null;
 	/** Observed harness family — mirrors `RequestData.clientHarness`. */
 	clientHarness?: string | null;
-	/** Turn-state token length — mirrors `RequestData.codexTurnStateLen`. */
-	codexTurnStateLen?: number | null;
 	/** Provider terminal stop reason — mirrors `RequestData.stopReason`. */
 	stopReason?: string | null;
 	/** Refusal category — mirrors `RequestData.refusalCategory`. */
@@ -1036,7 +1029,6 @@ export class RequestRecorder {
 					cachePrefixHashes: meta.cachePrefixHashes ?? null,
 					clientUserAgent: meta.clientUserAgent ?? null,
 					clientHarness: meta.clientHarness ?? null,
-					codexTurnStateLen: meta.codexTurnStateLen ?? null,
 					// Response-side facts come off the finalized usage summary; the
 					// two credit marks are ingress facts carried on the meta.
 					stopReason: record.usage?.stopReason,

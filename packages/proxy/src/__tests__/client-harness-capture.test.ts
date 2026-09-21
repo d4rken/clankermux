@@ -1,6 +1,6 @@
 /**
- * Ingress-to-persistence pin for the header-derived request columns:
- * `client_user_agent`, `client_harness` and `codex_turn_state_len`.
+ * Ingress-to-persistence pin for `requests.client_user_agent` /
+ * `requests.client_harness`.
  *
  * The two values are derived once at ingress and then copied by hand through
  * `RequestMeta` → the forward options → `RecordMeta` → `SaveRequestData` →
@@ -44,7 +44,6 @@ interface SavedRow extends GatewayHintMetadata {
 	id: string;
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
-	codexTurnStateLen?: number | null;
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
@@ -251,7 +250,7 @@ function resetSingletons(): void {
 	usageCache.delete(ACCOUNT_ID);
 }
 
-describe("header-derived request column capture", () => {
+describe("client user-agent / harness capture", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
@@ -277,7 +276,6 @@ describe("header-derived request column capture", () => {
 				"User-Agent": CLAUDE_CODE_UA,
 				"X-Claude-Code-Agent-Type": "explore",
 				"x-claude-code-request-class": "primary",
-				"x-codex-turn-state": "t".repeat(292),
 			}),
 			ctx,
 		);
@@ -288,7 +286,6 @@ describe("header-derived request column capture", () => {
 		expect(row.clientHarness).toBe("claude-code");
 		expect(row.gatewayHintAgentType).toBe("explore");
 		expect(row.gatewayHintRequestClass).toBe("primary");
-		expect(row.codexTurnStateLen).toBe(292);
 	});
 
 	it("lands both columns on a synthetic terminal row", async () => {
@@ -304,7 +301,6 @@ describe("header-derived request column capture", () => {
 				"User-Agent": "codex_cli_rs/0.104.0",
 				originator: "codex_cli_rs",
 				"x-claude-code-compaction": "false",
-				"x-codex-turn-state": "t".repeat(312),
 			}),
 			ctx,
 		);
@@ -314,7 +310,6 @@ describe("header-derived request column capture", () => {
 		expect(row.clientUserAgent).toBe("codex_cli_rs/0.104.0");
 		expect(row.clientHarness).toBe("codex");
 		expect(row.gatewayHintCompaction).toBe("false");
-		expect(row.codexTurnStateLen).toBe(312);
 	});
 
 	it("writes NULL for both when the request carried no user-agent", async () => {
@@ -330,6 +325,5 @@ describe("header-derived request column capture", () => {
 		const row = await waitForSave(saved);
 		expect(row.clientUserAgent).toBeNull();
 		expect(row.clientHarness).toBeNull();
-		expect(row.codexTurnStateLen).toBeNull();
 	});
 });
