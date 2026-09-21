@@ -232,6 +232,43 @@ describe("ollama-transformer", () => {
 			expect(sse).toContain("stop");
 		});
 
+		it("states NO token counts, rather than a count of zero", () => {
+			// Ollama reports none. A fabricated 0 is a positive claim that none
+			// were consumed, which the persisted row publishes and a client
+			// settles its budget against; absence keeps the row honest.
+			const state = freshState();
+			const start = ollamaChunkToAnthropicSSE(
+				{
+					model: "gemma3",
+					message: { role: "assistant", content: "Hi" },
+					done: false,
+				},
+				"test123",
+				state,
+			);
+			const startUsage = JSON.parse(
+				/data: (.*"type":"message_start".*)/.exec(start)?.[1] ?? "{}",
+			).message.usage;
+			expect(startUsage.input_tokens).toBeUndefined();
+
+			const end = ollamaChunkToAnthropicSSE(
+				{
+					model: "gemma3",
+					message: { role: "assistant", content: "" },
+					done: true,
+					done_reason: "stop",
+				},
+				"test123",
+				state,
+			);
+			const delta = JSON.parse(
+				/data: (.*"type":"message_delta".*)/.exec(end)?.[1] ?? "{}",
+			);
+			// message_delta is where a provider states its authoritative counts.
+			expect(delta.usage).toBeUndefined();
+			expect(delta.delta.stop_reason).toBe("stop");
+		});
+
 		it("emits message_start even for empty non-done chunk", () => {
 			const state = freshState();
 			const sse = ollamaChunkToAnthropicSSE(
@@ -268,6 +305,15 @@ describe("ollama-transformer", () => {
 			});
 			expect(result.model).toBe("gemma3");
 			expect(result.stop_reason).toBe("end_turn");
+		});
+
+		it("states no usage at all rather than a zero vector", () => {
+			const result = ollamaResponseToAnthropic({
+				model: "gemma3",
+				message: { role: "assistant", content: "Hello world" },
+				done: true,
+			});
+			expect(result.usage).toBeUndefined();
 		});
 	});
 

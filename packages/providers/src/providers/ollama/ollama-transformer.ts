@@ -285,7 +285,12 @@ export function ollamaChunkToAnthropicSSE(
 					content: [],
 					stop_reason: null,
 					stop_sequence: null,
-					usage: { input_tokens: 0, output_tokens: 0 },
+					// Ollama reports no token counts. A fabricated 0 would be a
+					// positive claim that none were consumed, which the persisted
+					// row publishes and a client settles against; absence is the
+					// truth. `output_tokens` stays only because message_start's is
+					// a placeholder every reader already treats as one.
+					usage: { output_tokens: 0 },
 				},
 			})}`,
 			``,
@@ -305,10 +310,6 @@ export function ollamaChunkToAnthropicSSE(
 			);
 		}
 
-		const usage = {
-			input_tokens: 0,
-			output_tokens: 0,
-		};
 		events.push(
 			`event: message_delta`,
 			`data: ${JSON.stringify({
@@ -317,7 +318,10 @@ export function ollamaChunkToAnthropicSSE(
 					stop_reason: chunk.done_reason || "end_turn",
 					stop_sequence: null,
 				},
-				usage,
+				// No `usage`: message_delta is where a provider states its
+				// authoritative counts, and Ollama states none. The collector
+				// estimates the output and marks it approximate, which is what
+				// actually happened.
 			})}`,
 			``,
 			`event: message_stop`,
@@ -459,10 +463,7 @@ export function ollamaResponseToAnthropic(
 		model: chunk.model,
 		stop_reason: chunk.done_reason || "end_turn",
 		stop_sequence: null,
-		usage: {
-			input_tokens: 0,
-			output_tokens: 0,
-		},
+		// No `usage`, for the reason the streaming path states.
 	};
 }
 

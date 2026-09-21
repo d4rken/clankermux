@@ -1675,12 +1675,20 @@ export class RequestRecorder {
 		const u = summary.usage;
 		if (!u.model && !(u.costSource === "reported" && u.costUsd != null))
 			return undefined;
+		// Absent when NO part was reported. Summing three absences into 0 would
+		// publish a derived count the provider never stated, and the column
+		// cannot say afterwards which of its parts it was built from.
+		const promptParts = [
+			u.inputTokens,
+			u.cacheReadInputTokens,
+			u.cacheCreationInputTokens,
+		];
+		const promptTokens = promptParts.some((part) => part !== undefined)
+			? promptParts.reduce((sum, part) => (sum ?? 0) + (part ?? 0), 0)
+			: undefined;
 		return {
 			model: u.model,
-			promptTokens:
-				(u.inputTokens || 0) +
-				(u.cacheReadInputTokens || 0) +
-				(u.cacheCreationInputTokens || 0),
+			promptTokens,
 			completionTokens: u.outputTokens,
 			totalTokens: u.totalTokens,
 			costUsd: u.costUsd,

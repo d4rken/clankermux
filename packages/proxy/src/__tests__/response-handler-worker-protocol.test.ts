@@ -475,13 +475,15 @@ describe("forwardToClient inline usage collection", () => {
 		);
 
 		await waitFor(() => attached.length > 0);
-		// onSummary now also receives cacheRead tokens (none in this body → 0,
-		// the usage-collector default) and the model, used to route keyed sessions
-		// into the session bridge.
+		// onSummary also receives cacheRead tokens and the model, used to route
+		// keyed sessions into the session bridge. This body reports no cache read
+		// at all, so the count is absent rather than 0 — `onSummary` takes
+		// `number | undefined` and gates on `> 0`, so the branch it picks is the
+		// same either way.
 		expect(onSummary).toHaveBeenCalledWith(
 			"req-cache-summary",
 			7,
-			0,
+			undefined,
 			"claude-opus-4-8",
 		);
 	});

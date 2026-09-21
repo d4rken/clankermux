@@ -73,9 +73,16 @@ export interface UsageState {
 	/** Latest cumulative response charge, gated to OpenRouter during finalization. */
 	providerReportedCostUsd?: number;
 	costIsByok?: boolean;
-	inputTokens: number;
-	cacheReadInputTokens: number;
-	cacheCreationInputTokens: number;
+	/**
+	 * The three input classes, `undefined` until the provider reports one. Zero
+	 * is a POSITIVE claim that none of that class was consumed, so a provider
+	 * that reports nothing must not be given one: the persisted row publishes
+	 * absence as absence, and a client settling per-class accounting reads a
+	 * stored 0 as a figure it may act on. Same rule `costUsd` already follows.
+	 */
+	inputTokens: number | undefined;
+	cacheReadInputTokens: number | undefined;
+	cacheCreationInputTokens: number | undefined;
 	/**
 	 * The authoritative cumulative output-token count last seen from the
 	 * provider (`message_delta` or a Responses terminal while streaming, or a
@@ -192,9 +199,9 @@ export function getLineBufferLength(state: UsageState): number {
 export function createUsageState(): UsageState {
 	return {
 		model: undefined,
-		inputTokens: 0,
-		cacheReadInputTokens: 0,
-		cacheCreationInputTokens: 0,
+		inputTokens: undefined,
+		cacheReadInputTokens: undefined,
+		cacheCreationInputTokens: undefined,
 		providerFinalOutputTokens: undefined,
 		providerReportedOutput: false,
 		streamedBytes: 0,
@@ -521,9 +528,9 @@ function applySseData(
 					cacheWrites,
 				);
 				state.inputTokens = normalizedInput.inputTokens;
-				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens ?? 0;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens =
-					normalizedInput.cacheCreationInputTokens ?? 0;
+					normalizedInput.cacheCreationInputTokens;
 			} else if (
 				typeof inputTokenDetails?.cached_tokens === "number" &&
 				Number.isFinite(inputTokenDetails.cached_tokens) &&
@@ -990,9 +997,9 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 		if (usage) {
 			if (json.model) state.model = json.model;
 			captureReportedCharge(state, usage);
-			state.inputTokens = usage.input_tokens ?? 0;
-			state.cacheReadInputTokens = usage.cache_read_input_tokens ?? 0;
-			state.cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
+			state.inputTokens = usage.input_tokens;
+			state.cacheReadInputTokens = usage.cache_read_input_tokens;
+			state.cacheCreationInputTokens = usage.cache_creation_input_tokens;
 			state.providerFinalOutputTokens = usage.output_tokens ?? 0;
 			state.providerReportedOutput = true;
 			// Model first, then the stop reason: a refusal registers its credit
@@ -1134,9 +1141,9 @@ export async function finalizeUsage(
 	}
 
 	const totalTokens =
-		state.inputTokens +
-		state.cacheReadInputTokens +
-		state.cacheCreationInputTokens +
+		(state.inputTokens ?? 0) +
+		(state.cacheReadInputTokens ?? 0) +
+		(state.cacheCreationInputTokens ?? 0) +
 		finalOutput;
 
 	const model = state.model;
@@ -1154,10 +1161,10 @@ export async function finalizeUsage(
 			? await estimateCostUSD(
 					model,
 					{
-						inputTokens: state.inputTokens,
+						inputTokens: state.inputTokens ?? 0,
 						outputTokens: finalOutput,
-						cacheReadInputTokens: state.cacheReadInputTokens,
-						cacheCreationInputTokens: state.cacheCreationInputTokens,
+						cacheReadInputTokens: state.cacheReadInputTokens ?? 0,
+						cacheCreationInputTokens: state.cacheCreationInputTokens ?? 0,
 					},
 					{
 						provider: opts.accountProvider ?? opts.providerName,

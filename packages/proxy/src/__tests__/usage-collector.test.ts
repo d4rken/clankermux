@@ -234,6 +234,82 @@ describe("usage-collector", () => {
 		});
 	});
 
+	describe("absent counts stay absent", () => {
+		// A 0 is a POSITIVE claim that none of that class was consumed, and the
+		// persisted row now publishes one. A provider that reports nothing must
+		// not be given one on its behalf.
+		it("reports no input classes when the provider states none", async () => {
+			const state = createUsageState();
+			expect(state.inputTokens).toBeUndefined();
+
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: { model: "gemma3", usage: { output_tokens: 0 } },
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "ollama", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.usage.cacheCreationInputTokens).toBeUndefined();
+			// The output is the content estimate, and says so.
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("keeps a reported 0 as 0", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: {
+							input_tokens: 12,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 5 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBe(12);
+			expect(summary.usage.cacheReadInputTokens).toBe(0);
+			expect(summary.usage.cacheCreationInputTokens).toBe(0);
+		});
+	});
+
 	describe("precedence: provider-reported vs content fallback", () => {
 		it("message_start output_tokens:0 then message_delta N → final = N (not 0)", async () => {
 			const state = createUsageState();
@@ -903,7 +979,7 @@ describe("usage-collector", () => {
 			feedChunk(state, enc.encode(full.slice(0, splitAt)), 1000);
 			// Nothing complete yet — the data line is still buffered.
 			expect(state.model).toBeUndefined();
-			expect(state.inputTokens).toBe(0);
+			expect(state.inputTokens).toBeUndefined();
 			feedChunk(state, enc.encode(full.slice(splitAt)), 1100);
 			expect(state.model).toBe("claude-opus-4-8");
 			expect(state.inputTokens).toBe(123);
@@ -935,7 +1011,7 @@ describe("usage-collector", () => {
 			const third = Math.floor(full.length / 3);
 			feedChunk(state, enc.encode(full.slice(0, third)), 1000);
 			feedChunk(state, enc.encode(full.slice(third, third * 2)), 1010);
-			expect(state.inputTokens).toBe(0); // still incomplete
+			expect(state.inputTokens).toBeUndefined(); // still incomplete
 			feedChunk(state, enc.encode(full.slice(third * 2)), 1020);
 			expect(state.model).toBe("claude-opus-4-8");
 			expect(state.inputTokens).toBe(999);
@@ -949,7 +1025,7 @@ describe("usage-collector", () => {
 			);
 			expect(() => feedChunk(state, chunk, 1000)).not.toThrow();
 			// Nothing applied — the data line was never terminated by a newline.
-			expect(state.inputTokens).toBe(0);
+			expect(state.inputTokens).toBeUndefined();
 			expect(state.providerReportedOutput).toBe(false);
 		});
 
@@ -1205,7 +1281,9 @@ describe("usage-collector", () => {
 			// input + 30 cache reads, which reconstructs the original total.
 			expect(state.inputTokens).toBe(70);
 			expect(state.cacheReadInputTokens).toBe(30);
-			expect(state.inputTokens + state.cacheReadInputTokens).toBe(100);
+			expect((state.inputTokens ?? 0) + (state.cacheReadInputTokens ?? 0)).toBe(
+				100,
+			);
 
 			const cost = fakeCost();
 			const _summary = await finalizeUsage(
@@ -1223,8 +1301,10 @@ describe("usage-collector", () => {
 			for (const [writes, expectedInput, expectedWrites] of [
 				[0, 70, 0],
 				[90, 0, 70],
-				[-5, 70, 0],
-			]) {
+				// A negative counter is not a report of zero writes: nothing
+				// usable arrived, so the class stays absent.
+				[-5, 70, undefined],
+			] as Array<[number, number, number | undefined]>) {
 				const state = createUsageState();
 				feedChunk(
 					state,
@@ -1255,8 +1335,8 @@ describe("usage-collector", () => {
 			);
 			expect(state.inputTokens).toBe(50);
 			expect(state.providerFinalOutputTokens).toBe(9);
-			expect(state.cacheReadInputTokens).toBe(0);
-			expect(state.cacheCreationInputTokens).toBe(0);
+			expect(state.cacheReadInputTokens).toBeUndefined();
+			expect(state.cacheCreationInputTokens).toBeUndefined();
 
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
@@ -1282,8 +1362,8 @@ describe("usage-collector", () => {
 				}),
 				1000,
 			);
-			expect(state.cacheReadInputTokens).toBe(0);
-			expect(state.cacheCreationInputTokens).toBe(0);
+			expect(state.cacheReadInputTokens).toBeUndefined();
+			expect(state.cacheCreationInputTokens).toBeUndefined();
 			expect(state.inputTokens).toBe(10);
 			expect(state.providerFinalOutputTokens).toBe(5);
 		});

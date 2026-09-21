@@ -315,9 +315,11 @@ function probeUsageVector(state: UsageState): {
 	}
 	return {
 		model: state.model ?? null,
-		inputTokens: state.inputTokens,
-		cacheReadInputTokens: state.cacheReadInputTokens,
-		cacheCreationInputTokens: state.cacheCreationInputTokens,
+		// Same rule the output arm below states: a class the provider never
+		// reported records null, not a zero it did not claim.
+		inputTokens: state.inputTokens ?? null,
+		cacheReadInputTokens: state.cacheReadInputTokens ?? null,
+		cacheCreationInputTokens: state.cacheCreationInputTokens ?? null,
 		// Only an AUTHORITATIVE count goes in; a stream that never reported one
 		// records null rather than an estimate.
 		outputTokens: state.providerReportedOutput
