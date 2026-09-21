@@ -2196,6 +2196,25 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Run `fn` with `db`'s busy_timeout widened to
+	 * {@link STARTUP_BUSY_TIMEOUT_MS}, restoring the steady-state value
+	 * afterwards even if it throws.
+	 *
+	 * For startup work that runs AFTER the constructor, and so cannot use the
+	 * constructor's window, and that cannot borrow the adapter's async retry
+	 * either because it may not run inside a transaction. Blocking the thread
+	 * is acceptable only because every such caller runs before HTTP binds.
+	 */
+	private withStartupBusyTimeout<T>(db: Database, fn: () => T): T {
+		db.exec(`PRAGMA busy_timeout = ${STARTUP_BUSY_TIMEOUT_MS}`);
+		try {
+			return fn();
+		} finally {
+			db.exec(`PRAGMA busy_timeout = ${MAIN_CONNECTION_BUSY_TIMEOUT_MS}`);
+		}
+	}
+
+	/**
 	 * One-time migration: promote the DB from auto_vacuum=NONE (mode 0) to
 	 * INCREMENTAL (mode 2).
 	 *
@@ -2279,12 +2298,13 @@ OAuth tokens will need to be re-authenticated.
 		// session. Cheap to re-issue, and removes a "spooky action at a
 		// distance" failure mode where the next VACUUM doesn't flip the mode
 		// because the PRAGMA wasn't actually set on this connection.
-		this.sqliteDb.exec("PRAGMA auto_vacuum = INCREMENTAL");
-		this.sqliteDb.exec("VACUUM");
-
-		const { auto_vacuum: modeAfter } = this.sqliteDb
-			.query("PRAGMA auto_vacuum")
-			.get() as { auto_vacuum: number };
+		const db = this.sqliteDb;
+		const modeAfter = this.withStartupBusyTimeout(db, () => {
+			db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+			db.exec("VACUUM");
+			return (db.query("PRAGMA auto_vacuum").get() as { auto_vacuum: number })
+				.auto_vacuum;
+		});
 
 		// VACUUM committed the new mode to the header, so update our captured
 		// value too — otherwise a second `bootstrapAutoVacuum()` call (rare,

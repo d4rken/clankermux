@@ -14,6 +14,7 @@
  * integrity-check, dashboard workers), where long C-level blocking is fine.
  */
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -168,6 +169,96 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 				.query("PRAGMA busy_timeout")
 				.get() as { timeout: number };
 			expect(timeout).toBe(MAIN_CONNECTION_BUSY_TIMEOUT_MS);
+		} finally {
+			await dbOps.close();
+		}
+	});
+});
+
+describe("bootstrapAutoVacuum under contention", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = makeTempDbDir();
+	});
+
+	afterEach(() => {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	/**
+	 * A NON-EMPTY database at auto_vacuum=NONE — the only shape that reaches
+	 * the migration VACUUM. configureSqlite's `PRAGMA auto_vacuum =
+	 * INCREMENTAL` is silently rejected on a database that already has pages,
+	 * so the mode stays 0 and bootstrapAutoVacuum has work to do.
+	 */
+	function seedModeZeroDb(dbPath: string): void {
+		const db = new Database(dbPath, { create: true });
+		db.exec("PRAGMA journal_mode = WAL");
+		db.run("CREATE TABLE legacy (id INTEGER PRIMARY KEY, v TEXT)");
+		db.run("INSERT INTO legacy (v) VALUES ('x')");
+		db.close();
+	}
+
+	it("waits out a concurrent writer instead of aborting boot", async () => {
+		// bootstrapAutoVacuum runs AFTER construction, from server.ts, which
+		// rethrows on failure — so a VACUUM that cannot get the writer slot
+		// takes the whole process down. VACUUM cannot run inside a transaction,
+		// so it cannot borrow the adapter's transactional retry; it carries the
+		// startup window itself.
+		const dbPath = path.join(tmpDir, "modezero.db");
+		seedModeZeroDb(dbPath);
+
+		let dbOps: DatabaseOperations | undefined;
+		let holder: Awaited<ReturnType<typeof holdWriteLock>> | undefined;
+		try {
+			dbOps = new DatabaseOperations(dbPath);
+			holder = await holdWriteLock(dbPath, {
+				holdMs: 400,
+				writeSql: ["INSERT INTO legacy (v) VALUES ('held')"],
+			});
+
+			const result = dbOps.bootstrapAutoVacuum();
+			expect(result.migrated).toBe(true);
+			expect(result.modeBefore).toBe(0);
+			expect(result.modeAfter).toBe(2);
+
+			// The widened window is a loan, not a new setting.
+			expect(
+				dbOps.getAdapter().getSQLiteDb().query("PRAGMA busy_timeout").get(),
+			).toEqual({ timeout: MAIN_CONNECTION_BUSY_TIMEOUT_MS });
+		} finally {
+			await holder?.release();
+			await dbOps?.close();
+		}
+	});
+
+	it("restores the steady-state timeout when the VACUUM fails", async () => {
+		const dbPath = path.join(tmpDir, "failing.db");
+		seedModeZeroDb(dbPath);
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			const handle = dbOps.getAdapter().getSQLiteDb();
+			const realExec = handle.exec.bind(handle);
+			// biome-ignore lint/suspicious/noExplicitAny: test stub replacing the DB method
+			(handle as any).exec = (...args: any[]) => {
+				if (typeof args[0] === "string" && args[0].includes("VACUUM")) {
+					throw new Error("database or disk is full");
+				}
+				// biome-ignore lint/suspicious/noExplicitAny: delegating to the real method
+				return (realExec as any)(...args);
+			};
+			try {
+				expect(() => dbOps.bootstrapAutoVacuum()).toThrow("disk is full");
+			} finally {
+				// biome-ignore lint/suspicious/noExplicitAny: restoring the real method
+				(handle as any).exec = realExec;
+			}
+
+			expect(handle.query("PRAGMA busy_timeout").get()).toEqual({
+				timeout: MAIN_CONNECTION_BUSY_TIMEOUT_MS,
+			});
 		} finally {
 			await dbOps.close();
 		}
