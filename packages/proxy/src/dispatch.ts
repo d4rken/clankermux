@@ -7,8 +7,8 @@ import {
 import { Logger } from "@clankermux/logger";
 import { requestIdFromError } from "./error-request-id";
 import { handleProxy, type ProxyContext } from "./proxy";
-import { CLIENT_REQUEST_ID_HEADER } from "./response-handler";
 import { ModelSubstitutionRouteError } from "./resolved-route";
+import { CLIENT_REQUEST_ID_HEADER } from "./response-handler";
 
 const log = new Logger("ProxyDispatch");
 

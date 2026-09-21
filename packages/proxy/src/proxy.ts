@@ -25,6 +25,7 @@ import {
 } from "./burst-retry-policy";
 import { cacheBodyStore } from "./cache-body-store";
 import { codexTransientHoldTotalBudgetMs } from "./codex-transient-hold";
+import { attachRequestId } from "./error-request-id";
 import { isFamilyWeeklyMemoExhausted } from "./family-weekly-memo";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
@@ -61,7 +62,6 @@ import {
 	isOfficialAnthropicProvider,
 } from "./provider-overload-cooldown";
 import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
-import { attachRequestId } from "./error-request-id";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RequestRecorder } from "./request-recorder";
 import {
