@@ -442,6 +442,51 @@ export async function deleteBatched(
 }
 
 /**
+ * Delete payload rows whose `requests` parent is already gone, in bounded
+ * batches, and return how many were removed.
+ *
+ * Candidates are chosen by a read-only SELECT first. SQLite takes the WAL
+ * writer slot at the top of any DML statement — before the orphan predicate is
+ * evaluated, and whether or not it matches anything — so expressing this as one
+ * `DELETE ... WHERE id NOT IN (SELECT id FROM requests)` holds the slot for a
+ * full scan of a multi-megabyte-per-row blob table on every retention tick,
+ * with zero rows removed being the normal outcome.
+ *
+ * Each batch re-applies the orphan predicate inside its own DELETE, so a
+ * payload whose request row lands between the select and the delete survives.
+ * A batch that removes none of its candidates for that reason ends the pass;
+ * the next tick resumes, the same way a transient lock after progress does.
+ */
+export async function deleteOrphanedPayloads(db: Database): Promise<number> {
+	const orphan = `NOT EXISTS (SELECT 1 FROM requests WHERE requests.id = request_payloads.id)`;
+	const selectSql = `SELECT id FROM request_payloads WHERE ${orphan} LIMIT ?`;
+	let total = 0;
+	for (;;) {
+		let removed: number;
+		let candidates: number;
+		try {
+			const ids = db.query(selectSql).all(CLEANUP_DELETE_BATCH_ROWS) as Array<{
+				id: string;
+			}>;
+			candidates = ids.length;
+			if (candidates === 0) break;
+			const placeholders = ids.map(() => "?").join(",");
+			removed = db.run(
+				`DELETE FROM request_payloads WHERE id IN (${placeholders}) AND ${orphan}`,
+				ids.map((r) => r.id),
+			).changes;
+		} catch (err) {
+			if (isTransientLockError(err) && total > 0) break;
+			throw err;
+		}
+		total += removed;
+		if (removed === 0 || candidates < CLEANUP_DELETE_BATCH_ROWS) break;
+		await Bun.sleep(CLEANUP_DELETE_YIELD_MS);
+	}
+	return total;
+}
+
+/**
  * The time column each batched-prune table is aged by. A closed union, not a
  * free string: the column name is interpolated into SQL, so the set of legal
  * values is fixed here rather than trusted from a call site.
@@ -567,12 +612,9 @@ async function runCleanup(
 			{ atomic: true },
 		);
 
-		// Orphaned payloads (request row already gone). Typically ~0; a NOT IN
-		// subquery has no natural LIMIT, so run it as a single statement.
-		// (request_payloads has no children, so .changes here is accurate.)
-		const removedOrphans = db.run(
-			`DELETE FROM request_payloads WHERE id NOT IN (SELECT id FROM requests)`,
-		).changes;
+		// Orphaned payloads (request row already gone). Typically ~0.
+		// (request_payloads has no children, so .changes there is accurate.)
+		const removedOrphans = await deleteOrphanedPayloads(db);
 
 		// Attempts can precede their parent and internal/local requests may never
 		// create one. Allow a day for in-flight work, then prune those orphans.
