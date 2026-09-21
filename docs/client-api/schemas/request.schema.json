@@ -76,7 +76,7 @@
             "integer",
             "null"
           ],
-          "description": "How many upstream attempts were abandoned before the one this row's counts describe. Above 0, the counts are the ANSWERING attempt alone and the abandoned ones are unaccounted: the proxy can discard a provider response it has already been billed for, and no column anywhere records what that cost. Treat such a row as a lower bound rather than an exact total.",
+          "description": "The attempt index the answering try was made under. Above 0 it means earlier attempts happened and their cost is missing: the proxy can discard a provider response it has already been billed for, and no column records what that cost, so the row is a lower bound. At 0 it does NOT prove none did, because a retry against the same account after a hold restarts the index. Evidence when positive, not evidence of absence when 0.",
           "minimum": 0
         },
         "project": {

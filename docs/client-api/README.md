@@ -165,11 +165,15 @@ itself closes those rows on the way out, including the ones whose settling
 write it could not queue at the time. When the server's write queue is full it
 holds such a row's accounting in memory and retries it rather than dropping it,
 so a sustained backlog grows that memory with no ceiling; the accounting is
-never discarded to bound it. What remains is the process dying abruptly (a
-crash, a kill, or a power loss) inside that window. Nothing is then left to
-close the row and it stays `finalized: false` permanently. No row-level
-evidence distinguishes it from a row that is still waiting. Resolve such a row
-as unknown when your own reconciliation window closes.
+never discarded to bound it.
+
+Two things remain. The process can die abruptly (a crash, a kill, or a power
+loss) inside that window. And a write the queue ACCEPTED can still fail at the
+database: acceptance is what releases the in-memory record, so a write that is
+then refused for the whole retry deadline has nothing left to retry it. Either
+way the row stays `finalized: false` permanently, no row-level evidence
+distinguishes it from a row that is still waiting, and the answer is the same:
+resolve such a row as unknown when your own reconciliation window closes.
 
 ## `usageSource`
 
@@ -211,17 +215,28 @@ Rows written before this guarantee existed are not backfilled, and on those a
 null may still be a collapsed zero. A client whose traffic begins after the
 version that publishes this document has no such rows.
 
-Values are otherwise upstream-reported and are not validated for sign or bound.
-The schemas constrain neither.
+Values are upstream-reported except an estimated output count, which
+`usageSource: "approximate"` marks, and are not validated for sign or bound. The
+schemas constrain neither.
 
 The counts describe ONE upstream attempt: the one that produced the response.
-`failoverAttempts` says how many were abandoned before it, and their tokens are
-recorded nowhere. The proxy can discard a provider response it has already been
-billed for, most often when a provider answers as a different model than it was
-sent, and no column holds what that attempt cost. So a row with
-`failoverAttempts` above 0 is a LOWER BOUND on what the request consumed, and
-one at 0 is exact. That is why the field is published: without it every row
-would have to be labelled approximate, or none of them would.
+Attempts abandoned before it are recorded nowhere. The proxy can discard a
+provider response it has already been billed for, most often when a provider
+answers as a different model than it was sent, and no column holds what that
+attempt cost. A row whose request failed over is therefore a LOWER BOUND on what
+the request consumed.
+
+`failoverAttempts` is the signal for that, with one limit worth stating
+precisely. Above 0 it means earlier attempts happened and their cost is missing.
+At 0 it does NOT prove none did: the value is the attempt index the answering
+try was made under, and a retry against the same account after a hold restarts
+that index. Read a positive value as evidence, and 0 as absence of evidence
+rather than evidence of absence.
+
+`usageSource` qualifies the counts independently and both have to be read. An
+`approximate` row had its output count estimated from the generated content
+because the provider reported none, so it is not exact whatever
+`failoverAttempts` says.
 
 Two caveats:
 
