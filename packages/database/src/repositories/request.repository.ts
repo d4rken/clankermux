@@ -196,6 +196,38 @@ export interface RequestHeadersData {
 	createdAt: number;
 }
 
+/**
+ * The columns `/client/v1/requests/*` publishes, and no others.
+ *
+ * An ALLOWLIST rather than `SELECT *`: these rows leave the process on a
+ * credential-scoped wire, so a column added to `requests` later is published
+ * by someone deciding to publish it, not by inheriting the star.
+ */
+export interface ClientRequestRow {
+	id: string;
+	timestamp: number;
+	status_code: number | null;
+	error_message: string | null;
+	model: string | null;
+	requested_model: string | null;
+	input_tokens: number | null;
+	output_tokens: number | null;
+	cache_read_input_tokens: number | null;
+	cache_creation_input_tokens: number | null;
+	total_tokens: number | null;
+	usage_finalized_at: number | null;
+	usage_source: string | null;
+	project: string | null;
+	/** Non-null by construction: both queries filter `api_key_id = ?`. */
+	api_key_id: string;
+	correlation_tag: string | null;
+}
+
+const CLIENT_REQUEST_COLUMNS = `id, timestamp, status_code, error_message,
+	model, requested_model, input_tokens, output_tokens,
+	cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
+	usage_finalized_at, usage_source, project, api_key_id, correlation_tag`;
+
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
@@ -602,6 +634,66 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		await this.run(
 			`UPDATE requests SET usage_source = COALESCE(usage_source, ?) WHERE id = ?`,
 			[usageSource, requestId],
+		);
+	}
+
+	// Client API reads
+	//
+	// Both are scoped to ONE api key IN SQL. The predicate is the security
+	// property of `/client/v1/requests/*`: a client presents the key it proxies
+	// with and reads back its own rows, so a filter applied after the read — or
+	// a caller that forgets to pass one — would publish every other client's
+	// accounting. Rows with a NULL `api_key_id` belong to no key and match
+	// neither query, because `= ?` is never true of NULL.
+
+	/**
+	 * One request by id, for one api key. Null when no such row exists FOR THIS
+	 * KEY — which covers another key's row, a row retention has deleted, and an
+	 * id that never existed. The caller turns all three into the same 404, so
+	 * the surface cannot be used to probe for ids.
+	 */
+	async getClientRequest(
+		apiKeyId: string,
+		id: string,
+	): Promise<ClientRequestRow | null> {
+		return this.get<ClientRequestRow>(
+			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests WHERE id = ? AND api_key_id = ?`,
+			[id, apiKeyId],
+		);
+	}
+
+	/**
+	 * One page of a key's rows carrying `tag`, oldest first.
+	 *
+	 * Keyset pagination over `(timestamp, id)`: `id` is the PRIMARY KEY, so the
+	 * pair is a total order and rows sharing a timestamp still have exactly one
+	 * successor. An OFFSET would skip or repeat rows as new ones land during a
+	 * scan, which is the one thing a reconciliation pass cannot tolerate.
+	 *
+	 * Column order matches `idx_requests_correlation_tag`
+	 * `(correlation_tag, api_key_id, timestamp, id)`, so the equality pair seeks
+	 * and the range walks the index in ORDER BY order.
+	 */
+	async listClientRequestsByTag(opts: {
+		apiKeyId: string;
+		tag: string;
+		limit: number;
+		after?: { timestamp: number; id: string } | null;
+	}): Promise<ClientRequestRow[]> {
+		const { apiKeyId, tag, limit, after } = opts;
+		const params: unknown[] = [tag, apiKeyId];
+		let keyset = "";
+		if (after) {
+			keyset = " AND (timestamp > ? OR (timestamp = ? AND id > ?))";
+			params.push(after.timestamp, after.timestamp, after.id);
+		}
+		params.push(limit);
+		return this.query<ClientRequestRow>(
+			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests
+			 WHERE correlation_tag = ? AND api_key_id = ?${keyset}
+			 ORDER BY timestamp ASC, id ASC
+			 LIMIT ?`,
+			params,
 		);
 	}
 
