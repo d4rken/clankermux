@@ -12,6 +12,7 @@ import type {
 	AccountModelPermissions,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
+import { getDefaultEndpoint, PROVIDER_NAMES } from "@clankermux/types";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
 export function modelPermissionScope(account: Account): string {
@@ -54,13 +55,16 @@ interface DiscoveryDeps {
  * Whole-attempt discovery budget for providers whose catalogue endpoint is
  * INFERRED from protocol compatibility rather than a published contract.
  *
- * Z.ai speaks the Anthropic Messages protocol, so `/v1/models` on its base is a
- * reasonable guess — but only a guess. A guess that hangs is worse than one that
- * 404s, because an in-flight attempt is joined by every request that arrives
- * during it. One second is long enough for a catalogue that exists and short
- * enough that one that does not costs little.
+ * Z.ai and MiMo Token Plan both speak the Anthropic Messages protocol, so
+ * `/v1/models` on their base is a reasonable guess — but only a guess. A guess
+ * that hangs is worse than one that 404s, because an in-flight attempt is joined
+ * by every request that arrives during it. One second is long enough for a
+ * catalogue that exists and short enough that one that does not costs little.
  */
-const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = { zai: 1000 };
+const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = {
+	zai: 1000,
+	mimo: 1000,
+};
 
 /** Providers whose client metadata requires an account discovery snapshot. */
 export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
@@ -71,7 +75,7 @@ export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
  * Providers that authenticate discovery with a stored API key and have no OAuth
  * path, so discovery must never reach for an access token on their behalf.
  */
-const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai", "mimo"]);
 
 /** Permission discovery never borrows a provider-wide or pin-wide catalogue. */
 export class AccountModelPermissionService {
@@ -330,6 +334,34 @@ export class AccountModelPermissionService {
 			// discovered and manual ids untouched — the account stays exactly as
 			// routable as it was, and manual model ids remain the way through.
 			url = new URL("https://api.z.ai/api/anthropic/v1/models");
+			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
+			headers.set("x-api-key", token);
+			headers.set("anthropic-version", "2023-06-01");
+			url.searchParams.set("limit", "1000");
+			cursorParam = "after_id";
+		} else if (account.provider === "mimo") {
+			// MiMo Token Plan is Anthropic Messages compatible, and `/v1/models` on
+			// its base is inferred from that compatibility alone — MiMo publishes no
+			// catalogue contract, and nothing here has been confirmed against a live
+			// subscription. If the path or its pagination turn out to be wrong the
+			// fetch fails and failDiscovery records it, leaving previously discovered
+			// and manual ids untouched: the account stays exactly as routable as it
+			// was, and manual model ids remain the way through.
+			//
+			// The base is READ FROM THE ACCOUNT where zai's is pinned, because MiMo's
+			// honoursCustomEndpoint is true — the region (cn / sgp / ams) is what
+			// custom_endpoint holds, and the provider already dials requests there.
+			// Discovering against a different region would describe a backend other
+			// than the one that serves the account's traffic.
+			url = new URL(endpoint || getDefaultEndpoint(PROVIDER_NAMES.MIMO));
+			// Operator-supplied, so it earns the same base-shape guard the
+			// *-compatible branches use rather than a second derivation of it: a base
+			// carrying a query or credentials cannot have a path appended to it.
+			if (baseUrlShapeProblem(url))
+				throw new Error("Invalid discovery endpoint");
+			// The base already ends in `/anthropic`, so this extends the base's own
+			// path rather than replacing it.
+			url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/models`;
 			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
 			headers.set("x-api-key", token);
 			headers.set("anthropic-version", "2023-06-01");

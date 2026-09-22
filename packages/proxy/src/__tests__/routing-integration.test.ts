@@ -476,6 +476,90 @@ describe("routing table through the real proxy", () => {
 		).toEqual([{ kind: "upstream_send", outgoing_model: requested }]);
 	});
 	it.each([
+		"forced",
+		"ordinary",
+	])("routes to a MiMo account once its own discovery has run (%s)", async (mode) => {
+		// Why MiMo discovery had to exist at all. A new account's permission row is
+		// `unknown` with both id lists empty, and naming the destination does not
+		// get past that: `x-clankermux-account-id` is filtered through the same
+		// permission check as ordinary selection. Discovery is what fills
+		// discovered_ids, so this drives the real service and then requires BOTH
+		// paths to reach the account.
+		const account = makeAccount({
+			id: `mimo-${mode}`,
+			provider: "mimo",
+			api_key: "tp-key",
+			custom_endpoint: "https://token-plan-ams.xiaomimimo.com/anthropic",
+		});
+		const { ctx, routing } = await setup([account], []);
+		// The shared setup pins its key to codex/openrouter; MiMo needs a key with
+		// no destination restriction, not an absent pin (which is a 403 by itself).
+		ctx.dbOps.getApiKeyPin = mock(async () => ({
+			pinnedAccountId: null,
+			pinnedProviders: null,
+			excludedProviders: null,
+			malformed: false,
+		}));
+		const catalogue: string[] = [];
+		ctx.modelPermissions = new AccountModelPermissionService({
+			repository: routing,
+			listAccounts: async () => [account],
+			getAccessToken: async () => {
+				throw new Error("Token Plan discovery must not mint a token");
+			},
+			fetchImpl: mockFetch(async (input) => {
+				catalogue.push(String(input));
+				return Response.json({ data: [{ id: requested }] });
+			}),
+		});
+		await ctx.modelPermissions.refresh(account, true);
+		expect(catalogue).toEqual([
+			"https://token-plan-ams.xiaomimimo.com/anthropic/v1/models?limit=1000",
+		]);
+		expect(await routing.getPermissions(account.id)).toMatchObject({
+			completeness: "known-complete",
+			discovered_ids: [requested],
+			manual_ids: [],
+		});
+		const sent: Request[] = [];
+		globalThis.fetch = mockFetch(async (input) => {
+			const outgoing = input instanceof Request ? input : new Request(input);
+			// The pricing singleton may finish its lazy catalogue read here.
+			if (outgoing.url === "https://models.dev/api.json")
+				return Response.json({});
+			sent.push(outgoing);
+			return Response.json({
+				id: "mimo-response",
+				type: "message",
+				role: "assistant",
+				model: requested,
+				content: [{ type: "text", text: "mimo replied" }],
+				stop_reason: "end_turn",
+				usage: { input_tokens: 2, output_tokens: 2 },
+			});
+		});
+		const req = request();
+		if (mode === "forced")
+			req.headers.set("x-clankermux-account-id", account.id);
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(200);
+		expect((await response.json()).content[0].text).toBe("mimo replied");
+		expect(sent).toHaveLength(1);
+		// The account's stored region, not MiMo's Singapore default.
+		expect(sent[0].url).toBe(
+			"https://token-plan-ams.xiaomimimo.com/anthropic/v1/messages",
+		);
+		expect(sent[0].headers.get("x-api-key")).toBe("tp-key");
+		expect(
+			dbs
+				.at(-1)
+				?.query("SELECT kind,provider,outgoing_model FROM routing_attempts")
+				.all(),
+		).toEqual([
+			{ kind: "upstream_send", provider: "mimo", outgoing_model: requested },
+		]);
+	});
+	it.each([
 		"rule",
 		"permission",
 		"provider pin",
