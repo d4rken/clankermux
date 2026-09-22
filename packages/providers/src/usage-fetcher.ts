@@ -480,6 +480,8 @@ export function anthropicOAuthUsageHeaders(
 export interface UsageFetchResult {
 	data: UsageData | null;
 	retryAfterMs: number | null; // Set when server returns retry-after on 429
+	/** The endpoint answered 429, with or without a usable Retry-After. */
+	rateLimited?: boolean;
 	/**
 	 * The usage endpoint refused access. This can be an organization setting
 	 * or a subscription/seat problem; the response does not prove expiration.
@@ -561,6 +563,7 @@ export async function fetchUsageData(
 			return {
 				data: null,
 				retryAfterMs,
+				rateLimited: response.status === 429,
 				failureKind: classifyUsageFetchFailure(response.status, errorBody),
 			};
 		}
@@ -691,6 +694,8 @@ interface UsageFetchOutcome {
 	success: boolean;
 	retryAfterMs: number | null;
 	superseded?: boolean;
+	/** No request was sent: the shared rate-limit deadline still stands. */
+	deferred?: boolean;
 }
 
 /**
@@ -1488,7 +1493,7 @@ class UsageCache {
 				// and let its usage data go stale. A replaced generation bails on the
 				// guard below; a fenced fetch leaves the generation live and only
 				// skips the failure accounting.
-				superseded = outcome.superseded === true;
+				superseded = outcome.superseded === true || outcome.deferred === true;
 				success = outcome.success;
 				nextRetryAfterMs = outcome.retryAfterMs;
 			} catch (error) {
@@ -1726,11 +1731,12 @@ class UsageCache {
 				generation,
 				provider,
 				customEndpoint,
-			).then(({ success, retryAfterMs, superseded }) => {
+			).then(({ success, retryAfterMs, superseded, deferred }) => {
 				// A superseded result says nothing about THIS poller, so it must not
-				// seed a failure streak. A fenced one still starts the loop below;
+				// seed a failure streak, and neither does a fetch deferred by the
+				// rate-limit deadline. A fenced one still starts the loop below;
 				// a replaced generation fails the guard.
-				if (!success && !superseded) {
+				if (!success && !superseded && !deferred) {
 					this.failureCounts.set(accountId, 1);
 				}
 				// Generation + identity guards: only start the loop if this generation
@@ -1792,7 +1798,8 @@ class UsageCache {
 
 	/**
 	 * Trigger an immediate usage fetch for an account that already has polling configured.
-	 * Returns false when no polling/token provider is configured or when the fetch fails.
+	 * Returns false when no polling/token provider is configured, when the fetch
+	 * fails, and without a request while the usage rate-limit deadline stands.
 	 *
 	 * On success the failure streak is cleared and a backed-off poll loop is
 	 * re-armed to the healthy cadence — see {@link rearmAfterOnDemandSuccess}.
@@ -1959,6 +1966,16 @@ class UsageCache {
 		provider?: string,
 		customEndpoint?: string | null,
 	): Promise<UsageFetchOutcome> {
+		// The usage endpoint's rate limit is shared with every other reader of it,
+		// so while its deadline stands no fetch is sent; the poll re-arms for it.
+		const limitedUntil = this.getRateLimitedUntil(accountId);
+		if (limitedUntil !== null) {
+			return {
+				success: false,
+				retryAfterMs: Math.max(0, limitedUntil - Date.now()),
+				deferred: true,
+			};
+		}
 		// Deduplicate concurrent fetches for the same account — return the existing
 		// in-flight promise rather than starting a second HTTP request — but ONLY
 		// within the same poll generation. A newer generation must issue (and apply)
@@ -2439,14 +2456,13 @@ class UsageCache {
 					);
 					return { success: true, retryAfterMs: null };
 				}
-				if (result.retryAfterMs != null && result.retryAfterMs > 0) {
-					this.usageRateLimitedUntil.set(
+				// Only a successful fetch clears the deadline; a failure can only
+				// extend it.
+				if (result.rateLimited) {
+					this.noteRateLimited(
 						accountId,
-						Date.now() + result.retryAfterMs,
+						Date.now() + (result.retryAfterMs ?? USAGE_RATE_LIMITED_DEFAULT_MS),
 					);
-				} else if (result.retryAfterMs == null) {
-					// Non-429 failure: clear any stale rate-limit marker
-					this.usageRateLimitedUntil.delete(accountId);
 				}
 				// Usage-access denial detection: fire the callback once per
 				// transition into the denied state (not on every failing poll).
