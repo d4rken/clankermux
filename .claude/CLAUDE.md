@@ -188,6 +188,34 @@ This repo has both a `main` **branch** and a `main` **tag**. Always use
 error: `git log refs/heads/main`, `git diff refs/heads/main...`,
 `git merge-base refs/heads/main`, `git push origin refs/heads/main:refs/heads/main`.
 
+## Deploying from a worktree-isolated session
+
+Claude Code refuses every git command that targets `/home/darken/clankermux`
+from a session isolated in a worktree, reads included: `git -C … status` is
+blocked exactly like `git merge`. The refusal is path-based (it also catches
+`cd`, `env -C`, `--git-dir`, `GIT_DIR=`, globs and git behind `bash -c`),
+unconditional, and has no opt-out setting. A branch built in
+`.claude/worktrees/<name>` therefore cannot be merged, pushed or promoted from
+the session that built it.
+
+Hand that work to a peer Claude session whose cwd is `/home/darken/clankermux`,
+in two stages.
+
+Stage 1, delegate without asking first. The peer merges the branch into
+`refs/heads/main`, runs `bun run build:db-workers` (those blobs are gitignored,
+so a fresh checkout needs them rebuilt), then `bun run lint && bun run
+typecheck`, then `bun run test`. Use `bun run test`, not `bun test`: the former
+adds the `test:dom` lane. Tell the peer to stop and report there. Nothing is
+pushed.
+
+Stage 2, only once the user has authorised it in this session:
+`git push origin refs/heads/main:refs/heads/main`, then
+`scripts/promote-release.sh`. Promotion restarts the live service, so it never
+runs on your initiative or a peer's.
+
+If no peer session is running in the shared checkout, ask the user to run the
+stage. Never re-point git at the checkout to get around the refusal.
+
 ## Working in this repo
 
 - Run `git status` before making changes, and note which files were already
