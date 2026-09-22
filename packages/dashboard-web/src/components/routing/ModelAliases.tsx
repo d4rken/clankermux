@@ -134,9 +134,9 @@ export function ModelAliases() {
 					{aliases.data.data.map((alias) => (
 						<li
 							key={alias.id}
-							className="rounded-lg border p-4 flex flex-wrap items-center gap-3"
+							className="rounded-lg border p-4 flex flex-col gap-3 md:flex-row md:items-center"
 						>
-							<div className="grow">
+							<div className="min-w-0 flex-1 break-words">
 								<strong>{alias.displayName}</strong>
 								<p className="text-sm">
 									<code>{alias.id}</code>
@@ -158,22 +158,24 @@ export function ModelAliases() {
 									))}
 								</ol>
 							</div>
-							<Button
-								variant="outline"
-								disabled={mutation.isPending}
-								aria-label={`Edit ${alias.displayName}`}
-								onClick={() => edit(alias)}
-							>
-								Edit
-							</Button>
-							<Button
-								variant="destructive"
-								disabled={mutation.isPending}
-								aria-label={`Delete ${alias.displayName}`}
-								onClick={() => mutation.mutate({ alias, remove: true })}
-							>
-								Delete
-							</Button>
+							<div className="flex shrink-0 flex-wrap gap-3">
+								<Button
+									variant="outline"
+									disabled={mutation.isPending}
+									aria-label={`Edit ${alias.displayName}`}
+									onClick={() => edit(alias)}
+								>
+									Edit
+								</Button>
+								<Button
+									variant="destructive"
+									disabled={mutation.isPending}
+									aria-label={`Delete ${alias.displayName}`}
+									onClick={() => mutation.mutate({ alias, remove: true })}
+								>
+									Delete
+								</Button>
+							</div>
 						</li>
 					))}
 				</ul>

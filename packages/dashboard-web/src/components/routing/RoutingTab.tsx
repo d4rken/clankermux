@@ -130,9 +130,9 @@ export function RoutingTab() {
 					{rows.map((r, i) => (
 						<li
 							key={r.id}
-							className="rounded-lg border p-4 flex flex-wrap items-center gap-3"
+							className="rounded-lg border p-4 flex flex-col gap-3 md:flex-row md:items-center"
 						>
-							<div className="grow">
+							<div className="min-w-0 flex-1 break-words">
 								<strong>
 									{i + 1}. {r.name}
 								</strong>
@@ -169,50 +169,52 @@ export function RoutingTab() {
 										: "Requested model"}
 								</p>
 							</div>
-							<Button
-								variant="outline"
-								disabled={i === 0 || mutate.isPending}
-								onClick={() => move(i, -1)}
-								aria-label={`Move ${r.name} up`}
-							>
-								↑
-							</Button>
-							<Button
-								variant="outline"
-								disabled={i === rows.length - 1 || mutate.isPending}
-								onClick={() => move(i, 1)}
-								aria-label={`Move ${r.name} down`}
-							>
-								↓
-							</Button>
-							<Button
-								variant="outline"
-								onClick={() => {
-									mutate.reset();
-									setDraft({ ...r });
-								}}
-							>
-								Edit
-							</Button>
-							<Button
-								variant="outline"
-								disabled={mutate.isPending}
-								onClick={() =>
-									mutate.mutate({
-										method: "save",
-										rule: { ...r, enabled: !r.enabled },
-									})
-								}
-							>
-								{r.enabled ? "Disable" : "Enable"}
-							</Button>
-							<Button
-								variant="destructive"
-								disabled={mutate.isPending}
-								onClick={() => mutate.mutate({ method: "delete", rule: r })}
-							>
-								Delete
-							</Button>
+							<div className="flex shrink-0 flex-wrap gap-3">
+								<Button
+									variant="outline"
+									disabled={i === 0 || mutate.isPending}
+									onClick={() => move(i, -1)}
+									aria-label={`Move ${r.name} up`}
+								>
+									↑
+								</Button>
+								<Button
+									variant="outline"
+									disabled={i === rows.length - 1 || mutate.isPending}
+									onClick={() => move(i, 1)}
+									aria-label={`Move ${r.name} down`}
+								>
+									↓
+								</Button>
+								<Button
+									variant="outline"
+									onClick={() => {
+										mutate.reset();
+										setDraft({ ...r });
+									}}
+								>
+									Edit
+								</Button>
+								<Button
+									variant="outline"
+									disabled={mutate.isPending}
+									onClick={() =>
+										mutate.mutate({
+											method: "save",
+											rule: { ...r, enabled: !r.enabled },
+										})
+									}
+								>
+									{r.enabled ? "Disable" : "Enable"}
+								</Button>
+								<Button
+									variant="destructive"
+									disabled={mutate.isPending}
+									onClick={() => mutate.mutate({ method: "delete", rule: r })}
+								>
+									Delete
+								</Button>
+							</div>
 						</li>
 					))}
 				</ol>
