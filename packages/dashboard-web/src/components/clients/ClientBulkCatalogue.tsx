@@ -21,14 +21,26 @@ import {
 import { Input } from "../ui/input";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
+import {
+	type CatalogueLabels,
+	type CatalogueRowExtras,
+	CatalogueSelector,
+} from "./CatalogueSelector";
 import { ClientLabel, clientLabelText } from "./ClientLabel";
 import type { DestinationAccount } from "./ClientWizard";
 import { suggestedModel } from "./ClientWizard";
-import { ModelFilterField, matchesModelQuery } from "./model-filter";
+import { NO_DESTINATION_FILTER, servingAccounts } from "./destination-filter";
 import { FORMAT_LABELS, FORMATS } from "./setup";
 
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
 const FORMAT_KEYS = Object.keys(FORMATS) as ClientFormat[];
+const BATCH_LABELS: CatalogueLabels = {
+	selectedTitle: "In catalogues",
+	availableTitle: "Not in every catalogue",
+	selectedEmpty: "No selected client publishes a model in this format yet.",
+	availableEmpty: "Every model listed is already in every selected catalogue.",
+};
+const PENDING_FIRST = "Review or discard the pending changes first";
 
 /** Comparable account pin. `null` (any allowed account) stays distinct from a list. */
 const pinOf = (model: ClientModel) =>
@@ -37,6 +49,7 @@ const sameDefinition = (a: ClientModel, b: ClientModel) =>
 	a.targetModel === b.targetModel &&
 	a.displayName === b.displayName &&
 	pinOf(a) === pinOf(b);
+const clientCount = (n: number) => `${n} ${n === 1 ? "client" : "clients"}`;
 
 interface Candidate {
 	model: ClientModel;
@@ -47,6 +60,12 @@ interface Candidate {
 	/** Staged in this panel rather than read from a client or discovery. */
 	staged?: boolean;
 }
+/**
+ * `add` publishes the ID on every selected client missing it, `remove` drops it
+ * from every client that has it. One intent per ID, so a model some clients
+ * publish leaves the pane it was moved out of.
+ */
+type Intent = "add" | "remove";
 
 const EMPTY_CUSTOM = { id: "", target: "", name: "", accounts: [] as string[] };
 
@@ -72,9 +91,12 @@ export function ClientBulkCatalogue({
 	const [suggestions, setSuggestions] = useState<ClientSuggestions | null>(
 		null,
 	);
-	const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
+	const [pending, setPending] = useState<ReadonlyMap<string, Intent>>(
+		() => new Map(),
+	);
 	/** Kept across format tabs: narrowing the list is a view, not an operation. */
-	const [query, setQuery] = useState("");
+	const [queries, setQueries] = useState({ available: "", selected: "" });
+	const [filter, setFilter] = useState(NO_DESTINATION_FILTER);
 	const [custom, setCustom] = useState(EMPTY_CUSTOM);
 	const [customError, setCustomError] = useState<string | null>(null);
 	/** Entries the operator typed, which no client and no discovery offers. */
@@ -86,6 +108,8 @@ export function ClientBulkCatalogue({
 	const [replaceDefault, setReplaceDefault] = useState("");
 	const [confirming, setConfirming] = useState(false);
 	const [review, setReview] = useState<ClientBulkReview | null>(null);
+	/** The catalogues the review was taken against; the list keeps refreshing. */
+	const [reviewedClients, setReviewedClients] = useState<ClientView[]>([]);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
@@ -148,7 +172,7 @@ export function ClientBulkCatalogue({
 				union.set(model.id, { model, coverage: 0, conflicted: false });
 		}
 		// A staged definition outranks both: the operator typed it, and a
-		// definition that arrived after they checked the row must not be applied
+		// definition that arrived after they staged the row must not be applied
 		// in its place. Coverage stays honest about who already publishes the ID.
 		for (const model of stagedModels) {
 			const covering = clients.filter((c) =>
@@ -170,31 +194,97 @@ export function ClientBulkCatalogue({
 			a.model.id.localeCompare(b.model.id),
 		);
 	}, [clients, format, suggestions, stagedModels]);
-	// Every operation reads the unfiltered candidates: hiding a row must not
-	// change what is applied.
-	const checkedCandidates = candidates.filter((c) => checked.has(c.model.id));
-	const visible = candidates.filter((c) => matchesModelQuery(c.model, query));
-	const visibleIds = new Set(visible.map((c) => c.model.id));
-	const hiddenChecked = checkedCandidates.filter(
-		(c) => !visibleIds.has(c.model.id),
-	).length;
-	const addable =
-		checkedCandidates.length > 0 &&
-		!checkedCandidates.some((c) => c.conflicted);
+	const byId = new Map(candidates.map((c) => [c.model.id, c]));
+	const total = clients.length;
+	/**
+	 * Read against the coverage in hand, not the one at staging time: after the
+	 * selected clients refresh, an add every client now has, or a remove none
+	 * has, changes nothing and counts as no intent.
+	 */
+	const intentOf = (c: Candidate): Intent | undefined => {
+		const intent = pending.get(c.model.id);
+		return (intent === "add" && c.coverage === total) ||
+			(intent === "remove" && c.coverage === 0)
+			? undefined
+			: intent;
+	};
+	// Drop what a refresh made void rather than only hiding it: an intent kept
+	// behind a no-op, or behind a model that left the list, would come back on
+	// a later refresh without the operator having staged it again.
+	useEffect(() => {
+		const byIdNow = new Map(candidates.map((c) => [c.model.id, c]));
+		setPending((current) => {
+			const live = [...current].filter(([id, intent]) => {
+				const c = byIdNow.get(id);
+				return (
+					!!c &&
+					!(intent === "add" && c.coverage === total) &&
+					!(intent === "remove" && c.coverage === 0)
+				);
+			});
+			return live.length === current.size ? current : new Map(live);
+		});
+	}, [candidates, total]);
+	const inCatalogues = candidates.filter((c) => {
+		const intent = intentOf(c);
+		return intent ? intent === "add" : c.coverage > 0;
+	});
+	const notEverywhere = candidates.filter((c) => {
+		const intent = intentOf(c);
+		return intent ? intent === "remove" : c.coverage < total;
+	});
+	// Operations read the intents, never the panes: a filter hiding a row must
+	// not change what is applied.
+	const adds = candidates.filter((c) => intentOf(c) === "add");
+	const removes = candidates.filter((c) => intentOf(c) === "remove");
+	const staged = adds.length + removes.length;
+	// A row can turn conflicted after it was staged: a custom entry a client
+	// then publishes differently, or a refetch that changes a client's entry.
+	const conflictedAdds = adds.filter((c) => c.conflicted).length;
+	/**
+	 * Moving a row to the side its stored coverage already puts it on undoes the
+	 * intent rather than recording one that changes nothing.
+	 */
+	const move = (models: ClientModel[], intent: Intent) => {
+		// A custom entry exists only to be added; taking it back out discards it
+		// rather than leaving a row that looks queued and changes nothing.
+		const discarded = new Set(
+			models
+				.filter((m) => intent === "remove" && byId.get(m.id)?.staged)
+				.filter((m) => byId.get(m.id)?.coverage === 0)
+				.map((m) => m.id),
+		);
+		if (discarded.size)
+			setStagedModels((current) => current.filter((m) => !discarded.has(m.id)));
+		setPending((current) => {
+			const next = new Map(current);
+			for (const { id } of models) {
+				const coverage = byId.get(id)?.coverage ?? 0;
+				if (intent === "add" ? coverage === total : coverage === 0)
+					next.delete(id);
+				else next.set(id, intent);
+			}
+			return next;
+		});
+	};
+	const undo = (id: string) =>
+		setPending((current) => {
+			const next = new Map(current);
+			next.delete(id);
+			return next;
+		});
 	const changeFormat = (next: ClientFormat) => {
 		setFormat(next);
-		setChecked(new Set());
+		setPending(new Map());
 		setSource(null);
 		setReplaceDefault("");
 		setStagedModels([]);
 		setCustomError(null);
 	};
-	const toggle = (id: string) =>
-		setChecked((current) => {
-			const next = new Set(current);
-			if (!next.delete(id)) next.add(id);
-			return next;
-		});
+	const discard = () => {
+		setPending(new Map());
+		setStagedModels([]);
+	};
 	const stage = () => {
 		const id = custom.id.trim();
 		const target = custom.target.trim() || id;
@@ -202,7 +292,7 @@ export function ClientBulkCatalogue({
 			setCustomError("Enter a model ID");
 			return;
 		}
-		if (candidates.some((c) => c.model.id === id)) {
+		if (byId.has(id)) {
 			// Adding an ID a client already has is a no-op for that client, so a
 			// collision would apply to some of the batch and silently skip the rest.
 			setCustomError(`${id} is already in this list`);
@@ -222,34 +312,31 @@ export function ClientBulkCatalogue({
 					target !== id && custom.accounts.length ? custom.accounts : null,
 			},
 		]);
-		setChecked((current) => new Set(current).add(id));
+		setPending((current) => new Map(current).set(id, "add"));
 		setCustom(EMPTY_CUSTOM);
 		setCustomError(null);
 	};
 	const unstage = (id: string) => {
 		setStagedModels((current) => current.filter((m) => m.id !== id));
-		setChecked((current) => {
-			const next = new Set(current);
-			next.delete(id);
-			return next;
-		});
+		undo(id);
 	};
 	const propose = (operation: ClientBulkOperation) =>
 		run(async () => {
+			const snapshot = clients;
 			setReview(
 				await clientRequest<ClientBulkReview>("/bulk/review", {
-					clientIds: clients.map((c) => c.apiKeyId),
+					clientIds: snapshot.map((c) => c.apiKeyId),
 					operation,
 				}),
 			);
+			setReviewedClients(snapshot);
 		});
 	const changed =
 		review?.clients.filter((c) => c.status === "changed").length ?? 0;
 	/**
-	 * Commit, hand the committed views up, and stay open for the next operation
-	 * — swapping an official ID for a variant is a remove and an add. The commit
-	 * response is what the panel then reads: an invalidation only starts a
-	 * refetch, so without it the next operation would work from pre-apply
+	 * Commit, hand the committed views up, and stay open for the next change.
+	 * The commit response is what the panel then reads: an invalidation only
+	 * starts a refetch, so without it the next change would work from pre-apply
 	 * catalogues.
 	 */
 	const apply = (token: string) =>
@@ -261,16 +348,78 @@ export function ClientBulkCatalogue({
 			);
 			onApplied(committed.clients);
 			setReview(null);
-			setChecked(new Set());
+			setPending(new Map());
 			setStagedModels([]);
 			setSource(null);
 			setReplaceDefault("");
-			setNotice(
-				`Applied to ${applied} ${applied === 1 ? "client" : "clients"}.`,
-			);
+			setNotice(`Applied to ${clientCount(applied)}.`);
 		});
 	const accountName = (id: string) =>
 		accounts.find((a) => a.id === id)?.name ?? id;
+	const rowExtras = (
+		model: ClientModel,
+		selected: boolean,
+	): CatalogueRowExtras => {
+		const candidate = byId.get(model.id);
+		if (!candidate) return {};
+		const { coverage, conflicted, staged: custom } = candidate;
+		const intent = intentOf(candidate);
+		return {
+			// Only adding needs one agreed definition; a remove reads the ID alone.
+			blocked:
+				conflicted && !selected
+					? "Clients define this ID differently; edit them individually"
+					: undefined,
+			note: (
+				<span className="text-xs text-muted-foreground">
+					In {coverage} of {total}
+					{conflicted
+						? ` · Defined differently in ${clientCount(coverage)}`
+						: ""}
+					{custom && (
+						<span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px]">
+							Custom
+						</span>
+					)}
+					{intent && (
+						<span className="ml-2 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+							{intent === "add"
+								? `Adding to ${clientCount(total - coverage)}`
+								: `Removing from ${clientCount(coverage)}`}
+						</span>
+					)}
+				</span>
+			),
+			actions: (
+				<>
+					{intent && !custom && (
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-7 px-2 text-xs"
+							aria-label={`Undo ${model.id}`}
+							disabled={busy}
+							onClick={() => undo(model.id)}
+						>
+							Undo
+						</Button>
+					)}
+					{custom && (
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-7 px-2 text-xs"
+							aria-label={`Discard ${model.id}`}
+							disabled={busy}
+							onClick={() => unstage(model.id)}
+						>
+							Discard
+						</Button>
+					)}
+				</>
+			),
+		};
+	};
 	const shown = clients
 		.slice(0, 3)
 		.map((c) => clientLabelText(c.key.name, c.application));
@@ -278,10 +427,7 @@ export function ClientBulkCatalogue({
 	return (
 		<Card>
 			<CardHeader className="gap-3">
-				<CardTitle>
-					Edit catalogues · {clients.length}{" "}
-					{clients.length === 1 ? "client" : "clients"}
-				</CardTitle>
+				<CardTitle>Edit catalogues · {clientCount(total)}</CardTitle>
 				<p
 					className="text-sm text-muted-foreground"
 					title={clients
@@ -319,7 +465,9 @@ export function ClientBulkCatalogue({
 									key={result.apiKeyId}
 									result={result}
 									operation={review.operation}
-									stored={clients.find((c) => c.apiKeyId === result.apiKeyId)}
+									stored={reviewedClients.find(
+										(c) => c.apiKeyId === result.apiKeyId,
+									)}
 									accountName={accountName}
 								/>
 							))}
@@ -339,6 +487,11 @@ export function ClientBulkCatalogue({
 									<TabsTrigger
 										key={f}
 										value={f}
+										// The pending changes belong to this format's catalogues.
+										disabled={f !== format && staged > 0}
+										title={
+											f !== format && staged > 0 ? PENDING_FIRST : undefined
+										}
 										className="px-2 text-xs sm:px-3 sm:text-sm"
 									>
 										{FORMAT_LABELS[f]}
@@ -352,115 +505,65 @@ export function ClientBulkCatalogue({
 								))}
 							</TabsList>
 						</Tabs>
-						<ModelFilterField
-							value={query}
-							onChange={setQuery}
-							shown={visible.length}
-							total={candidates.length}
-							label={`Filter ${FORMATS[format]} models`}
-						/>
-						<section
-							aria-label={`${FORMATS[format]} models`}
-							className="h-[50dvh] min-h-48 overflow-auto divide-y rounded-md border"
-						>
-							{candidates.length === 0 && (
-								<p className="p-3 text-sm text-muted-foreground">
-									No models to choose from in this format yet.
-								</p>
-							)}
-							{candidates.length > 0 && visible.length === 0 && (
-								<p className="p-3 text-sm text-muted-foreground">
-									No models match this filter.
-								</p>
-							)}
-							{visible.map(({ model, coverage, conflicted, staged }) => (
-								<div
-									key={model.id}
-									data-candidate={model.id}
-									className="flex items-center gap-3 px-3 py-2 hover:bg-muted/40"
-								>
-									<label className="flex flex-1 min-w-0 items-center gap-3">
-										<input
-											className="shrink-0"
-											type="checkbox"
-											aria-label={`Select ${model.id}`}
-											checked={checked.has(model.id)}
-											onChange={() => toggle(model.id)}
-										/>
-										<span className="min-w-0 flex-1 grid gap-x-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
-											<span className="font-medium text-sm break-all leading-5">
-												{model.displayName}
-												{staged && (
-													<span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
-														Custom
-													</span>
-												)}
-											</span>
-											<code className="text-xs break-all text-muted-foreground sm:col-start-1 sm:row-start-2">
-												{model.id}
-												{model.targetModel !== model.id
-													? ` → ${model.targetModel}`
-													: ""}
-											</code>
-											<span className="text-xs text-muted-foreground sm:col-start-2 sm:row-start-1 sm:row-span-2 sm:self-center">
-												In {coverage} of {clients.length}
-												{conflicted
-													? ` · Defined differently in ${coverage} ${coverage === 1 ? "client" : "clients"} — edit these individually`
-													: ""}
-											</span>
-										</span>
-									</label>
-									{staged && (
-										<Button
-											variant="ghost"
-											size="sm"
-											className="ml-auto h-7 px-2 text-xs"
-											aria-label={`Remove ${model.id} from the list`}
-											onClick={() => unstage(model.id)}
-										>
-											Remove
-										</Button>
-									)}
-								</div>
-							))}
-						</section>
-						{hiddenChecked > 0 && (
-							<p className="text-sm text-muted-foreground">
-								{checkedCandidates.length} selected · {hiddenChecked} hidden by
-								the filter
+						{candidates.length === 0 ? (
+							<p className="rounded-md border p-3 text-sm text-muted-foreground">
+								No models to choose from in this format yet.
 							</p>
+						) : (
+							<CatalogueSelector
+								formatLabel={FORMATS[format]}
+								available={notEverywhere.map((c) => c.model)}
+								selected={inCatalogues.map((c) => c.model)}
+								queries={queries}
+								onQueryChange={(side, value) =>
+									setQueries((current) => ({ ...current, [side]: value }))
+								}
+								filter={filter}
+								onFilterChange={setFilter}
+								busy={busy}
+								modelAccounts={(model) =>
+									servingAccounts(model, suggestions, accounts)
+								}
+								onAdd={(models) => move(models, "add")}
+								onRemove={(models) => move(models, "remove")}
+								rowExtras={rowExtras}
+								labels={BATCH_LABELS}
+							/>
 						)}
-						<div className="flex flex-wrap gap-2">
+						<div className="flex flex-wrap items-center gap-3">
 							<Button
-								disabled={busy || !addable}
+								disabled={busy || staged === 0 || conflictedAdds > 0}
 								title={
-									addable
-										? undefined
-										: "Selected IDs that different clients define differently, or that a client already publishes against another target, cannot be added in bulk"
+									conflictedAdds > 0
+										? "Some models to add are defined differently across the selected clients; undo them or edit those clients individually"
+										: undefined
 								}
 								onClick={() =>
 									propose({
 										format,
-										mode: "add",
-										models: checkedCandidates.map((c) => c.model),
+										mode: "edit",
+										add: adds.map((c) => c.model),
+										remove: removes.map((c) => c.model.id),
 									})
 								}
 							>
-								Add to all selected
+								Review changes
 							</Button>
 							<Button
 								variant="outline"
-								disabled={busy || !checkedCandidates.length}
-								onClick={() =>
-									propose({
-										format,
-										mode: "remove",
-										models: checkedCandidates.map((c) => c.model),
-									})
-								}
+								disabled={busy || (staged === 0 && !stagedModels.length)}
+								onClick={discard}
 							>
-								Remove from all selected
+								Discard changes
 							</Button>
+							<p
+								role="status"
+								className="text-sm text-muted-foreground tabular-nums"
+							>
+								{staged
+									? `${adds.length} to add · ${removes.length} to remove`
+									: "Move models between the columns to stage changes."}
+							</p>
 						</div>
 						<details className="rounded-md border p-3">
 							<summary className="cursor-pointer w-fit text-sm font-medium">
@@ -468,9 +571,8 @@ export function ClientBulkCatalogue({
 							</summary>
 							<div className="mt-3 grid gap-4 max-w-xl sm:grid-cols-2">
 								<p className="text-sm text-muted-foreground sm:col-span-2">
-									Publish an entry no client offers yet. It joins the list
-									above, already selected, and is applied like any other
-									selection.
+									Publish an entry no client offers yet. It is staged for every
+									selected client and applied with the other changes.
 								</p>
 								<label
 									className="grid gap-2 text-sm font-medium"
@@ -624,11 +726,12 @@ export function ClientBulkCatalogue({
 								<Button
 									variant="destructive"
 									className="w-fit"
-									disabled={busy || !source}
+									// A replace would silently drop the staged changes.
+									disabled={busy || !source || staged > 0}
+									title={staged > 0 ? PENDING_FIRST : undefined}
 									onClick={() => setConfirming(true)}
 								>
-									Replace catalogue for {clients.length}{" "}
-									{clients.length === 1 ? "client" : "clients"}
+									Replace catalogue for {clientCount(total)}
 								</Button>
 							</div>
 						</details>
@@ -652,9 +755,7 @@ export function ClientBulkCatalogue({
 								disabled={busy || !changed}
 								onClick={() => apply(review.token)}
 							>
-								{busy
-									? "Working…"
-									: `Apply to ${changed} ${changed === 1 ? "client" : "clients"}`}
+								{busy ? "Working…" : `Apply to ${clientCount(changed)}`}
 							</Button>
 						</div>
 					)}
@@ -729,7 +830,9 @@ function PreviewRow({
 		const old = stored?.catalogues[operation.format].models.find(
 			(m) => m.id === id,
 		);
-		const next = operation.models.find((m) => m.id === id);
+		const next = (
+			operation.mode === "replace" ? operation.models : operation.add
+		).find((m) => m.id === id);
 		if (!old || !next) return id;
 		const moves: string[] = [];
 		if (old.targetModel !== next.targetModel)

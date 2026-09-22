@@ -1,7 +1,37 @@
 import type { ClientModel } from "@clankermux/types";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
+import type { DestinationAccount } from "./ClientWizard";
+import {
+	type DestinationFilter,
+	DestinationFilterBar,
+	matchesDestinationFilter,
+} from "./destination-filter";
 import { ModelFilterField, matchesModelQuery } from "./model-filter";
+
+/** What a caller layers onto one row of one pane. */
+export interface CatalogueRowExtras {
+	/** Rendered under the model's names. */
+	note?: ReactNode;
+	/** Why the row cannot move to the other pane; it still renders. */
+	blocked?: string;
+	/** Buttons ahead of the row's own. */
+	actions?: ReactNode;
+}
+/** Wording that differs between one client's catalogue and a batch's. */
+export interface CatalogueLabels {
+	selectedTitle: string;
+	availableTitle: string;
+	selectedEmpty: string;
+	availableEmpty: string;
+}
+const CLIENT_LABELS: CatalogueLabels = {
+	selectedTitle: "Selected models",
+	availableTitle: "Available models",
+	selectedEmpty: "No selected models. Add models from the available list.",
+	availableEmpty:
+		"No available models. All discovered models may already be selected. Refresh suggestions or add a custom model.",
+};
 
 interface CataloguePaneProps {
 	selected: boolean;
@@ -9,10 +39,14 @@ interface CataloguePaneProps {
 	models: ClientModel[];
 	query: string;
 	onQueryChange: (value: string) => void;
+	filter: DestinationFilter;
 	busy: boolean;
-	accountNames: (model: ClientModel) => string[];
+	/** The accounts serving a model, which place it under a provider. */
+	modelAccounts: (model: ClientModel) => DestinationAccount[];
 	onMove: (models: ClientModel[]) => void;
-	onEdit: (model: ClientModel) => void;
+	onEdit?: (model: ClientModel) => void;
+	rowExtras?: (model: ClientModel, selected: boolean) => CatalogueRowExtras;
+	labels: CatalogueLabels;
 	children?: ReactNode;
 }
 
@@ -22,18 +56,29 @@ function CataloguePane({
 	models,
 	query,
 	onQueryChange,
+	filter,
 	busy,
-	accountNames,
+	modelAccounts,
 	onMove,
 	onEdit,
+	rowExtras,
+	labels,
 	children,
 }: CataloguePaneProps) {
 	const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
 	const selectAllRef = useRef<HTMLInputElement>(null);
-	const visible = models.filter((model) => matchesModelQuery(model, query));
-	const checkedModels = visible.filter((model) => checked.has(model.id));
+	const visible = models.filter(
+		(model) =>
+			matchesModelQuery(model, query) &&
+			matchesDestinationFilter(modelAccounts(model), filter),
+	);
+	const extras = new Map(
+		visible.map((model) => [model.id, rowExtras?.(model, selected) ?? {}]),
+	);
+	const movable = visible.filter((model) => !extras.get(model.id)?.blocked);
+	const checkedModels = movable.filter((model) => checked.has(model.id));
 	const allChecked =
-		visible.length > 0 && checkedModels.length === visible.length;
+		movable.length > 0 && checkedModels.length === movable.length;
 	const partiallyChecked = checkedModels.length > 0 && !allChecked;
 	useEffect(() => {
 		if (selectAllRef.current)
@@ -47,7 +92,7 @@ function CataloguePane({
 		});
 	}, [models]);
 	const side = selected ? "selected" : "available";
-	const title = selected ? "Selected models" : "Available models";
+	const title = selected ? labels.selectedTitle : labels.availableTitle;
 	const action = selected ? "Remove" : "Add";
 	const move = (entries: ClientModel[]) => {
 		onMove(entries);
@@ -85,11 +130,11 @@ function CataloguePane({
 							ref={selectAllRef}
 							type="checkbox"
 							aria-label={`Check all shown ${side} models`}
-							disabled={busy || !visible.length}
+							disabled={busy || !movable.length}
 							checked={allChecked}
 							onChange={(event) =>
 								setChecked(
-									new Set(event.target.checked ? visible.map((m) => m.id) : []),
+									new Set(event.target.checked ? movable.map((m) => m.id) : []),
 								)
 							}
 						/>
@@ -110,7 +155,8 @@ function CataloguePane({
 				className="h-[40dvh] min-h-48 md:h-[max(18rem,calc(100dvh-43rem))] overflow-auto overscroll-contain divide-y"
 			>
 				{visible.map((model) => {
-					const names = accountNames(model);
+					const names = modelAccounts(model).map((a) => a.name);
+					const { note, blocked, actions } = extras.get(model.id) ?? {};
 					return (
 						<div
 							key={model.id}
@@ -122,8 +168,9 @@ function CataloguePane({
 									type="checkbox"
 									className="shrink-0"
 									aria-label={`Check ${model.id}`}
-									disabled={busy}
-									checked={checked.has(model.id)}
+									disabled={busy || !!blocked}
+									title={blocked}
+									checked={!blocked && checked.has(model.id)}
 									onChange={(event) => {
 										const next = new Set(checked);
 										if (event.target.checked) next.add(model.id);
@@ -154,25 +201,30 @@ function CataloguePane({
 											{names.length > 1 ? ` +${names.length - 1}` : ""}
 										</span>
 									)}
+									{note}
 								</span>
 							</label>
 							<div className="flex shrink-0 flex-col gap-1 sm:flex-row">
-								<Button
-									variant="ghost"
-									size="sm"
-									className="h-7 px-2 text-xs"
-									aria-label={`Edit ${model.id}`}
-									disabled={busy}
-									onClick={() => onEdit(model)}
-								>
-									Edit
-								</Button>
+								{actions}
+								{onEdit && (
+									<Button
+										variant="ghost"
+										size="sm"
+										className="h-7 px-2 text-xs"
+										aria-label={`Edit ${model.id}`}
+										disabled={busy}
+										onClick={() => onEdit(model)}
+									>
+										Edit
+									</Button>
+								)}
 								<Button
 									variant="outline"
 									size="sm"
 									className="h-7 px-2 text-xs"
 									aria-label={`${action} ${model.id}`}
-									disabled={busy}
+									title={blocked}
+									disabled={busy || !!blocked}
 									onClick={() => move([model])}
 								>
 									{action}
@@ -186,8 +238,8 @@ function CataloguePane({
 						{models.length
 							? "No models match this filter."
 							: selected
-								? "No selected models. Add models from the available list."
-								: "No available models. All discovered models may already be selected. Refresh suggestions or add a custom model."}
+								? labels.selectedEmpty
+								: labels.availableEmpty}
 					</p>
 				)}
 			</section>
@@ -201,25 +253,42 @@ export function CatalogueSelector({
 	selected,
 	queries,
 	onQueryChange,
+	onFilterChange,
 	onAdd,
 	onRemove,
+	labels = CLIENT_LABELS,
 	children,
 	...shared
 }: Omit<
 	CataloguePaneProps,
-	"selected" | "models" | "query" | "onQueryChange" | "onMove"
+	"selected" | "models" | "query" | "onQueryChange" | "onMove" | "labels"
 > & {
 	available: ClientModel[];
 	selected: ClientModel[];
 	queries: { available: string; selected: string };
 	onQueryChange: (side: "available" | "selected", value: string) => void;
+	onFilterChange: (filter: DestinationFilter) => void;
 	onAdd: (models: ClientModel[]) => void;
 	onRemove: (models: ClientModel[]) => void;
+	labels?: CatalogueLabels;
 }) {
+	// A model can sit in both panes (a batch where only some clients have it),
+	// so the chips count each ID once.
+	const models = new Map(
+		[...selected, ...available].map((model) => [model.id, model]),
+	);
 	return (
 		<div className="grid items-start gap-4 md:grid-cols-2">
+			<div className="md:col-span-2">
+				<DestinationFilterBar
+					rows={[...models.values()].map(shared.modelAccounts)}
+					filter={shared.filter}
+					onChange={onFilterChange}
+				/>
+			</div>
 			<CataloguePane
 				{...shared}
+				labels={labels}
 				selected
 				models={selected}
 				query={queries.selected}
@@ -230,6 +299,7 @@ export function CatalogueSelector({
 			</CataloguePane>
 			<CataloguePane
 				{...shared}
+				labels={labels}
 				selected={false}
 				models={available}
 				query={queries.available}

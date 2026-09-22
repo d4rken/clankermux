@@ -777,6 +777,20 @@ describe("catalogue filtering", () => {
 		expect(document.body.textContent).toContain("No models match this filter.");
 	});
 
+	it("narrows both panes to the models one provider serves", async () => {
+		await mount(existing, false, RICH);
+		// `old` is pinned nowhere and discovery does not list it.
+		await click("Show Unknown provider models, 1 model");
+		expect(listedModels()).toEqual([]);
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await click("Show Unknown provider models, 1 model");
+		await click("Show OpenAI-Compatible models, 2 models");
+		expect(listedModels()).toEqual(["new", "rich"]);
+		expect(listedModels("Selected")).toEqual([]);
+		await click("Clear filters");
+		expect(listedModels("Selected")).toEqual(["old"]);
+	});
+
 	it("selects and deselects only what the filter shows", async () => {
 		await mount(existing, false, RICH);
 		await filterModels("rich");
