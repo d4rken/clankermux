@@ -1,5 +1,6 @@
 import { describe, expect, it, mock, spyOn } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
+import { mockFetch } from "@clankermux/test-support";
 import { createDevinAccountHandlers } from "./devin-accounts";
 
 const post = (body: unknown) =>
@@ -114,6 +115,56 @@ describe("Devin account discovery and login", () => {
 		const body = await response.text();
 		expect(body).not.toContain("private-token");
 		expect(body).not.toContain("private-jwt");
+	});
+
+	it("verifies through the injected client only, never a global fetch", async () => {
+		let inserted = false;
+		const beforeInsert: string[] = [];
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async (input) => {
+				if (!inserted)
+					beforeInsert.push(
+						input instanceof Request ? input.url : input.toString(),
+					);
+				return new Response(null, { status: 401 });
+			}),
+		);
+		try {
+			const db = {
+				getAdapter: () => ({
+					runWithChanges: async () => {
+						inserted = true;
+						return 1;
+					},
+					get: async () => ({
+						id: "created-devin",
+						name: "Free",
+						provider: "devin",
+						created_at: Date.now(),
+						expires_at: null,
+					}),
+				}),
+				setAccountIdentityFromProfile: async () => {},
+			} as unknown as DatabaseOperations;
+			const getAccount = mock(async () => ({
+				userJwt: "private-jwt",
+				endpoint: "https://server.codeium.com",
+				models: [],
+				usage: { kind: "devin" },
+			}));
+			const handlers = createDevinAccountHandlers(db, {
+				getAccount,
+			} as never);
+			const response = await handlers.add(
+				post({ name: "Free", apiKey: "private-token" }),
+			);
+			expect(response.status).toBe(200);
+			expect(getAccount).toHaveBeenCalledTimes(1);
+			expect(inserted).toBe(true);
+			expect(beforeInsert).toEqual([]);
+		} finally {
+			fetchSpy.mockRestore();
+		}
 	});
 
 	it("returns only safe account metadata, never JWT or token", async () => {

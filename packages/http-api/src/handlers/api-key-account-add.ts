@@ -18,9 +18,20 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import { devinSessionExpiresAt } from "@clankermux/providers";
+import {
+	type CredentialCheck,
+	type CredentialCheckOutcome,
+	catalogueCheck,
+	devinSessionExpiresAt,
+	GROK_MODELS_ENDPOINT,
+	mimoCatalogueUrl,
+	openRouterKeyCheck,
+} from "@clankermux/providers";
 import { supportsCustomEndpoint } from "@clankermux/types";
-import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
+import {
+	refreshOpenRouterAccountMetadata,
+	storeOpenRouterAccountMetadata,
+} from "../services/openrouter-account-metadata";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 
 const log = new Logger("API:Accounts");
@@ -76,6 +87,13 @@ export interface ApiKeyProviderSpec {
 	 * NULL instead.
 	 */
 	mirrorKeyToTokens: boolean;
+	/**
+	 * Probe the provider with the key before the row is written, and refuse
+	 * the add unless the probe comes back valid. Opt-in per spec: a provider
+	 * that omits it is created unchecked. "Valid" means only that the probed
+	 * endpoint answered 2xx to this key, not that the key can serve inference.
+	 */
+	credentialCheck?: CredentialCheck;
 }
 
 /**
@@ -88,6 +106,8 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
+		// No credentialCheck: checked by its own route handler before this one
+		// runs (devin-accounts.ts).
 	},
 	zai: {
 		provider: "zai",
@@ -98,6 +118,8 @@ export const API_KEY_PROVIDERS = {
 		// back, and never used. See supportsCustomEndpoint.
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: there is no z.ai catalogue path this codebase has
+		// confirmed, and a wrong guess would refuse every z.ai key.
 	},
 	openai: {
 		provider: "openai-compatible",
@@ -105,6 +127,9 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "body", required: true },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: the endpoint is the operator's, and a gateway may
+		// serve inference without a model list, so a catalogue probe would
+		// refuse keys that work.
 	},
 	minimax: {
 		provider: "minimax",
@@ -112,6 +137,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: no validation surface this codebase already dials.
 	},
 	anthropicCompatible: {
 		provider: "anthropic-compatible",
@@ -119,6 +145,8 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "body", required: false },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: as for openai, and these backends authenticate with
+		// `x-api-key` rather than a Bearer token.
 	},
 	ollama: {
 		provider: "ollama",
@@ -126,6 +154,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "fixed", value: "ollama" },
 		endpoint: { from: "body", required: false },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: the key is the placeholder above.
 	},
 	ollamaCloud: {
 		provider: "ollama-cloud",
@@ -133,6 +162,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: "https://ollama.com" },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: as for minimax.
 	},
 	kilo: {
 		provider: "kilo",
@@ -140,6 +170,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
+		// No credentialCheck: as for minimax.
 	},
 	alibabaCodingPlan: {
 		provider: "alibaba-coding-plan",
@@ -147,6 +178,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
+		// No credentialCheck: as for minimax.
 	},
 	openrouter: {
 		provider: "openrouter",
@@ -154,6 +186,7 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
+		credentialCheck: openRouterKeyCheck,
 	},
 	grok: {
 		provider: "grok",
@@ -161,6 +194,10 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
+		credentialCheck: catalogueCheck(
+			"xAI model catalogue",
+			GROK_MODELS_ENDPOINT,
+		),
 	},
 	mimo: {
 		provider: "mimo",
@@ -173,6 +210,7 @@ export const API_KEY_PROVIDERS = {
 		// and query to whatever is stored here.
 		endpoint: { from: "body", required: false, baseUrlOnly: true },
 		mirrorKeyToTokens: true,
+		credentialCheck: catalogueCheck("MiMo model catalogue", mimoCatalogueUrl),
 	},
 } as const satisfies Record<string, ApiKeyProviderSpec>;
 
@@ -226,6 +264,30 @@ function readEndpoint(
 	});
 
 	return value || null;
+}
+
+/**
+ * The operator-facing refusal for a check that did not confirm the key, or
+ * null to proceed. Rejected and unverified read differently so a wrong key
+ * is not mistaken for an unreachable provider:
+ *
+ *   MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created
+ *   Could not verify the MiMo API key (MiMo model catalogue: could not be reached); the account was not created
+ */
+function credentialRefusal(
+	label: string,
+	surface: string,
+	outcome: CredentialCheckOutcome,
+): string | null {
+	switch (outcome.status) {
+		case "valid":
+		case "skipped":
+			return null;
+		case "rejected":
+			return `${surface} ${outcome.detail}; the ${label} account was not created`;
+		case "unverified":
+			return `Could not verify the ${label} API key (${surface}: ${outcome.detail}); the account was not created`;
+	}
 }
 
 /**
@@ -307,6 +369,23 @@ export function createApiKeyAccountAddHandler(
 				}
 			}
 
+			// Last, so a malformed field is reported without a round trip. A
+			// duplicate name is only caught by the insert below, so a duplicate
+			// with a bad key reports the key.
+			let verified: CredentialCheckOutcome | null = null;
+			if (spec.credentialCheck) {
+				verified = await spec.credentialCheck.run(
+					{ apiKey, customEndpoint },
+					req.signal,
+				);
+				const refusal = credentialRefusal(
+					spec.label,
+					spec.credentialCheck.surface,
+					verified,
+				);
+				if (refusal) return errorResponse(BadRequest(refusal));
+			}
+
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const token = spec.mirrorKeyToTokens ? apiKey : null;
@@ -343,12 +422,22 @@ export function createApiKeyAccountAddHandler(
 				name,
 			);
 
-			const openRouterMetadata = await refreshOpenRouterAccountMetadata(dbOps, {
+			// A valid OpenRouter check already read the key endpoint; store what it
+			// returned instead of asking again.
+			const metadataTarget = {
 				id: accountId,
 				provider: spec.provider,
 				api_key: apiKey,
 				custom_endpoint: customEndpoint,
-			});
+			};
+			const openRouterMetadata =
+				verified?.status === "valid"
+					? await storeOpenRouterAccountMetadata(
+							dbOps,
+							metadataTarget,
+							verified.metadata,
+						)
+					: await refreshOpenRouterAccountMetadata(dbOps, metadataTarget);
 
 			// Start polling here rather than in each caller: every API-key provider
 			// with a pollable window gets its usage bars filled on creation instead
