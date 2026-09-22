@@ -1,5 +1,7 @@
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 
+export const GROK_MODELS_ENDPOINT = "https://api.x.ai/v1/models";
+
 export class GrokProvider extends BaseAnthropicCompatibleProvider {
 	constructor() {
 		super({
