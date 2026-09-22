@@ -1381,6 +1381,56 @@ describe("client service integration", () => {
 			).toEqual(["low", "medium", "high", "xhigh", "max"]);
 		});
 
+		it("describes an unpinned alias from the targets the key can actually reach", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["gpt-5.4-mini"]);
+			// Neither target names an account, so reachability is decided purely by the
+			// key's provider exclusion — the case an explicit `accountIds` pin already
+			// covers in the `targets` filter.
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:reach",
+				displayName: "Reach",
+				revision: 0,
+				targets: [
+					{ model: "gpt-6-astra", accountIds: null },
+					{ model: "gpt-5.4-mini", accountIds: null },
+				],
+			});
+			const entry = {
+				id: "reach",
+				displayName: "Reach",
+				targetModel: alias.id,
+				accountIds: null,
+			};
+			const both = blank();
+			both.catalogues.openai.models = [entry];
+			const bothId = (await create(both)).client.apiKeyId;
+			// Both reachable: the shared floor across the two targets.
+			expect(
+				(await service.modelMetadata(bothId, "openai")).models.reach
+					?.supportedReasoningEfforts,
+			).toEqual(["low", "medium"]);
+
+			const excluded = blank();
+			excluded.name = "Codex only";
+			excluded.destinations.excludedProviders = ["openai-compatible"];
+			excluded.catalogues.openai.models = [entry];
+			const excludedId = (await create(excluded)).client.apiKeyId;
+			// gpt-5.4-mini has no route left, so it describes nothing rather than
+			// erasing what the one reachable target substantiates.
+			const metadata = (await service.modelMetadata(excludedId, "openai"))
+				.models.reach;
+			expect(metadata?.supportedReasoningEfforts).toEqual([
+				"low",
+				"medium",
+				"high",
+				"xhigh",
+				"max",
+			]);
+			expect(metadata?.reasoning).toBe(true);
+			expect(metadata?.contextWindow).toBe(872_000);
+		});
+
 		it("reduces limits and retention across fallback targets, pins, and live alias edits", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["fast-backup"]);
