@@ -505,7 +505,7 @@ export class ClientService {
 									winning.pool_provider === account.provider),
 						),
 				);
-				const targetMetadata = await Promise.all(
+				const targetResults = await Promise.all(
 					targets.map(async (aliasTarget) => {
 						const target = aliasTarget.model;
 						const pool =
@@ -617,8 +617,28 @@ export class ClientService {
 							cacheRoutes,
 							unresolvedRoutes,
 						);
-						return metadata;
+						// `cacheRoutes` gains an entry for exactly the permitted accounts, so
+						// an empty one with nothing unresolved means this key can reach no
+						// route for the target at all.
+						return {
+							metadata,
+							reachable: cacheRoutes.length > 0 || unresolvedRoutes,
+						};
 					}),
+				);
+				// A target routing can never pick describes nothing about the alias, and
+				// every reduction below requires EVERY target to substantiate a field —
+				// so folding its empty metadata in erases what the reachable targets do
+				// substantiate. The `targets` filter above already drops a target whose
+				// `accountIds` pin excludes every account; this is the same rule for one
+				// left unreachable by the key's provider pin or exclusions, which that
+				// filter cannot see. An account whose permissions were never read is NOT
+				// this case: it stays, and goes on forcing the alias unresolved.
+				// With no reachable target at all there is nothing better to say than
+				// what the full set said before.
+				const reached = targetResults.filter((result) => result.reachable);
+				const targetMetadata = (reached.length ? reached : targetResults).map(
+					(result) => result.metadata,
 				);
 				const metadata = reduceClientModelMetadata(targetMetadata);
 				const cachePolicy = reduceModelCachePolicies(
