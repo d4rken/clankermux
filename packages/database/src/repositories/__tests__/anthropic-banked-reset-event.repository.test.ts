@@ -117,6 +117,15 @@ describe("AnthropicBankedResetEventRepository", () => {
 			expect(await repo.findPendingForAccount("acc-1")).toHaveLength(1);
 		});
 
+		it("starts no new attempt, expiry or weekly, while a manual claim is pending", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			expect(await repo.claimAutoAttempt(AUTO)).toBeNull();
+			expect(
+				await repo.claimAutoAttempt({ ...AUTO, cause: "weekly-limit" }),
+			).toBeNull();
+			expect(await repo.findPendingForAccount("acc-1", "auto")).toEqual([]);
+		});
+
 		it("blocks a weekly claim while another auto attempt on the account is pending, but not an expiry claim", async () => {
 			await repo.claimAutoAttempt({ ...AUTO, grantId: "g_other" });
 			expect(
@@ -165,6 +174,52 @@ describe("AnthropicBankedResetEventRepository", () => {
 			expect(clash.kind).toBe("grant_mismatch");
 			expect(clash.row.grant_id).toBe("g_week_1");
 			expect(await repo.findRecentForAccount("acc-1", 10)).toHaveLength(1);
+		});
+
+		it("refuses a new request id while another claim on the account is pending, naming it", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			const blocked = await repo.beginManualAttempt({
+				...MANUAL,
+				grantId: "g_other",
+				requestId: "req-manual-2",
+				now: NOW + 1,
+			});
+			expect(blocked.kind).toBe("pending_other");
+			expect(blocked.row).toMatchObject({
+				request_id: "req-manual-1",
+				grant_id: "g_week_1",
+			});
+			expect(await repo.findByRequestId("acc-1", "req-manual-2")).toBeNull();
+		});
+
+		it("refuses a new manual claim while an auto claim is pending", async () => {
+			const auto = await repo.claimAutoAttempt(AUTO);
+			if (!auto) throw new Error("expected an auto claim");
+			const blocked = await repo.beginManualAttempt(MANUAL);
+			expect(blocked.kind).toBe("pending_other");
+			expect(blocked.row.request_id).toBe(auto.requestId);
+		});
+
+		it("still reconciles the pending claim's own request id", async () => {
+			const auto = await repo.claimAutoAttempt(AUTO);
+			if (!auto) throw new Error("expected an auto claim");
+			const replay = await repo.beginManualAttempt({
+				...MANUAL,
+				requestId: auto.requestId,
+			});
+			expect(replay.kind).toBe("existing");
+			expect(replay.row.id).toBe(auto.id);
+		});
+
+		it("accepts a new request id once the pending claim resolved", async () => {
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			await repo.resolveAttempt(row.id, { status: "reset", now: NOW + 1 });
+			const next = await repo.beginManualAttempt({
+				...MANUAL,
+				requestId: "req-manual-2",
+				now: NOW + 2,
+			});
+			expect(next.kind).toBe("created");
 		});
 
 		it("scopes request ids per account", async () => {
@@ -228,8 +283,19 @@ describe("AnthropicBankedResetEventRepository", () => {
 		});
 
 		it("filters pending rows by trigger, oldest first", async () => {
-			await repo.beginManualAttempt(MANUAL);
-			await repo.claimAutoAttempt({ ...AUTO, now: NOW + 10 });
+			// Only a database written before claims excluded each other holds
+			// two pending rows at once.
+			db.run(
+				`INSERT INTO anthropic_banked_reset_events (
+					id, account_id, account_name, grant_id, trigger, cause,
+					attempt_seq, request_id, status, created_at
+				) VALUES
+					('m1', 'acc-1', 'Claude One', 'g_week_1', 'manual', NULL, NULL,
+						'req-manual-1', 'pending', ?),
+					('acc-1:g_week_1:1', 'acc-1', 'Claude One', 'g_week_1', 'auto',
+						'expiry', 1, 'req-auto-1', 'pending', ?)`,
+				[NOW, NOW + 10],
+			);
 			expect(
 				(await repo.findPendingForAccount("acc-1")).map((r) => r.trigger),
 			).toEqual(["manual", "auto"]);
@@ -242,9 +308,9 @@ describe("AnthropicBankedResetEventRepository", () => {
 
 		it("expires rows pending for an hour or more to failed", async () => {
 			await repo.beginManualAttempt(MANUAL);
-			await repo.beginManualAttempt({
-				...MANUAL,
-				requestId: "req-fresh",
+			await repo.claimAutoAttempt({
+				...AUTO,
+				accountId: "acc-2",
 				now: NOW + 30 * 60_000,
 			});
 			expect(await repo.expireStalePending(NOW + HOUR - 1)).toBe(0);
@@ -254,9 +320,9 @@ describe("AnthropicBankedResetEventRepository", () => {
 			expect(expired?.status).toBe("failed");
 			expect(expired?.resolved_at).toBe(NOW + HOUR);
 			expect(expired?.error_message).not.toBeNull();
-			expect((await repo.findByRequestId("acc-1", "req-fresh"))?.status).toBe(
-				"pending",
-			);
+			expect(
+				(await repo.findPendingForAccount("acc-2")).map((r) => r.status),
+			).toEqual(["pending"]);
 		});
 	});
 
@@ -288,17 +354,18 @@ describe("AnthropicBankedResetEventRepository", () => {
 	});
 
 	it("lists recent events newest first", async () => {
-		await repo.beginManualAttempt(MANUAL);
-		await repo.beginManualAttempt({
-			...MANUAL,
-			requestId: "req-2",
-			now: NOW + 1,
-		});
-		await repo.beginManualAttempt({
-			...MANUAL,
-			requestId: "req-3",
-			now: NOW + 2,
-		});
+		for (const [requestId, at] of [
+			["req-manual-1", NOW],
+			["req-2", NOW + 1],
+			["req-3", NOW + 2],
+		] as const) {
+			const { row } = await repo.beginManualAttempt({
+				...MANUAL,
+				requestId,
+				now: at,
+			});
+			await repo.resolveAttempt(row.id, { status: "reset", now: at });
+		}
 		expect(
 			(await repo.findRecentForAccount("acc-1", 2)).map((r) => r.request_id),
 		).toEqual(["req-3", "req-2"]);

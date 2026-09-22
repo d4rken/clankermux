@@ -203,6 +203,28 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 	});
 });
 
+describe("POST /api/accounts/:id/banked-resets/claim — pending claim", () => {
+	it("answers 409 with the pending claim's request and grant ids", async () => {
+		const pending = mock(async () => ({
+			status: "failed" as const,
+			code: "pending_claim" as const,
+			message: "An earlier claim is unconfirmed",
+			pendingRequestId: "req-pending",
+			pendingGrantId: "g0",
+		}));
+		const res = await createAnthropicBankedResetClaimHandler(
+			dbOps({}),
+			pending,
+		)(post({ grantId: "g1", requestId: "r1" }), "acct-1");
+		expect(res.status).toBe(409);
+		expect(await res.json()).toEqual({
+			message: "An earlier claim is unconfirmed",
+			pendingRequestId: "req-pending",
+			pendingGrantId: "g0",
+		});
+	});
+});
+
 describe("POST /api/accounts/:id/banked-resets/refresh", () => {
 	it("forces a status read", async () => {
 		const refresh = mock(async () => ({ success: true, message: "ok" }));

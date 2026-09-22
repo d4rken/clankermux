@@ -449,8 +449,9 @@ export class AnthropicBankedResetCoordinator {
 
 	/**
 	 * The ledger row this claim resolves. A manual claim writes its row here;
-	 * a replayed request id is reconciled onto its existing row, and one bound
-	 * to another grant is refused. An auto claim's row was written by the
+	 * a replayed request id is reconciled onto its existing row, one bound to
+	 * another grant is refused, and so is a new one while another claim on the
+	 * account is pending. An auto claim's row was written by the
 	 * scheduler. A ledger failure never stops the claim.
 	 */
 	private async openLedgerRow(
@@ -508,6 +509,18 @@ export class AnthropicBankedResetCoordinator {
 						status: "failed",
 						code: "grant_mismatch",
 						message: `Request ${request.requestId} was already used for grant ${begin.row.grant_id}; generate a new request id.`,
+					},
+				};
+			}
+			if (begin.kind === "pending_other") {
+				return {
+					kind: "refused",
+					outcome: {
+						status: "failed",
+						code: "pending_claim",
+						message: `An earlier banked-reset claim for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
+						pendingRequestId: begin.row.request_id,
+						pendingGrantId: begin.row.grant_id,
 					},
 				};
 			}

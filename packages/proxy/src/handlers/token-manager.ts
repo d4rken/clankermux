@@ -1488,6 +1488,17 @@ export type AnthropicBankedResetClaimDispatchOutcome =
 			status: "failed";
 			code: "busy" | "grant_mismatch" | "account_state" | "error";
 			message: string;
+	  }
+	| {
+			/**
+			 * No request was sent: another claim on the account is unconfirmed,
+			 * and only a retry under its own request id may be sent.
+			 */
+			status: "failed";
+			code: "pending_claim";
+			message: string;
+			pendingRequestId: string;
+			pendingGrantId: string;
 	  };
 
 // Anthropic banked resets (Claude Code's `cedar_ember`): a status read on the

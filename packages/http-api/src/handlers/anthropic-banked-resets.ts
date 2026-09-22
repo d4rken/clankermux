@@ -169,6 +169,19 @@ export function createAnthropicBankedResetClaimHandler(
 			}
 
 			const dispatched = await claim(accountId, { grantId, requestId });
+			if (
+				dispatched.status === "failed" &&
+				dispatched.code === "pending_claim"
+			) {
+				return Response.json(
+					{
+						message: dispatched.message,
+						pendingRequestId: dispatched.pendingRequestId,
+						pendingGrantId: dispatched.pendingGrantId,
+					},
+					{ status: 409 },
+				);
+			}
 			if (dispatched.status === "failed") {
 				return dispatched.code === "error"
 					? errorResponse(InternalServerError(dispatched.message))

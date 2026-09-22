@@ -24,9 +24,11 @@ afterEach(async () => {
 });
 
 it("round-trips a manual and an auto attempt through the wrappers", async () => {
+	// A pending manual claim blocks new auto attempts on its account, so the
+	// manual one lives on another account.
 	const manual = await dbOps.beginManualAnthropicBankedResetAttempt({
-		accountId: "acc",
-		accountName: "Acc",
+		accountId: "acc-manual",
+		accountName: "Acc manual",
 		grantId: "g1",
 		requestId: "req-1",
 		grantEndsAt: null,
@@ -34,7 +36,8 @@ it("round-trips a manual and an auto attempt through the wrappers", async () => 
 	});
 	expect(manual.kind).toBe("created");
 	expect(
-		(await dbOps.getAnthropicBankedResetEventByRequestId("acc", "req-1"))?.id,
+		(await dbOps.getAnthropicBankedResetEventByRequestId("acc-manual", "req-1"))
+			?.id,
 	).toBe(manual.row.id);
 
 	const auto = await dbOps.claimAnthropicBankedResetAutoAttempt({
@@ -81,5 +84,10 @@ it("round-trips a manual and an auto attempt through the wrappers", async () => 
 		(await dbOps.getRecentAnthropicBankedResetEvents("acc", 10)).map(
 			(row) => row.status,
 		),
-	).toEqual(["reset", "failed"]);
+	).toEqual(["reset"]);
+	expect(
+		(await dbOps.getRecentAnthropicBankedResetEvents("acc-manual", 10)).map(
+			(row) => row.status,
+		),
+	).toEqual(["failed"]);
 });

@@ -391,7 +391,7 @@ function harness(
 				if (force) h.forcedReads++;
 				return true;
 			},
-			getPendingAutoAttempts: async () => options.pending ?? [],
+			getPendingAttempts: async () => options.pending ?? [],
 			getAutoApplyCooldownAnchorAt: async () => null,
 			getUsage: () =>
 				options.usage === undefined
@@ -553,6 +553,45 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.dispatched).toEqual([]);
 		expect(h.forcedReads).toBe(0);
+	});
+
+	it("starts no new attempt, and forces no read, while a manual claim is pending", async () => {
+		const manual = pendingRow({
+			id: "manual-row",
+			trigger: "manual",
+			cause: null,
+			attempt_seq: null,
+			request_id: "manual-request",
+		});
+		for (const accounts of [[weeklyOnly], [expiryOnly]]) {
+			const h = harness({ accounts, pending: [manual] });
+			await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+			expect(h.claims).toEqual([]);
+			expect(h.dispatched).toEqual([]);
+			expect(h.forcedReads).toBe(0);
+		}
+	});
+
+	it("still replays its own pending auto row beside a pending manual claim", async () => {
+		const h = harness({
+			accounts: [weeklyOnly],
+			pending: [
+				pendingRow({
+					id: "manual-row",
+					trigger: "manual",
+					cause: null,
+					attempt_seq: null,
+					request_id: "manual-request",
+					created_at: NOW - 120_000,
+				}),
+				pendingRow(),
+			],
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.claims).toEqual([]);
+		expect(h.dispatched.map((request) => request.requestId)).toEqual([
+			"stored-request",
+		]);
 	});
 
 	it("leaves a pending row dormant while its toggle is off", async () => {

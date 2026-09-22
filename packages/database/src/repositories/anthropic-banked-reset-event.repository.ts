@@ -48,11 +48,15 @@ export interface AnthropicBankedResetAutoClaim {
  * of a request id this account already used for the same grant; the caller
  * reconciles that row instead of starting a new claim. `grant_mismatch` means
  * the request id is bound to another grant and must not be sent.
+ * `pending_other` means another claim on the account (`row`, manual or auto)
+ * is still unconfirmed: a new request id could spend a second reset if that
+ * one landed, so only a retry under its own request id may be sent.
  */
 export type AnthropicBankedResetManualBegin =
 	| { kind: "created"; row: AnthropicBankedResetEventRow }
 	| { kind: "existing"; row: AnthropicBankedResetEventRow }
-	| { kind: "grant_mismatch"; row: AnthropicBankedResetEventRow };
+	| { kind: "grant_mismatch"; row: AnthropicBankedResetEventRow }
+	| { kind: "pending_other"; row: AnthropicBankedResetEventRow };
 
 export interface AnthropicBankedResetResolution {
 	status: AnthropicBankedResetEventResolvedStatus;
@@ -86,10 +90,11 @@ export const ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS = 60 * 60 * 1000;
 export class AnthropicBankedResetEventRepository extends BaseRepository<AnthropicBankedResetEventRow> {
 	/**
 	 * Claim (or reuse) the next auto attempt for a grant. A still-pending
-	 * attempt is returned as-is, cause included. Returns null when a
-	 * weekly-limit claim is blocked by another pending auto attempt on the
-	 * account; expiry claims are not blocked, so a stuck weekly attempt cannot
-	 * let a grant lapse.
+	 * attempt is returned as-is, cause included. Returns null while a manual
+	 * claim on the account is pending, and when a weekly-limit claim is blocked
+	 * by another pending auto attempt on the account; expiry claims are not
+	 * blocked by auto attempts, so a stuck weekly attempt cannot let a grant
+	 * lapse.
 	 */
 	async claimAutoAttempt(input: {
 		accountId: string;
@@ -114,9 +119,12 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				request_id, status, grant_ends_at, created_at
 			)
 			SELECT ?, ?, ?, ?, 'auto', ?, ?, ?, 'pending', ?, ?
-			WHERE ? = 'expiry' OR NOT EXISTS (
+			WHERE (? = 'expiry' OR NOT EXISTS (
 				SELECT 1 FROM anthropic_banked_reset_events
 				WHERE account_id = ? AND trigger = 'auto' AND status = 'pending'
+			)) AND NOT EXISTS (
+				SELECT 1 FROM anthropic_banked_reset_events
+				WHERE account_id = ? AND trigger = 'manual' AND status = 'pending'
 			)
 		`,
 			[
@@ -131,17 +139,23 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				input.now,
 				input.cause,
 				input.accountId,
+				input.accountId,
 			],
 		);
 		if (changes > 0) return { id, requestId, attemptSeq, reused: false };
 
-		// A concurrent claim won, or a pending attempt elsewhere on the account
-		// blocked this weekly claim. Reuse only a still-pending row for THIS grant.
+		// A concurrent claim won, or a pending manual claim or (for a weekly
+		// claim) a pending auto attempt blocked it. Reuse only a still-pending
+		// row for THIS grant.
 		const winner = await this.latestAutoRow(input.accountId, input.grantId);
 		return winner?.status === "pending" ? toAutoClaim(winner) : null;
 	}
 
-	/** Record a manual claim before its POST, reconciling a replayed request id. */
+	/**
+	 * Record a manual claim before its POST, reconciling a replayed request id.
+	 * The insert and the check for another pending claim are one statement, so
+	 * two new claims racing on one account cannot both be recorded.
+	 */
 	async beginManualAttempt(input: {
 		accountId: string;
 		accountName: string;
@@ -150,34 +164,52 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 		grantEndsAt: number | null;
 		now: number;
 	}): Promise<AnthropicBankedResetManualBegin> {
-		const changes = await this.runWithChanges(
-			`
-			INSERT OR IGNORE INTO anthropic_banked_reset_events (
-				id, account_id, account_name, grant_id, trigger, cause, attempt_seq,
-				request_id, status, grant_ends_at, created_at
-			)
-			VALUES (?, ?, ?, ?, 'manual', NULL, NULL, ?, 'pending', ?, ?)
-		`,
-			[
-				crypto.randomUUID(),
-				input.accountId,
-				input.accountName,
-				input.grantId,
-				input.requestId,
-				input.grantEndsAt,
-				input.now,
-			],
-		);
-		const row = await this.findByRequestId(input.accountId, input.requestId);
-		if (!row) {
-			throw new Error(
-				`Banked-reset ledger row for request ${input.requestId} vanished after insert`,
+		// The blocking row can resolve between the insert and the lookup, which
+		// leaves neither; the second pass then records the claim.
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const changes = await this.runWithChanges(
+				`
+				INSERT OR IGNORE INTO anthropic_banked_reset_events (
+					id, account_id, account_name, grant_id, trigger, cause,
+					attempt_seq, request_id, status, grant_ends_at, created_at
+				)
+				SELECT ?, ?, ?, ?, 'manual', NULL, NULL, ?, 'pending', ?, ?
+				WHERE NOT EXISTS (
+					SELECT 1 FROM anthropic_banked_reset_events
+					WHERE account_id = ? AND status = 'pending' AND request_id <> ?
+				)
+			`,
+				[
+					crypto.randomUUID(),
+					input.accountId,
+					input.accountName,
+					input.grantId,
+					input.requestId,
+					input.grantEndsAt,
+					input.now,
+					input.accountId,
+					input.requestId,
+				],
 			);
+			const row = await this.findByRequestId(input.accountId, input.requestId);
+			if (row) {
+				if (changes > 0) return { kind: "created", row };
+				return row.grant_id === input.grantId
+					? { kind: "existing", row }
+					: { kind: "grant_mismatch", row };
+			}
+			const blocking = await this.get<AnthropicBankedResetEventRow>(
+				`SELECT * FROM anthropic_banked_reset_events
+				 WHERE account_id = ? AND status = 'pending' AND request_id <> ?
+				 ORDER BY trigger = 'manual' DESC, created_at DESC, id DESC
+				 LIMIT 1`,
+				[input.accountId, input.requestId],
+			);
+			if (blocking) return { kind: "pending_other", row: blocking };
 		}
-		if (changes > 0) return { kind: "created", row };
-		return row.grant_id === input.grantId
-			? { kind: "existing", row }
-			: { kind: "grant_mismatch", row };
+		throw new Error(
+			`Banked-reset ledger row for request ${input.requestId} was not recorded`,
+		);
 	}
 
 	async findByRequestId(

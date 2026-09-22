@@ -19,7 +19,8 @@
  * clears a weekly window: a 5h-only grant is manual-only.
  *
  * Every tick replays due pending auto claims first, with their stored request
- * id. Discovery then reads only caches; a candidate it finds gets a forced
+ * id. An account with a pending manual claim starts no new attempt.
+ * Discovery then reads only caches; a candidate it finds gets a forced
  * status read (at most one per account per
  * {@link BANKED_RESET_CONFIRM_READ_INTERVAL_MS}) and the decision is taken on
  * that before the ledger claim.
@@ -312,7 +313,8 @@ export interface BankedResetApplyDeps {
 	getCachedStatus(accountId: string): AnthropicBankedResetStatus | null;
 	/** Non-forced is a cache-gated no-op while the status is fresh. */
 	refreshStatus(accountId: string, force: boolean): Promise<boolean>;
-	getPendingAutoAttempts(
+	/** Unresolved claims of either trigger, oldest first. */
+	getPendingAttempts(
 		accountId: string,
 	): Promise<AnthropicBankedResetEventRow[]>;
 	getAutoApplyCooldownAnchorAt(accountId: string): Promise<number | null>;
@@ -420,7 +422,8 @@ export class AnthropicBankedResetApplyScheduler {
 		const account = await this.deps.getAccount(id);
 		if (!account) return;
 
-		const pending = await this.deps.getPendingAutoAttempts(id);
+		const allPending = await this.deps.getPendingAttempts(id);
+		const pending = allPending.filter((row) => row.trigger === "auto");
 		if (pending.length > 0) {
 			const now = this.now();
 			// A backed-off claim holds the account until it is due: any new claim
@@ -447,6 +450,15 @@ export class AnthropicBankedResetApplyScheduler {
 			}
 			// The rest stay dormant until their toggle is back on or they expire,
 			// and must not block expiry protection meanwhile.
+		}
+
+		// An unconfirmed manual claim may already have spent a reset; a new
+		// attempt waits until it resolves or expires.
+		if (allPending.some((row) => row.trigger === "manual")) {
+			log.debug(
+				`Banked-reset applier: '${name}' has an unconfirmed manual claim; no new attempt`,
+			);
+			return;
 		}
 
 		if (account.anthropic_auto_apply_banked_resets_enabled) {
@@ -486,7 +498,7 @@ export class AnthropicBankedResetApplyScheduler {
 		});
 		if (!claim) {
 			log.debug(
-				`Banked-reset applier: claim refused for '${name}' grant ${decision.grantId} (another auto attempt is pending)`,
+				`Banked-reset applier: claim refused for '${name}' grant ${decision.grantId} (another claim is pending)`,
 			);
 			return;
 		}
@@ -696,8 +708,8 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 			anthropicBankedResetCache.get(accountId)?.status ?? null,
 		refreshStatus: async (accountId, force) =>
 			(await coordinator.refreshStatus(accountId, force)).success,
-		getPendingAutoAttempts: (accountId) =>
-			dbOps.getPendingAnthropicBankedResetAttempts(accountId, "auto"),
+		getPendingAttempts: (accountId) =>
+			dbOps.getPendingAnthropicBankedResetAttempts(accountId),
 		getAutoApplyCooldownAnchorAt: (accountId) =>
 			dbOps.getAnthropicBankedResetAutoApplyCooldownAnchorAt(accountId),
 		getUsage: readUsage,

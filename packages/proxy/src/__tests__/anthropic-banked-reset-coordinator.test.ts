@@ -427,6 +427,67 @@ describe("claim", () => {
 		expect(claim).not.toHaveBeenCalled();
 	});
 
+	it("refuses a manual claim under a new request id while a manual claim is pending, without a POST", async () => {
+		await realDbOps.beginManualAnthropicBankedResetAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			requestId: "req-unconfirmed",
+			grantEndsAt: null,
+			now: NOW - 30_000,
+		});
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g2",
+			requestId: "req-new",
+		});
+		expect(outcome).toMatchObject({
+			status: "failed",
+			code: "pending_claim",
+			pendingRequestId: "req-unconfirmed",
+			pendingGrantId: "g1",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(
+			await realDbOps.getAnthropicBankedResetEventByRequestId(
+				ACCOUNT_ID,
+				"req-new",
+			),
+		).toBeNull();
+	});
+
+	it("refuses a manual claim while an auto claim is pending, naming the auto row", async () => {
+		const auto = await realDbOps.claimAnthropicBankedResetAutoAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			grantEndsAt: null,
+			cause: "expiry",
+			now: NOW - 30_000,
+		});
+		if (!auto) throw new Error("expected an auto claim");
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-new",
+		});
+		expect(outcome).toMatchObject({
+			status: "failed",
+			code: "pending_claim",
+			pendingRequestId: auto.requestId,
+			pendingGrantId: "g1",
+		});
+		expect(claim).not.toHaveBeenCalled();
+
+		// Retrying with the pending row's own id replays it.
+		const replay = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: auto.requestId,
+		});
+		expect(replay.status === "completed" && replay.ledgerStatus).toBe("reset");
+		expect(claim.mock.calls.map((call) => call[2].requestId)).toEqual([
+			auto.requestId,
+		]);
+	});
+
 	it("answers a resolved request id from the ledger without a POST", async () => {
 		await coordinator().claim(ACCOUNT_ID, {
 			grantId: "g1",
