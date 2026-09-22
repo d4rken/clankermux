@@ -354,11 +354,17 @@ export function LiveActivityLanesView({
 				    than trailing the readouts: `active` and `req/min` change width
 				    every tick, and a control at the end of that row would shift under
 				    the pointer between clicks. Pinning them to a corner nothing else
-				    shares keeps them still. `items-start` so they stay on the title's
-				    line however far the description wraps. The two wrap onto separate
-				    lines rather than overflowing: together they are wider than a
-				    phone-width card's interior. */}
-				<div className="flex items-start justify-between gap-x-group">
+				    shares keeps them still. `sm:items-start` so they stay on the
+				    title's line however far the description wraps.
+
+				    Below `sm` they take a row of their own and wrap within it:
+				    together they are wider than a phone-width card's interior. That
+				    wrapper has to be shrinkable there — `flex-wrap` engages only once
+				    the container's own width is constrained below its content, and
+				    `shrink-0` pins it to max-content, so the constraint would never
+				    apply, both fieldsets would stay side by side, and the title column
+				    would be squeezed to nothing while the document overflowed. */}
+				<div className="flex flex-col gap-item sm:flex-row sm:items-start sm:justify-between sm:gap-x-group">
 					<div className="min-w-0">
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
@@ -368,7 +374,7 @@ export function LiveActivityLanesView({
 							its request.
 						</CardDescription>
 					</div>
-					<div className="flex shrink-0 flex-wrap items-center justify-end gap-item">
+					<div className="flex w-full min-w-0 flex-wrap items-center justify-end gap-item sm:w-auto sm:shrink-0">
 						{groupControl && (
 							<GroupSelector
 								value={groupControl.value}
