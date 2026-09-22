@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import {
+	consumeUpstreamReportedNoUsage,
+	resetUpstreamUsagePresence,
+} from "@clankermux/core";
 import { sanitizeHeaders, transformStreamingResponse } from "../stream";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -32,7 +36,7 @@ async function readStream(
  * Each payload is wrapped in `data: <payload>\n\n`. The last element
  * of `chunks` can be "[DONE]" to send the stream terminator.
  */
-function makeOpenAIStream(chunks: string[]): Response {
+function makeOpenAIStream(chunks: string[], requestId?: string): Response {
 	const encoder = new TextEncoder();
 	const lines = chunks.map((c) => `data: ${c}\n\n`).join("");
 	const body = new ReadableStream<Uint8Array>({
@@ -42,7 +46,12 @@ function makeOpenAIStream(chunks: string[]): Response {
 		},
 	});
 	return new Response(body, {
-		headers: { "content-type": "text/event-stream" },
+		headers: {
+			"content-type": "text/event-stream",
+			// What the proxy injects before `processResponse`, and the only way
+			// this transform can name the request it is translating.
+			...(requestId ? { "x-clankermux-request-id": requestId } : {}),
+		},
 	});
 }
 
@@ -311,6 +320,83 @@ describe("transformStreamingResponse — text responses", () => {
 				parsed.usage.cache_read_input_tokens +
 				parsed.usage.cache_creation_input_tokens,
 		).toBe(1_000);
+	});
+
+	describe("reporting that upstream sent no usage at all", () => {
+		// The required counts below are emitted either way, because the Anthropic
+		// shape demands them and a client SDK reads straight through them. The
+		// mark is how the collector, reading this same translated stream, learns
+		// they are this translator's placeholders rather than measurements.
+		//
+		// Marking and reading are module state, so they rely on running in ONE
+		// process. That holds because this transform hands `forwardToClient` a
+		// live in-memory stream, which does not cross a worker boundary; see the
+		// premise on `upstream-usage-presence`.
+		it("marks the request when no usage chunk ever arrives", async () => {
+			resetUpstreamUsagePresence();
+			const upstream = makeOpenAIStream(
+				[
+					JSON.stringify({
+						id: "c1",
+						model: "qwen3-coder-plus",
+						choices: [
+							{ index: 0, delta: { content: "Hi" }, finish_reason: null },
+						],
+					}),
+					"[DONE]",
+				],
+				"req-silent",
+			);
+			const events = parseSSEEvents(
+				await readStream(transformStreamingResponse(upstream).body),
+			);
+			const msgDelta = events.find((e) => e.event === "message_delta");
+			if (!msgDelta) throw new Error("expected message_delta event");
+			// The wire still carries what its shape requires.
+			expect(JSON.parse(dataOf(msgDelta)).usage.output_tokens).toBe(0);
+			// And the mark says those are placeholders. Read-once.
+			expect(consumeUpstreamReportedNoUsage("req-silent")).toBe(true);
+			expect(consumeUpstreamReportedNoUsage("req-silent")).toBe(false);
+		});
+
+		it("does NOT mark a request whose upstream did report usage", async () => {
+			resetUpstreamUsagePresence();
+			const upstream = makeOpenAIStream(
+				[
+					JSON.stringify({
+						id: "c1",
+						model: "qwen3-coder-plus",
+						choices: [
+							{ index: 0, delta: { content: "Hi" }, finish_reason: null },
+						],
+						usage: { prompt_tokens: 0, completion_tokens: 0 },
+					}),
+					"[DONE]",
+				],
+				"req-reported",
+			);
+			await readStream(transformStreamingResponse(upstream).body);
+			// A reported all-zero vector is a measurement and must survive.
+			expect(consumeUpstreamReportedNoUsage("req-reported")).toBe(false);
+		});
+
+		it("cannot mark a response that carries no request id", async () => {
+			// A known limit rather than a bug: with nothing to key on, the row
+			// falls back to the old behaviour. Pinned so it stays a decision.
+			resetUpstreamUsagePresence();
+			const upstream = makeOpenAIStream([
+				JSON.stringify({
+					id: "c1",
+					model: "qwen3-coder-plus",
+					choices: [
+						{ index: 0, delta: { content: "Hi" }, finish_reason: null },
+					],
+				}),
+				"[DONE]",
+			]);
+			await readStream(transformStreamingResponse(upstream).body);
+			expect(consumeUpstreamReportedNoUsage(undefined)).toBe(false);
+		});
 	});
 
 	it("leaves the prompt total alone when no cache detail is reported", async () => {

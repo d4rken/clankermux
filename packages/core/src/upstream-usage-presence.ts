@@ -17,6 +17,25 @@
  * The id comes from `x-clankermux-request-id`, which the proxy injects onto the
  * upstream response before `processResponse` runs precisely so a provider can
  * read it without the original request.
+ *
+ * PREMISE: the translation that marks and the finalization that reads run in
+ * the SAME process. This is module scope, so nothing is shared across a worker
+ * boundary; split them and every mark is written to one Set and read from
+ * another, the suppression silently stops, and the published contract would go
+ * on claiming the zeros are gone. That is worse than the defect it replaced.
+ *
+ * What holds it today is structural rather than incidental. Both run inside one
+ * `proxyWithAccount` call: `processResponse` hands `forwardToClient` a Response
+ * whose body is a live in-memory stream, which is not a thing that crosses a
+ * worker boundary. The proxy package spawns no workers at all; every `new
+ * Worker` in this repo is database maintenance or dashboard analytics, and
+ * none of them translates a provider response or collects usage.
+ *
+ * The temptation is specific and has been acted on before: usage finalization
+ * USED to run in a post-processor worker and was deliberately brought back onto
+ * the main thread. `packages/proxy/src/__tests__/response-handler-worker-protocol.test.ts`
+ * pins that retirement. If it is ever undone, this registry has to move with it
+ * or be replaced by something the two sides genuinely share.
  */
 
 /**

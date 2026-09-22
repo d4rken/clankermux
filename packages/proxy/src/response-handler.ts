@@ -178,6 +178,10 @@ function trackFinalize(
 	},
 	ctx: ProxyContext,
 ): void {
+	// Reads the upstream-usage presence mark the translator left for this id,
+	// which is module state and therefore this process's. Moving this call
+	// off-thread would silently stop the suppression it drives — see the premise
+	// on `upstream-usage-presence`.
 	const promise = finalizeUsage(state, { ...opts, requestId })
 		.then((summary) => {
 			// Diagnostic (observational only): an Anthropic stream that reached clean
