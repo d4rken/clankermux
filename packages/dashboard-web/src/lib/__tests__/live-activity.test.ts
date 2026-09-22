@@ -1168,6 +1168,25 @@ describe("buildLanes", () => {
 			expect(lanes[0].scope).toEqual({ kind: "client", apiKeyId: "key-1" });
 		});
 
+		it("labels a renamed key by the name recorded most recently", () => {
+			// Fed in the order the store holds them, newest name first, so a
+			// first-seen-wins label would come out "workstation". The live path
+			// records the name held at arrival and the history path the name the
+			// key has now; only the latest reading tracks the rename.
+			const { lanes } = buildLanes(
+				[
+					fromKey("b", "key-1", "workstation", T0),
+					fromKey("a", "key-1", "laptop", T0 + 1),
+				],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes[0].label).toBe("laptop");
+		});
+
 		it("does not merge two keys that share a name", () => {
 			const { lanes } = buildLanes(
 				[

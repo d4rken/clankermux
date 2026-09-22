@@ -537,7 +537,7 @@ export function buildLanes(
 	const cutoff = now - windowMs;
 	const byKey = new Map<
 		string,
-		{ value: string | null; name: string | null; events: LiveEvent[] }
+		{ value: string | null; events: LiveEvent[] }
 	>();
 
 	for (const event of events) {
@@ -546,12 +546,11 @@ export function buildLanes(
 		const key = laneKeyOf(dimension, value);
 		let bucket = byKey.get(key);
 		if (!bucket) {
-			bucket = { value, name: null, events: [] };
+			bucket = { value, events: [] };
 			byKey.set(key, bucket);
 		}
 		// Membership follows the value alone. The recorded name only labels the
 		// lane, so a key renamed mid-window still draws as one row.
-		bucket.name ??= spec.nameOf(event);
 		bucket.events.push(event);
 	}
 
@@ -591,14 +590,16 @@ export function buildLanes(
 	const toLaneFor = (key: string): Lane => {
 		const bucket = byKey.get(key) as {
 			value: string | null;
-			name: string | null;
 			events: LiveEvent[];
 		};
+		const events = sortByTime(bucket.events);
 		return toLane(
 			key,
-			bucket.value === null ? spec.emptyLabel : (bucket.name ?? bucket.value),
+			bucket.value === null
+				? spec.emptyLabel
+				: (latestName(events, spec) ?? bucket.value),
 			bucket.value === null ? spec.emptyScope : spec.scopeOf(bucket.value),
-			sortByTime(bucket.events),
+			events,
 			cutoff,
 		);
 	};
@@ -623,6 +624,26 @@ export function buildLanes(
 
 function sortByTime(events: LiveEvent[]): LiveEvent[] {
 	return [...events].sort((a, b) => a.ts - b.ts);
+}
+
+/**
+ * The name most recently recorded for a lane's value, from `events` ascending
+ * by time.
+ *
+ * Newest rather than first-seen: a live event carries the name held when the
+ * request arrived and a history row carries the name the key has now, so one
+ * key is routinely seen under two names and store order decides nothing. The
+ * latest reading is the one closest to what the key is called today.
+ */
+function latestName(
+	events: readonly LiveEvent[],
+	spec: LaneDimensionSpec,
+): string | null {
+	for (let i = events.length - 1; i >= 0; i--) {
+		const name = spec.nameOf(events[i]);
+		if (name !== null) return name;
+	}
+	return null;
 }
 
 function toLane(
