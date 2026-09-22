@@ -306,6 +306,56 @@ describe("GET /api/accounts/:id/banked-resets/events", () => {
 			resolvedAt: new Date(NOW + 1_000).toISOString(),
 		});
 	});
+
+	it("serves the request id of a pending manual claim, and only that one", async () => {
+		const base: AnthropicBankedResetEventRow = {
+			id: "row",
+			account_id: "acct-1",
+			account_name: "claude-one",
+			grant_id: "g1",
+			trigger: "manual",
+			cause: null,
+			attempt_seq: null,
+			request_id: "req",
+			status: "pending",
+			reason: null,
+			cleared: null,
+			resets_left: null,
+			error_message: "Anthropic answered unavailable",
+			grant_ends_at: null,
+			next_attempt_at: NOW + 60_000,
+			created_at: NOW,
+			resolved_at: null,
+		};
+		const rows: AnthropicBankedResetEventRow[] = [
+			{ ...base, id: "manual-pending", request_id: "manual-pending-req" },
+			{
+				...base,
+				id: "manual-reset",
+				request_id: "manual-reset-req",
+				status: "reset",
+				next_attempt_at: null,
+				resolved_at: NOW,
+			},
+			{
+				...base,
+				id: "auto-pending",
+				request_id: "auto-pending-req",
+				trigger: "auto",
+				cause: "expiry",
+				attempt_seq: 1,
+			},
+		];
+		const res = await createAnthropicBankedResetEventsHandler(
+			dbOps({}, { getRecentAnthropicBankedResetEvents: async () => rows }),
+		)(new URL("http://localhost/x"), "acct-1");
+		const body = await res.json();
+		expect(
+			body.events.map((event: { requestId?: string }) => event.requestId),
+		).toEqual(["manual-pending-req", undefined, undefined]);
+		expect(JSON.stringify(body)).not.toContain("manual-reset-req");
+		expect(JSON.stringify(body)).not.toContain("auto-pending-req");
+	});
 });
 
 describe("toAnthropicBankedResetsInfo", () => {

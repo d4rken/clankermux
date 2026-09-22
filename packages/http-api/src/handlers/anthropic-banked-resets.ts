@@ -326,10 +326,16 @@ export function toAnthropicBankedResetEventResponse(
 		nextAttemptAt: iso(row.next_attempt_at),
 		createdAt: new Date(row.created_at).toISOString(),
 		resolvedAt: iso(row.resolved_at),
+		...(row.trigger === "manual" && row.status === "pending"
+			? { requestId: row.request_id }
+			: {}),
 	};
 }
 
-/** Recent banked-reset ledger events, newest first, without request ids. */
+/**
+ * Recent banked-reset ledger events, newest first. Request ids are withheld
+ * except on pending manual claims, which only their request id can retry.
+ */
 export function createAnthropicBankedResetEventsHandler(
 	dbOps: DatabaseOperations,
 ) {

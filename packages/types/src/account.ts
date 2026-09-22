@@ -1054,6 +1054,11 @@ export interface AnthropicBankedResetEventResponse {
 	nextAttemptAt: string | null; // ISO
 	createdAt: string; // ISO
 	resolvedAt: string | null; // ISO
+	/**
+	 * Present only on a pending manual claim, so the dashboard can retry it
+	 * with the same request id after a reload.
+	 */
+	requestId?: string;
 }
 
 // UI display type - used in CLI and web dashboard
