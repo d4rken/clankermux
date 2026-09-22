@@ -149,15 +149,24 @@ export interface ClientReview {
 	precedingRules: string[];
 	notices: string[];
 }
-export type ClientBulkMode = "add" | "remove" | "replace";
-export interface ClientBulkOperation {
-	format: ClientFormat;
-	mode: ClientBulkMode;
-	/** add/replace: the entries. remove: only `id` is read. */
-	models: ClientModel[];
-	/** replace only; ignored for add/remove. */
-	defaultModel?: string | null;
-}
+export type ClientBulkOperation =
+	| {
+			format: ClientFormat;
+			/**
+			 * Drops every `remove` ID, then appends each `add` entry a client does
+			 * not already publish. An ID may appear in only one of the two lists.
+			 */
+			mode: "edit";
+			add: ClientModel[];
+			remove: string[];
+	  }
+	| {
+			format: ClientFormat;
+			mode: "replace";
+			models: ClientModel[];
+			defaultModel?: string | null;
+	  };
+export type ClientBulkMode = ClientBulkOperation["mode"];
 export interface ClientBulkClientResult {
 	apiKeyId: string;
 	name: string;
