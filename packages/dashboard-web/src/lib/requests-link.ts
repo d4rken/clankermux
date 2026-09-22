@@ -28,16 +28,28 @@ export function requestDetailsHref(id: string): string {
 /**
  * Requests page prefiltered to the requests a lane covers.
  *
- * Null for the overflow lane: it aggregates several projects, so no single
- * project filter expresses it and a link would silently show a subset.
+ * Null for the overflow lane: it aggregates several lanes, so no single filter
+ * expresses it and a link would silently show a subset.
  */
 export function laneRequestsHref(scope: LaneScope): string | null {
 	if (scope.kind === "other") return null;
-	const params =
-		scope.kind === "no-project"
-			? new URLSearchParams({ noProject: "1" })
-			: new URLSearchParams({ project: scope.project });
+	const params = paramsFor(scope);
 	return `/requests?${params.toString()}`;
+}
+
+function paramsFor(scope: Exclude<LaneScope, { kind: "other" }>) {
+	switch (scope.kind) {
+		case "project":
+			return new URLSearchParams({ project: scope.project });
+		case "no-project":
+			return new URLSearchParams({ noProject: "1" });
+		case "client":
+			// By id, never by name: the name form matches every key that has ever
+			// carried it, which is not the one lane the reader clicked.
+			return new URLSearchParams({ apiKeyId: scope.apiKeyId });
+		case "no-client":
+			return new URLSearchParams({ noApiKey: "1" });
+	}
 }
 
 /**

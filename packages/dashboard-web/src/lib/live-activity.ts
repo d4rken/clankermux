@@ -33,6 +33,16 @@ export interface LiveEvent {
 	tokensPerSecond: number | null;
 	/** Account display name where resolvable, else whatever the source gave. */
 	account: string | null;
+	/** The API key the request presented. `null` is a real state, not a gap:
+	 *  unprotected mode admits traffic that carries no key at all. */
+	apiKeyId: string | null;
+	/**
+	 * The key's name AS RECORDED by the source this event came from — the name
+	 * held at arrival on the live path, the key's current name on the history
+	 * path. One key can therefore be seen under two names, so this is a label
+	 * and {@link LiveEvent.apiKeyId} is the identity.
+	 */
+	apiKeyName: string | null;
 }
 
 /** Id-keyed store. Mutated in place by the `apply*` reducers below. */
@@ -125,6 +135,8 @@ function upsert(
 		durationMs: next.durationMs ?? prior?.durationMs ?? null,
 		tokensPerSecond: next.tokensPerSecond ?? prior?.tokensPerSecond ?? null,
 		account: next.account ?? prior?.account ?? null,
+		apiKeyId: next.apiKeyId ?? prior?.apiKeyId ?? null,
+		apiKeyName: next.apiKeyName ?? prior?.apiKeyName ?? null,
 	});
 	return true;
 }
@@ -152,6 +164,8 @@ function fromRequestResponse(
 		durationMs: finiteNonNegative(payload.responseTimeMs),
 		tokensPerSecond: finiteNonNegative(payload.tokensPerSecond),
 		account: resolveAccount(payload.accountUsed, ctx),
+		apiKeyId: payload.apiKeyId ?? null,
+		apiKeyName: payload.apiKeyName ?? null,
 		status: classifyOutcome(payload),
 	};
 }
@@ -184,6 +198,8 @@ export function applyStreamEvent(
 				ts: evt.timestamp,
 				project: evt.project,
 				model: evt.model,
+				apiKeyId: evt.apiKeyId,
+				apiKeyName: evt.apiKeyName,
 				status: "pending",
 			});
 
@@ -193,6 +209,8 @@ export function applyStreamEvent(
 				project: evt.project,
 				model: evt.model,
 				account: resolveAccount(evt.accountId, ctx),
+				apiKeyId: evt.apiKeyId,
+				apiKeyName: evt.apiKeyName,
 				status: "streaming",
 			});
 
@@ -242,6 +260,8 @@ function applySnapshot(
 				project: entry.project,
 				model: entry.model,
 				account: resolveAccount(entry.accountId, ctx),
+				apiKeyId: entry.apiKeyId,
+				apiKeyName: entry.apiKeyName,
 				status: entry.phase === "streaming" ? "streaming" : "pending",
 			}) || changed;
 	}
@@ -366,16 +386,31 @@ export function sweepLostEvents(
 export const OTHER_LANE_KEY = "other";
 /** Synthetic key for requests with no recorded project. */
 export const NO_PROJECT_LANE_KEY = "none";
+/** Synthetic key for requests that carried no API key. */
+export const NO_CLIENT_LANE_KEY = "no-client";
+
+/** Label for the lane holding requests that carried no API key. */
+export const NO_CLIENT_LABEL = "(no API key)";
+
+/** What one row of the card stands for: a project, or an API key. */
+export type LaneDimension = "project" | "client";
 
 /**
- * Stable lane key for a project.
+ * Stable lane key for one value in `dimension` — a project name or a key id.
  *
- * Real project names are namespaced under a `project:` prefix so neither a
- * project literally called `(no project)` nor one called `Other (3 projects)`
- * can be merged into a synthetic bucket by sharing its label.
+ * Real values are namespaced under a per-dimension prefix, so neither a project
+ * literally called `(no project)` nor one called `Other (3 projects)` can be
+ * merged into a synthetic bucket by sharing its label, and a project and a key
+ * id that happen to be the same string stay separate lanes.
  */
-export function laneKeyOf(project: string | null): string {
-	return project === null ? NO_PROJECT_LANE_KEY : `project:${project}`;
+export function laneKeyOf(
+	dimension: LaneDimension,
+	value: string | null,
+): string {
+	if (dimension === "client") {
+		return value === null ? NO_CLIENT_LANE_KEY : `client:${value}`;
+	}
+	return value === null ? NO_PROJECT_LANE_KEY : `project:${value}`;
 }
 
 /**
@@ -389,6 +424,8 @@ export function laneKeyOf(project: string | null): string {
 export type LaneScope =
 	| { kind: "project"; project: string }
 	| { kind: "no-project" }
+	| { kind: "client"; apiKeyId: string }
+	| { kind: "no-client" }
 	| { kind: "other" };
 
 export interface Lane {
@@ -424,17 +461,53 @@ export interface BuildLanesResult {
 	order: string[];
 }
 
+/** Everything the lane machinery below does differently per dimension. */
+interface LaneDimensionSpec {
+	/** The value a lane groups on. `null` goes to the empty bucket. */
+	valueOf: (event: LiveEvent) => string | null;
+	/** A name recorded alongside the value, where the value is not itself one. */
+	nameOf: (event: LiveEvent) => string | null;
+	emptyKey: string;
+	emptyLabel: string;
+	emptyScope: LaneScope;
+	scopeOf: (value: string) => LaneScope;
+	/** Singular noun for the overflow lane's count. */
+	noun: string;
+}
+
+const LANE_DIMENSIONS: Record<LaneDimension, LaneDimensionSpec> = {
+	project: {
+		valueOf: (event) => event.project,
+		nameOf: () => null,
+		emptyKey: NO_PROJECT_LANE_KEY,
+		emptyLabel: NO_PROJECT_LABEL,
+		emptyScope: { kind: "no-project" },
+		scopeOf: (project) => ({ kind: "project", project }),
+		noun: "project",
+	},
+	client: {
+		valueOf: (event) => event.apiKeyId,
+		nameOf: (event) => event.apiKeyName,
+		emptyKey: NO_CLIENT_LANE_KEY,
+		emptyLabel: NO_CLIENT_LABEL,
+		emptyScope: { kind: "no-client" },
+		scopeOf: (apiKeyId) => ({ kind: "client", apiKeyId }),
+		noun: "client",
+	},
+};
+
 /**
- * Group events into per-project lanes.
+ * Group events into lanes, one per project or per API key.
  *
- * `maxLanes` bounds the NAMED project lanes only. The `(no project)` bucket is
- * not a project — spending a named slot on it pushed a real project into the
- * overflow lane and made that lane's "Other (N projects)" label count a bucket
- * that is not a project at all. It therefore gets its own row, held at its
- * sticky position like any other lane and simply not counted against the quota;
- * it never folds into the overflow lane, which appears only when named projects
- * genuinely overflow and counts named projects only. The card is thus at most
- * `maxLanes + 2` rows.
+ * `maxLanes` bounds the NAMED lanes only. The empty bucket — `(no project)`, or
+ * the requests that carried no key — is not one of the things being counted:
+ * spending a named slot on it pushed a real project into the overflow lane and
+ * made that lane's "Other (N projects)" label count a bucket that is not a
+ * project at all. It therefore gets its own row, held at its sticky position
+ * like any other lane and simply not counted against the quota; it never folds
+ * into the overflow lane, which appears only when named lanes genuinely
+ * overflow and counts named lanes only. The card is thus at most `maxLanes + 2`
+ * rows.
  *
  * Ordering is STICKY. A lane keeps its row for as long as it has events in the
  * window, and new lanes are appended below the existing ones (busiest first
@@ -454,25 +527,31 @@ export interface BuildLanesResult {
  */
 export function buildLanes(
 	events: readonly LiveEvent[],
+	dimension: LaneDimension,
 	now: number,
 	windowMs: number,
 	maxLanes: number,
 	previousOrder: readonly string[] = [],
 ): BuildLanesResult {
+	const spec = LANE_DIMENSIONS[dimension];
 	const cutoff = now - windowMs;
 	const byKey = new Map<
 		string,
-		{ project: string | null; events: LiveEvent[] }
+		{ value: string | null; name: string | null; events: LiveEvent[] }
 	>();
 
 	for (const event of events) {
 		if (event.ts < cutoff && !isActiveStatus(event.status)) continue;
-		const key = laneKeyOf(event.project);
+		const value = spec.valueOf(event);
+		const key = laneKeyOf(dimension, value);
 		let bucket = byKey.get(key);
 		if (!bucket) {
-			bucket = { project: event.project, events: [] };
+			bucket = { value, name: null, events: [] };
 			byKey.set(key, bucket);
 		}
+		// Membership follows the value alone. The recorded name only labels the
+		// lane, so a key renamed mid-window still draws as one row.
+		bucket.name ??= spec.nameOf(event);
 		bucket.events.push(event);
 	}
 
@@ -488,16 +567,16 @@ export function buildLanes(
 		);
 	const order = [...surviving, ...entrants];
 
-	// The quota is spent on named projects only. The no-project bucket keeps its
-	// sticky position in `order` — pulling it out and re-appending it would move
-	// its row every time a new named project sent its first request — it is
-	// simply not counted against `maxLanes`, and never folds into (or is counted
-	// by) the overflow lane.
+	// The quota is spent on named lanes only. The empty bucket keeps its sticky
+	// position in `order` — pulling it out and re-appending it would move its row
+	// every time a new named lane sent its first request — it is simply not
+	// counted against `maxLanes`, and never folds into (or is counted by) the
+	// overflow lane.
 	const direct: string[] = [];
 	const overflow: string[] = [];
 	let namedTaken = 0;
 	for (const key of order) {
-		if (key === NO_PROJECT_LANE_KEY) {
+		if (key === spec.emptyKey) {
 			direct.push(key);
 			continue;
 		}
@@ -511,15 +590,14 @@ export function buildLanes(
 
 	const toLaneFor = (key: string): Lane => {
 		const bucket = byKey.get(key) as {
-			project: string | null;
+			value: string | null;
+			name: string | null;
 			events: LiveEvent[];
 		};
 		return toLane(
 			key,
-			bucket.project ?? NO_PROJECT_LABEL,
-			bucket.project === null
-				? { kind: "no-project" }
-				: { kind: "project", project: bucket.project },
+			bucket.value === null ? spec.emptyLabel : (bucket.name ?? bucket.value),
+			bucket.value === null ? spec.emptyScope : spec.scopeOf(bucket.value),
 			sortByTime(bucket.events),
 			cutoff,
 		);
@@ -532,7 +610,7 @@ export function buildLanes(
 		lanes.push(
 			toLane(
 				OTHER_LANE_KEY,
-				`Other (${overflow.length} project${overflow.length === 1 ? "" : "s"})`,
+				`Other (${overflow.length} ${spec.noun}${overflow.length === 1 ? "" : "s"})`,
 				{ kind: "other" },
 				sortByTime(merged),
 				cutoff,

@@ -999,7 +999,15 @@ export function LiveActivityLanes() {
 	 */
 	const orderRef = useRef<string[]>([]);
 	const { lanes, order } = useMemo(
-		() => buildLanes(events, renderNow, windowMs, MAX_LANES, orderRef.current),
+		() =>
+			buildLanes(
+				events,
+				"project",
+				renderNow,
+				windowMs,
+				MAX_LANES,
+				orderRef.current,
+			),
 		[events, renderNow, windowMs],
 	);
 	orderRef.current = order;

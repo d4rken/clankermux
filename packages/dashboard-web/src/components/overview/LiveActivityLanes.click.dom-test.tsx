@@ -44,6 +44,8 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		durationMs: 1200,
 		tokensPerSecond: null,
 		account: "backup2-darken",
+		apiKeyId: null,
+		apiKeyName: null,
 		...over,
 	};
 }
@@ -53,6 +55,7 @@ const lanes: Lane[] = buildLanes(
 		event({ id: "recent", ts: T0 - 5_000 }),
 		event({ id: "older", ts: T0 - 150_000 }),
 	],
+	"project",
 	T0,
 	WINDOW,
 	6,

@@ -37,6 +37,8 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		durationMs: 1200,
 		tokensPerSecond: null,
 		account: "backup2-darken",
+		apiKeyId: null,
+		apiKeyName: null,
 		...over,
 	};
 }
@@ -45,7 +47,7 @@ function render(
 	props: Partial<Parameters<typeof LiveActivityLanesView>[0]> = {},
 ) {
 	const lanes: Lane[] =
-		props.lanes ?? buildLanes([event()], T0, WINDOW, 6).lanes;
+		props.lanes ?? buildLanes([event()], "project", T0, WINDOW, 6).lanes;
 	return renderToStaticMarkup(
 		<LiveActivityLanesView
 			lanes={lanes}
@@ -113,6 +115,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 					event({ id: "a", model: "claude-opus-5" }),
 					event({ id: "b", model: "claude-sonnet-5" }),
 				],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -132,6 +135,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 					event({ id: "a", model: "claude-opus-5", status: "rate_limited" }),
 					event({ id: "b", model: "claude-sonnet-5", status: "error" }),
 				],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -153,6 +157,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 		const markup = render({
 			lanes: buildLanes(
 				[event({ id: "a", model: "claude-fable-5", status: "pending" })],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -175,6 +180,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 					event({ id: "b", model: "claude-sonnet-5" }),
 					event({ id: "c", model: "claude-fable-5" }),
 				],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -215,7 +221,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 			event({ id: "rare", model: "claude-opus-4.8" }),
 		];
 		const markup = render({
-			lanes: buildLanes(events, T0, WINDOW, 6).lanes,
+			lanes: buildLanes(events, "project", T0, WINDOW, 6).lanes,
 		});
 
 		const legend = legendOf(markup);
@@ -246,6 +252,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 					]),
 					event({ id: "rare", model: "claude-opus-4.8" }),
 				],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -264,6 +271,7 @@ describe("LiveActivityLanesView colour encoding", () => {
 					event({ id: "a", model: "gpt-5.6-sol" }),
 					event({ id: "b", model: "claude-opus-5" }),
 				],
+				"project",
 				T0,
 				WINDOW,
 				6,
@@ -294,6 +302,7 @@ describe("LiveActivityLanesView", () => {
 				event({ id: "b", tokens: 2_000, status: "rate_limited" }),
 				event({ id: "c", tokens: 3_000, status: "error" }),
 			],
+			"project",
 			T0,
 			WINDOW,
 			6,
@@ -311,7 +320,7 @@ describe("LiveActivityLanesView", () => {
 	it("gives each status its own shape, so nothing is colour-alone", () => {
 		const shapeFor = (status: LiveStatus) =>
 			render({
-				lanes: buildLanes([event({ status })], T0, WINDOW, 6).lanes,
+				lanes: buildLanes([event({ status })], "project", T0, WINDOW, 6).lanes,
 			});
 
 		// 429 is a triangle, a hard failure is a cross, in-flight work is a
@@ -327,13 +336,24 @@ describe("LiveActivityLanesView", () => {
 		// situations — one may be a stall, the other never is.
 		expect(
 			render({
-				lanes: buildLanes([event({ status: "pending" })], T0, WINDOW, 6).lanes,
+				lanes: buildLanes(
+					[event({ status: "pending" })],
+					"project",
+					T0,
+					WINDOW,
+					6,
+				).lanes,
 			}),
 		).toContain("stroke-dasharray");
 		expect(
 			render({
-				lanes: buildLanes([event({ status: "streaming" })], T0, WINDOW, 6)
-					.lanes,
+				lanes: buildLanes(
+					[event({ status: "streaming" })],
+					"project",
+					T0,
+					WINDOW,
+					6,
+				).lanes,
 			}),
 		).not.toContain("stroke-dasharray");
 	});
@@ -347,6 +367,7 @@ describe("LiveActivityLanesView", () => {
 	it("reports the in-flight count and the request rate", () => {
 		const lanes = buildLanes(
 			[event({ id: "a", status: "streaming" }), event({ id: "b" })],
+			"project",
 			T0,
 			WINDOW,
 			6,
@@ -370,7 +391,13 @@ describe("LiveActivityLanesView", () => {
 	});
 
 	it("links the no-project lane to the empty bucket, not to a name", () => {
-		const lanes = buildLanes([event({ project: null })], T0, WINDOW, 6).lanes;
+		const lanes = buildLanes(
+			[event({ project: null })],
+			"project",
+			T0,
+			WINDOW,
+			6,
+		).lanes;
 
 		expect(render({ lanes })).toContain('href="/requests?noProject=1"');
 	});
@@ -383,7 +410,7 @@ describe("LiveActivityLanesView", () => {
 				event({ id: `${p}-${n}`, project: p, ts: T0 - 1000 * n }),
 			),
 		);
-		const lanes = buildLanes(events, T0, WINDOW, 1).lanes;
+		const lanes = buildLanes(events, "project", T0, WINDOW, 1).lanes;
 		const html = render({ lanes });
 
 		expect(html).toContain("Other (2 projects)");
@@ -577,6 +604,7 @@ describe("hitTest", () => {
 			event({ id: "recent", ts: T0 - 5_000 }),
 			event({ id: "other-lane", ts: T0 - 5_000, project: "herdr" }),
 		],
+		"project",
 		T0,
 		WINDOW,
 		6,
