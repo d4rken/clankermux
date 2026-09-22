@@ -410,6 +410,11 @@ export interface AccountRow {
 	peak_hours_pause_enabled?: boolean | number | null;
 	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
 	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
+	anthropic_auto_apply_banked_resets_enabled?: boolean | number | null;
+	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled?:
+		| boolean
+		| number
+		| null;
 	custom_endpoint?: string | null;
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
@@ -470,6 +475,8 @@ export interface Account {
 	peak_hours_pause_enabled: boolean;
 	codex_auto_apply_reset_credits_enabled: boolean;
 	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
+	anthropic_auto_apply_banked_resets_enabled: boolean;
+	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
@@ -592,6 +599,10 @@ export interface AccountResponse {
 	autoApplyResetCreditsEnabled?: boolean;
 	/** Codex-only: auto-consume at the weekly limit with no usable Codex alternative; respects account pins and manual pauses (opt-in). */
 	autoApplyResetOnWeeklyLimitEnabled?: boolean;
+	/** Anthropic-OAuth-only: claim a banked reset grant before it expires unused (opt-in). */
+	autoApplyBankedResetsEnabled?: boolean;
+	/** Anthropic-OAuth-only: claim a banked reset grant when the account hits a weekly limit it clears (opt-in). */
+	autoApplyBankedResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
@@ -965,6 +976,10 @@ export function toAccount(row: AccountRow): Account {
 			!!row.codex_auto_apply_reset_credits_enabled,
 		codex_auto_apply_reset_on_weekly_limit_enabled:
 			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
+		anthropic_auto_apply_banked_resets_enabled:
+			!!row.anthropic_auto_apply_banked_resets_enabled,
+		anthropic_auto_apply_banked_reset_on_weekly_limit_enabled:
+			!!row.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
@@ -1062,6 +1077,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 			account.codex_auto_apply_reset_credits_enabled,
 		autoApplyResetOnWeeklyLimitEnabled:
 			account.codex_auto_apply_reset_on_weekly_limit_enabled,
+		autoApplyBankedResetsEnabled:
+			account.anthropic_auto_apply_banked_resets_enabled,
+		autoApplyBankedResetOnWeeklyLimitEnabled:
+			account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 		customEndpoint: account.custom_endpoint,
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache

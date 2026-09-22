@@ -35,6 +35,8 @@ function makeAccount(overrides: Partial<Account>): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		codex_auto_apply_reset_on_weekly_limit_enabled: false,
+		anthropic_auto_apply_banked_resets_enabled: false,
+		anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: false,
 		custom_endpoint: null,
 		model_mappings: null,
 		model_fallbacks: null,

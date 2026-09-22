@@ -1660,6 +1660,26 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async setAnthropicAutoApplyBankedResetsEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET anthropic_auto_apply_banked_resets_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
+	async setAnthropicAutoApplyBankedResetOnWeeklyLimitEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET anthropic_auto_apply_banked_reset_on_weekly_limit_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
 	async hasAccountsForProvider(provider: string): Promise<boolean> {
 		return this.accounts.hasAccountsForProvider(provider);
 	}

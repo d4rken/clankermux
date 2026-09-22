@@ -487,6 +487,8 @@ export async function listAccountResponses(
 			peak_hours_pause_enabled: 0 | 1;
 			codex_auto_apply_reset_credits_enabled: 0 | 1;
 			codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
+			anthropic_auto_apply_banked_resets_enabled: 0 | 1;
+			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
@@ -544,6 +546,8 @@ export async function listAccountResponses(
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
 					COALESCE(codex_auto_apply_reset_on_weekly_limit_enabled, 0) as codex_auto_apply_reset_on_weekly_limit_enabled,
+					COALESCE(anthropic_auto_apply_banked_resets_enabled, 0) as anthropic_auto_apply_banked_resets_enabled,
+					COALESCE(anthropic_auto_apply_banked_reset_on_weekly_limit_enabled, 0) as anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 
 					billing_type,
 					pause_reason,
@@ -1251,6 +1255,11 @@ export async function listAccountResponses(
 						account.codex_auto_apply_reset_credits_enabled === 1,
 					autoApplyResetOnWeeklyLimitEnabled:
 						account.codex_auto_apply_reset_on_weekly_limit_enabled === 1,
+					autoApplyBankedResetsEnabled:
+						account.anthropic_auto_apply_banked_resets_enabled === 1,
+					autoApplyBankedResetOnWeeklyLimitEnabled:
+						account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled ===
+						1,
 					customEndpoint: account.custom_endpoint,
 					usageUtilization,
 					usageWindow,

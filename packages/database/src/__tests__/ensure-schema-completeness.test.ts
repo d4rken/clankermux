@@ -88,6 +88,8 @@ describe("ensureSchema completeness", () => {
 			"peak_hours_pause_enabled",
 			"codex_auto_apply_reset_credits_enabled",
 			"codex_auto_apply_reset_on_weekly_limit_enabled",
+			"anthropic_auto_apply_banked_resets_enabled",
+			"anthropic_auto_apply_banked_reset_on_weekly_limit_enabled",
 			"pause_reason",
 			"rate_limited_reason",
 			"rate_limited_at",

@@ -58,6 +58,8 @@ export function ensureSchema(db: Database): void {
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
+			anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0,
+			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
 			rate_limited_reason TEXT,
 			rate_limited_at INTEGER,
@@ -1734,6 +1736,19 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_organization_uuid",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_organization_uuid TEXT",
+	},
+	// Opt-in per-account toggles for Anthropic banked resets (Claude Code's
+	// cedar_ember grants): claim a grant before it expires unused, and claim
+	// one when the account hits a weekly limit a grant clears. Default OFF.
+	{
+		table: "accounts",
+		column: "anthropic_auto_apply_banked_resets_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	{
+		table: "accounts",
+		column: "anthropic_auto_apply_banked_reset_on_weekly_limit_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0",
 	},
 ];
 
