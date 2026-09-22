@@ -15,6 +15,12 @@ export {
 	NATIVE_DISCOVERY_PROVIDERS,
 } from "./account-model-permissions";
 export {
+	AnthropicBankedResetApplyScheduler,
+	type BankedResetApplyDeps,
+	createAnthropicBankedResetApplyScheduler,
+	decideBankedResetAction,
+} from "./anthropic-banked-reset-applier";
+export {
 	AnthropicBankedResetCoordinator,
 	type AnthropicBankedResetCoordinatorDeps,
 	bankedResetsLeftTotal,
