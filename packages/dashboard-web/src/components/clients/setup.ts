@@ -1,8 +1,9 @@
-import type {
-	ClientApplication,
-	ClientFormat,
-	ClientModel,
-	ClientModelMetadata,
+import {
+	ALIAS_REASONING_EFFORTS,
+	type ClientApplication,
+	type ClientFormat,
+	type ClientModel,
+	type ClientModelMetadata,
 } from "@clankermux/types";
 export const APPLICATIONS: Record<ClientApplication, string> = {
 	generic: "Generic / script",
@@ -82,6 +83,41 @@ function piFields(metadata: ClientModelMetadata | undefined) {
 			: { maxTokens: metadata.maxOutputTokens }),
 	};
 }
+/**
+ * Pi's `thinkingLevelMap` for the efforts this route is known to accept.
+ *
+ * Pi keeps an unmapped level and passes its name through verbatim, except
+ * `xhigh`/`max`, which need an explicit entry to be selectable at all. So the
+ * whole canonical set has to be written out: an effort the route does NOT
+ * accept is `null` (removed), not absent (kept). Without a substantiated list
+ * there is no map — today that is every alias, whose Claude target contributes
+ * no effort profile.
+ *
+ * `off` is always `null`. Pi's own default for an unmapped `off` is to send
+ * `reasoning: { effort: "none" }` on every non-thinking request, and `none` is
+ * outside this proxy's effort vocabulary — `resolveReasoningEffort` throws on
+ * it, and only the Codex provider's own special case keeps that from surfacing.
+ * `null` makes Pi send no reasoning field instead.
+ *
+ * Oh My Pi does not get this key: whether its loader accepts it is unverified,
+ * the same reason `tiers` is left out of its cost block.
+ */
+function piThinkingLevelMap(metadata: ClientModelMetadata | undefined) {
+	const efforts = metadata?.supportedReasoningEfforts;
+	if (!efforts?.length) return {};
+	return {
+		thinkingLevelMap: {
+			off: null,
+			...Object.fromEntries(
+				ALIAS_REASONING_EFFORTS.map((effort) => [
+					effort,
+					efforts.includes(effort) ? effort : null,
+				]),
+			),
+		},
+	};
+}
+
 /** OpenCode's cost keys, which are snake_case where Pi's are camelCase. */
 function openCodeCost(metadata: ClientModelMetadata | undefined) {
 	const cost = metadata?.cost;
@@ -225,6 +261,7 @@ export function clientSetup(
 								id: m.id,
 								name: m.displayName,
 								...piFields(m.metadata),
+								...piThinkingLevelMap(m.metadata),
 								...(m.metadata?.cost ? { cost: m.metadata.cost } : {}),
 							})),
 						},

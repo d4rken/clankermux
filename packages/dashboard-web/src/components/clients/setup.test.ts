@@ -211,6 +211,41 @@ it("declares Pi's limits, modalities and tiered rates under Pi's own names", () 
 	expect(second).toEqual({ id: "b", name: "B" });
 });
 
+it("maps Pi's thinking levels onto the efforts the route accepts", () => {
+	const snippet = clientSetup("pi", "http://host", "key", "a", [
+		model("a", {
+			...full,
+			supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+		}),
+		model("b", { ...full, supportedReasoningEfforts: ["low", "medium"] }),
+		model("c", full),
+	]).snippet;
+	const [first, second, third] =
+		JSON.parse(snippet).providers.clankermux.models;
+	expect(first.thinkingLevelMap).toEqual({
+		off: null,
+		minimal: null,
+		low: "low",
+		medium: "medium",
+		high: "high",
+		xhigh: "xhigh",
+		max: "max",
+	});
+	// An effort the route does not accept must be null, not absent: Pi keeps an
+	// unmapped low/medium/high and would offer a level the alias rejects.
+	expect(second.thinkingLevelMap).toEqual({
+		off: null,
+		minimal: null,
+		low: "low",
+		medium: "medium",
+		high: null,
+		xhigh: null,
+		max: null,
+	});
+	// No substantiated effort list (every alias today): no claim about thinking.
+	expect(third).not.toHaveProperty("thinkingLevelMap");
+});
+
 it("writes the same fields as Oh My Pi YAML, without the tiers it does not document", () => {
 	const snippet = clientSetup("oh-my-pi", "http://host", "key", "a", [
 		model("a", full),
@@ -235,6 +270,11 @@ it("writes the same fields as Oh My Pi YAML, without the tiers it does not docum
 	);
 	expect(snippet).not.toContain("tiers");
 	expect(snippet).not.toContain("inputTokensAbove");
+	expect(
+		clientSetup("oh-my-pi", "http://host", "key", "a", [
+			model("a", { ...full, supportedReasoningEfforts: ["low", "medium"] }),
+		]).snippet,
+	).not.toContain("thinkingLevelMap");
 });
 
 it("nests OpenCode's limit and renames its cache rates", () => {
