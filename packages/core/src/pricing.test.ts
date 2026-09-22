@@ -169,6 +169,55 @@ describe("bundled Opus pricing (offline fallback)", () => {
 	});
 });
 
+describe("1-hour cache writes", () => {
+	// Opus 5: $5/M input, so a 5-minute write is $6.25/M and a 1-hour write
+	// $10/M.
+	it("charges the 1-hour share of the writes at 2x input", async () => {
+		expect(
+			await estimateCostUSD("claude-opus-5", {
+				cacheCreationInputTokens: 1_000_000,
+				cacheCreation1hInputTokens: 400_000,
+			}),
+		).toBeCloseTo(0.6 * 6.25 + 0.4 * 10, 6);
+	});
+
+	it("charges writes that are all 1-hour at 2x input", async () => {
+		expect(
+			await estimateCostUSD("claude-opus-5", {
+				cacheCreationInputTokens: 1_000_000,
+				cacheCreation1hInputTokens: 1_000_000,
+			}),
+		).toBeCloseTo(10, 6);
+	});
+
+	it("never charges more 1-hour tokens than were written", async () => {
+		expect(
+			await estimateCostUSD("claude-opus-5", {
+				cacheCreationInputTokens: 1_000_000,
+				cacheCreation1hInputTokens: 3_000_000,
+			}),
+		).toBeCloseTo(10, 6);
+	});
+
+	it("keeps the 5-minute rate when no split was reported", async () => {
+		expect(
+			await estimateCostUSD("claude-opus-5", {
+				cacheCreationInputTokens: 1_000_000,
+			}),
+		).toBeCloseTo(6.25, 6);
+	});
+
+	it("uses the model's own input rate, not a tier constant", async () => {
+		// Opus 5.5: $4/M input, 1-hour write $8/M.
+		expect(
+			await estimateCostUSD("claude-opus-5-5", {
+				cacheCreationInputTokens: 1_000_000,
+				cacheCreation1hInputTokens: 1_000_000,
+			}),
+		).toBeCloseTo(8, 6);
+	});
+});
+
 describe("bundled cost fields backfill a partial remote entry", () => {
 	// models.dev can list a freshly-released model before it carries cache
 	// pricing. Merging "remote wins wholesale" would then leave the merged entry

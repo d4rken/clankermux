@@ -15,6 +15,7 @@ test("CLI repairs only scoped NULL costs, using recorded providers before accoun
 			[model]: { id: model, cost: { input: 2, output: 8, cache_read: 0.2 } },
 			"other-model": { id: "other-model", cost: { input: 3, output: 9 } },
 			"free-input": { id: "free-input", cost: { input: 0, output: 1 } },
+			"cached-model": { id: "cached-model", cost: { input: 4, output: 20, cache_write: 5 } },
 		} },
 	};
 	mkdirSync(join(dir, "clankermux"));
@@ -26,12 +27,12 @@ test("CLI repairs only scoped NULL costs, using recorded providers before accoun
 		CREATE TABLE requests (id TEXT PRIMARY KEY, timestamp INTEGER, model TEXT,
 		 account_used TEXT, cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER,
 		 cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
-		 estimated_cost_usd REAL, cost_source TEXT);
+		 estimated_cost_usd REAL, cost_source TEXT, cache_creation_1h_input_tokens INTEGER);
 		CREATE TABLE routing_attempts (id TEXT PRIMARY KEY, request_id TEXT,
 		 account_id TEXT, provider TEXT, kind TEXT, started_at INTEGER);
 		INSERT INTO accounts VALUES ('changed', 'bothub'), ('legacy', 'codex');
 	`);
-	const insert = db.query("INSERT INTO requests VALUES (?, 100, ?, ?, ?, 1000000, 0, ?, 0, NULL, 'unknown')");
+	const insert = db.query("INSERT INTO requests VALUES (?, 100, ?, ?, ?, 1000000, 0, ?, 0, NULL, 'unknown', NULL)");
 	insert.run("recorded", model, "changed", null, 1000000);
 	insert.run("deleted-account", model, "deleted", null, 1000000);
 	insert.run("fallback", model, "legacy", null, 1000000);
@@ -42,6 +43,8 @@ test("CLI repairs only scoped NULL costs, using recorded providers before accoun
 	insert.run("other", "other-model", "legacy", null, 0);
 	insert.run("free", "free-input", "legacy", null, 0);
 	insert.run("unknown-provider", model, "missing", null, 1000000);
+	// 1M writes, 400k of them 1-hour: 600k at $5/M and 400k at 2 x $4/M.
+	db.exec("INSERT INTO requests VALUES ('one-hour', 100, 'cached-model', 'legacy', NULL, 0, 0, 0, 1000000, NULL, 'unknown', 400000)");
 	db.exec(`
 		INSERT INTO routing_attempts VALUES
 		 ('a', 'recorded', 'changed', 'codex', 'upstream_send', 1),
@@ -71,7 +74,7 @@ test("CLI repairs only scoped NULL costs, using recorded providers before accoun
 		expect(costs()).toEqual({
 			recorded: 2.2, "deleted-account": 2.2, fallback: 2.2, reseller: 90,
 			incomplete: null, "already-priced": 123, other: null, free: null,
-			"unknown-provider": null,
+			"unknown-provider": null, "one-hour": null,
 		});
 		expect(db.query("SELECT estimated_cost_usd, cost_source FROM requests WHERE id = 'recorded'").get()).toEqual({ estimated_cost_usd: 2.2, cost_source: "estimated" });
 		expect(db.query("SELECT estimated_cost_usd, cost_source FROM requests WHERE id = 'already-priced'").get()).toEqual({ estimated_cost_usd: null, cost_source: "reported" });
@@ -84,6 +87,7 @@ test("CLI repairs only scoped NULL costs, using recorded providers before accoun
 		expect(unscoped.exitCode).toBe(0);
 		expect(costs().other).toBe(3);
 		expect(costs().free).toBe(0);
+		expect(costs()["one-hour"]).toBeCloseTo(3 + 3.2, 9);
 		for (const arg of ["--model=", "--provider=", "--batch-size=2junk"]) {
 			const invalid = run(arg);
 			expect(invalid.exitCode).toBe(1);

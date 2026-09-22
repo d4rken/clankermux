@@ -82,6 +82,7 @@ interface CandidateRow {
 	output_tokens: number | null;
 	cache_read_input_tokens: number | null;
 	cache_creation_input_tokens: number | null;
+	cache_creation_1h_input_tokens: number | null;
 }
 
 interface ModelOutcome {
@@ -106,7 +107,8 @@ const CANDIDATE_SQL = `
 		          ORDER BY ra.started_at DESC, ra.id DESC LIMIT 1
 		       ), NULLIF(a.provider, '')) AS provider,
 		       r.input_tokens, r.output_tokens,
-		       r.cache_read_input_tokens, r.cache_creation_input_tokens
+		       r.cache_read_input_tokens, r.cache_creation_input_tokens,
+		       r.cache_creation_1h_input_tokens
 		  FROM requests r
 		  LEFT JOIN accounts a ON a.id = r.account_used
 		 WHERE r.cost_usd IS NULL
@@ -241,6 +243,7 @@ async function main(): Promise<void> {
 					outputTokens: row.output_tokens ?? 0,
 					cacheReadInputTokens: row.cache_read_input_tokens ?? 0,
 					cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+					cacheCreation1hInputTokens: row.cache_creation_1h_input_tokens ?? 0,
 				}, { provider: row.provider })
 				: null;
 

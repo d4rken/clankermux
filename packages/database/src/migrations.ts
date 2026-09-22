@@ -116,6 +116,9 @@ export function ensureSchema(db: Database): void {
 			input_tokens INTEGER DEFAULT 0,
 			cache_read_input_tokens INTEGER DEFAULT 0,
 			cache_creation_input_tokens INTEGER DEFAULT 0,
+			-- The part of cache_creation_input_tokens written with a 1-hour TTL,
+			-- billed at 2x input. NULL = no split was reported.
+			cache_creation_1h_input_tokens INTEGER,
 			output_tokens INTEGER DEFAULT 0,
 			project TEXT,
 			-- Which attribution tier produced the project column
@@ -1715,6 +1718,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "usage_source",
 		ddl: "ALTER TABLE requests ADD COLUMN usage_source TEXT",
+	},
+	// The 1-hour share of cache_creation_input_tokens. No DEFAULT and no
+	// backfill: pre-column rows never stored the split, and NULL says so.
+	{
+		table: "requests",
+		column: "cache_creation_1h_input_tokens",
+		ddl: "ALTER TABLE requests ADD COLUMN cache_creation_1h_input_tokens INTEGER",
 	},
 ];
 

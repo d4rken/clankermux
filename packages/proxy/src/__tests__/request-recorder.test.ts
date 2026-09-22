@@ -622,6 +622,20 @@ describe("RequestRecorder — normal terminal end", () => {
 		expect(h.emitted[0].tokensPerSecondApproximate).toBe(true);
 	});
 
+	it("persists the 1-hour share of the cache writes", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		const summary = makeSummary();
+		summary.usage.cacheCreation1hInputTokens = 3;
+		h.recorder.attachUsageSummary("req-1", summary);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const usage = h.dbOps.saveRequestCalls[0].usage as Record<string, unknown>;
+		expect(usage.cacheCreationInputTokens).toBe(5);
+		expect(usage.cacheCreation1hInputTokens).toBe(3);
+	});
+
 	it("leaves tokensPerSecondApproximate unset on the event when the summary lacks it", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());

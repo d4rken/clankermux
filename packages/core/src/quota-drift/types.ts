@@ -56,6 +56,8 @@ export interface TokenCounts {
 	outputTokens: number;
 	cacheReadInputTokens: number;
 	cacheCreationInputTokens: number;
+	/** The 1-hour-TTL part of `cacheCreationInputTokens`, when reported. */
+	cacheCreation1hInputTokens?: number;
 }
 
 /** A design matrix plus response vector, ready for the solver. */

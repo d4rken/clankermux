@@ -90,6 +90,8 @@ export interface RequestData extends GatewayHintMetadata {
 		inputTokens?: number;
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
+		/** The 1-hour-TTL part of `cacheCreationInputTokens`. */
+		cacheCreation1hInputTokens?: number;
 		outputTokens?: number;
 		tokensPerSecond?: number;
 		tokensPerSecondApproximate?: boolean;
@@ -278,9 +280,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
 					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted,
-					correlation_tag, usage_source
+					correlation_tag, usage_source, cache_creation_1h_input_tokens
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -303,6 +305,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				input_tokens = EXCLUDED.input_tokens,
 				cache_read_input_tokens = EXCLUDED.cache_read_input_tokens,
 				cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
+				cache_creation_1h_input_tokens = EXCLUDED.cache_creation_1h_input_tokens,
 				output_tokens = EXCLUDED.output_tokens,
 				output_tokens_per_second = EXCLUDED.output_tokens_per_second,
 				output_tokens_per_second_approx = EXCLUDED.output_tokens_per_second_approx,
@@ -419,6 +422,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintContextCompacted ?? null,
 				data.correlationTag ?? null,
 				data.usageSource ?? null,
+				usage?.cacheCreation1hInputTokens ?? null,
 			],
 		);
 	}
@@ -605,6 +609,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				input_tokens = COALESCE(?, input_tokens),
 				cache_read_input_tokens = COALESCE(?, cache_read_input_tokens),
 				cache_creation_input_tokens = COALESCE(?, cache_creation_input_tokens),
+				cache_creation_1h_input_tokens = COALESCE(?, cache_creation_1h_input_tokens),
 				output_tokens = COALESCE(?, output_tokens),
 				output_tokens_per_second = COALESCE(?, output_tokens_per_second),
 				output_tokens_per_second_approx = COALESCE(?, output_tokens_per_second_approx),
@@ -624,6 +629,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					usage.inputTokens ?? null,
 					usage.cacheReadInputTokens ?? null,
 					usage.cacheCreationInputTokens ?? null,
+					usage.cacheCreation1hInputTokens ?? null,
 					usage.outputTokens ?? null,
 					usage.tokensPerSecond || null,
 					usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,

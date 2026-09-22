@@ -370,6 +370,7 @@ describe("quota-drift segment assembly", () => {
 			output_tokens: 0,
 			cache_read_input_tokens: 0,
 			cache_creation_input_tokens: 0,
+			cache_creation_1h_input_tokens: null,
 		}));
 		const lists = [segments];
 		attachRequestTokens(
@@ -388,6 +389,46 @@ describe("quota-drift segment assembly", () => {
 		// The row at 250 fell between runs — dropped, exactly like the Δpct that
 		// was never observed for it.
 		expect(lists[0][2].eqTokensByModel).toEqual({ "claude-opus-5": 1_000_000 });
+	});
+
+	it("weights a row's 1-hour cache writes at 2x input", () => {
+		const segments: QuotaSegment[] = [
+			{
+				runId: "r",
+				accountId: "a",
+				t0: 0,
+				t1: 100,
+				dpct: 1,
+				eqTokensByModel: {},
+			},
+		];
+		// 1M writes, 400k of them 1-hour: 600k x 1.25 + 400k x 2.
+		const rows = [
+			{
+				timestamp: 50,
+				model: "claude-opus-5",
+				input_tokens: 0,
+				output_tokens: 0,
+				cache_read_input_tokens: 0,
+				cache_creation_input_tokens: 1_000_000,
+				cache_creation_1h_input_tokens: 400_000,
+			},
+		];
+		const lists = [segments];
+		attachRequestTokens(
+			{ iterate: () => rows[Symbol.iterator]() },
+			{
+				id: "a",
+				provider: "anthropic",
+				currentPlanTier: null,
+				currentRateLimitTier: null,
+			},
+			lists,
+		);
+		expect(lists[0][0].eqTokensByModel["claude-opus-5"]).toBeCloseTo(
+			600_000 * 1.25 + 400_000 * 2,
+			6,
+		);
 	});
 
 	it("still computes on a database predating the per-sample columns", () => {

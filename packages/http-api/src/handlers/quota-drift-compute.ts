@@ -119,7 +119,8 @@ const WINDOWS: readonly QuotaWindowKind[] = ["five_hour", "seven_day"];
  * not a slowdown: the pass would go from bounded to O(table) per account.
  */
 export const REQUEST_SCAN_SQL = `SELECT timestamp, model, input_tokens, output_tokens,
-       cache_read_input_tokens, cache_creation_input_tokens
+       cache_read_input_tokens, cache_creation_input_tokens,
+       cache_creation_1h_input_tokens
 FROM requests
 WHERE account_used = ? AND timestamp >= ? AND timestamp < ?
 ORDER BY timestamp`;
@@ -132,6 +133,7 @@ interface RequestScanRow {
 	output_tokens: number | null;
 	cache_read_input_tokens: number | null;
 	cache_creation_input_tokens: number | null;
+	cache_creation_1h_input_tokens: number | null;
 }
 
 /** One account as the pass sees it. */
@@ -1293,6 +1295,7 @@ export function attachRequestTokens(
 				outputTokens: row.output_tokens ?? 0,
 				cacheReadInputTokens: row.cache_read_input_tokens ?? 0,
 				cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+				cacheCreation1hInputTokens: row.cache_creation_1h_input_tokens ?? 0,
 			},
 			provider,
 			key,

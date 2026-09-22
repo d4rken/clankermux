@@ -88,6 +88,12 @@ export interface UsageState {
 	cacheReadInputTokens: number | undefined;
 	cacheCreationInputTokens: number | undefined;
 	/**
+	 * The 1-hour-TTL part of `cacheCreationInputTokens`, from Anthropic's
+	 * `usage.cache_creation.ephemeral_1h_input_tokens`. Undefined when the
+	 * provider reported no split.
+	 */
+	cacheCreation1hInputTokens: number | undefined;
+	/**
 	 * True once a counter had to be cut down to fit its own total. What the row
 	 * then carries is the proxy's repair rather than the provider's report, so
 	 * the vector's provenance is no longer `provider`.
@@ -212,6 +218,7 @@ export function createUsageState(): UsageState {
 		inputTokens: undefined,
 		cacheReadInputTokens: undefined,
 		cacheCreationInputTokens: undefined,
+		cacheCreation1hInputTokens: undefined,
 		inputClamped: false,
 		providerFinalOutputTokens: undefined,
 		providerReportedOutput: false,
@@ -279,6 +286,19 @@ interface ReportedCharge {
 	is_byok?: unknown;
 }
 
+/** Anthropic's per-TTL breakdown of `cache_creation_input_tokens`. */
+interface CacheCreationSplit {
+	cache_creation?: { ephemeral_1h_input_tokens?: unknown };
+}
+
+/** The reported 1-hour write count, or undefined when it is absent or malformed. */
+function oneHourCacheWrites(usage: CacheCreationSplit): number | undefined {
+	const value = usage.cache_creation?.ephemeral_1h_input_tokens;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
 interface SseParsed {
 	type?: string;
 	code?: unknown;
@@ -286,19 +306,21 @@ interface SseParsed {
 	model?: string;
 	message?: {
 		model?: string;
-		usage?: ReportedCharge & {
+		usage?: ReportedCharge &
+			CacheCreationSplit & {
+				input_tokens?: number;
+				cache_read_input_tokens?: number;
+				cache_creation_input_tokens?: number;
+				output_tokens?: number;
+			};
+	};
+	usage?: ReportedCharge &
+		CacheCreationSplit & {
 			input_tokens?: number;
 			cache_read_input_tokens?: number;
 			cache_creation_input_tokens?: number;
 			output_tokens?: number;
 		};
-	};
-	usage?: ReportedCharge & {
-		input_tokens?: number;
-		cache_read_input_tokens?: number;
-		cache_creation_input_tokens?: number;
-		output_tokens?: number;
-	};
 	/**
 	 * Codex-Responses vocabulary (native Responses passthrough):
 	 * `response.created` and the terminals (`response.completed` /
@@ -441,6 +463,8 @@ function applySseData(
 				state.cacheReadInputTokens = usage.cache_read_input_tokens;
 			if (usage.cache_creation_input_tokens !== undefined)
 				state.cacheCreationInputTokens = usage.cache_creation_input_tokens;
+			const oneHour = oneHourCacheWrites(usage);
+			if (oneHour !== undefined) state.cacheCreation1hInputTokens = oneHour;
 			// NOTE: message_start's output_tokens is a placeholder (0/1). It does
 			// NOT set providerReportedOutput — only message_delta does.
 		}
@@ -462,6 +486,8 @@ function applySseData(
 				state.cacheReadInputTokens = u.cache_read_input_tokens;
 			if (u.cache_creation_input_tokens !== undefined)
 				state.cacheCreationInputTokens = u.cache_creation_input_tokens;
+			const oneHour = oneHourCacheWrites(u);
+			if (oneHour !== undefined) state.cacheCreation1hInputTokens = oneHour;
 		}
 		// Independent of usage: a refusal's message_delta carries the terminal
 		// reason whether or not it also reports tokens.
@@ -1012,6 +1038,7 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 			state.inputTokens = usage.input_tokens;
 			state.cacheReadInputTokens = usage.cache_read_input_tokens;
 			state.cacheCreationInputTokens = usage.cache_creation_input_tokens;
+			state.cacheCreation1hInputTokens = oneHourCacheWrites(usage);
 			state.providerFinalOutputTokens = usage.output_tokens ?? 0;
 			state.providerReportedOutput = true;
 			// Model first, then the stop reason: a refusal registers its credit
@@ -1155,6 +1182,7 @@ export async function finalizeUsage(
 		state.inputTokens = undefined;
 		state.cacheReadInputTokens = undefined;
 		state.cacheCreationInputTokens = undefined;
+		state.cacheCreation1hInputTokens = undefined;
 		state.providerReportedOutput = false;
 		state.providerFinalOutputTokens = undefined;
 	}
@@ -1204,6 +1232,7 @@ export async function finalizeUsage(
 						outputTokens: finalOutput,
 						cacheReadInputTokens: state.cacheReadInputTokens ?? 0,
 						cacheCreationInputTokens: state.cacheCreationInputTokens ?? 0,
+						cacheCreation1hInputTokens: state.cacheCreation1hInputTokens,
 					},
 					{
 						provider: opts.accountProvider ?? opts.providerName,
@@ -1240,6 +1269,7 @@ export async function finalizeUsage(
 			outputTokens: finalOutput,
 			cacheReadInputTokens: state.cacheReadInputTokens,
 			cacheCreationInputTokens: state.cacheCreationInputTokens,
+			cacheCreation1hInputTokens: state.cacheCreation1hInputTokens,
 			totalTokens,
 			costUsd,
 			estimatedCostUsd: estimated ?? undefined,
