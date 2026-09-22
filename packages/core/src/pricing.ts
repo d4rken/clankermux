@@ -343,10 +343,9 @@ BUNDLED_PRICING.mimo = {
 			cost: {
 				input: 0.14,
 				output: 0.28,
-				// No published cache-read rate. Omitted rather than filled in: a
-				// cache-reading request is then reported as a pricing gap, where a
-				// stand-in rate would be an invented price and a 0 would claim those
-				// tokens were free.
+				// DERIVED from this model's credit burn rates: the rate card
+				// publishes no dollar cache-read figure for flash.
+				cache_read: 0.0028,
 				cache_write: 0,
 			},
 		},

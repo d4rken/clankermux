@@ -729,8 +729,6 @@ describe("bundled MiMo pricing (offline fallback)", () => {
 	});
 
 	it("prices mimo-v2.6-flash input/output from bundled data", async () => {
-		// The flash entry publishes no cache-read rate; input and output still
-		// price, because only the buckets a request used are looked up.
 		expect(
 			await estimateCostUSD("mimo-v2.6-flash", ioTokens, { provider: "mimo" }),
 		).toBeCloseTo(0.42, 6);
@@ -946,22 +944,19 @@ describe("pricing-miss registry", () => {
 		expect(byModel.get("MiniMax-M2")).toBe("cost_missing");
 	});
 
-	it("reports an unpriced MiMo cache read as a gap, not as a free request", async () => {
-		// mimo-v2.6-flash carries input and output but no published cache-read
-		// rate, and a single missing rate voids the whole request: null plus a
-		// recorded gap, never a measured 0 that reads as "this traffic was free".
+	it("prices a MiMo cache read rather than recording it as a gap", async () => {
+		// mimo-v2.6-flash carries all four rates, so a cache-reading request is
+		// priced in full: $0.14/M input plus $0.0028/M cache read. Billing those
+		// cache tokens as input would give 0.28, and a missing rate would void the
+		// whole request into a null plus a cost_missing gap.
 		const cost = await estimateCostUSD(
 			"mimo-v2.6-flash",
-			{ inputTokens: 1000, cacheReadInputTokens: 1000 },
+			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
 			{ provider: "mimo", ...report },
 		);
 
-		expect(cost).toBeNull();
-		const gaps = getPricingGaps();
-		expect(gaps).toHaveLength(1);
-		expect(gaps[0].modelId).toBe("mimo-v2.6-flash");
-		expect(gaps[0].provider).toBe("mimo");
-		expect(gaps[0].reason).toBe("cost_missing");
+		expect(cost).toBeCloseTo(0.1428, 9);
+		expect(getPricingGaps()).toEqual([]);
 	});
 
 	it("sanitizes control characters and truncates oversized model ids", async () => {
