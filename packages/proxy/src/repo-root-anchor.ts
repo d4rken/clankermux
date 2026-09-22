@@ -17,10 +17,13 @@ import { isAncestorOrSame, toPathSegments } from "./project-path-match";
  *
  * Three rules make it trustworthy:
  *
- *  1. CUT AT THE FIRST `/.claude/` OR `/.codex/worktrees/`. Instruction
- *     files and imported rules inside an agent worktree name the containing
- *     repository, not the worktree. Taking the first marker also handles
- *     nested worktrees created by different agents.
+ *  1. CUT AT THE FIRST `/.claude/`, `/.codex/worktrees/` OR
+ *     `/.pi/worktrees/`. Instruction files and imported rules inside an agent
+ *     worktree name the containing repository, not the worktree. Taking the
+ *     first marker also handles nested worktrees created by different agents.
+ *     Only the `worktrees` CHILD of `.codex` and `.pi` is a marker: both
+ *     directories hold unrelated things, and `/home/u/.pi` is itself a
+ *     project an operator can name with an override.
  *
  *  2. SHALLOWEST WINS. A monorepo can carry a directory-scoped instruction file
  *     deeper in the tree, and several rule files reduce to the same root, so
@@ -97,7 +100,9 @@ const ANCHOR_MARKER = "(project instructions";
  * Returns null for a path with no directory part, which cannot name a root.
  */
 export function instructionPathToRoot(path: string): string | null {
-	const marker = path.search(/\/(?:\.claude\/|\.codex\/worktrees\/)/);
+	const marker = path.search(
+		/\/(?:\.claude\/|\.codex\/worktrees\/|\.pi\/worktrees\/)/,
+	);
 	if (marker > 0) return path.slice(0, marker);
 
 	const lastSlash = path.lastIndexOf("/");

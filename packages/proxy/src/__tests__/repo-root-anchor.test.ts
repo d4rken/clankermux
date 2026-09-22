@@ -42,6 +42,11 @@ describe("instructionPathToRoot", () => {
 		"/home/u/repo/.codex/worktrees/expiry-independent/.claude/rules/review.md",
 		"/home/u/repo/.codex/worktrees/outer/.claude/worktrees/inner/CLAUDE.md",
 		"/home/u/repo/.claude/worktrees/outer/.codex/worktrees/inner/CLAUDE.md",
+		"/home/u/repo/.pi/worktrees/attribution-fix/.claude/CLAUDE.md",
+		"/home/u/repo/.pi/worktrees/attribution-fix/AGENTS.md",
+		"/home/u/repo/.pi/worktrees/attribution-fix/.claude/rules/review.md",
+		"/home/u/repo/.pi/worktrees/outer/.codex/worktrees/inner/CLAUDE.md",
+		"/home/u/repo/.codex/worktrees/outer/.pi/worktrees/inner/CLAUDE.md",
 	])("collapses nested agent worktrees: %s", (path) => {
 		expect(instructionPathToRoot(path)).toBe("/home/u/repo");
 	});
@@ -50,6 +55,14 @@ describe("instructionPathToRoot", () => {
 		expect(
 			instructionPathToRoot("/home/u/repo/.codex/examples/CLAUDE.md"),
 		).toBe("/home/u/repo/.codex/examples");
+	});
+
+	it("does not treat other .pi directories as worktrees", () => {
+		// `/home/u/.pi` is a project in its own right (the operator can name it
+		// with an override), so only its `worktrees` subdirectory is a marker.
+		expect(instructionPathToRoot("/home/u/.pi/agent/AGENTS.md")).toBe(
+			"/home/u/.pi/agent",
+		);
 	});
 
 	it("falls back to the containing directory for a root-level CLAUDE.md", () => {
