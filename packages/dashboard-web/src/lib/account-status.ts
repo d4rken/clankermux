@@ -25,7 +25,10 @@ import { getExhaustedScopedFamilies } from "./secondary-limits";
  */
 const HARD_LIMIT_PREFIXES = [...ACCOUNT_WIDE_HARD_STATUSES];
 
-/** Urgency of the soonest-expiring available Codex usage-reset credit. */
+/**
+ * Urgency of the soonest-expiring banked usage reset: a Codex reset credit or
+ * an Anthropic banked-reset grant.
+ */
 export type ResetCreditUrgency = "none" | "soon" | "imminent";
 
 /** Soonest available reset credit expires in under this → "imminent" (red). */
@@ -33,6 +36,28 @@ export const RESET_CREDIT_IMMINENT_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 
 /** Soonest available reset credit expires in under this → "soon" (amber). */
 export const RESET_CREDIT_SOON_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Urgency of a banked reset that expires at `expiry`; "none" without one. */
+export function resetCreditUrgencyFor(
+	expiry: Date | null,
+	now: number,
+): ResetCreditUrgency {
+	if (!expiry) return "none";
+	const msLeft = expiry.getTime() - now;
+	if (msLeft < RESET_CREDIT_IMMINENT_THRESHOLD_MS) return "imminent";
+	if (msLeft < RESET_CREDIT_SOON_THRESHOLD_MS) return "soon";
+	return "none";
+}
+
+/** "Sep 23, 14:05" — reset events, use-by dates and retry times. */
+export function formatResetTime(iso: string): string {
+	return new Date(iso).toLocaleString(undefined, {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
 
 /**
  * Display-ready status flags derived from an account. This is the single source
@@ -184,6 +209,17 @@ export interface AccountStatus {
 	resetCreditAutoApplyArmed: boolean;
 	/** Per-account auto-apply of a reset credit at the weekly limit is enabled (opt-in). */
 	resetCreditAutoApplyOnWeeklyLimitArmed: boolean;
+	/**
+	 * Soonest future use-by date among Anthropic banked-reset grants that still
+	 * have resets left, or null when none.
+	 */
+	bankedResetNextExpiry: Date | null;
+	/** Urgency of `bankedResetNextExpiry` (drives the banked-reset chip color). */
+	bankedResetUrgency: ResetCreditUrgency;
+	/** Per-account auto-apply of expiring Anthropic banked resets is enabled (opt-in). */
+	bankedResetAutoApplyArmed: boolean;
+	/** Per-account auto-apply of an Anthropic banked reset at the weekly limit is enabled (opt-in). */
+	bankedResetAutoApplyOnWeeklyLimitArmed: boolean;
 	/** Account shares a provider identity (external id / email) with another account. */
 	isDuplicateAccount: boolean;
 	/** Ids of the other accounts this account duplicates (empty when not a duplicate). */
@@ -385,19 +421,25 @@ export function deriveAccountStatus(
 		})
 		.sort((a, b) => a.getTime() - b.getTime());
 	const resetCreditNextExpiry = resetCreditAvailableExpiries[0] ?? null;
-	let resetCreditUrgency: ResetCreditUrgency = "none";
-	if (resetCreditNextExpiry) {
-		const msLeft = resetCreditNextExpiry.getTime() - now;
-		if (msLeft < RESET_CREDIT_IMMINENT_THRESHOLD_MS) {
-			resetCreditUrgency = "imminent";
-		} else if (msLeft < RESET_CREDIT_SOON_THRESHOLD_MS) {
-			resetCreditUrgency = "soon";
-		}
-	}
+	const resetCreditUrgency = resetCreditUrgencyFor(resetCreditNextExpiry, now);
 	const resetCreditAutoApplyArmed =
 		account.autoApplyResetCreditsEnabled === true;
 	const resetCreditAutoApplyOnWeeklyLimitArmed =
 		account.autoApplyResetOnWeeklyLimitEnabled === true;
+
+	// Anthropic banked-reset grants: a spent grant, or one past its use-by
+	// date, never colors the chip.
+	const bankedResetExpiries = (account.anthropicBankedResets?.grants ?? [])
+		.flatMap((grant) => {
+			if (grant.resetsLeft <= 0 || grant.endsAt === null) return [];
+			const endsAtMs = Date.parse(grant.endsAt);
+			return Number.isFinite(endsAtMs) && endsAtMs > now ? [endsAtMs] : [];
+		})
+		.sort((a, b) => a - b);
+	const bankedResetNextExpiry =
+		bankedResetExpiries[0] !== undefined
+			? new Date(bankedResetExpiries[0])
+			: null;
 
 	return {
 		isPrimary: account.isPrimary,
@@ -449,6 +491,11 @@ export function deriveAccountStatus(
 		resetCreditUrgency,
 		resetCreditAutoApplyArmed,
 		resetCreditAutoApplyOnWeeklyLimitArmed,
+		bankedResetNextExpiry,
+		bankedResetUrgency: resetCreditUrgencyFor(bankedResetNextExpiry, now),
+		bankedResetAutoApplyArmed: account.autoApplyBankedResetsEnabled === true,
+		bankedResetAutoApplyOnWeeklyLimitArmed:
+			account.autoApplyBankedResetOnWeeklyLimitEnabled === true,
 		isDuplicateAccount: account.isDuplicateAccount,
 		duplicateAccountIds: account.duplicateAccountIds ?? [],
 	};
