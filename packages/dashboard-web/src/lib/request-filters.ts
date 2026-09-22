@@ -26,8 +26,12 @@ export interface RequestFilterState {
 	codes: string[];
 	/** Account name, or null when inactive. */
 	account: string | null;
-	/** API key name, or null when inactive. */
-	apiKey: string | null;
+	/**
+	 * API key ID, or null when inactive. An ID rather than a name because two
+	 * clients can carry the same name, and a name filter returns both with no
+	 * way to separate them.
+	 */
+	apiKeyId: string | null;
 	/** Restrict to requests that carried no API key at all. */
 	noApiKey: boolean;
 	/** Project name, or null when inactive. */
@@ -49,7 +53,7 @@ export interface RequestQueryParams {
 	from?: number;
 	to?: number;
 	account?: string;
-	apiKey?: string;
+	apiKeyId?: string;
 	noApiKey?: boolean;
 	project?: string;
 	noProject?: boolean;
@@ -80,7 +84,7 @@ export function isRequestFilterActive(state: RequestFilterState): boolean {
 		state.status !== "all" ||
 		state.codes.length > 0 ||
 		state.account !== null ||
-		state.apiKey !== null ||
+		state.apiKeyId !== null ||
 		state.noApiKey ||
 		state.project !== null ||
 		state.noProject ||
@@ -115,7 +119,7 @@ export function buildRequestQueryParams(
 
 	if (state.account !== null) params.account = state.account;
 	if (state.noApiKey) params.noApiKey = true;
-	else if (state.apiKey !== null) params.apiKey = state.apiKey;
+	else if (state.apiKeyId !== null) params.apiKeyId = state.apiKeyId;
 	if (state.noProject) params.noProject = true;
 	else if (state.project !== null) params.project = state.project;
 
@@ -142,7 +146,7 @@ export function requestQueryToSearchParams(
 	// Names are serialized verbatim — no value is filtered out as a sentinel,
 	// so a key or project called "all" reaches the server as itself.
 	if (params.noApiKey) p.set("noApiKey", "1");
-	else if (params.apiKey) p.set("apiKey", params.apiKey);
+	else if (params.apiKeyId) p.set("apiKeyId", params.apiKeyId);
 	if (params.noProject) p.set("noProject", "1");
 	else if (params.project) p.set("project", params.project);
 	return p;

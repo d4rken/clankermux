@@ -34,6 +34,7 @@ function makeKey(overrides: Partial<ApiKeyResponse> = {}): ApiKeyResponse {
 	return {
 		id: "key-1",
 		name: "Workstation key",
+		application: null,
 		prefixLast8: "abcd1234",
 		createdAt: "2026-01-01T00:00:00.000Z",
 		lastUsed: null,

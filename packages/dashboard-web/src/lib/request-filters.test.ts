@@ -15,7 +15,7 @@ const emptyState: RequestFilterState = {
 	status: "all",
 	codes: [],
 	account: null,
-	apiKey: null,
+	apiKeyId: null,
 	noApiKey: false,
 	project: null,
 	noProject: false,
@@ -112,12 +112,21 @@ describe("buildRequestQueryParams", () => {
 		expect(
 			buildRequestQueryParams({
 				...emptyState,
-				apiKey: "my-key",
+				apiKeyId: "key-1",
 				noApiKey: true,
 				project: "my-proj",
 				noProject: true,
 			}),
 		).toEqual({ noApiKey: true, noProject: true });
+	});
+
+	it("sends the API key filter as an id, which two same-named keys differ on", () => {
+		expect(
+			buildRequestQueryParams({ ...emptyState, apiKeyId: "key-pi" }),
+		).toEqual({ apiKeyId: "key-pi" });
+		expect(
+			buildRequestQueryParams({ ...emptyState, apiKeyId: "key-codex" }),
+		).toEqual({ apiKeyId: "key-codex" });
 	});
 });
 
@@ -147,10 +156,15 @@ describe("requestQueryToSearchParams", () => {
 		// filter on a real project named "all" into an unfiltered query.
 		const qs = requestQueryToSearchParams({
 			account: "all",
-			apiKey: "all",
 			project: "all",
 		}).toString();
-		expect(qs).toBe("account=all&apiKey=all&project=all");
+		expect(qs).toBe("account=all&project=all");
+	});
+
+	it("serializes the API key filter under the id param", () => {
+		expect(requestQueryToSearchParams({ apiKeyId: "key-1" }).toString()).toBe(
+			"apiKeyId=key-1",
+		);
 	});
 
 	it("serializes the empty buckets as their own flags", () => {

@@ -17,6 +17,7 @@ import {
 } from "../../lib/runway-display";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
+import { ClientLabel } from "../clients/ClientLabel";
 import { TONE_CLASSES } from "../quota/outlook-tone";
 import {
 	Card,
@@ -219,7 +220,11 @@ function RunwayPanel({
 										className="flex items-baseline justify-between gap-item"
 									>
 										<span className="min-w-0 truncate">
-											<span className="font-medium">{runway.keyName}</span>
+											<ClientLabel
+												apiKeyId={runway.keyId}
+												name={runway.keyName}
+												className="font-medium"
+											/>
 											<span className="text-muted-foreground">
 												{" · "}
 												{describePinTarget(runway.pin, accounts)}

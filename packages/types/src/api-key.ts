@@ -1,3 +1,5 @@
+import type { ClientApplication } from "./clients";
+
 // Crypto interface for dependency injection
 
 // Database row type that matches actual database schema
@@ -46,6 +48,12 @@ export interface ApiKeyResponse {
 	pinnedAccountId: string | null;
 	pinnedProviders: string[] | null;
 	excludedProviders?: string[] | null;
+	/**
+	 * The harness this key is set up as, from its `client_profiles` row. `null`
+	 * for a key that has no profile, which is the only honest answer: a key
+	 * created outside the client wizard was never told what it talks to.
+	 */
+	application: ClientApplication | null;
 }
 
 // API key generation result
@@ -278,7 +286,18 @@ export function toApiKey(row: ApiKeyRow): ApiKey {
 	};
 }
 
-export function toApiKeyResponse(apiKey: ApiKey): ApiKeyResponse {
+/**
+ * `application` is a separate argument rather than a field on {@link ApiKey}
+ * because it lives in another table: the domain row is what `api_keys` holds.
+ *
+ * REQUIRED, with no default. A default of `null` reads as "this key has no
+ * client profile", which is a claim, and a caller that simply never looked
+ * would make it silently.
+ */
+export function toApiKeyResponse(
+	apiKey: ApiKey,
+	application: ClientApplication | null,
+): ApiKeyResponse {
 	return {
 		id: apiKey.id,
 		name: apiKey.name,
@@ -290,5 +309,6 @@ export function toApiKeyResponse(apiKey: ApiKey): ApiKeyResponse {
 		pinnedAccountId: apiKey.pinnedAccountId,
 		pinnedProviders: apiKey.pinnedProviders,
 		excludedProviders: apiKey.excludedProviders ?? null,
+		application,
 	};
 }

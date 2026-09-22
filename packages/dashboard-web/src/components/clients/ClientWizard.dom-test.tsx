@@ -20,6 +20,7 @@ const existing: ClientView = {
 	key: {
 		id: "key",
 		name: "Client",
+		application: null,
 		prefixLast8: "abcdefgh",
 		createdAt: "2026-01-01",
 		lastUsed: null,
@@ -54,6 +55,7 @@ const source: ClientView = {
 	key: {
 		id: "source",
 		name: "Source",
+		application: null,
 		prefixLast8: "12345678",
 		createdAt: "2026-01-01",
 		lastUsed: null,

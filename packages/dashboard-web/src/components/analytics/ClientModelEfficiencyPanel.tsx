@@ -3,6 +3,7 @@ import type { ClientModelEfficiencyRow } from "@clankermux/types";
 import { formatNumber, formatTokens, formatUsd } from "@clankermux/ui-common";
 import { Scale } from "lucide-react";
 import { useMemo } from "react";
+import { ClientLabel } from "../clients/ClientLabel";
 import {
 	Card,
 	CardContent,
@@ -105,7 +106,11 @@ export function ClientModelEfficiencyPanel({
 													className="hover:bg-muted/40"
 												>
 													<TableCell className="align-top">
-														<div className="font-medium">{row.apiKey}</div>
+														<ClientLabel
+															apiKeyId={row.apiKeyId}
+															name={row.apiKey}
+															className="font-medium"
+														/>
 														{row.unpricedRequests > 0 && (
 															<div className="text-xs text-muted-foreground">
 																{formatNumber(row.unpricedRequests)} unpriced

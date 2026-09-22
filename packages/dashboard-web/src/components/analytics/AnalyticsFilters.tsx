@@ -1,5 +1,6 @@
 import type { AnalyticsFilterOption } from "@clankermux/types";
 import { Filter } from "lucide-react";
+import { ClientLabel } from "../clients/ClientLabel";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Label } from "../ui/label";
@@ -255,7 +256,11 @@ export function AnalyticsFilters({
 												}
 											}}
 										/>
-										<span className="text-sm truncate">{apiKey.label}</span>
+										<ClientLabel
+											apiKeyId={apiKey.value}
+											name={apiKey.label}
+											className="text-sm"
+										/>
 									</label>
 								))}
 							</div>

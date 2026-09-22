@@ -1,9 +1,10 @@
-import type { RoutingRule } from "@clankermux/types";
+import type { ApiKeyResponse, RoutingRule } from "@clankermux/types";
 import { PROVIDER_NAMES } from "@clankermux/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
 import { useAccounts, useApiKeys } from "../../hooks/queries";
+import { ClientLabel, clientLabelText } from "../clients/ClientLabel";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -23,6 +24,22 @@ import {
 
 const control = "w-full rounded-md border bg-background p-2 text-sm";
 const rulesKey = ["routing-rules"];
+/**
+ * The client a rule matches on, or a plain marker when the rule outlived the
+ * key. Its own component so the id -> key lookup stays out of the row JSX.
+ */
+function RuleClient({ id, keys }: { id: string; keys: ApiKeyResponse[] }) {
+	const key = keys.find((k) => k.id === id);
+	if (!key) return <>Missing key</>;
+	return (
+		<ClientLabel
+			apiKeyId={key.id}
+			name={key.name}
+			application={key.application}
+		/>
+	);
+}
+
 export function RoutingTab() {
 	const client = useQueryClient();
 	const rules = useQuery({
@@ -121,10 +138,14 @@ export function RoutingTab() {
 								</strong>
 								<p className="text-sm text-muted-foreground">
 									{r.enabled ? "Enabled" : "Disabled"} ·{" "}
-									{r.match_api_key_id
-										? (keys.data?.find((k) => k.id === r.match_api_key_id)
-												?.name ?? "Missing key")
-										: "Any API key"}{" "}
+									{r.match_api_key_id ? (
+										<RuleClient
+											id={r.match_api_key_id}
+											keys={keys.data ?? []}
+										/>
+									) : (
+										"Any API key"
+									)}{" "}
 									·{" "}
 									{r.match_model_kind === "any"
 										? "Any model"
@@ -250,7 +271,7 @@ export function RoutingTab() {
 									<option value="">Any API key</option>
 									{keys.data?.map((k) => (
 										<option value={k.id} key={k.id}>
-											{k.name}
+											{clientLabelText(k.name, k.application)}
 										</option>
 									))}
 								</select>

@@ -316,6 +316,14 @@ describe("client service integration", () => {
 		const missing = views.find((c) => c.apiKeyId === client.apiKeyId)!;
 		expect(missing.revision).toBe(0);
 		expect(missing.notices.join(" ")).toContain("missing");
+		// The synthetic profile carries "generic" so the wizard has something to
+		// open on, but `key.application` is what a client LABEL reads, and it must
+		// say what the stored profile says — null, the same answer
+		// `/api/api-keys` gives for this key. Otherwise the two endpoints disagree
+		// about whether this key has a harness, and a mark appears on one surface
+		// and not the next.
+		expect(missing.application).toBe("generic");
+		expect(missing.key.application).toBeNull();
 		expect(await dbOps.clients.getProfile(client.apiKeyId)).toBeNull();
 		await expect(service.wire(client.apiKeyId, "openai")).rejects.toThrow();
 		const other = blank();

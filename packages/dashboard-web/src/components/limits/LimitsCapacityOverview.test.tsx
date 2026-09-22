@@ -8,7 +8,9 @@ import {
 	type PoolUsageResult,
 } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import { queryKeys } from "../../lib/query-keys";
 import {
 	buildQuotaSummary,
 	type QuotaSummaryRow,
@@ -145,22 +147,33 @@ function renderOverview(
 		now?: number;
 	} = {},
 ) {
-	return renderToStaticMarkup(
-		<LimitsCapacityOverview
-			pacing={windows.pacing}
-			summaryRows={windows.summaryRows}
-			fiveHour={windows.fiveHour}
-			sevenDay={windows.sevenDay}
-			daily={windows.daily}
-			now={runwayProps.now ?? NOW}
-			runways={runwayProps.runways ?? [keyRunway()]}
-			accounts={RUNWAY_ACCOUNTS}
-			windowsLoading={runwayProps.windowsLoading}
-			windowsUnavailableReason={runwayProps.windowsUnavailableReason}
-			runwaysLoading={runwayProps.runwaysLoading ?? false}
-			runwaysUnavailableReason={runwayProps.runwaysUnavailableReason}
-		/>,
+	// The per-key breakdown labels each row with `ClientLabel`, which resolves
+	// the harness mark from the API-key list. Seeded EMPTY: a key the list does
+	// not know renders as its bare name, which is what these assertions read.
+	const query = new QueryClient({
+		defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+	});
+	query.setQueryData(queryKeys.apiKeys(), []);
+	const html = renderToStaticMarkup(
+		<QueryClientProvider client={query}>
+			<LimitsCapacityOverview
+				pacing={windows.pacing}
+				summaryRows={windows.summaryRows}
+				fiveHour={windows.fiveHour}
+				sevenDay={windows.sevenDay}
+				daily={windows.daily}
+				now={runwayProps.now ?? NOW}
+				runways={runwayProps.runways ?? [keyRunway()]}
+				accounts={RUNWAY_ACCOUNTS}
+				windowsLoading={runwayProps.windowsLoading}
+				windowsUnavailableReason={runwayProps.windowsUnavailableReason}
+				runwaysLoading={runwayProps.runwaysLoading ?? false}
+				runwaysUnavailableReason={runwayProps.runwaysUnavailableReason}
+			/>
+		</QueryClientProvider>,
 	);
+	query.clear();
+	return html;
 }
 
 /** How many times `needle` appears in `haystack` (non-overlapping). */

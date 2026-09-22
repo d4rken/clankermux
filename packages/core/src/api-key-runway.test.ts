@@ -68,6 +68,7 @@ function mkKey(partial: Partial<ApiKeyResponse>): ApiKeyResponse {
 	return {
 		id: partial.id ?? "key",
 		name: partial.name ?? "Key",
+		application: partial.application ?? null,
 		prefixLast8: "abcdefgh",
 		createdAt: new Date(NOW).toISOString(),
 		lastUsed: null,

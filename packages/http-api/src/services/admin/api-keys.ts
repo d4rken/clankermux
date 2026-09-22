@@ -78,13 +78,31 @@ export async function generateApiKey(
 }
 
 /**
+ * One key's configured harness, or null when it has no client profile.
+ *
+ * Single-key responses go through this rather than reading the profile, which
+ * would parse that client's whole published catalogue to reach one enum.
+ */
+async function clientApplication(
+	dbOps: DatabaseOperations,
+	id: string,
+): Promise<ApiKeyResponse["application"]> {
+	return (await dbOps.getClientApplications()).get(id) ?? null;
+}
+
+/**
  * List all API keys
  */
 export async function listApiKeys(
 	dbOps: DatabaseOperations,
 ): Promise<ApiKeyResponse[]> {
-	const apiKeys = await dbOps.getApiKeys();
-	return apiKeys.map(toApiKeyResponse);
+	const [apiKeys, applications] = await Promise.all([
+		dbOps.getApiKeys(),
+		dbOps.getClientApplications(),
+	]);
+	return apiKeys.map((key) =>
+		toApiKeyResponse(key, applications.get(key.id) ?? null),
+	);
 }
 
 /**
@@ -235,7 +253,7 @@ export async function renameApiKey(
 		`API key renamed: id=${existing.id} name='${existing.name}' -> '${trimmed}'`,
 	);
 
-	return toApiKeyResponse(updated);
+	return toApiKeyResponse(updated, await clientApplication(dbOps, updated.id));
 }
 
 /**

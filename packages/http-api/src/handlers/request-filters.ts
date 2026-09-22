@@ -31,9 +31,19 @@ export interface RequestFilters {
 	/** Account name (falls back to matching the raw account id). */
 	account?: string;
 	/**
+	 * API key id. Preferred over {@link RequestFilters.apiKey}: two keys may
+	 * carry the same name, and a name filter cannot tell them apart. The id is
+	 * stamped on the request row and `requests.api_key_id` has no foreign key,
+	 * so it keeps matching after the key is deleted.
+	 */
+	apiKeyId?: string;
+	/**
 	 * API key name — a LITERAL name and nothing else. The "no key" bucket is
 	 * {@link RequestFilters.noApiKey} rather than a magic name, because every
 	 * sentinel string is also a name a real key can be given.
+	 *
+	 * Matches EVERY key with that name. Kept for callers holding a name and no
+	 * id; the dashboard filters by id.
 	 */
 	apiKey?: string;
 	/** Restrict to requests that carried no API key at all. */
@@ -150,6 +160,9 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 
 	if (filters.noApiKey) {
 		clauses.push("r.api_key_name IS NULL");
+	} else if (filters.apiKeyId) {
+		clauses.push("r.api_key_id = ?");
+		params.push(filters.apiKeyId);
 	} else if (filters.apiKey) {
 		// Match the key's CURRENT name (api_keys.name) so a filter on the
 		// post-rename name finds requests stamped under the old one. The
@@ -231,8 +244,13 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	if (params.get("noApiKey") === "1") {
 		filters.noApiKey = true;
 	} else {
+		const apiKeyId = params.get("apiKeyId");
 		const apiKey = params.get("apiKey");
-		if (apiKey) {
+		// Only one of the two is ever kept, so the clause builder's precedence
+		// can never be reached with both set and quietly drop one.
+		if (apiKeyId) {
+			filters.apiKeyId = apiKeyId;
+		} else if (apiKey) {
 			filters.apiKey = apiKey;
 		}
 	}

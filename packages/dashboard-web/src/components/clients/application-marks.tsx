@@ -73,8 +73,9 @@ interface ApplicationMarkIconProps {
  * a terminal glyph — every row gets a mark, and a column of icons with a hole
  * in it reads as a rendering failure.
  *
- * Decorative: the application's name is already spelled out under the client
- * name, so the mark is hidden from assistive technology.
+ * Decorative, so it is hidden from assistive technology. Every caller owes a
+ * text rendering of the same application beside it — `ClientLabel` carries one
+ * as `sr-only`, the Clients list spells it out in the row's sub-line.
  */
 export function ApplicationMarkIcon({
 	application,

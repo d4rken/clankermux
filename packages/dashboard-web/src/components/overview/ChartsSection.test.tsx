@@ -9,7 +9,9 @@
  * would say so.
  */
 import { describe, expect, it } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import { queryKeys } from "../../lib/query-keys";
 import { ChartsSection } from "./ChartsSection";
 
 type Row = {
@@ -20,16 +22,28 @@ type Row = {
 };
 
 function render(apiKeyModelUsageData: Row[]): string {
-	return renderToStaticMarkup(
-		<ChartsSection
-			timeSeriesData={[]}
-			timeRange="6h"
-			modelData={[]}
-			apiKeyModelUsageData={apiKeyModelUsageData}
-			projectBreakdownData={[]}
-			loading={false}
-		/>,
+	// The legend labels each key with `ClientLabel`, which resolves the harness
+	// mark from the API-key list. Seeded EMPTY: these rows are about identity,
+	// and a key the list does not know renders as its bare name, which is what
+	// every assertion below reads.
+	const query = new QueryClient({
+		defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+	});
+	query.setQueryData(queryKeys.apiKeys(), []);
+	const html = renderToStaticMarkup(
+		<QueryClientProvider client={query}>
+			<ChartsSection
+				timeSeriesData={[]}
+				timeRange="6h"
+				modelData={[]}
+				apiKeyModelUsageData={apiKeyModelUsageData}
+				projectBreakdownData={[]}
+				loading={false}
+			/>
+		</QueryClientProvider>,
 	);
+	query.clear();
+	return html;
 }
 
 /** The markup of the API-key card alone, so the assertions can't match a sibling card. */
