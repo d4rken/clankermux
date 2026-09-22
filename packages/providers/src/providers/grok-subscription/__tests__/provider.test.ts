@@ -300,4 +300,135 @@ describe("GrokSubscriptionProvider", () => {
 			expect(await provider.transformRequestBody(raw)).toBe(raw);
 		});
 	});
+
+	// The proxy intermittently answers a request holding any `role: "system"`
+	// message with 400 "Invalid message role" (7 of 60 live sends), while the
+	// same text inside a user message passed 50 of 50.
+	describe("system-role messages", () => {
+		async function messagesAfter(
+			messages: unknown[],
+			extra: Record<string, unknown> = {},
+		) {
+			const request = await provider.transformRequestBody(
+				new Request("https://cli-chat-proxy.grok.com/v1/messages", {
+					method: "POST",
+					body: JSON.stringify({ model: "grok-4.6", messages, ...extra }),
+				}),
+			);
+			return request.json();
+		}
+		const reminder = (text: string) => ({
+			type: "text",
+			text: `<system-reminder>\n${text}\n</system-reminder>`,
+		});
+
+		it("appends a system message to the user turn before it", async () => {
+			const toolResult = {
+				type: "tool_result",
+				tool_use_id: "toolu_1",
+				content: "ok",
+			};
+			const body = await messagesAfter([
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "toolu_1", name: "Bash", input: {} },
+					],
+				},
+				{ role: "user", content: [toolResult] },
+				{ role: "system", content: [{ type: "text", text: "Date changed." }] },
+			]);
+			expect(body.messages.at(-1)).toEqual({
+				role: "user",
+				content: [toolResult, reminder("Date changed.")],
+			});
+			expect(body.messages).toHaveLength(3);
+		});
+
+		it("prepends to the next user turn when the previous turn is the assistant's", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{ role: "system", content: "Be brief." },
+				{ role: "user", content: "again" },
+			]);
+			expect(body.messages).toEqual([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{
+					role: "user",
+					content: [reminder("Be brief."), { type: "text", text: "again" }],
+				},
+			]);
+		});
+
+		it("keeps tool results first when prepending to the next user turn", async () => {
+			const toolResult = {
+				type: "tool_result",
+				tool_use_id: "toolu_1",
+				content: "ok",
+			};
+			const body = await messagesAfter([
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "toolu_1", name: "Bash", input: {} },
+					],
+				},
+				{ role: "system", content: "Date changed." },
+				{ role: "user", content: [toolResult, { type: "text", text: "go" }] },
+			]);
+			expect(body.messages.at(-1).content).toEqual([
+				toolResult,
+				reminder("Date changed."),
+				{ type: "text", text: "go" },
+			]);
+		});
+
+		it("becomes its own user turn when no user turn is adjacent", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{ role: "system", content: "Be brief." },
+			]);
+			expect(body.messages.at(-1)).toEqual({
+				role: "user",
+				content: [reminder("Be brief.")],
+			});
+		});
+
+		it("moves an effort update to the request instead of dropping it", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{
+					role: "system",
+					content: "Effort changed.",
+					output_config: { effort: "low" },
+				},
+			]);
+			expect(body.output_config).toEqual({ effort: "low" });
+			expect(body.messages).toEqual([
+				{
+					role: "user",
+					content: [{ type: "text", text: "hi" }, reminder("Effort changed.")],
+				},
+			]);
+		});
+
+		it("leaves a conversation without system messages untouched", async () => {
+			const original = new Request(
+				"https://cli-chat-proxy.grok.com/v1/messages",
+				{
+					method: "POST",
+					body: JSON.stringify({
+						model: "grok-4.6",
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				},
+			);
+			expect(await provider.transformRequestBody(original)).toBe(original);
+		});
+	});
 });
