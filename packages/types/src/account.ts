@@ -257,10 +257,9 @@ export interface GrokSubscriptionUsageData {
 	/**
 	 * Weekly pool utilization percent (0-100), or null for UNKNOWN.
 	 *
-	 * Null is NOT zero. `config.creditUsagePercent` was absent from the live
-	 * billing probe, and proto3 omits zero-valued scalars — but that explains how
-	 * a zero COULD vanish, not that the endpoint ever populates the field for
-	 * this billing mode. A fabricated 0% reads as actionable headroom and could
+	 * Null is NOT zero. The parser reads an absent `creditUsagePercent` as 0
+	 * only inside a period that is running now; every other unreadable case is
+	 * null, because a fabricated 0% reads as actionable headroom and could
 	 * release a cooldown on an account that is in fact exhausted.
 	 */
 	weeklyUtilization: number | null;
