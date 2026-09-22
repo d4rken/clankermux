@@ -122,6 +122,7 @@ ingest header uses, so a tag that can be stored can always be searched for.
 | `cacheCreationInputTokens` | number \| null | Prompt tokens written to the cache |
 | `usageSource` | `provider` \| `approximate` \| `none` \| null | Provenance of the token vector |
 | `failoverAttempts` | number \| null | The attempt index the answering try was made under. Above 0 means earlier attempts happened; 0 does not prove none did, and null says the same as 0 |
+| `modelSubstitutionDiscards` | number | Attempts whose answer was thrown away because the upstream served a different model than it was sent. Above 0, this row's counts exclude what those attempts consumed |
 | `project` | string \| null | The project the proxy attributed the request to |
 | `apiKeyId` | string | The client id the row is scoped to |
 | `correlationTag` | string \| null | The stored tag, null when none was accepted |
@@ -255,7 +256,29 @@ answers as a different model than it was sent, and no column holds what that
 attempt cost. A row whose request failed over is therefore a LOWER BOUND on what
 the request consumed.
 
-`failoverAttempts` is the signal for that, with one limit worth stating
+`modelSubstitutionDiscards` names the specific case directly. It counts the
+attempts of this request whose answer was thrown away because the upstream
+served a different model than it was sent, which is the discard that dominates
+in practice. Above 0, this row's counts exclude whatever those attempts
+consumed.
+
+Every recorded discard counts, whether or not another attempt followed and
+whether or not the request went on to succeed: when every candidate substitutes,
+the last discard is still recorded and the request ends 503.
+
+At 0, no such discard was **recorded**. The proxy logs and continues when it
+cannot persist an attempt's outcome, so 0 is the absence of a record rather than
+a guarantee that nothing was thrown away. It also states no token cost, and a
+positive value does not establish that generated output was lost — a
+substitution is detectable on an opening frame that names the model and carries
+no content.
+
+Two further limits. Only enforced substitutions count: where an operator has
+excepted a pair, or turned enforcement off, the answer is forwarded and nothing
+is discarded. And it covers substitution alone, not every way an attempt can be
+abandoned.
+
+`failoverAttempts` is the broader signal, with one limit worth stating
 precisely. Above 0 it means earlier attempts happened and their cost is missing.
 At 0 it does NOT prove none did: the value is the attempt index the answering
 try was made under, and a retry against the same account after a hold restarts

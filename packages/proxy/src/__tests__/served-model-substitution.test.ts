@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "@clankermux/core";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "../handlers/model-substitution";
 
 /**
  * The rung that notices an upstream answering as a DIFFERENT model than it was
@@ -269,16 +269,23 @@ describe("served-model substitution — enforcement", () => {
 			sseResponse(anthropicSse("claude-haiku-4-5")),
 		) as never;
 
-		const res = await callDispatch(
-			makeRequest("claude-sonnet-4-5"),
-			makeContext(
-				[
-					makeAnthropicAccount({ name: "A", priority: 1 }),
-					makeAnthropicAccount({ name: "B", priority: 2 }),
-				],
-				"enforce",
-			),
+		const ctx = makeContext(
+			[
+				makeAnthropicAccount({ name: "A", priority: 1 }),
+				makeAnthropicAccount({ name: "B", priority: 2 }),
+			],
+			"enforce",
 		);
+		const res = await callDispatch(makeRequest("claude-sonnet-4-5"), ctx);
+
+		// Including the LAST one, which no failover follows. The client API
+		// counts these rows, so a discard that ends the request still has to
+		// leave the reason behind.
+		const { routingAttempts } = await import("./fixtures/routing-harness");
+		expect(routingAttempts(ctx).map((attempt) => attempt.error)).toEqual([
+			MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+			MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+		]);
 
 		expect(res.status).toBe(503);
 		const payload = (await res.json()) as {

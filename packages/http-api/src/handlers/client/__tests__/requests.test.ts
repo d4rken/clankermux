@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "@clankermux/config";
+import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
 import { ClientRouter } from "../router";
 
@@ -76,6 +77,16 @@ async function seed(row: SeedRow): Promise<void> {
 			row.apiKeyId === undefined ? KEY_A : row.apiKeyId,
 			row.tag ?? null,
 		],
+	);
+}
+
+/** One `routing_attempts` row for `requestId`, dispatched and then refused. */
+async function seedAttempt(requestId: string, error: string): Promise<void> {
+	await dbOps.getAdapter().run(
+		`INSERT INTO routing_attempts (
+			id, request_id, route_snapshot_id, requested_model, kind, started_at, error
+		) VALUES (?, ?, 'snapshot', 'claude-x', 'upstream_send', 1, ?)`,
+		[crypto.randomUUID(), requestId, error],
 	);
 }
 
@@ -175,6 +186,7 @@ describe("GET /client/v1/requests/{id}", () => {
 			cacheCreationInputTokens: 44,
 			usageSource: "provider",
 			failoverAttempts: 0,
+			modelSubstitutionDiscards: 0,
 			project: "alpha",
 			apiKeyId: KEY_A,
 			correlationTag: TAG,
@@ -196,6 +208,26 @@ describe("GET /client/v1/requests/{id}", () => {
 		const { body } = await call("/client/v1/requests/failed-over");
 
 		expect(body).toMatchObject({ failoverAttempts: 2, inputTokens: 11 });
+	});
+
+	it("publishes a substitution discard that failoverAttempts cannot show", async () => {
+		// The case the narrower field exists for: the index the answering try ran
+		// under is 0, and an earlier attempt's answer was still thrown away.
+		await seed({
+			id: "substituted",
+			inputTokens: 11,
+			usageSource: "provider",
+			failoverAttempts: 0,
+		});
+		await seedAttempt("substituted", MODEL_SUBSTITUTION_SUPPRESSION_REASON);
+		await seedAttempt("substituted", "retryable_429");
+
+		const { body } = await call("/client/v1/requests/substituted");
+
+		expect(body).toMatchObject({
+			failoverAttempts: 0,
+			modelSubstitutionDiscards: 1,
+		});
 	});
 
 	// One answer for three situations, so the route cannot be used to find out

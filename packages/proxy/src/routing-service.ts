@@ -1,6 +1,7 @@
 import {
 	isModelAliasId,
 	isModelPermitted,
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	matchRoutingRule,
 	resolveRoutingTarget,
 } from "@clankermux/core";
@@ -12,7 +13,6 @@ import type {
 } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
 import { AccountModelPermissionService } from "./account-model-permissions";
-import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "./handlers/model-substitution";
 import type { ProxyContext } from "./handlers/proxy-types";
 
 /**

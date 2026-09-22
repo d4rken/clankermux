@@ -58,6 +58,25 @@ export interface ClientRequestDto {
 	 * index. Evidence when positive, not evidence of absence when 0.
 	 */
 	failoverAttempts: number | null;
+	/**
+	 * Attempts of this request whose answer was thrown away because the upstream
+	 * served a different model than it was sent.
+	 *
+	 * This is the field that answers what `failoverAttempts` cannot: above 0,
+	 * this row's counts exclude whatever those attempts consumed. Every recorded
+	 * discard counts, whether or not another attempt followed and whether or not
+	 * the request went on to succeed — when every candidate substitutes, the
+	 * last discard is recorded and the request ends 503.
+	 *
+	 * At 0 no discard was RECORDED. The proxy logs and continues when it cannot
+	 * persist an attempt's outcome, so this is the absence of a record rather
+	 * than a guarantee that nothing was thrown away.
+	 *
+	 * It states no token cost, and a positive value does not establish that
+	 * generated output was lost: a substitution is detectable on an opening
+	 * frame that names the model and carries no content.
+	 */
+	modelSubstitutionDiscards: number;
 	project: string | null;
 	apiKeyId: string;
 	correlationTag: string | null;
@@ -135,6 +154,7 @@ export function toClientRequestDto(row: ClientRequestRow): ClientRequestDto {
 		cacheCreationInputTokens: row.cache_creation_input_tokens,
 		usageSource: toClientUsageSource(row),
 		failoverAttempts: row.failover_attempts,
+		modelSubstitutionDiscards: row.model_substitution_discards,
 		project: row.project,
 		apiKeyId: row.api_key_id,
 		correlationTag: row.correlation_tag,
