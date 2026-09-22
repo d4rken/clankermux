@@ -343,10 +343,14 @@ export class AccountModelPermissionService {
 			cursorParam = "after_id";
 		} else if (account.provider === "mimo") {
 			// One Token Plan host, two surfaces. The stored endpoint is the REQUEST
-			// base and ends in `/anthropic` — that is where the provider dials
-			// `/anthropic/v1/messages` — but the catalogue is OpenAI-shaped and sits
-			// on the host ROOT, so the `/anthropic` segment is stripped here instead
-			// of extended. The strip is not a typo: on a live Token Plan subscription
+			// base and normally ends in `/anthropic` — that is where the provider
+			// dials `/anthropic/v1/messages` — but the catalogue is OpenAI-shaped and
+			// sits on the host ROOT, so the segments the request path supplies for
+			// itself come off here instead of being extended: one terminal `/v1` (a
+			// stored base may already carry it), then one terminal `/anthropic`. Any
+			// deployment prefix ahead of them survives, so `/anthropic`,
+			// `/anthropic/v1` and a bare host all land on `<host>/v1/models`.
+			// The strip is not a typo: on a live Token Plan subscription
 			// `/anthropic/v1/models` 404s, while the root `/v1/models` answers 200
 			// with `{object:"list",data:[{id,…}]}` to a Bearer token and no cursor —
 			// hence one request, not a paged loop. If MiMo moves it the fetch fails
@@ -367,6 +371,7 @@ export class AccountModelPermissionService {
 				throw new Error("Invalid discovery endpoint");
 			url.pathname = `${url.pathname
 				.replace(/\/+$/, "")
+				.replace(/\/v1$/, "")
 				.replace(/\/anthropic$/, "")}/v1/models`;
 			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
 			headers.set("authorization", `Bearer ${token}`);

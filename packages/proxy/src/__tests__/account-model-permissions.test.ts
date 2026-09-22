@@ -822,6 +822,40 @@ describe("mimo model discovery", () => {
 		expect((await service.permissions(a)).discovered_ids).toEqual(CATALOGUE);
 	});
 
+	it("strips the `/anthropic` even when the base already carries a `/v1`", async () => {
+		// The stored endpoint may already carry the `/v1` that the request path
+		// would otherwise supply. The catalogue still sits on the host ROOT, so
+		// both segments come off: appending here would ask for
+		// `/anthropic/v1/v1/models`, which is not a MiMo surface.
+		const a = mimo("mimo-region-v1", {
+			custom_endpoint: "https://token-plan-ams.xiaomimimo.com/anthropic/v1",
+		});
+		const urls: string[] = [];
+		const { service } = setup([a], async (input) => {
+			urls.push(String(input));
+			return catalogueBody();
+		});
+		await service.refresh(a);
+		expect(urls).toEqual(["https://token-plan-ams.xiaomimimo.com/v1/models"]);
+		expect((await service.permissions(a)).discovered_ids).toEqual(CATALOGUE);
+	});
+
+	it("reaches the same catalogue from a base that ends in a slash", async () => {
+		// Trailing slashes come off before either segment is matched, so a base
+		// pasted with one normalizes to exactly the URL the unslashed form does.
+		const a = mimo("mimo-region-v1-slash", {
+			custom_endpoint: "https://token-plan-ams.xiaomimimo.com/anthropic/v1/",
+		});
+		const urls: string[] = [];
+		const { service } = setup([a], async (input) => {
+			urls.push(String(input));
+			return catalogueBody();
+		});
+		await service.refresh(a);
+		expect(urls).toEqual(["https://token-plan-ams.xiaomimimo.com/v1/models"]);
+		expect((await service.permissions(a)).discovered_ids).toEqual(CATALOGUE);
+	});
+
 	it("commits the whole list from the single request it arrives in", async () => {
 		// The OpenAI list shape carries no cursor and no `has_more`, so there is no
 		// second page to ask for: one request either yields the catalogue or yields
