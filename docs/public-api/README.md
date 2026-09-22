@@ -176,24 +176,30 @@ categories, including its older quota category for `all_accounts_failed`.
 Request `GET /v1/models?clankermux_metadata=1` to include the `clankermux`
 metadata extension. The opt-in is a query parameter, not a request header.
 The canonical effort vocabulary is `minimal`, `low`, `medium`, `high`, `xhigh`,
-and `max`; each alias advertises only its substantiated subset.
+and `max`. Every alias advertises the same fixed range, `low` through `max`.
 
 OpenAI, Anthropic, and Codex are client catalogue formats here, not promises of
 upstream provider support. Verified GPT profiles on the `codex` and
 `openai-compatible` upstream adapters currently substantiate effort metadata.
 Anthropic upstream routes and unknown adapter/model combinations do not.
 
-For an alias, `supportedReasoningEfforts` is the canonical effort list accepted by
-the alias across every eligible, known route. A value may be translated or
-lowered for the concrete fallback target selected for an attempt. The list is
-not a provider-specific thinking budget and does not advertise reasoning
-summaries.
+For an alias, `supportedReasoningEfforts` is always `low`, `medium`, `high`,
+`xhigh`, `max`, whatever its targets accept, and `reasoning` is `true`. The
+chosen level is mapped onto the concrete fallback target selected for each
+attempt: it may be lowered to what that target accepts, turned into the target's
+own effort variant where the provider encodes effort in the model id, or
+dropped so the target runs at its default where the provider is not known to
+accept it. A request without an effort sends each target exactly as configured.
+The list is not a provider-specific thinking budget and does not advertise
+reasoning summaries.
 
-If an eligible route has an unknown provider family, unresolved permissions, or
-no verified adapter mapping, the effort field is omitted. Clients must not infer
-support from an alias target's model name alone. Codex's native response uses
-the same values in `supported_reasoning_levels`; each level describes an alias
-acceptance rather than one target's native metadata.
+For a model that is not an alias, the effort field is present only when the
+route substantiates it; an unknown provider family, unresolved permissions or
+no verified adapter mapping omits it. Clients must not infer support from a
+model name alone. Codex's native response uses the same values in
+`supported_reasoning_levels`, with `medium` as an alias's
+`default_reasoning_level`; each level describes an alias acceptance rather than
+one target's native metadata.
 
 ## Wire and transport rules
 

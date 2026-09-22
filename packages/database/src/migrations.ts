@@ -1011,7 +1011,8 @@ export function ensureSchema(db: Database): void {
 		account_id TEXT PRIMARY KEY, scope TEXT NOT NULL, generation INTEGER NOT NULL,
 		completeness TEXT NOT NULL CHECK(completeness IN ('unknown','known-complete','known-empty')),
 		discovered_ids TEXT NOT NULL, manual_ids TEXT NOT NULL,
-		last_success_at INTEGER, last_attempt_at INTEGER, last_error TEXT
+		last_success_at INTEGER, last_attempt_at INTEGER, last_error TEXT,
+		model_variants TEXT NOT NULL DEFAULT '{}'
 	)`);
 	db.run(`CREATE TABLE IF NOT EXISTS account_model_suppressions (
 		account_id TEXT NOT NULL, scope TEXT NOT NULL, model TEXT NOT NULL,
@@ -1076,7 +1077,7 @@ export function ensureSchema(db: Database): void {
   WHEN OLD.provider IS NOT NEW.provider OR (${routingEndpoint("OLD")}) IS NOT (${routingEndpoint("NEW")}) OR OLD.api_key IS NOT NEW.api_key
    OR OLD.identity_external_id IS NOT NEW.identity_external_id OR OLD.identity_email IS NOT NEW.identity_email
    OR OLD.identity_organization_name IS NOT NEW.identity_organization_name OR OLD.identity_plan_tier IS NOT NEW.identity_plan_tier
-  BEGIN UPDATE account_model_permissions SET scope='invalidated',generation=generation+1,completeness='unknown',discovered_ids='[]',manual_ids='[]',last_success_at=NULL,last_attempt_at=NULL,last_error=NULL WHERE account_id=OLD.id;
+  BEGIN UPDATE account_model_permissions SET scope='invalidated',generation=generation+1,completeness='unknown',discovered_ids='[]',manual_ids='[]',model_variants='{}',last_success_at=NULL,last_attempt_at=NULL,last_error=NULL WHERE account_id=OLD.id;
  DELETE FROM account_model_suppressions WHERE account_id=OLD.id; END`);
 
 	addPerformanceIndexes(db);
@@ -1725,6 +1726,14 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "cache_creation_1h_input_tokens",
 		ddl: "ALTER TABLE requests ADD COLUMN cache_creation_1h_input_tokens INTEGER",
+	},
+	// JSON map of discovered model id -> ModelVariant (family, effort, other
+	// axes), written with discovered_ids. Only Devin declares variants; an
+	// alias maps the requested effort onto a sibling through it.
+	{
+		table: "account_model_permissions",
+		column: "model_variants",
+		ddl: "ALTER TABLE account_model_permissions ADD COLUMN model_variants TEXT NOT NULL DEFAULT '{}'",
 	},
 ];
 

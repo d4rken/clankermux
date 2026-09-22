@@ -25,6 +25,7 @@ export function devinInfo(): DevinAccountInfo {
 				supportsImages: false,
 				defaultInFamily: true,
 				effort: "high",
+				variant: { family: "SWE-2", effort: "high", dimensions: "" },
 			},
 		],
 		usage: {

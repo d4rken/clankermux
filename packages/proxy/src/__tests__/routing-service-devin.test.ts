@@ -1,10 +1,10 @@
-import { afterEach, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { devinClient } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import type { Account, ModelAlias, RequestMeta } from "@clankermux/types";
 import { setChatContext } from "@clankermux/types";
 import { modelPermissionScope } from "../account-model-permissions";
 import type { ProxyContext } from "../handlers/proxy-types";
-import { getResolvedRoute } from "../resolved-route";
+import { getAliasRoutes, getResolvedRoute } from "../resolved-route";
 import { initializeRequestRoute } from "../routing-service";
 
 let lookup: ReturnType<typeof spyOn> | undefined;
@@ -122,4 +122,112 @@ it.each([
 						'No permitted destination for model "swe-2" supports Chat Completions; supported providers are codex and openrouter',
 				},
 	);
+});
+
+describe("alias stages map the requested effort onto a Devin variant", () => {
+	const variant = (effort: string, dimensions = "") => ({
+		family: "SWE-2",
+		effort,
+		dimensions,
+	});
+	const variants = {
+		"swe-2-medium": variant("medium"),
+		"swe-2-high": variant("high"),
+		"swe-2-max": variant("max"),
+		"swe-2-high-fast": variant("high", "Fast Mode=@1"),
+		"swe-2-max-fast": variant("max", "Fast Mode=@1"),
+	};
+	function aliasSetup(target: string, reasoningEffort?: string) {
+		const devin = {
+			id: "devin-route",
+			provider: "devin",
+			name: "Devin",
+			api_key: "session",
+			custom_endpoint: null,
+		} as Account;
+		const codex = { ...devin, id: "codex-route", provider: "codex" } as Account;
+		const suppression = mock(async (..._args: unknown[]) => false);
+		const alias: ModelAlias = {
+			id: "alias:balanced",
+			displayName: "Balanced",
+			revision: 1,
+			targets: [
+				{ model: target, accountIds: [devin.id] },
+				{ model: "gpt-5.6-sol", accountIds: [codex.id] },
+			],
+		};
+		const ctx = {
+			dbOps: {
+				getAllAccounts: async () => [devin, codex],
+				routing: { listRules: async () => [], isModelSuppressed: suppression },
+				modelAliases: { get: async () => alias },
+			},
+			modelPermissions: {
+				permissions: async (a: Account) => ({
+					account_id: a.id,
+					scope: modelPermissionScope(a),
+					generation: 1,
+					completeness: "known-complete",
+					discovered_ids:
+						a.provider === "devin" ? Object.keys(variants) : ["gpt-5.6-sol"],
+					manual_ids: [],
+					last_success_at: Date.now(),
+					last_attempt_at: Date.now(),
+					last_error: null,
+					model_variants: a.provider === "devin" ? variants : {},
+				}),
+				refreshMisses: mock(async () => {}),
+			},
+		} as unknown as ProxyContext;
+		const meta = {
+			id: crypto.randomUUID(),
+			requestedModel: alias.id,
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			reasoningEffort,
+		} as RequestMeta;
+		return { devin, codex, ctx, meta, suppression };
+	}
+	async function stageModels(target: string, effort?: string) {
+		lookup ??= spyOn(devinClient, "getAccount").mockRejectedValue(
+			new Error("must not fetch"),
+		);
+		const { devin, codex, ctx, meta, suppression } = aliasSetup(target, effort);
+		await initializeRequestRoute(meta, ctx, null, null);
+		expect(lookup).not.toHaveBeenCalled();
+		const [devinStage, codexStage] = getAliasRoutes(meta) ?? [];
+		return {
+			devin: devinStage?.target(devin)?.upstreamModel,
+			codex: codexStage?.target(codex)?.upstreamModel,
+			suppressionReads: suppression.mock.calls.map((call) => call[2]),
+		};
+	}
+	it("routes the sibling that serves the requested effort", async () => {
+		const routed = await stageModels("swe-2-max", "high");
+		expect(routed.devin).toBe("swe-2-high");
+		// The suppression that gates the stage is the one for the model it sends.
+		expect(routed.suppressionReads).toContain("swe-2-high");
+		expect(routed.suppressionReads).not.toContain("swe-2-max");
+	});
+	it("keeps the target as written when no effort was requested", async () => {
+		expect((await stageModels("swe-2-max")).devin).toBe("swe-2-max");
+	});
+	it("keeps the target for an effort outside the vocabulary", async () => {
+		expect((await stageModels("swe-2-max", "thinking:2048")).devin).toBe(
+			"swe-2-max",
+		);
+	});
+	it("preserves the fast-mode axis while changing the effort", async () => {
+		expect((await stageModels("swe-2-max-fast", "high")).devin).toBe(
+			"swe-2-high-fast",
+		);
+	});
+	it("falls to the nearest effort below one the family lacks", async () => {
+		expect((await stageModels("swe-2-high", "xhigh")).devin).toBe("swe-2-high");
+		expect((await stageModels("swe-2-high", "low")).devin).toBe("swe-2-medium");
+	});
+	it("leaves a target without Devin variants unchanged", async () => {
+		expect((await stageModels("swe-2-max", "low")).codex).toBe("gpt-5.6-sol");
+	});
 });

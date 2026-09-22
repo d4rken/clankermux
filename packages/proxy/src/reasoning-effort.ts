@@ -42,3 +42,26 @@ export function parseReasoningEffort(body: unknown): string | null {
 
 	return null;
 }
+
+/**
+ * Remove every effort control {@link parseReasoningEffort} reads, so the
+ * upstream falls back to its own default. Nested objects are replaced, never
+ * edited: a body from `withPatchedModel` shares them with its parent, which
+ * later attempts to other destinations still send.
+ */
+export function stripEffortControls(body: Record<string, unknown>): void {
+	delete body.reasoning;
+	delete body.reasoning_effort;
+	delete body.thinking;
+	const outputConfig = body.output_config;
+	if (
+		typeof outputConfig !== "object" ||
+		outputConfig === null ||
+		Array.isArray(outputConfig) ||
+		!Object.hasOwn(outputConfig, "effort")
+	)
+		return;
+	const { effort: _effort, ...rest } = outputConfig as Record<string, unknown>;
+	if (Object.keys(rest).length) body.output_config = rest;
+	else delete body.output_config;
+}

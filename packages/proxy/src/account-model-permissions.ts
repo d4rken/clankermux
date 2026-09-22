@@ -14,6 +14,7 @@ import type {
 	Account,
 	AccountModelPermissions,
 	ClientModelMetadataMap,
+	ModelVariant,
 } from "@clankermux/types";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
@@ -37,6 +38,8 @@ export function modelPermissionScope(account: Account): string {
 interface DiscoveredCatalog {
 	ids: string[];
 	metadata?: ClientModelMetadataMap;
+	/** Model id -> its place in the provider's family; Devin only. */
+	variants?: Record<string, ModelVariant>;
 }
 interface NativeMetadataSnapshot {
 	generation: number;
@@ -217,6 +220,7 @@ export class AccountModelPermissionService {
 				permissions.generation,
 				catalog.ids,
 				this.now(),
+				catalog.variants,
 			);
 			if (!committed) return;
 			if (catalog.metadata)
@@ -293,7 +297,14 @@ export class AccountModelPermissionService {
 					return [model.id, entry];
 				}),
 			);
-			return { ids: [...new Set(models.map((m) => m.id))], metadata };
+			const variants: Record<string, ModelVariant> = {};
+			for (const model of models)
+				if (model.variant) variants[model.id] = model.variant;
+			return {
+				ids: [...new Set(models.map((m) => m.id))],
+				metadata,
+				variants,
+			};
 		}
 		if (account.provider === "codex") {
 			if (endpoint && !endpoint.startsWith("https://chatgpt.com/"))

@@ -1,11 +1,13 @@
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
-import type {
-	ClientCatalogue,
-	ClientFormat,
-	ClientModel,
-	ClientModelMetadata,
-	ClientModelMetadataMap,
+import {
+	ALIAS_REASONING_EFFORTS,
+	type AliasReasoningEffort,
+	type ClientCatalogue,
+	type ClientFormat,
+	type ClientModel,
+	type ClientModelMetadata,
+	type ClientModelMetadataMap,
 } from "@clankermux/types";
 
 /**
@@ -15,6 +17,25 @@ import type {
  * independent of cached metadata belonging to any one target.
  * Wire schema: codex-rs/protocol/src/openai_models.rs, ModelInfo (0.149+).
  */
+/**
+ * `medium` when the alias offers it, else the highest level below it, else the
+ * first listed: a client that sends the default gets a middling effort rather
+ * than the cheapest one.
+ */
+export function aliasDefaultReasoningLevel(
+	efforts: readonly AliasReasoningEffort[],
+): AliasReasoningEffort | null {
+	const upToMedium = ALIAS_REASONING_EFFORTS.slice(
+		0,
+		ALIAS_REASONING_EFFORTS.indexOf("medium") + 1,
+	);
+	return (
+		upToMedium.findLast((effort) => efforts.includes(effort)) ??
+		efforts[0] ??
+		null
+	);
+}
+
 export function aliasCodexMetadata(
 	model: Pick<ClientModel, "targetModel" | "displayName">,
 	metadata?: ClientModelMetadata,
@@ -34,8 +55,9 @@ export function aliasCodexMetadata(
 								"Accepted by the alias; mapped to the selected fallback target",
 						}),
 					),
-					default_reasoning_level:
-						metadata.supportedReasoningEfforts[0] ?? null,
+					default_reasoning_level: aliasDefaultReasoningLevel(
+						metadata.supportedReasoningEfforts,
+					),
 				}),
 		shell_type: "shell_command",
 		visibility: "list",

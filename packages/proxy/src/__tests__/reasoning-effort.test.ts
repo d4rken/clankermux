@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseReasoningEffort } from "../reasoning-effort";
+import { parseReasoningEffort, stripEffortControls } from "../reasoning-effort";
 
 describe("parseReasoningEffort", () => {
 	it("returns null for null/undefined/non-object bodies", () => {
@@ -134,4 +134,45 @@ it("recognizes explicit chat effort and prioritizes explicit settings over think
 			thinking: { type: "enabled", budget_tokens: 100 },
 		}),
 	).toBe("max");
+});
+
+describe("stripEffortControls", () => {
+	it("removes every effort control parseReasoningEffort reads", () => {
+		const body: Record<string, unknown> = {
+			model: "m",
+			reasoning: { effort: "high", summary: "auto" },
+			reasoning_effort: "high",
+			thinking: { type: "enabled", budget_tokens: 2048 },
+			output_config: { effort: "high", format: { type: "json_schema" } },
+		};
+		stripEffortControls(body);
+		expect(body).toEqual({
+			model: "m",
+			output_config: { format: { type: "json_schema" } },
+		});
+		expect(parseReasoningEffort(body)).toBeNull();
+	});
+	it("drops an output_config that held only the effort", () => {
+		const body: Record<string, unknown> = { output_config: { effort: "max" } };
+		stripEffortControls(body);
+		expect(body).toEqual({});
+	});
+	it("replaces output_config instead of editing an object a parent body shares", () => {
+		const shared = { effort: "high", format: { type: "text" } };
+		const body: Record<string, unknown> = { output_config: shared };
+		stripEffortControls(body);
+		expect(shared).toEqual({ effort: "high", format: { type: "text" } });
+		expect(body.output_config).not.toBe(shared);
+	});
+	it("leaves a body without effort controls alone", () => {
+		const body: Record<string, unknown> = {
+			model: "m",
+			output_config: { format: { type: "text" } },
+		};
+		stripEffortControls(body);
+		expect(body).toEqual({
+			model: "m",
+			output_config: { format: { type: "text" } },
+		});
+	});
 });

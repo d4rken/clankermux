@@ -32,6 +32,7 @@ const info: DevinAccountInfo = {
 			maxOutputTokens: 64000,
 			supportsImages: true,
 			effort: "high",
+			variant: { family: "SWE-2", effort: "high", dimensions: "" },
 		},
 	],
 	usage: {

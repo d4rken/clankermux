@@ -83,7 +83,10 @@ export interface ClientModelMetadata {
 	contextWindow?: number;
 	maxOutputTokens?: number;
 	reasoning?: boolean;
-	/** Canonical effort values accepted by every substantiated alias route. */
+	/**
+	 * Canonical effort values the route accepts. An alias always lists its fixed
+	 * range and maps the chosen level onto each target it tries.
+	 */
 	supportedReasoningEfforts?: AliasReasoningEffort[];
 	inputModalities?: Array<"text" | "image">;
 	cost?: ClientModelCost;

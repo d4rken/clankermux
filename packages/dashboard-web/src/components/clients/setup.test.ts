@@ -232,7 +232,7 @@ it("maps Pi's thinking levels onto the efforts the route accepts", () => {
 		max: "max",
 	});
 	// An effort the route does not accept must be null, not absent: Pi keeps an
-	// unmapped low/medium/high and would offer a level the alias rejects.
+	// unmapped low/medium/high and would offer a level the route rejects.
 	expect(second.thinkingLevelMap).toEqual({
 		off: null,
 		minimal: null,
@@ -242,7 +242,7 @@ it("maps Pi's thinking levels onto the efforts the route accepts", () => {
 		xhigh: null,
 		max: null,
 	});
-	// No substantiated effort list (every alias today): no claim about thinking.
+	// No substantiated effort list: no claim about thinking.
 	expect(third).not.toHaveProperty("thinkingLevelMap");
 });
 

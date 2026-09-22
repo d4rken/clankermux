@@ -372,4 +372,74 @@ describe("routing storage", () => {
 		});
 		expect(await repo.isModelSuppressed("a", "scope", "manual", 0)).toBe(false);
 	});
+	describe("model variants", () => {
+		const high = { family: "SWE-2", effort: "high", dimensions: "" };
+		const max = { family: "SWE-2", effort: "max", dimensions: "" };
+		it("stores variants with the discovery, keeping only discovered ids", async () => {
+			const p = await repo.ensurePermissionScope("a", "scope");
+			expect(p.model_variants).toEqual({});
+			await repo.completeDiscovery(
+				"a",
+				"scope",
+				p.generation,
+				["swe-2-high", "swe-2-max"],
+				100,
+				{ "swe-2-high": high, "swe-2-max": max, "swe-2-medium": high },
+			);
+			expect((await repo.getPermissions("a"))?.model_variants).toEqual({
+				"swe-2-high": high,
+				"swe-2-max": max,
+			});
+		});
+		it("replaces the variants on rediscovery and defaults to none", async () => {
+			const p = await repo.ensurePermissionScope("a", "scope");
+			await repo.completeDiscovery("a", "scope", p.generation, ["m"], 100, {
+				m: high,
+			});
+			await repo.completeDiscovery("a", "scope", p.generation, ["m"], 110);
+			expect((await repo.getPermissions("a"))?.model_variants).toEqual({});
+		});
+		it("clears the variants when the permission scope changes", async () => {
+			const p = await repo.ensurePermissionScope("a", "scope-a");
+			await repo.completeDiscovery("a", "scope-a", p.generation, ["m"], 100, {
+				m: high,
+			});
+			await repo.ensurePermissionScope("a", "scope-b");
+			expect(
+				db
+					.query(
+						"SELECT model_variants FROM account_model_permissions WHERE account_id='a'",
+					)
+					.get(),
+			).toEqual({ model_variants: "{}" });
+		});
+		it("clears the variants when the account identity changes", async () => {
+			db.run(
+				"INSERT INTO accounts(id,name,provider,refresh_token,created_at) VALUES('a','A','devin','',0)",
+			);
+			const p = await repo.ensurePermissionScope("a", "scope");
+			await repo.completeDiscovery("a", "scope", p.generation, ["m"], 100, {
+				m: high,
+			});
+			db.run("UPDATE accounts SET provider='codex' WHERE id='a'");
+			expect(
+				db
+					.query(
+						"SELECT model_variants FROM account_model_permissions WHERE account_id='a'",
+					)
+					.get(),
+			).toEqual({ model_variants: "{}" });
+		});
+		it("ignores a leftover variant whose model is no longer discovered", async () => {
+			// What a database whose identity trigger predates the column looks like
+			// after an invalidation: discovered_ids reset, model_variants not.
+			const p = await repo.ensurePermissionScope("a", "scope");
+			db.run(
+				"UPDATE account_model_permissions SET model_variants=? WHERE account_id='a'",
+				[JSON.stringify({ gone: high })],
+			);
+			expect(p.discovered_ids).toEqual([]);
+			expect((await repo.getPermissions("a"))?.model_variants).toEqual({});
+		});
+	});
 });

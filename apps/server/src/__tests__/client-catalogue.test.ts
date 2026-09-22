@@ -4,7 +4,11 @@ import type {
 	ClientCatalogue,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
-import { aliasCodexMetadata, renderClientCatalogue } from "../client-catalogue";
+import {
+	aliasCodexMetadata,
+	aliasDefaultReasoningLevel,
+	renderClientCatalogue,
+} from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
 import anthropicRetentionFixture from "./fixtures/cache-retention/anthropic.json";
 import codexRetentionFixture from "./fixtures/cache-retention/codex.json";
@@ -60,7 +64,7 @@ describe("client catalogue serving", () => {
 						(level: { effort: string }) => level.effort,
 					),
 				).toEqual(["low", "medium"]);
-				expect(entry.default_reasoning_level).toBe("low");
+				expect(entry.default_reasoning_level).toBe("medium");
 			} else {
 				expect(entry).not.toHaveProperty("supported_reasoning_levels");
 				expect(entry).not.toHaveProperty("default_reasoning_level");
@@ -68,6 +72,15 @@ describe("client catalogue serving", () => {
 		}
 	});
 
+	it("defaults an alias to medium, else the nearest level below, else the first", () => {
+		expect(
+			aliasDefaultReasoningLevel(["low", "medium", "high", "xhigh", "max"]),
+		).toBe("medium");
+		expect(aliasDefaultReasoningLevel(["minimal", "low", "high"])).toBe("low");
+		expect(aliasDefaultReasoningLevel(["minimal", "high"])).toBe("minimal");
+		expect(aliasDefaultReasoningLevel(["high", "max"])).toBe("high");
+		expect(aliasDefaultReasoningLevel([])).toBeNull();
+	});
 	it("does not publish efforts for unmapped future GPT variants", async () => {
 		for (const targetModel of [
 			"gpt-5-future",

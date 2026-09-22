@@ -12,11 +12,52 @@ const GPT_EFFORTS: Record<string, readonly AliasReasoningEffort[]> = {
 	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.4-mini": ["low", "medium"],
 	"gpt-5.5": ["minimal", "low", "medium", "high", "xhigh"],
+	// Codex's catalogue lists `max` for these, but the ChatGPT backend rejects it
+	// on 5.x and backend-params clamps it to `xhigh`; publish what is delivered.
+	"gpt-5.6-sol": ["minimal", "low", "medium", "high", "xhigh"],
+	"gpt-5.6-terra": ["minimal", "low", "medium", "high", "xhigh"],
+	"gpt-5.6-luna": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-6": ["low", "medium", "high", "xhigh", "max"],
 	"gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
 	"gpt-6-sol": ["low", "medium", "high", "xhigh", "max"],
 	"gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
 };
+
+/**
+ * What every alias offers, whatever its targets support: the request path maps
+ * the chosen level onto each target it tries.
+ */
+export const ALIAS_ADVERTISED_EFFORTS: readonly AliasReasoningEffort[] = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+/**
+ * Providers an alias may hand the requested effort to. Codex and the OpenAI
+ * adapters clamp it per model; Anthropic serves Claude Code's own effort as
+ * sent; Z.AI accepted every level from `minimal` to `max` when probed; Devin
+ * ignores the field and gets the effort through its model variant instead.
+ * Any other provider has never been shown to accept it, and on an alias an
+ * upstream 400 is final, so the effort is removed and the target uses its own
+ * default.
+ */
+const ALIAS_EFFORT_PROVIDERS: ReadonlySet<string> = new Set([
+	"codex",
+	"openai-compatible",
+	"qwen",
+	"kilo",
+	"anthropic",
+	"claude-console-api",
+	"zai",
+	"devin",
+]);
+
+export function aliasEffortReachesProvider(provider: string): boolean {
+	return ALIAS_EFFORT_PROVIDERS.has(provider);
+}
 
 export type TargetReasoningProfile =
 	| { status: "known"; efforts: readonly AliasReasoningEffort[] }

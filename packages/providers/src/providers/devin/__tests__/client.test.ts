@@ -14,6 +14,9 @@ import {
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	GetUserStatusResponseSchema,
+	ModelFamilyMetadataEntrySchema,
+	ModelFamilyMetadataSchema,
+	ModelFamilyMetadataValueSchema,
 	ModelInfoSchema,
 	PlanInfoSchema,
 	PlanStatusSchema,
@@ -128,6 +131,90 @@ describe("Devin account client", () => {
 		expect(() => client.resolveModel(a.models, "adaptive")).toThrow(
 			"Adaptive routing is not supported",
 		);
+	});
+	it("describes each model's place in its family from the catalogue metadata", async () => {
+		const config = (
+			modelUid: string,
+			family: string,
+			entries: Array<[string, string, number]>,
+		) =>
+			create(ClientModelConfigSchema, {
+				modelUid,
+				label: modelUid,
+				modelFamilyMetadata: create(ModelFamilyMetadataSchema, {
+					modelFamilyLabel: family,
+					entries: entries.map(([key, name, order]) =>
+						create(ModelFamilyMetadataEntrySchema, {
+							key,
+							value: create(ModelFamilyMetadataValueSchema, { name, order }),
+						}),
+					),
+				}),
+			});
+		const client = new DevinClient(async (input) => {
+			const path = new URL(String(input)).pathname;
+			if (path.endsWith("GetUserJwt"))
+				return new Response(
+					new Uint8Array(
+						toBinary(
+							GetUserJwtResponseSchema,
+							create(GetUserJwtResponseSchema, { userJwt: "jwt" }),
+						),
+					),
+				);
+			if (path.endsWith("GetCliModelConfigs"))
+				return new Response(
+					new Uint8Array(
+						toBinary(
+							GetCliModelConfigsResponseSchema,
+							create(GetCliModelConfigsResponseSchema, {
+								clientModelConfigs: [
+									config("swe-2-high", "SWE-2", [
+										["Reasoning Effort", "High", 1],
+									]),
+									config("glm-5-3-max", "GLM-5.3", [
+										["Effort", "Max", 2],
+										["1M Context", "", 1],
+									]),
+									config("claude-opus-5-low-fast", "Claude Opus 5", [
+										["Effort", "Low", 0],
+										["Thinking", "", 1],
+										["Fast Mode", "", 1],
+										["1M Context", "", 0],
+									]),
+									create(ClientModelConfigSchema, {
+										modelUid: "standalone",
+										label: "Standalone",
+									}),
+								],
+							}),
+						),
+					),
+				);
+			return new Response(
+				new Uint8Array(
+					toBinary(
+						GetUserStatusResponseSchema,
+						create(GetUserStatusResponseSchema),
+					),
+				),
+			);
+		});
+		const { models } = await client.getAccount("token");
+		expect(Object.fromEntries(models.map((m) => [m.id, m.variant]))).toEqual({
+			"swe-2-high": { family: "SWE-2", effort: "high", dimensions: "" },
+			"glm-5-3-max": {
+				family: "GLM-5.3",
+				effort: "max",
+				dimensions: "1M Context=@1",
+			},
+			"claude-opus-5-low-fast": {
+				family: "Claude Opus 5",
+				effort: "low",
+				dimensions: "1M Context=@0|Fast Mode=@1|Thinking=@1",
+			},
+			standalone: null,
+		});
 	});
 	it("treats undated proto-default quota values as absent and honors hidden daily windows", () => {
 		const response = create(GetUserStatusResponseSchema, {

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -13,6 +13,7 @@ import {
 	modelPermissionScope,
 } from "../account-model-permissions";
 import { cacheBodyStore } from "../cache-body-store";
+import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	markAnthropicBurstThrottle,
@@ -32,13 +33,13 @@ afterEach(() => {
 	clearProviderOverloadCooldown();
 	for (const db of dbs.splice(0)) db.close();
 });
-async function setup() {
-	const accounts = [0, 1, 2].map((i) =>
+async function setup(providers = ["anthropic", "anthropic", "anthropic"]) {
+	const accounts = providers.map((provider, i) =>
 		makeAccount({
 			id: `alias-account-${i}`,
 			name: `Account ${i}`,
 			custom_endpoint: `https://upstream-${i}.test`,
-			provider: "anthropic",
+			provider,
 		}),
 	);
 	const db = new Database(":memory:");
@@ -439,5 +440,80 @@ it("cleans staged bodies and audits the rejected fallback target", async () => {
 	expect(JSON.parse(rejected?.route_snapshot ?? "{}").alias).toMatchObject({
 		id: "alias:good",
 		targetIndex: 1,
+	});
+});
+
+describe("reasoning effort on alias attempts", () => {
+	const effort = {
+		thinking: { type: "enabled", budget_tokens: 2048 },
+		output_config: { effort: "high" },
+	};
+	function capture(handler: (model: string) => Response) {
+		const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
+		globalThis.fetch = mockFetch(async (input) => {
+			if (!(input instanceof Request) || !input.url.includes(".test"))
+				return new Response("unavailable", { status: 503 });
+			const body = await input.clone().json();
+			sent.push({ url: input.url, body });
+			return handler(body.model);
+		});
+		return sent;
+	}
+	it("drops it for a provider not known to handle it and keeps it for one that does", async () => {
+		const { ctx } = await setup([
+			"anthropic-compatible",
+			"anthropic-compatible",
+			"anthropic",
+		]);
+		const sent = capture((model) =>
+			model === "primary-model"
+				? Response.json(
+						{ error: { type: "rate_limit_error" } },
+						{ status: 429 },
+					)
+				: success(model),
+		);
+		expect((await run(ctx, request(undefined, effort))).status).toBe(200);
+		expect(sent.map((s) => s.body.model)).toEqual([
+			"primary-model",
+			"primary-model",
+			"backup-model",
+		]);
+		for (const { body } of sent.slice(0, 2)) {
+			expect(body.thinking).toBeUndefined();
+			expect(body.output_config).toBeUndefined();
+		}
+		expect(sent[2]?.body).toMatchObject(effort);
+	});
+	it("drops it on the global force-account path too", async () => {
+		const { ctx, accounts } = await setup([
+			"anthropic-compatible",
+			"anthropic-compatible",
+			"anthropic",
+		]);
+		const sent = capture((model) => success(model));
+		setForcedAccount(accounts[0].id);
+		try {
+			expect((await run(ctx, request(undefined, effort))).status).toBe(200);
+		} finally {
+			setForcedAccount(null);
+		}
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.body.thinking).toBeUndefined();
+		expect(sent[0]?.body.output_config).toBeUndefined();
+	});
+	it("leaves a request that did not name an alias as the client sent it", async () => {
+		const { ctx } = await setup([
+			"anthropic-compatible",
+			"anthropic-compatible",
+			"anthropic",
+		]);
+		const sent = capture((model) => success(model));
+		const response = await run(
+			ctx,
+			request(undefined, { ...effort, model: "primary-model" }),
+		);
+		expect(response.status).toBe(200);
+		expect(sent[0]?.body).toMatchObject({ model: "primary-model", ...effort });
 	});
 });

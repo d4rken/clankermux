@@ -27,6 +27,18 @@ export interface ModelPermissionSet {
 	discovered_ids: string[];
 	manual_ids: string[];
 }
+/**
+ * Where a discovered model sits among the provider's own variants of it. Devin
+ * publishes `swe-2-high` as family "SWE-2" at effort "high", so a sibling with
+ * the same family and dimensions differs from it only in effort.
+ */
+export interface ModelVariant {
+	family: string;
+	/** Canonical effort (`none`..`max`), or null when the name is not one. */
+	effort: string | null;
+	/** Every non-effort axis (fast mode, 1M context, …), as one comparable key. */
+	dimensions: string;
+}
 export interface AccountModelPermissions extends ModelPermissionSet {
 	account_id: string;
 	scope: string;
@@ -34,6 +46,8 @@ export interface AccountModelPermissions extends ModelPermissionSet {
 	last_success_at: number | null;
 	last_attempt_at: number | null;
 	last_error: string | null;
+	/** Discovered variants by model id; only providers that declare them. */
+	model_variants?: Record<string, ModelVariant>;
 }
 export interface ResolvedRoutingTarget {
 	upstreamModel: string;

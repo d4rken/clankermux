@@ -13,6 +13,7 @@ import {
 } from "@clankermux/proxy";
 import { tempDbTracker } from "@clankermux/test-support";
 import type {
+	AliasReasoningEffort,
 	ClientDraft,
 	ClientModel,
 	ClientView,
@@ -22,6 +23,14 @@ import { ClientService } from "../client-service";
 import { ModelCatalogService } from "../model-catalog-service";
 
 const temp = tempDbTracker("client-service");
+/** What every alias advertises, whatever its targets accept. */
+const ALIAS_EFFORTS: AliasReasoningEffort[] = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
 const raw = (slug = "gpt-real", context = 64000) => ({
 	bodyText: JSON.stringify({
 		models: [
@@ -152,10 +161,14 @@ describe("client service integration", () => {
 			slug: "good",
 			supports_reasoning_summaries: false,
 		});
-		expect(discovery.models[0]).not.toHaveProperty(
-			"supported_reasoning_levels",
-		);
-		expect(discovery.models[0]).not.toHaveProperty("default_reasoning_level");
+		// Every alias offers the fixed range; the request path maps the chosen
+		// level onto each target it tries.
+		expect(
+			discovery.models[0].supported_reasoning_levels.map(
+				(level: { effort: string }) => level.effort,
+			),
+		).toEqual(ALIAS_EFFORTS);
+		expect(discovery.models[0].default_reasoning_level).toBe("medium");
 		expect(discovery.models[0].base_instructions).not.toContain("gpt-real");
 		expect(discovery.models[0].context_window).toBeUndefined();
 		expect(
@@ -1317,7 +1330,7 @@ describe("client service integration", () => {
 			rmSync(cacheDir, { recursive: true, force: true });
 		});
 
-		it("intersects alias efforts across formats and recomputes for restrictions and unknown routes", async () => {
+		it("advertises the fixed alias effort range in every format, whatever the targets accept", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["gpt-5.4-mini", "gpt-6-future"]);
 			const alias = await dbOps.modelAliases.save({
@@ -1345,7 +1358,10 @@ describe("client service integration", () => {
 				const enriched = await (await service.wire(id, format, true)).json();
 				const key = format === "codex" ? "models" : "data";
 				const { clankermux, ...native } = enriched[key][0];
-				expect(clankermux.supportedReasoningEfforts).toEqual(["low", "medium"]);
+				// gpt-5.4-mini alone accepts only low and medium; the alias still
+				// offers the whole range and maps it per target at request time.
+				expect(clankermux.supportedReasoningEfforts).toEqual(ALIAS_EFFORTS);
+				expect(clankermux.reasoning).toBe(true);
 				expect(native).toEqual(plain[key][0]);
 				expect(plain[key][0]).not.toHaveProperty("clankermux");
 				if (format === "codex") {
@@ -1354,7 +1370,8 @@ describe("client service integration", () => {
 						native.supported_reasoning_levels.map(
 							(level: { effort: string }) => level.effort,
 						),
-					).toEqual(["low", "medium"]);
+					).toEqual(ALIAS_EFFORTS);
+					expect(native.default_reasoning_level).toBe("medium");
 				}
 			}
 			const pinned = structuredClone(draft);
@@ -1364,7 +1381,7 @@ describe("client service integration", () => {
 			expect(
 				(await service.modelMetadata(pinnedId, "openai")).models.efforts
 					?.supportedReasoningEfforts,
-			).toEqual(["low", "medium", "high", "xhigh", "max"]);
+			).toEqual(ALIAS_EFFORTS);
 			await dbOps.modelAliases.save({
 				...alias,
 				targets: [
@@ -1372,13 +1389,15 @@ describe("client service integration", () => {
 					{ model: "gpt-6-future", accountIds: ["d"] },
 				],
 			});
+			// A target with no known effort profile does not narrow it either.
 			expect(
-				(await service.modelMetadata(id, "openai")).models.efforts,
-			).not.toHaveProperty("supportedReasoningEfforts");
+				(await service.modelMetadata(id, "openai")).models.efforts
+					?.supportedReasoningEfforts,
+			).toEqual(ALIAS_EFFORTS);
 			expect(
 				(await service.modelMetadata(pinnedId, "openai")).models.efforts
 					?.supportedReasoningEfforts,
-			).toEqual(["low", "medium", "high", "xhigh", "max"]);
+			).toEqual(ALIAS_EFFORTS);
 		});
 
 		it("describes an unpinned alias from the targets the key can actually reach", async () => {
@@ -1405,11 +1424,12 @@ describe("client service integration", () => {
 			const both = blank();
 			both.catalogues.openai.models = [entry];
 			const bothId = (await create(both)).client.apiKeyId;
-			// Both reachable: the shared floor across the two targets.
-			expect(
-				(await service.modelMetadata(bothId, "openai")).models.reach
-					?.supportedReasoningEfforts,
-			).toEqual(["low", "medium"]);
+			// Both reachable: gpt-5.4-mini has no catalogue window, so the alias
+			// substantiates none.
+			const shared = (await service.modelMetadata(bothId, "openai")).models
+				.reach;
+			expect(shared?.contextWindow).toBeUndefined();
+			expect(shared?.supportedReasoningEfforts).toEqual(ALIAS_EFFORTS);
 
 			const excluded = blank();
 			excluded.name = "Codex only";
@@ -1420,13 +1440,7 @@ describe("client service integration", () => {
 			// erasing what the one reachable target substantiates.
 			const metadata = (await service.modelMetadata(excludedId, "openai"))
 				.models.reach;
-			expect(metadata?.supportedReasoningEfforts).toEqual([
-				"low",
-				"medium",
-				"high",
-				"xhigh",
-				"max",
-			]);
+			expect(metadata?.supportedReasoningEfforts).toEqual(ALIAS_EFFORTS);
 			expect(metadata?.reasoning).toBe(true);
 			expect(metadata?.contextWindow).toBe(872_000);
 		});
@@ -1457,7 +1471,9 @@ describe("client service integration", () => {
 			expect((await service.modelMetadata(id, "openai")).models.good).toEqual({
 				contextWindow: 100_000,
 				maxOutputTokens: 32_000,
-				reasoning: false,
+				// fast-backup does not reason, but an alias always offers the range.
+				reasoning: true,
+				supportedReasoningEfforts: ALIAS_EFFORTS,
 				inputModalities: ["text"],
 				cacheRetention: expect.objectContaining({
 					basis: "heuristic",
