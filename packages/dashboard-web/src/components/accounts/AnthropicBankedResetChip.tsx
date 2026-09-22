@@ -5,7 +5,7 @@ import type {
 	AnthropicBankedResetsInfo,
 } from "@clankermux/types";
 import { RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { type AccountStatus, formatResetTime } from "../../lib/account-status";
 import {
@@ -17,6 +17,7 @@ import {
 	findResumableBankedResetClaim,
 	formatBankedResetReason,
 	pendingBankedResetClaimOf,
+	retryAtOf,
 	showsAnthropicBankedResetChip,
 	unconfirmedBankedResetMessage,
 } from "../../lib/anthropic-banked-resets";
@@ -152,6 +153,17 @@ export function AnthropicBankedResetChip({
 		ResetEventsState<AnthropicBankedResetEventResponse>
 	>({ kind: "idle" });
 	const [attempt, setAttempt] = useState<ClaimAttempt>(IDLE_ATTEMPT);
+	// Re-render once a held Retry becomes available.
+	const [, setRetryTick] = useState(0);
+	const retryAt =
+		attempt.state.kind === "retry" ? attempt.state.retryAt : undefined;
+	useEffect(() => {
+		if (retryAt === undefined) return;
+		const wait = retryAt - Date.now();
+		if (wait <= 0) return;
+		const timer = setTimeout(() => setRetryTick((tick) => tick + 1), wait + 50);
+		return () => clearTimeout(timer);
+	}, [retryAt]);
 	const info = account.anthropicBankedResets;
 	if (!info || !showsAnthropicBankedResetChip(account)) return null;
 
@@ -173,6 +185,7 @@ export function AnthropicBankedResetChip({
 								state: {
 									kind: "retry",
 									message: unconfirmedBankedResetMessage(pending.nextAttemptAt),
+									...retryAtOf(pending.nextAttemptAt),
 								},
 								requestId: pending.requestId,
 								grantId: pending.grantId,

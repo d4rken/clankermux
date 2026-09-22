@@ -138,6 +138,12 @@ async function openPopover(): Promise<void> {
 	await act(async () => trigger?.click());
 }
 
+function retryButton(): HTMLButtonElement | undefined {
+	return Array.from(document.querySelectorAll("button")).find(
+		(element) => element.textContent === "Retry",
+	);
+}
+
 async function clickButton(label: string): Promise<void> {
 	const button = Array.from(document.querySelectorAll("button")).find(
 		(element) => element.textContent === label,
@@ -153,7 +159,7 @@ it("keeps one request id across a transport failure and a pending answer", async
 		.mockResolvedValueOnce(
 			claimResponse({
 				status: "pending",
-				nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
+				nextAttemptAt: new Date(Date.now() + 200).toISOString(),
 			}),
 		)
 		.mockResolvedValue(
@@ -180,6 +186,12 @@ it("keeps one request id across a transport failure and a pending answer", async
 	expect(document.body.textContent).toContain(
 		"Couldn't confirm — retry after ",
 	);
+	// Held until the server's next attempt time, then released by a timer.
+	expect(retryButton()?.disabled).toBe(true);
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 400));
+	});
+	expect(retryButton()?.disabled).toBe(false);
 	await clickButton("Retry");
 	expect(document.body.textContent).toContain("Limits reset");
 	expect(claim).toHaveBeenCalledTimes(3);

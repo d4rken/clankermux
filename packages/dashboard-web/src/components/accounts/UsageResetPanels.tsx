@@ -138,8 +138,11 @@ export type ResetApplyState =
 	| { kind: "confirm" }
 	| { kind: "applying" }
 	| { kind: "done"; success: boolean; message: string }
-	/** Not settled: Retry resends the same attempt. `detail` is the tooltip. */
-	| { kind: "retry"; message: string; detail?: string };
+	/**
+	 * Not settled: Retry resends the same attempt. `detail` is the tooltip;
+	 * Retry stays disabled until `retryAt` (ms epoch) when one is given.
+	 */
+	| { kind: "retry"; message: string; detail?: string; retryAt?: number };
 
 export function ResetApplyConfirmPanel({
 	available,
@@ -151,6 +154,7 @@ export function ResetApplyConfirmPanel({
 	onCancel,
 	onRetry,
 	onDismiss,
+	now = Date.now(),
 }: {
 	/** Whether a reset can be applied right now; gates the idle button only. */
 	available: boolean;
@@ -163,6 +167,8 @@ export function ResetApplyConfirmPanel({
 	onRetry: () => void;
 	/** Dismiss a terminal outcome — the parent resets the flow back to idle. */
 	onDismiss: () => void;
+	/** Render time; the parent re-renders when `retryAt` passes. */
+	now?: number;
 }) {
 	if (state.kind === "idle") {
 		if (!available) return null;
@@ -202,6 +208,7 @@ export function ResetApplyConfirmPanel({
 		return <p className="text-xs text-muted-foreground">Applying reset…</p>;
 	}
 	if (state.kind === "retry") {
+		const waiting = state.retryAt !== undefined && state.retryAt > now;
 		return (
 			<div className="space-y-item">
 				<p
@@ -211,7 +218,17 @@ export function ResetApplyConfirmPanel({
 					{state.message}
 				</p>
 				<div className="flex items-center gap-item">
-					<Button size="sm" className="h-7 text-xs" onClick={onRetry}>
+					<Button
+						size="sm"
+						className="h-7 text-xs"
+						onClick={onRetry}
+						disabled={waiting}
+						title={
+							waiting && state.retryAt !== undefined
+								? `Retry after ${formatResetTime(new Date(state.retryAt).toISOString())}`
+								: undefined
+						}
+					>
 						Retry
 					</Button>
 					<Button

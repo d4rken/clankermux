@@ -83,8 +83,8 @@ export function claimableBankedResetGrant(
 /** What the Apply-now flow shows after the server answered a claim. */
 export type BankedResetClaimView =
 	| { kind: "done"; success: boolean; message: string }
-	/** Unconfirmed: retry with the same request id. */
-	| { kind: "retry"; message: string };
+	/** Unconfirmed: retry with the same request id, not before `retryAt` (ms epoch). */
+	| { kind: "retry"; message: string; retryAt?: number };
 
 export function unconfirmedBankedResetMessage(
 	nextAttemptAt: string | null,
@@ -92,6 +92,12 @@ export function unconfirmedBankedResetMessage(
 	return nextAttemptAt
 		? `Couldn't confirm — retry after ${formatResetTime(nextAttemptAt)}`
 		: "Couldn't confirm — retry";
+}
+
+/** `{retryAt}` for a parseable next attempt time, else nothing. */
+export function retryAtOf(nextAttemptAt: string | null): { retryAt?: number } {
+	const at = nextAttemptAt ? Date.parse(nextAttemptAt) : Number.NaN;
+	return Number.isFinite(at) ? { retryAt: at } : {};
 }
 
 export function describeBankedResetClaim(
@@ -134,6 +140,7 @@ export function describeBankedResetClaim(
 			return {
 				kind: "retry",
 				message: unconfirmedBankedResetMessage(response.nextAttemptAt),
+				...retryAtOf(response.nextAttemptAt),
 			};
 	}
 }

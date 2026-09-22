@@ -8,6 +8,7 @@ import { deriveAccountStatus } from "../../lib/account-status";
 import type { AnthropicBankedResetGrantInfo } from "../../lib/anthropic-banked-resets";
 import { AccountStatusChips } from "./AccountStatusChips";
 import { BankedResetGrantsPanel } from "./AnthropicBankedResetChip";
+import { ResetApplyConfirmPanel } from "./UsageResetPanels";
 
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 const HOUR = 3_600_000;
@@ -278,5 +279,37 @@ describe("BankedResetGrantsPanel", () => {
 		expect(
 			panel(info({ cooldownUntil: new Date(NOW - HOUR).toISOString() })),
 		).not.toContain("Cooling down");
+	});
+});
+
+describe("ResetApplyConfirmPanel retry timing", () => {
+	function retryMarkup(retryAt: number | undefined): string {
+		return renderToStaticMarkup(
+			<ResetApplyConfirmPanel
+				available
+				state={{ kind: "retry", message: "Couldn't confirm", retryAt }}
+				armTitle=""
+				confirmPrompt=""
+				onArm={() => {}}
+				onConfirm={() => {}}
+				onCancel={() => {}}
+				onRetry={() => {}}
+				onDismiss={() => {}}
+				now={NOW}
+			/>,
+		);
+	}
+	const retryButton = (markup: string) =>
+		markup.match(/<button[^>]*>Retry<\/button>/)?.[0] ?? "";
+
+	it("disables Retry until the claim's next attempt time", () => {
+		const markup = retryButton(retryMarkup(NOW + 60_000));
+		expect(markup).toContain(' disabled=""');
+		expect(markup).toContain("Retry after ");
+	});
+
+	it("enables Retry once that time has passed, or when none was given", () => {
+		expect(retryButton(retryMarkup(NOW))).not.toContain(' disabled=""');
+		expect(retryButton(retryMarkup(undefined))).not.toContain(' disabled=""');
 	});
 });

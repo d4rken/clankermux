@@ -206,6 +206,9 @@ describe("describeBankedResetClaim", () => {
 		);
 		expect(timed.kind).toBe("retry");
 		expect(timed.message).toStartWith("Couldn't confirm — retry after ");
+		expect(timed.kind === "retry" && timed.retryAt).toBe(
+			Date.parse("2030-01-05T10:00:00.000Z"),
+		);
 		expect(
 			describeBankedResetClaim(response({ status: "unavailable" })),
 		).toEqual({ kind: "retry", message: "Couldn't confirm — retry" });
