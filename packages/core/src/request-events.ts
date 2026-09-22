@@ -17,6 +17,10 @@ export type RequestIngressEvt = {
 	project: string | null;
 	/** Model resolved at ingress (the REQUESTED model — no upstream reply yet). */
 	model: string | null;
+	/** The API key the request presented. `null` is a real state, not a gap:
+	 *  unprotected mode admits traffic that carries no key at all. */
+	apiKeyId: string | null;
+	apiKeyName: string | null;
 };
 
 /**
@@ -50,6 +54,9 @@ export type RequestStartEvt = {
 	project: string | null;
 	/** The requested model, for the same reason as `project`. */
 	model: string | null;
+	/** Client identity, for the same reason as `project`. */
+	apiKeyId: string | null;
+	apiKeyName: string | null;
 };
 
 export type RequestSummaryEvt = {
@@ -76,6 +83,9 @@ export interface ActiveRequestEntry {
 	path: string;
 	project: string | null;
 	model: string | null;
+	/** Established at ingress; see {@link RequestIngressEvt.apiKeyId}. */
+	apiKeyId: string | null;
+	apiKeyName: string | null;
 	phase: ActiveRequestPhase;
 	/** Known only once `start` has fired. */
 	accountId: string | null;
@@ -205,6 +215,8 @@ requestEvents.on("event", (evt: RequestEvt) => {
 				path: evt.path,
 				project: evt.project,
 				model: evt.model,
+				apiKeyId: evt.apiKeyId,
+				apiKeyName: evt.apiKeyName,
 				phase: "pending",
 				accountId: null,
 				statusCode: null,
@@ -226,6 +238,8 @@ requestEvents.on("event", (evt: RequestEvt) => {
 				path: evt.path,
 				project: evt.project ?? existing?.project ?? null,
 				model: evt.model ?? existing?.model ?? null,
+				apiKeyId: evt.apiKeyId ?? existing?.apiKeyId ?? null,
+				apiKeyName: evt.apiKeyName ?? existing?.apiKeyName ?? null,
 				phase: "streaming",
 				accountId: evt.accountId,
 				statusCode: evt.statusCode,

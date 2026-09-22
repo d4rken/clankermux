@@ -54,6 +54,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")).toMatchObject({
@@ -75,6 +77,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, {
 			type: "start",
@@ -88,6 +92,8 @@ describe("applyStreamEvent — phases", () => {
 			statusCode: 200,
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")?.status).toBe("streaming");
@@ -106,6 +112,8 @@ describe("applyStreamEvent — phases", () => {
 			statusCode: 200,
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "summary", payload: summaryPayload() });
 
@@ -127,6 +135,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")?.status).toBe("ok");
@@ -166,6 +176,8 @@ describe("applyStreamEvent — retraction", () => {
 			path: "/v1/messages",
 			project: null,
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "ingress-end", id: "r1", statusCode: 400 });
 
@@ -194,6 +206,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 					path: "/v1/messages",
 					project: "herdr",
 					model: "claude-opus-5",
+					apiKeyId: null,
+					apiKeyName: null,
 					phase: "streaming",
 					accountId: "acct-1",
 					statusCode: 200,
@@ -220,6 +234,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "snapshot", active: [] });
 
@@ -246,6 +262,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "snapshot", active: [] });
 		expect(s.get("r1")?.status).toBe("lost");
@@ -343,6 +361,8 @@ describe("pruneLiveStore", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 	it("drops completed events that fall out of the window", () => {
@@ -403,6 +423,8 @@ describe("sweepLostEvents", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		sweepLostEvents(s, T0 + LOST_AFTER_MS + 1);
@@ -419,6 +441,8 @@ describe("sweepLostEvents", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		sweepLostEvents(s, T0 + 60_000);

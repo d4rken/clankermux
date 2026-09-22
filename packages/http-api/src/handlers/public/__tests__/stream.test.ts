@@ -161,6 +161,8 @@ describe("connect handshake", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		const res = createPublicStreamHandler(60_000)(
 			new Request("http://localhost/public/v1/stream"),
@@ -295,6 +297,8 @@ describe("the surface is unauthenticated, so it bounds itself", () => {
 				path: "/v1/messages",
 				project: null,
 				model: null,
+				apiKeyId: null,
+				apiKeyName: null,
 			});
 		}
 
@@ -353,6 +357,8 @@ describe("event translation", () => {
 					path: "/p",
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			),
@@ -368,6 +374,8 @@ describe("event translation", () => {
 					statusCode: 200,
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			),
@@ -393,6 +401,8 @@ describe("event translation", () => {
 					path: "/p",
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			)?.type,
@@ -413,6 +423,8 @@ describe("event translation", () => {
 					statusCode: 200,
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			)?.type,
@@ -435,6 +447,8 @@ describe("event translation", () => {
 						path: "/p",
 						project: null,
 						model: null,
+						apiKeyId: null,
+						apiKeyName: null,
 						// biome-ignore lint/suspicious/noExplicitAny: modelling a future phase
 						phase: "queued" as any,
 						accountId: null,
@@ -488,6 +502,8 @@ describe("event translation", () => {
 							path: "/p",
 							project: null,
 							model: null,
+							apiKeyId: null,
+							apiKeyName: null,
 							phase: "pending",
 							accountId: null,
 							statusCode: null,
@@ -505,6 +521,8 @@ describe("event translation", () => {
 					path: "/p",
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			),
@@ -519,6 +537,8 @@ describe("event translation", () => {
 					statusCode: 200,
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				0,
 			),
@@ -580,6 +600,8 @@ describe("event translation", () => {
 							path: "/p",
 							project: null,
 							model: null,
+							apiKeyId: null,
+							apiKeyName: null,
 							phase: "streaming",
 							accountId: longAccountId,
 							statusCode: 200,
@@ -598,6 +620,8 @@ describe("event translation", () => {
 					path: "/p",
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				idsOf: (dto) => [dto.id],
 			},
@@ -618,6 +642,8 @@ describe("event translation", () => {
 					statusCode: 200,
 					project: null,
 					model: null,
+					apiKeyId: null,
+					apiKeyName: null,
 				},
 				idsOf: (dto) => [dto.id, dto.accountId],
 			},
@@ -669,6 +695,8 @@ describe("event translation", () => {
 				path: "/v1/messages",
 				project: "clankermux",
 				model: "claude-opus-5",
+				apiKeyId: null,
+				apiKeyName: null,
 			},
 			0,
 		);
@@ -683,6 +711,104 @@ describe("event translation", () => {
 		});
 	});
 
+	it("does NOT publish the API key the internal bus carries", () => {
+		// The internal lane names the client so the dashboard can group by it.
+		// The published contract does not, and every field here is mapped by
+		// hand precisely so that a field added to the bus cannot reach a wall
+		// device without someone deciding to publish it. Key SETS, not absence
+		// checks: an exact set is what makes the next addition fail here too.
+		const opened = toPublicStreamEvent(
+			{
+				type: "ingress",
+				id: "a",
+				timestamp: 5,
+				method: "POST",
+				path: "/v1/messages",
+				project: null,
+				model: null,
+				apiKeyId: "key-1",
+				apiKeyName: "Desk widget",
+			},
+			0,
+		);
+		const upstream = toPublicStreamEvent(
+			{
+				type: "start",
+				id: "a",
+				timestamp: 5,
+				method: "POST",
+				path: "/v1/messages",
+				accountId: "acct-1",
+				statusCode: 200,
+				project: null,
+				model: null,
+				apiKeyId: "key-1",
+				apiKeyName: "Desk widget",
+			},
+			0,
+		);
+		const snapshot = toPublicStreamEvent(
+			{
+				type: "snapshot",
+				active: [
+					{
+						id: "a",
+						timestamp: 5,
+						method: "POST",
+						path: "/v1/messages",
+						project: null,
+						model: null,
+						apiKeyId: "key-1",
+						apiKeyName: "Desk widget",
+						phase: "streaming",
+						accountId: "acct-1",
+						statusCode: 200,
+					},
+				],
+			},
+			0,
+		);
+
+		expect(Object.keys(opened ?? {}).sort()).toEqual([
+			"at",
+			"id",
+			"method",
+			"model",
+			"path",
+			"project",
+			"type",
+		]);
+		expect(Object.keys(upstream ?? {}).sort()).toEqual([
+			"accountId",
+			"at",
+			"id",
+			"method",
+			"model",
+			"path",
+			"project",
+			"statusCode",
+			"type",
+		]);
+		const entry =
+			snapshot?.type === "active.snapshot" ? snapshot.active[0] : undefined;
+		expect(Object.keys(entry ?? {}).sort()).toEqual([
+			"accountId",
+			"id",
+			"method",
+			"model",
+			"path",
+			"phase",
+			"project",
+			"startedAt",
+			"statusCode",
+		]);
+		// The key sets above are shallow; this catches a value smuggled in at
+		// any depth.
+		const wire = JSON.stringify([opened, upstream, snapshot]);
+		expect(wire).not.toContain("key-1");
+		expect(wire).not.toContain("Desk widget");
+	});
+
 	it("uses accountId on every event that names an account", () => {
 		const start = toPublicStreamEvent(
 			{
@@ -695,6 +821,8 @@ describe("event translation", () => {
 				statusCode: 200,
 				project: null,
 				model: null,
+				apiKeyId: null,
+				apiKeyName: null,
 			},
 			0,
 		);
@@ -741,6 +869,8 @@ describe("live events reach the wire", () => {
 			path: "/v1/messages",
 			project: null,
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		let text = "";

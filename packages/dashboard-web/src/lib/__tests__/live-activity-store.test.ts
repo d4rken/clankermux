@@ -60,6 +60,8 @@ describe("LiveActivityStore publishing", () => {
 				path: "/v1/messages",
 				project: "clankermux",
 				model: null,
+				apiKeyId: null,
+				apiKeyName: null,
 			});
 		}
 		expect(notifications).toBe(0); // nothing published synchronously
