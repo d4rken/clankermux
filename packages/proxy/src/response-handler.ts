@@ -178,7 +178,11 @@ function trackFinalize(
 	},
 	ctx: ProxyContext,
 ): void {
-	const promise = finalizeUsage(state, opts)
+	// Reads the upstream-usage presence mark the translator left for this id,
+	// which is module state and therefore this process's. Moving this call
+	// off-thread would silently stop the suppression it drives — see the premise
+	// on `upstream-usage-presence`.
+	const promise = finalizeUsage(state, { ...opts, requestId })
 		.then((summary) => {
 			// Diagnostic (observational only): an Anthropic stream that reached clean
 			// EOF and reported output but never sent `message_stop` — the condition
@@ -315,9 +319,11 @@ function probeUsageVector(state: UsageState): {
 	}
 	return {
 		model: state.model ?? null,
-		inputTokens: state.inputTokens,
-		cacheReadInputTokens: state.cacheReadInputTokens,
-		cacheCreationInputTokens: state.cacheCreationInputTokens,
+		// Same rule the output arm below states: a class the provider never
+		// reported records null, not a zero it did not claim.
+		inputTokens: state.inputTokens ?? null,
+		cacheReadInputTokens: state.cacheReadInputTokens ?? null,
+		cacheCreationInputTokens: state.cacheCreationInputTokens ?? null,
 		// Only an AUTHORITATIVE count goes in; a stream that never reported one
 		// records null rather than an estimate.
 		outputTokens: state.providerReportedOutput
@@ -699,15 +705,40 @@ function applyPoolHeadroomHeaders(
 	return response;
 }
 
+/**
+ * The id a client looks its own request up by under `/client/v1/requests/{id}`.
+ *
+ * It identifies the REQUEST, not a stored row: it is set whether or not the
+ * request is one Request History keeps, so a 404 from that route still has the
+ * causes the published contract lists.
+ */
+export const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
 export async function forwardToClient(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
 ): Promise<Response> {
 	try {
-		return applyPoolHeadroomHeaders(
+		const response = applyPoolHeadroomHeaders(
 			await forwardToClientInner(options, ctx),
 			options,
 		);
+		// The id the client needs to look its own request up afterwards.
+		//
+		// Set HERE rather than on the upstream response object, because whether a
+		// value set there survives to the client depends on which provider
+		// answered: the Codex provider lists this header among the internal ones
+		// it strips from every response it returns, and stripping an inbound
+		// header the proxy classifies on is correct — a forged one must never
+		// reach that classification. This wrapper runs after every provider's
+		// `processResponse` and after `withSanitizedProxyHeaders`, so it is the
+		// one place a client-facing header is a property of the proxy instead of
+		// a property of the account that served the request.
+		//
+		// Not inside `applyPoolHeadroomHeaders`: that returns early for internal
+		// dispatches and for a null account, and the id depends on neither.
+		response.headers.set(CLIENT_REQUEST_ID_HEADER, options.requestId);
+		return response;
 	} catch (err) {
 		// A throw during setup would otherwise orphan the probe lease until the
 		// safety TTL (~an hour), wedging the half-open bucket against every

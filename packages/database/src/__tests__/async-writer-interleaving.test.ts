@@ -75,11 +75,12 @@ test("processQueue yields the event loop so concurrent setInterval can fire", as
 		`[interleaving] jobsRun=${jobsRun}, tickerFires=${tickerFires}, observeMs=${observeMs}`,
 	);
 	// Explicit timeout: this test does 500×10ms ≈ 5s of synthetic busy-work, and
-	// dispose() drains whatever the 2s observation didn't. With the mid-tick
-	// macrotask yield the drain is now cooperative (interleaving other loop work),
-	// so total wall-clock sits just above bun's 5s default. The generous ceiling
-	// keeps it off the boundary without weakening any assertion above.
-}, 10_000);
+	// dispose() cooperatively drains whatever the 2s observation didn't, yielding
+	// to other loop work between runs. Wall-clock for the test itself tracks machine
+	// load — ~5.5s on an idle box, past 10s when busy — so a 10s ceiling sat inside
+	// its own measured spread. 30s clears it. The workload is what the assertions
+	// above measure, so widen the ceiling rather than shorten the run.
+}, 30_000);
 
 test("drain budget caps tick duration to MAX_DRAIN_MS_PER_TICK + slowest job", async () => {
 	const writer = new AsyncDbWriter();

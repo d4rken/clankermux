@@ -1,5 +1,7 @@
+import { markUpstreamReportedNoUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
+import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
 import { repairTruncatedToolJson } from "./utils";
 
 const log = new Logger("openai-formats");
@@ -79,13 +81,24 @@ function emitStreamEnd(
 	controller: TransformStreamDefaultController,
 	encoder: TextEncoder,
 	stopReason: "tool_use" | "end_turn",
-	promptTokens: number,
-	completionTokens: number,
+	context: TransformStreamContext,
 	toolCallBlockIndices: Record<number, number> | null,
-	cacheReadInputTokens: number,
-	cacheCreationInputTokens: number,
 	endTurnBlockIndex = 0,
 ) {
+	const {
+		promptTokens,
+		completionTokens,
+		cacheReadInputTokens,
+		cacheCreationInputTokens,
+		sawCacheRead,
+		sawCacheCreation,
+	} = context;
+
+	// Upstream said nothing about tokens, so the required counts below are this
+	// translator's placeholders. Say so on the side rather than in the stream:
+	// the client needs the fields, and the collector needs to know they are not
+	// measurements.
+	if (!context.sawUsage) markUpstreamReportedNoUsage(context.requestId ?? null);
 	// Send content_block_stop for all blocks
 	if (toolCallBlockIndices) {
 		// Tool call blocks — use Anthropic block indices (not OpenAI tool_call indices)
@@ -121,6 +134,14 @@ function emitStreamEnd(
 		);
 	}
 
+	// `promptTokens` is the upstream total and the two cache counts are parts of
+	// it, so the additive Anthropic shape needs them subtracted out.
+	const input = normalizeCacheInclusiveInput(
+		promptTokens,
+		cacheReadInputTokens,
+		cacheCreationInputTokens,
+	);
+
 	// Send message_delta with appropriate stop_reason
 	const messageDelta = {
 		type: "message_delta",
@@ -128,12 +149,23 @@ function emitStreamEnd(
 			stop_reason: stopReason,
 			stop_sequence: null,
 		},
-		usage: {
-			input_tokens: promptTokens,
-			output_tokens: completionTokens,
-			cache_read_input_tokens: cacheReadInputTokens,
-			cache_creation_input_tokens: cacheCreationInputTokens,
-		},
+		// Each cache field is emitted only when upstream reported ITS counter.
+		// They are optional in this shape, and a 0 nobody stated is published by
+		// the row as a claim that none of that class was consumed. Counters that
+		// do not fit their own total are dropped rather than cut down to fit: a
+		// clamped figure is the proxy's arithmetic under the provider's name.
+		usage: input.clamped
+			? { input_tokens: promptTokens, output_tokens: completionTokens }
+			: {
+					input_tokens: input.inputTokens,
+					output_tokens: completionTokens,
+					...(sawCacheRead
+						? { cache_read_input_tokens: input.cacheReadInputTokens }
+						: {}),
+					...(sawCacheCreation
+						? { cache_creation_input_tokens: input.cacheCreationInputTokens }
+						: {}),
+				},
 	};
 	controller.enqueue(encoder.encode(`event: message_delta\n`));
 	controller.enqueue(
@@ -175,6 +207,7 @@ export function transformStreamingResponse(response: Response): Response {
 					hasStarted: false,
 					extractedModel:
 						response.headers.get("x-clankermux-resolved-model") ?? "unknown",
+					requestId: response.headers.get("x-clankermux-request-id"),
 					hasSentStart: false,
 					hasSentContentBlockStart: false,
 					hasSentThinkingBlockStart: false,
@@ -239,11 +272,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"tool_use",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									context.toolCallBlockIndices,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 								);
 							} else if (context.hasSentContentBlockStart) {
 								// If text block was closed mid-stream (content→thinking transition),
@@ -255,11 +285,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"end_turn",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									null,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 									lastBlockIndex,
 								);
 							} else if (context.hasSentThinkingBlockStart) {
@@ -268,11 +295,8 @@ export function transformStreamingResponse(response: Response): Response {
 									controller,
 									encoder,
 									"end_turn",
-									context.promptTokens,
-									context.completionTokens,
+									context,
 									null,
-									context.cacheReadInputTokens,
-									context.cacheCreationInputTokens,
 									context.thinkingBlockIndex,
 								);
 							}
@@ -294,24 +318,27 @@ export function transformStreamingResponse(response: Response): Response {
 
 							// Extract usage data if present (typically in last chunk before [DONE])
 							if (data.usage) {
+								context.sawUsage = true;
 								if (data.usage.prompt_tokens) {
 									context.promptTokens = data.usage.prompt_tokens;
 								}
 								if (data.usage.completion_tokens) {
 									context.completionTokens = data.usage.completion_tokens;
 								}
-								// Extract cache statistics from prompt_tokens_details (Qwen/DashScope)
+								// Parts of `prompt_tokens`, not additions to it; the
+								// subtraction happens once, where the delta is emitted.
 								if (data.usage.prompt_tokens_details) {
-									const details = data.usage.prompt_tokens_details as {
-										cache_creation_input_tokens?: number;
-										cached_tokens?: number;
-									};
-									if (details.cache_creation_input_tokens) {
+									const details = readPromptTokensDetails(
+										data.usage.prompt_tokens_details as Record<string, unknown>,
+									);
+									if (details.cacheCreationInputTokens !== undefined) {
 										context.cacheCreationInputTokens =
-											details.cache_creation_input_tokens;
+											details.cacheCreationInputTokens;
+										context.sawCacheCreation = true;
 									}
-									if (details.cached_tokens) {
-										context.cacheReadInputTokens = details.cached_tokens;
+									if (details.cacheReadInputTokens !== undefined) {
+										context.cacheReadInputTokens = details.cacheReadInputTokens;
+										context.sawCacheRead = true;
 									}
 								}
 							}
@@ -607,11 +634,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"tool_use",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						context.toolCallBlockIndices,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 					);
 				} else if (
 					context.hasSentContentBlockStart &&
@@ -627,11 +651,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"end_turn",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						null,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 						lastBlockIndex,
 					);
 				} else if (context.hasSentThinkingBlockStart) {
@@ -643,11 +664,8 @@ export function transformStreamingResponse(response: Response): Response {
 						controller,
 						encoder,
 						"end_turn",
-						context.promptTokens,
-						context.completionTokens,
+						context,
 						null,
-						context.cacheReadInputTokens,
-						context.cacheCreationInputTokens,
 						context.thinkingBlockIndex,
 					);
 				}

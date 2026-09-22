@@ -1,5 +1,6 @@
 import {
 	getEndpointUrl,
+	markUpstreamReportedNoUsage,
 	ValidationError,
 	validateEndpointUrl,
 } from "@clankermux/core";
@@ -170,8 +171,18 @@ export class OpenAICompatibleProvider extends BaseProvider {
 			let rawBytes: ArrayBuffer | null = null;
 			try {
 				rawBytes = await response.arrayBuffer();
+				const openaiData = JSON.parse(new TextDecoder().decode(rawBytes));
+				// The Anthropic shape requires the input and output counts, so the
+				// conversion below emits them whether or not upstream sent any. Say
+				// on the side that it did not, or the row publishes this
+				// translator's placeholder as a count the provider reported.
+				if (!openaiData?.usage) {
+					markUpstreamReportedNoUsage(
+						response.headers.get("x-clankermux-request-id"),
+					);
+				}
 				const anthropicData = convertOpenAIResponseToAnthropic(
-					JSON.parse(new TextDecoder().decode(rawBytes)),
+					openaiData,
 					response.headers.get("x-clankermux-resolved-model") ?? undefined,
 				);
 

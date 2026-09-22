@@ -30,6 +30,7 @@ export {
 export * from "./types";
 // Export usage fetcher
 export * from "./usage-fetcher";
+export * from "./usage-reporting";
 // Export window-reset timestamp helpers
 export * from "./window-reset";
 // Export Zai usage fetcher

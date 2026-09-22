@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { CodexProvider, OpenAICompatibleProvider } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
 import { chatGptCloudflareCookieJar } from "../../chatgpt-cloudflare-cookies";
+import { CORRELATION_TAG_HEADER } from "../../correlation-tag";
 import { makeProxyRequest, validateProviderPath } from "../request-handler";
 
 describe("validateProviderPath", () => {
@@ -151,6 +152,11 @@ describe("makeProxyRequest — internal control header sweep", () => {
 		headers.set("x-clankermux-keepalive", "true");
 		headers.set("x-clankermux-request-stream", "true");
 		headers.set("x-clankermux-skip-cache", "true");
+		// The correlation tag is a CLIENT-supplied value that reaches the proxy
+		// from outside, unlike the markers above. Living inside the internal
+		// prefix is the only thing keeping it off the wire — this sweep is what
+		// that naming choice buys, so it is asserted by name below.
+		headers.set(CORRELATION_TAG_HEADER, "run-42");
 		headers.set("accept", "application/json");
 		return headers;
 	}
@@ -158,6 +164,7 @@ describe("makeProxyRequest — internal control header sweep", () => {
 	function expectSwept(sent: Headers): void {
 		const surviving = [...sent.keys()].filter((k) => /^x-clankermux-/i.test(k));
 		expect(surviving).toEqual([]);
+		expect(sent.get(CORRELATION_TAG_HEADER)).toBeNull();
 		// Ordinary headers must be untouched.
 		expect(sent.get("content-type")).toBe("application/json");
 		expect(sent.get("accept")).toBe("application/json");

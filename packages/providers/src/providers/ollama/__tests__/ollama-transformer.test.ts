@@ -232,6 +232,44 @@ describe("ollama-transformer", () => {
 			expect(sse).toContain("stop");
 		});
 
+		it("keeps the usage fields the Anthropic stream shape requires", () => {
+			// Ollama reports no counts, but `usage` is required on message_start and
+			// message_delta and a client SDK accumulates straight through it. The
+			// placeholders stay on the wire; `reportsTokenUsage` is what stops the
+			// usage collector reading them as measurements.
+			const state = freshState();
+			const start = ollamaChunkToAnthropicSSE(
+				{
+					model: "gemma3",
+					message: { role: "assistant", content: "Hi" },
+					done: false,
+				},
+				"test123",
+				state,
+			);
+			const startUsage = JSON.parse(
+				/data: (.*"type":"message_start".*)/.exec(start)?.[1] ?? "{}",
+			).message.usage;
+			expect(startUsage.input_tokens).toBe(0);
+			expect(startUsage.output_tokens).toBe(0);
+
+			const end = ollamaChunkToAnthropicSSE(
+				{
+					model: "gemma3",
+					message: { role: "assistant", content: "" },
+					done: true,
+					done_reason: "stop",
+				},
+				"test123",
+				state,
+			);
+			const delta = JSON.parse(
+				/data: (.*"type":"message_delta".*)/.exec(end)?.[1] ?? "{}",
+			);
+			expect(delta.usage.output_tokens).toBe(0);
+			expect(delta.delta.stop_reason).toBe("stop");
+		});
+
 		it("emits message_start even for empty non-done chunk", () => {
 			const state = freshState();
 			const sse = ollamaChunkToAnthropicSSE(
@@ -268,6 +306,16 @@ describe("ollama-transformer", () => {
 			});
 			expect(result.model).toBe("gemma3");
 			expect(result.stop_reason).toBe("end_turn");
+		});
+
+		it("keeps the usage field the Anthropic message shape requires", () => {
+			// A placeholder on the wire, not a measurement; see the streaming case.
+			const result = ollamaResponseToAnthropic({
+				model: "gemma3",
+				message: { role: "assistant", content: "Hello world" },
+				done: true,
+			});
+			expect(result.usage).toEqual({ input_tokens: 0, output_tokens: 0 });
 		});
 	});
 

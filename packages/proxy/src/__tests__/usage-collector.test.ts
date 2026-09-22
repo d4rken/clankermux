@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { PricingEstimateContext, TokenBreakdown } from "@clankermux/core";
+import {
+	markUpstreamReportedNoUsage,
+	type PricingEstimateContext,
+	resetUpstreamUsagePresence,
+	type TokenBreakdown,
+} from "@clankermux/core";
 import {
 	hashCreditToken,
 	refusalFallbackRegistry,
@@ -231,6 +236,234 @@ describe("usage-collector", () => {
 			// total = 100 + 20 + 5 + 250
 			expect(summary.usage.totalTokens).toBe(375);
 			expect(summary.outputApproximate).toBe(false);
+		});
+	});
+
+	describe("absent counts stay absent", () => {
+		// The presence registry is process-wide; a mark left by one case would
+		// silently suppress the next one's counts.
+		beforeEach(() => resetUpstreamUsagePresence());
+
+		// A 0 is a POSITIVE claim that none of that class was consumed, and the
+		// persisted row now publishes one. A provider that reports nothing must
+		// not be given one on its behalf.
+		it("reports no input classes when the provider states none", async () => {
+			const state = createUsageState();
+			expect(state.inputTokens).toBeUndefined();
+
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: { model: "gemma3", usage: { output_tokens: 0 } },
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "ollama", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.usage.cacheCreationInputTokens).toBeUndefined();
+			// The output is the content estimate, and says so.
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("drops a placeholder vector from a provider that reports none", async () => {
+			// Ollama has to emit the usage fields the Anthropic shape requires, so
+			// what arrives here is a fabricated zero rather than a measurement.
+			// Recording it would publish a row claiming the request consumed
+			// nothing, which a client settles its budget against.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "gemma3",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1050,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 0 },
+				}),
+				1100,
+			);
+			// The collector believed them up to this point.
+			expect(state.providerReportedOutput).toBe(true);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "ollama",
+					accountProvider: "ollama",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.usage.cacheCreationInputTokens).toBeUndefined();
+			// The output falls to the content estimate and says so.
+			expect(summary.outputApproximate).toBe(true);
+			expect(summary.usage.outputTokens).toBe(10);
+		});
+
+		it("drops the placeholders a translated response had to invent", async () => {
+			// qwen, kilo and openai-compatible normally DO report usage, so nothing
+			// about the provider answers this. What decides it is the response: a
+			// body that carried no usage block at all still gets the input and
+			// output counts its wire shape requires, and those are this proxy's
+			// placeholders rather than anything a provider stated.
+			markUpstreamReportedNoUsage("req-no-usage");
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "qwen3-coder-plus",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1050,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 0 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "openai-compatible",
+					accountProvider: "qwen",
+					requestId: "req-no-usage",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("keeps the counts of a response that DID carry a usage block", async () => {
+			// Same provider, no mark: this response reported, so 0 means 0.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "qwen3-coder-plus",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 7 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "openai-compatible",
+					accountProvider: "qwen",
+					requestId: "req-with-usage",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBe(0);
+			expect(summary.usage.outputTokens).toBe(7);
+			expect(summary.outputApproximate).toBe(false);
+		});
+
+		it("keeps a reported 0 as 0", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: {
+							input_tokens: 12,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 0,
+						},
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 5 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBe(12);
+			expect(summary.usage.cacheReadInputTokens).toBe(0);
+			expect(summary.usage.cacheCreationInputTokens).toBe(0);
 		});
 	});
 
@@ -903,7 +1136,7 @@ describe("usage-collector", () => {
 			feedChunk(state, enc.encode(full.slice(0, splitAt)), 1000);
 			// Nothing complete yet — the data line is still buffered.
 			expect(state.model).toBeUndefined();
-			expect(state.inputTokens).toBe(0);
+			expect(state.inputTokens).toBeUndefined();
 			feedChunk(state, enc.encode(full.slice(splitAt)), 1100);
 			expect(state.model).toBe("claude-opus-4-8");
 			expect(state.inputTokens).toBe(123);
@@ -935,7 +1168,7 @@ describe("usage-collector", () => {
 			const third = Math.floor(full.length / 3);
 			feedChunk(state, enc.encode(full.slice(0, third)), 1000);
 			feedChunk(state, enc.encode(full.slice(third, third * 2)), 1010);
-			expect(state.inputTokens).toBe(0); // still incomplete
+			expect(state.inputTokens).toBeUndefined(); // still incomplete
 			feedChunk(state, enc.encode(full.slice(third * 2)), 1020);
 			expect(state.model).toBe("claude-opus-4-8");
 			expect(state.inputTokens).toBe(999);
@@ -949,7 +1182,7 @@ describe("usage-collector", () => {
 			);
 			expect(() => feedChunk(state, chunk, 1000)).not.toThrow();
 			// Nothing applied — the data line was never terminated by a newline.
-			expect(state.inputTokens).toBe(0);
+			expect(state.inputTokens).toBeUndefined();
 			expect(state.providerReportedOutput).toBe(false);
 		});
 
@@ -1205,7 +1438,9 @@ describe("usage-collector", () => {
 			// input + 30 cache reads, which reconstructs the original total.
 			expect(state.inputTokens).toBe(70);
 			expect(state.cacheReadInputTokens).toBe(30);
-			expect(state.inputTokens + state.cacheReadInputTokens).toBe(100);
+			expect((state.inputTokens ?? 0) + (state.cacheReadInputTokens ?? 0)).toBe(
+				100,
+			);
 
 			const cost = fakeCost();
 			const _summary = await finalizeUsage(
@@ -1223,8 +1458,10 @@ describe("usage-collector", () => {
 			for (const [writes, expectedInput, expectedWrites] of [
 				[0, 70, 0],
 				[90, 0, 70],
-				[-5, 70, 0],
-			]) {
+				// A negative counter is not a report of zero writes: nothing
+				// usable arrived, so the class stays absent.
+				[-5, 70, undefined],
+			] as Array<[number, number, number | undefined]>) {
 				const state = createUsageState();
 				feedChunk(
 					state,
@@ -1255,8 +1492,8 @@ describe("usage-collector", () => {
 			);
 			expect(state.inputTokens).toBe(50);
 			expect(state.providerFinalOutputTokens).toBe(9);
-			expect(state.cacheReadInputTokens).toBe(0);
-			expect(state.cacheCreationInputTokens).toBe(0);
+			expect(state.cacheReadInputTokens).toBeUndefined();
+			expect(state.cacheCreationInputTokens).toBeUndefined();
 
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
@@ -1266,6 +1503,54 @@ describe("usage-collector", () => {
 			);
 			expect(summary.usage.outputTokens).toBe(9);
 			expect(summary.outputApproximate).toBe(false);
+		});
+
+		it("marks a repaired input vector as not provider-reported", async () => {
+			// 90 cache writes out of what is left of a 100-token prompt after 30
+			// cache reads does not fit. The vector the row then carries is the
+			// proxy's arithmetic, and `provider` promises the counts ARE the
+			// provider's, so the row has to say `approximate` instead.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 100,
+					output_tokens: 4,
+					input_tokens_details: { cached_tokens: 30, cache_write_tokens: 90 },
+				}),
+				1000,
+			);
+			expect(state.inputClamped).toBe(true);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.inputClamped).toBe(true);
+			// The output count itself was reported, so this is not that flag.
+			expect(summary.outputApproximate).toBe(false);
+		});
+
+		it("leaves a vector that fits unmarked", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				codexCompleted({
+					input_tokens: 100,
+					output_tokens: 4,
+					input_tokens_details: { cached_tokens: 30, cache_write_tokens: 20 },
+				}),
+				1000,
+			);
+			expect(state.inputClamped).toBe(false);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "codex", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.inputClamped).toBeUndefined();
 		});
 
 		it("ignores negative cached-token details (mirrors CodexProvider's >= 0 guard)", () => {
@@ -1282,8 +1567,8 @@ describe("usage-collector", () => {
 				}),
 				1000,
 			);
-			expect(state.cacheReadInputTokens).toBe(0);
-			expect(state.cacheCreationInputTokens).toBe(0);
+			expect(state.cacheReadInputTokens).toBeUndefined();
+			expect(state.cacheCreationInputTokens).toBeUndefined();
 			expect(state.inputTokens).toBe(10);
 			expect(state.providerFinalOutputTokens).toBe(5);
 		});

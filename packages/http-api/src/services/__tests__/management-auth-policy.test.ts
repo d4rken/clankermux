@@ -71,6 +71,7 @@ describe("outside the management namespace", () => {
 		"/",
 		"/health",
 		"/public/v1/status",
+		"/client/v1/retention",
 		"/v1/messages",
 		"/wire/anthropic/v1/messages",
 		"/assets/app.js",
@@ -87,5 +88,23 @@ describe("outside the management namespace", () => {
 		expect(isManagementPath("/api/")).toBe(true);
 		expect(isManagementPath("/api/accounts")).toBe(true);
 		expect(isManagementPath("/apiary")).toBe(false);
+	});
+
+	// The credential-scoped client API is a SIBLING mount, not a carve-out. It
+	// is reachable with a client key, and that key must never be a step towards
+	// the management surface — which is guaranteed by this classification never
+	// growing an entry for it, rather than by an exemption that could.
+	it("holds no exemption for the client API", () => {
+		for (const path of [
+			"/client",
+			"/client/",
+			"/client/v1/retention",
+			"/api/client",
+			"/api/client/v1/retention",
+		]) {
+			expect(managementAuthRequirement(path)).toBe(
+				path.startsWith("/api/") ? "session" : "public",
+			);
+		}
 	});
 });

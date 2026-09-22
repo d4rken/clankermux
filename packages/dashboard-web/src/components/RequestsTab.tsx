@@ -1044,9 +1044,10 @@ export function RequestsTab() {
 								request.meta.projectAttributionSource,
 							);
 							const attributionChip = projectAttributionChip(attributionSource);
-							// Tokens that weren't served from / written to the prompt cache.
-							// Derived from totalTokens (not input+output) because OpenAI rows
-							// count cached tokens inside inputTokens.
+							// Tokens that weren't served from / written to the prompt cache,
+							// so the part billed at the full rate. Taken off totalTokens,
+							// which is the one figure a row always carries once its usage
+							// lands, rather than re-summing the parts.
 							const freshTokens =
 								summary?.totalTokens != null
 									? Math.max(

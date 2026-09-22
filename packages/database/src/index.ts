@@ -75,7 +75,10 @@ export {
 	QuotaDriftResultRepository,
 	type QuotaDriftResultRow,
 } from "./repositories/quota-drift-result.repository";
-export { RequestRepository } from "./repositories/request.repository";
+export {
+	type ClientRequestRow,
+	RequestRepository,
+} from "./repositories/request.repository";
 export {
 	buildRequestFilterConditions,
 	EMPTY_REQUEST_FILTERS,

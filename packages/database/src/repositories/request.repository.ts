@@ -5,6 +5,7 @@ import type {
 	GatewayHintMetadata,
 	ProjectAttributionSource,
 	ToolCallStat,
+	UsageSource,
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
@@ -134,6 +135,23 @@ export interface RequestData extends GatewayHintMetadata {
 	 */
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
+	/**
+	 * The client's `x-clankermux-correlation-tag`, verbatim. Ingress-derived and
+	 * absent on the usage-patch re-upsert, so it COALESCEs EXCLUDED first like
+	 * `sessionKey` — a later usage write must not null it.
+	 */
+	correlationTag?: string | null;
+	/**
+	 * Provenance of the row's token vector. WRITE-ONCE: both the upsert and
+	 * {@link RequestRepository.updateUsage} COALESCE the STORED value first, so
+	 * a value that is already there survives every later write.
+	 *
+	 * That immutability is the column's whole purpose — a reader treats a
+	 * non-NULL value as a guarantee that accounting for the row is finished and
+	 * will not change. Absent/null leaves the column NULL, which says the
+	 * opposite: not finished yet.
+	 */
+	usageSource?: UsageSource | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -178,6 +196,40 @@ export interface RequestHeadersData {
 	createdAt: number;
 }
 
+/**
+ * The columns `/client/v1/requests/*` publishes, and no others.
+ *
+ * An ALLOWLIST rather than `SELECT *`: these rows leave the process on a
+ * credential-scoped wire, so a column added to `requests` later is published
+ * by someone deciding to publish it, not by inheriting the star.
+ */
+export interface ClientRequestRow {
+	id: string;
+	timestamp: number;
+	status_code: number | null;
+	error_message: string | null;
+	model: string | null;
+	requested_model: string | null;
+	input_tokens: number | null;
+	output_tokens: number | null;
+	cache_read_input_tokens: number | null;
+	cache_creation_input_tokens: number | null;
+	total_tokens: number | null;
+	usage_finalized_at: number | null;
+	usage_source: string | null;
+	failover_attempts: number | null;
+	project: string | null;
+	/** Non-null by construction: both queries filter `api_key_id = ?`. */
+	api_key_id: string;
+	correlation_tag: string | null;
+}
+
+const CLIENT_REQUEST_COLUMNS = `id, timestamp, status_code, error_message,
+	model, requested_model, input_tokens, output_tokens,
+	cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
+	usage_finalized_at, usage_source, failover_attempts, project, api_key_id,
+	correlation_tag`;
+
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
 		const { usage } = data;
@@ -200,9 +252,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					client_user_agent, client_harness,
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
-					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted
+					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted,
+					correlation_tag, usage_source
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -264,7 +317,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_agent_type = COALESCE(EXCLUDED.gateway_hint_agent_type, requests.gateway_hint_agent_type),
 				gateway_hint_prev_tool_durations = COALESCE(EXCLUDED.gateway_hint_prev_tool_durations, requests.gateway_hint_prev_tool_durations),
 				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
-				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted)
+				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted),
+				correlation_tag = COALESCE(EXCLUDED.correlation_tag, requests.correlation_tag),
+				-- Stored value FIRST, unlike the token columns above: a non-NULL
+				-- usage_source is a promise that accounting for this row is
+				-- finished, so nothing may overwrite one.
+				usage_source = COALESCE(requests.usage_source, EXCLUDED.usage_source)
 		`,
 			[
 				data.id,
@@ -279,14 +337,19 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.failoverAttempts,
 				usage?.model || null,
 				data.requestedModel || null,
-				usage?.promptTokens || null,
-				usage?.completionTokens || null,
-				usage?.totalTokens || null,
+				// `?? null` for every token count, NEVER `|| null`: a provider that
+				// reports 0 is stating that none of that class was consumed, and a
+				// NULL states that no count arrived. Collapsing the two leaves a
+				// request that merely created no cache entry indistinguishable from
+				// one whose accounting was never reported.
+				usage?.promptTokens ?? null,
+				usage?.completionTokens ?? null,
+				usage?.totalTokens ?? null,
 				usage?.costUsd ?? null,
-				usage?.inputTokens || null,
-				usage?.cacheReadInputTokens || null,
-				usage?.cacheCreationInputTokens || null,
-				usage?.outputTokens || null,
+				usage?.inputTokens ?? null,
+				usage?.cacheReadInputTokens ?? null,
+				usage?.cacheCreationInputTokens ?? null,
+				usage?.outputTokens ?? null,
 				usage?.tokensPerSecond || null,
 				usage?.tokensPerSecondApproximate && usage?.tokensPerSecond ? 1 : null,
 				data.apiKeyId || null,
@@ -329,6 +392,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintPrevToolDurations ?? null,
 				data.gatewayHintCompaction ?? null,
 				data.gatewayHintContextCompacted ?? null,
+				data.correlationTag ?? null,
+				data.usageSource ?? null,
 			],
 		);
 	}
@@ -474,12 +539,27 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * column records the earliest moment a usable usage vector existed, so a late
 	 * patch may fill it in but must never move it forward. Same rule as the
 	 * upsert in {@link RequestRepository.save}.
+	 *
+	 * `usageSource` rides the usage statement, and the atomicity is the point.
+	 * A client reads `finalized` as a promise that no later write can change the
+	 * row's accounting, and the provenance is part of that accounting: settled
+	 * by a second statement — its own transaction — the row is briefly stamped
+	 * and tokened with `usage_source` still NULL, which publishes as finalized
+	 * with an `approximate` source and then answers `provider` a moment later.
+	 *
+	 * The standalone {@link RequestRepository.markUsageSource} still runs for
+	 * the one arm with no usage statement to ride: a late summary that yields NO
+	 * token vector, which must still settle to `'none'`.
+	 *
+	 * Both places keep the stored-first COALESCE. What changed is when the write
+	 * lands, not whether it can overwrite.
 	 */
 	async updateUsage(
 		requestId: string,
 		usage: RequestData["usage"],
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string | null; refusalCategory?: string | null },
+		usageSource?: UsageSource | null,
 	): Promise<void> {
 		// The usage columns and the response-shape columns are independent
 		// patches: a summary can carry a stop reason while the token vector was
@@ -491,6 +571,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			UPDATE requests
 			SET
 				usage_finalized_at = COALESCE(usage_finalized_at, ?),
+				usage_source = COALESCE(usage_source, ?),
 				model = COALESCE(?, model),
 				prompt_tokens = COALESCE(?, prompt_tokens),
 				completion_tokens = COALESCE(?, completion_tokens),
@@ -509,15 +590,16 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		`,
 				[
 					usageFinalizedAt ?? null,
+					usageSource ?? null,
 					usage.model || null,
-					usage.promptTokens || null,
-					usage.completionTokens || null,
-					usage.totalTokens || null,
+					usage.promptTokens ?? null,
+					usage.completionTokens ?? null,
+					usage.totalTokens ?? null,
 					usage.costUsd ?? null,
-					usage.inputTokens || null,
-					usage.cacheReadInputTokens || null,
-					usage.cacheCreationInputTokens || null,
-					usage.outputTokens || null,
+					usage.inputTokens ?? null,
+					usage.cacheReadInputTokens ?? null,
+					usage.cacheCreationInputTokens ?? null,
+					usage.outputTokens ?? null,
 					usage.tokensPerSecond || null,
 					usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,
 					usage.estimatedCostUsd ?? null,
@@ -549,6 +631,91 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				],
 			);
 		}
+
+		// The vector-less arm only: with a usage statement in play the provenance
+		// already committed with it, and a second write here would reopen the
+		// window this method closes.
+		if (usageSource && !usage)
+			await this.markUsageSource(requestId, usageSource);
+	}
+
+	/**
+	 * Settle `requests.usage_source` for a row, once.
+	 *
+	 * `COALESCE(usage_source, ?)` — stored value FIRST. A non-NULL value is the
+	 * row's statement that its accounting is finished, so a second write is a
+	 * no-op rather than a correction. The recorder uses this both to record the
+	 * provenance a late patch established and to close the patch window with
+	 * `'none'` when no usage ever arrived.
+	 */
+	async markUsageSource(
+		requestId: string,
+		usageSource: UsageSource,
+	): Promise<void> {
+		await this.run(
+			`UPDATE requests SET usage_source = COALESCE(usage_source, ?) WHERE id = ?`,
+			[usageSource, requestId],
+		);
+	}
+
+	// Client API reads
+	//
+	// Both are scoped to ONE api key IN SQL. The predicate is the security
+	// property of `/client/v1/requests/*`: a client presents the key it proxies
+	// with and reads back its own rows, so a filter applied after the read — or
+	// a caller that forgets to pass one — would publish every other client's
+	// accounting. Rows with a NULL `api_key_id` belong to no key and match
+	// neither query, because `= ?` is never true of NULL.
+
+	/**
+	 * One request by id, for one api key. Null when no such row exists FOR THIS
+	 * KEY — which covers another key's row, a row retention has deleted, and an
+	 * id that never existed. The caller turns all three into the same 404, so
+	 * the surface cannot be used to probe for ids.
+	 */
+	async getClientRequest(
+		apiKeyId: string,
+		id: string,
+	): Promise<ClientRequestRow | null> {
+		return this.get<ClientRequestRow>(
+			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests WHERE id = ? AND api_key_id = ?`,
+			[id, apiKeyId],
+		);
+	}
+
+	/**
+	 * One page of a key's rows carrying `tag`, oldest first.
+	 *
+	 * Keyset pagination over `(timestamp, id)`: `id` is the PRIMARY KEY, so the
+	 * pair is a total order and rows sharing a timestamp still have exactly one
+	 * successor. An OFFSET would skip or repeat rows as new ones land during a
+	 * scan, which is the one thing a reconciliation pass cannot tolerate.
+	 *
+	 * Column order matches `idx_requests_correlation_tag`
+	 * `(correlation_tag, api_key_id, timestamp, id)`, so the equality pair seeks
+	 * and the range walks the index in ORDER BY order.
+	 */
+	async listClientRequestsByTag(opts: {
+		apiKeyId: string;
+		tag: string;
+		limit: number;
+		after?: { timestamp: number; id: string } | null;
+	}): Promise<ClientRequestRow[]> {
+		const { apiKeyId, tag, limit, after } = opts;
+		const params: unknown[] = [tag, apiKeyId];
+		let keyset = "";
+		if (after) {
+			keyset = " AND (timestamp > ? OR (timestamp = ? AND id > ?))";
+			params.push(after.timestamp, after.timestamp, after.id);
+		}
+		params.push(limit);
+		return this.query<ClientRequestRow>(
+			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests
+			 WHERE correlation_tag = ? AND api_key_id = ?${keyset}
+			 ORDER BY timestamp ASC, id ASC
+			 LIMIT ?`,
+			params,
+		);
 	}
 
 	// Payload management

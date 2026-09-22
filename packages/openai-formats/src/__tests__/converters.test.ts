@@ -791,6 +791,34 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 		expect(result.usage?.output_tokens).toBe(5);
 	});
 
+	it("publishes the cache classes and subtracts them out of the input", () => {
+		// Same convention the streaming path publishes: one account must not
+		// report tokens differently depending on `stream`.
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({
+				usage: {
+					prompt_tokens: 1_000,
+					completion_tokens: 5,
+					prompt_tokens_details: {
+						cached_tokens: 800,
+						cache_creation_input_tokens: 100,
+					},
+				},
+			}),
+		);
+		expect(result.usage?.input_tokens).toBe(100);
+		expect(result.usage?.cache_read_input_tokens).toBe(800);
+		expect(result.usage?.cache_creation_input_tokens).toBe(100);
+	});
+
+	it("omits the cache classes when upstream reports no detail", () => {
+		// Absent is not an observed cache miss, so the fields stay off the row
+		// rather than claiming a zero the provider never stated.
+		const result = convertOpenAIResponseToAnthropic(openaiTextResponse());
+		expect(result.usage?.cache_read_input_tokens).toBeUndefined();
+		expect(result.usage?.cache_creation_input_tokens).toBeUndefined();
+	});
+
 	it("passes through the response id", () => {
 		const result = convertOpenAIResponseToAnthropic(
 			openaiTextResponse({ id: "chatcmpl-xyz" }),

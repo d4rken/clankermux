@@ -193,7 +193,30 @@ export function ensureSchema(db: Database): void {
 			gateway_hint_agent_type TEXT,
 			gateway_hint_prev_tool_durations TEXT,
 			gateway_hint_compaction TEXT,
-			gateway_hint_context_compacted TEXT
+			gateway_hint_context_compacted TEXT,
+			-- The value of the client's x-clankermux-correlation-tag header,
+			-- stored VERBATIM: 1-128 bytes, every byte 0x20-0x7E, or NULL. A tag
+			-- that failed that test is not repaired into something storable — it
+			-- is the key a client looks its own request up by, so a repaired tag
+			-- would match a different request than the one the client holds.
+			-- NULL = the request carried no tag, carried an unusable one, or
+			-- predates the column.
+			correlation_tag TEXT,
+			-- Where this row's token vector came from, written once at persist
+			-- time and never overwritten:
+			--   'provider'    — the provider reported the output count.
+			--   'approximate' — the output count is the collector's
+			--                   ceil(generatedChars / 4) estimate, because the
+			--                   provider reported none or the stream did not end
+			--                   cleanly.
+			--   'none'        — no token vector was stored at all (waived usage,
+			--                   a synthetic terminal, or a summary carrying
+			--                   neither a model nor a reported charge).
+			-- NULL means accounting for the row is NOT COMPLETE YET: the row was
+			-- persisted while a late usage patch was still possible. That is the
+			-- only value a later write can change, which is why a reader may treat
+			-- any non-NULL value as final.
+			usage_source TEXT
 		)
 	`);
 
@@ -210,6 +233,15 @@ export function ensureSchema(db: Database): void {
 	// Composite index for the main requests query (timestamp DESC with account_used for JOIN)
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
+	);
+
+	// Client-API correlation-tag lookup: `correlation_tag = ? AND api_key_id = ?`
+	// then a range over `(timestamp, id)`. PARTIAL because almost no row carries
+	// a tag, so the index stays a few pages rather than one entry per request.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_requests_correlation_tag
+			ON requests(correlation_tag, api_key_id, timestamp, id)
+			WHERE correlation_tag IS NOT NULL`,
 	);
 
 	// NOTE: do NOT add a partial index over failed rows here for the
@@ -1665,6 +1697,24 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "renewal_price_source",
 		ddl: "ALTER TABLE accounts ADD COLUMN renewal_price_source TEXT",
+	},
+	// The client's `x-clankermux-correlation-tag`, verbatim (1-128 bytes, all
+	// 0x20-0x7E) or NULL. NULL on pre-column rows and on every request that sent
+	// no tag or sent an unusable one — a rejected tag is never repaired into a
+	// storable one.
+	{
+		table: "requests",
+		column: "correlation_tag",
+		ddl: "ALTER TABLE requests ADD COLUMN correlation_tag TEXT",
+	},
+	// Provenance of the row's token vector: 'provider' | 'approximate' | 'none'
+	// (see the requests CREATE TABLE comment). Write-once. NULL = accounting is
+	// not complete yet, and on pre-column rows — which is why a reader can only
+	// treat a NON-NULL value as a completion guarantee.
+	{
+		table: "requests",
+		column: "usage_source",
+		ddl: "ALTER TABLE requests ADD COLUMN usage_source TEXT",
 	},
 ];
 

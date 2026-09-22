@@ -1,0 +1,164 @@
+{
+  "$ref": "#/$defs/ClientRequestsDto",
+  "$defs": {
+    "ClientRequestsDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.client.requests.v1"
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientRequestDto"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The `after` cursor for the next page, or null when this is the last one."
+        }
+      },
+      "required": [
+        "schema",
+        "requests",
+        "next"
+      ],
+      "additionalProperties": true
+    },
+    "ClientRequestDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.client.request.v1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "When the ROW WAS WRITTEN, ms epoch — not when the request started. The recorder stamps this as it persists, after the async writer drains, so it trails the exchange by the response duration plus queue depth. It is the paging order, and it is not a request clock."
+        },
+        "finalized": {
+          "type": "boolean",
+          "description": "True when no later write can change this row's accounting."
+        },
+        "statusCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputTokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Four DISJOINT classes: `inputTokens` excludes both cache classes, so the three prompt classes sum to the whole prompt and none contains another. `null` means no count for that class was received; a provider-reported zero is published as 0. Rows written before that guarantee are not backfilled, so on those a null may still be a collapsed zero."
+        },
+        "outputTokens": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheReadInputTokens": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheCreationInputTokens": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "usageSource": {
+          "$ref": "#/$defs/ClientUsageSourceDto"
+        },
+        "failoverAttempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The attempt index the answering try was made under. Above 0 it means earlier attempts happened and their cost is missing: the proxy can discard a provider response it has already been billed for, and no column records what that cost, so the row is a lower bound. At 0 it does NOT prove none did, because a retry against the same account after a hold restarts the index. Evidence when positive, not evidence of absence when 0.",
+          "minimum": 0
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apiKeyId": {
+          "type": "string"
+        },
+        "correlationTag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "timestamp",
+        "finalized",
+        "statusCode",
+        "error",
+        "model",
+        "requestedModel",
+        "inputTokens",
+        "outputTokens",
+        "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+        "usageSource",
+        "failoverAttempts",
+        "project",
+        "apiKeyId",
+        "correlationTag"
+      ],
+      "additionalProperties": true
+    },
+    "ClientUsageSourceDto": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "provider",
+        "approximate",
+        "none",
+        null
+      ],
+      "description": "Where a row's token vector came from, as this surface states it.\n\nThe same three values `requests.usage_source` stores, plus `null` for a row whose accounting is not finished. A fourth value would widen a contract the consumer has already been given as three."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:client.requests.v1",
+  "$comment": "Generated from client API DTOs. Unknown properties are accepted. Every read on this surface is scoped to the api key that authenticated it."
+}

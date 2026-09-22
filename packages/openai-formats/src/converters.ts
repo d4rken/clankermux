@@ -13,7 +13,9 @@ import type {
 	OpenAIMessage,
 	OpenAIRequest,
 	OpenAIResponse,
+	OpenAIUsage,
 } from "./types";
+import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
 import { mapOpenAIFinishReason, removeUriFormat } from "./utils";
 
 const log = new Logger("openai-formats/converters");
@@ -377,8 +379,44 @@ export function convertOpenAIResponseToAnthropic(
 		stop_reason: mapOpenAIFinishReason(choice.finish_reason),
 		stop_sequence: undefined,
 		usage: {
-			input_tokens: openaiData.usage?.prompt_tokens || 0,
+			...normalizedInput(openaiData.usage),
 			output_tokens: openaiData.usage?.completion_tokens || 0,
 		},
+	};
+}
+
+/**
+ * The cache counters live in `prompt_tokens_details` on this path too, and the
+ * streaming path publishes them, so a client must not see the same account
+ * report a different convention depending on `stream`.
+ */
+function normalizedInput(usage: OpenAIUsage | undefined): {
+	input_tokens: number;
+	cache_read_input_tokens?: number;
+	cache_creation_input_tokens?: number;
+} {
+	const details = readPromptTokensDetails(usage?.prompt_tokens_details);
+	const input = normalizeCacheInclusiveInput(
+		usage?.prompt_tokens || 0,
+		details.cacheReadInputTokens ?? 0,
+		details.cacheCreationInputTokens ?? 0,
+	);
+	// Counters that do not fit their own total are not a vector to repair: a
+	// clamped figure is the proxy's arithmetic published under the provider's
+	// name, and nothing downstream can tell it from a real one. Report the
+	// prompt total the provider stated and no cache claim at all.
+	if (input.clamped) return { input_tokens: usage?.prompt_tokens || 0 };
+
+	// Each cache field rides on ITS OWN counter, not on the details object: a
+	// body reporting `cached_tokens` alone says nothing about cache writes, and
+	// publishing a 0 for the other would be a count upstream never stated.
+	return {
+		input_tokens: input.inputTokens,
+		...(details.cacheReadInputTokens === undefined
+			? {}
+			: { cache_read_input_tokens: input.cacheReadInputTokens }),
+		...(details.cacheCreationInputTokens === undefined
+			? {}
+			: { cache_creation_input_tokens: input.cacheCreationInputTokens }),
 	};
 }

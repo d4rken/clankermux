@@ -1,13 +1,21 @@
 import { describe, expect, it, spyOn } from "bun:test";
+// The REAL async writer, not a stand-in: the shutdown test below turns on
+// ordinary metadata-queue capacity rejection, which a fake `enqueue` switch
+// cannot reproduce.
+import { AsyncDbWriter } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 import type {
 	CachePrefixCapture,
 	ContextComposition,
 	RequestResponse,
 } from "@clankermux/types";
-// Import the recorder (and the re-exported NO_ACCOUNT_ID) FIRST: the recorder
-// pulls @clankermux/core before @clankermux/types, which is the load order that
-// avoids the latent types↔core module-eval cycle. A standalone value-import of
-// `@clankermux/types` here would trip it (see request-recorder.ts).
+// correlation-tag.ts imports nothing, so it cannot disturb the load order the
+// comment below pins.
+import { CORRELATION_TAG_HEADER } from "../correlation-tag";
+// Import the recorder (and the re-exported NO_ACCOUNT_ID) before any standalone
+// value-import of `@clankermux/types`: the recorder pulls @clankermux/core
+// first, which is the load order that avoids the latent types↔core module-eval
+// cycle (see request-recorder.ts).
 import {
 	NO_ACCOUNT_ID,
 	type RecordMeta,
@@ -46,6 +54,8 @@ interface SaveRequestCall {
 	refusalCategory: string | null | undefined;
 	fallbackCreditClaimed: boolean | undefined;
 	fallbackFromModel: string | null | undefined;
+	correlationTag: string | null | undefined;
+	usageSource: string | null | undefined;
 }
 
 type EnqueuedKind =
@@ -65,7 +75,9 @@ class FakeDbOps {
 		usage: unknown;
 		usageFinalizedAt?: number | null;
 		response?: { stopReason?: string; refusalCategory?: string };
+		usageSource?: string | null;
 	}> = [];
+	markUsageSourceCalls: Array<{ id: string; usageSource: string }> = [];
 	pauseCalls: Array<{ accountId: string; reason: string }> = [];
 	updateAccountUsageCalls: string[] = [];
 	// Shared ordered log: pushed synchronously at invocation (before any await
@@ -109,6 +121,8 @@ class FakeDbOps {
 		refusalCategory?: string | null;
 		fallbackCreditClaimed?: boolean;
 		fallbackFromModel?: string | null;
+		correlationTag?: string | null;
+		usageSource?: string | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -138,6 +152,8 @@ class FakeDbOps {
 			refusalCategory: data.refusalCategory,
 			fallbackCreditClaimed: data.fallbackCreditClaimed,
 			fallbackFromModel: data.fallbackFromModel,
+			correlationTag: data.correlationTag,
+			usageSource: data.usageSource,
 		});
 	}
 
@@ -180,13 +196,22 @@ class FakeDbOps {
 		usage: unknown,
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string; refusalCategory?: string },
+		usageSource?: string | null,
 	): Promise<void> {
 		this.updateUsageCalls.push({
 			id: requestId,
 			usage,
 			usageFinalizedAt,
 			response,
+			usageSource,
 		});
+	}
+
+	async markRequestUsageSource(
+		requestId: string,
+		usageSource: string,
+	): Promise<void> {
+		this.markUsageSourceCalls.push({ id: requestId, usageSource });
 	}
 
 	async pauseAccount(accountId: string, reason: string): Promise<void> {
@@ -257,6 +282,21 @@ class FakeAsyncWriter {
 		}
 		this.queue.push(job);
 		return true;
+	}
+
+	/**
+	 * Cap-exempt tail append. The real writer refuses it only once its own
+	 * dispose has drained; `acceptMetadata` models the ORDINARY cap, which this
+	 * path is exempt from, so it is deliberately not consulted here.
+	 */
+	enqueueShutdownBatch(job: () => void | Promise<void>): boolean {
+		this.queue.push(job);
+		return true;
+	}
+
+	/** Non-counting capacity probe; `acceptMetadata` is the modelled cap. */
+	canAcceptMetadata(): boolean {
+		return this.acceptMetadata;
 	}
 
 	canAcceptPayload(_bytes: number): boolean {
@@ -2125,6 +2165,28 @@ describe("RequestRecorder — dispose", () => {
 		await h.flush();
 		expect(h.dbOps.saveRequestCalls.length).toBe(0);
 	});
+
+	// A graceful shutdown disposes in REVERSE registration order and the
+	// recorder registers after the async writer, so a settlement enqueued from
+	// dispose() still drains. Clearing the map without one strands every
+	// recoverable row at usage_source NULL permanently — the sweep that would
+	// have settled them never runs again.
+	it("settles the recoverable rows it is still holding", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		h.recorder.dispose();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
 });
 
 describe("RequestRecorder — payload ordering and reservation", () => {
@@ -2532,3 +2594,723 @@ it("emits gateway hints for a synthetic rejection without payload storage", asyn
 	expect(h.dbOps.savePayloadCalls).toHaveLength(0);
 	h.recorder.dispose();
 });
+
+describe("RequestRecorder — correlation_tag", () => {
+	const MAX_TAG = "a".repeat(128);
+
+	function metaWithTag(tag: string): RecordMeta {
+		return makeMeta({
+			requestHeaders: {
+				"content-type": "application/json",
+				[CORRELATION_TAG_HEADER]: tag,
+			},
+		});
+	}
+
+	it("round-trips a 128-byte all-printable tag into the row", async () => {
+		const h = makeHarness();
+		h.recorder.begin(metaWithTag(MAX_TAG));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBe(MAX_TAG);
+	});
+
+	it("stores NULL when the request carried no tag", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBeNull();
+	});
+
+	// Each of these has an obvious repair available, and a repaired tag would
+	// come back matched to some other request. The row must carry NULL — and the
+	// request itself must be entirely unaffected, because a metadata header may
+	// never cost a paid model call.
+	const REJECTED: Array<[string, string]> = [
+		["a 129-byte tag", `${MAX_TAG}a`],
+		["a tag containing TAB", "run\t42"],
+		["a tag containing DEL", "run\x7f42"],
+		["an empty tag", ""],
+	];
+	for (const [label, tag] of REJECTED) {
+		it(`stores NULL for ${label} and still records the request`, async () => {
+			const h = makeHarness();
+			h.recorder.begin(metaWithTag(tag));
+			h.recorder.attachUsageSummary("req-1", makeSummary());
+			h.recorder.finishTransport("req-1", "success");
+			await h.flush();
+
+			expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+			const call = h.dbOps.saveRequestCalls[0];
+			expect(call.correlationTag).toBeNull();
+			// The rest of the row is exactly what an untagged request writes.
+			expect(call.id).toBe("req-1");
+			expect(call.success).toBe(true);
+			expect(call.usage).toMatchObject({ model: "claude-opus-4-8" });
+			expect(h.dbOps.savePayloadCalls).toHaveLength(1);
+			expect(h.emitted).toHaveLength(1);
+		});
+	}
+
+	it("stores the tag on a synthetic terminal", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(
+			metaWithTag("run-42"),
+			"error",
+			"pool_exhausted",
+		);
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].correlationTag).toBe("run-42");
+	});
+});
+
+describe("RequestRecorder — usage_source", () => {
+	it("writes 'provider' for a cleanly-ended stream", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("provider");
+	});
+
+	// The stamp and the token vector are ONE fact about the row, so they have to
+	// be captured together. `usage` and the derived `usageSource` are read
+	// before the enqueue and `usageFinalizedAt` inside the queued job, so a
+	// summary landing in that gap commits a row with no tokens, a NULL
+	// usage_source, and a non-NULL usage_finalized_at — which the client
+	// contract reads as finalized with an 'approximate' source for a row that
+	// has nothing to be approximate about.
+	it("never stamps usage_finalized_at on the row it persists with NO usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace elapses → the no-usage row is ENQUEUED
+
+		// The summary arrives while the write is still queued. That gap is the
+		// writer's backlog, so it is as wide as the queue is deep.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+
+		const initial = h.dbOps.saveRequestCalls[0];
+		expect(initial.usage).toBeUndefined();
+		expect(initial.usageSource).toBeNull();
+		expect(initial.usageFinalizedAt ?? null).toBeNull();
+
+		// The other direction of the same rule, so the fix cannot be "never
+		// stamp": when the vector IS in hand at persist time, the stamp captured
+		// alongside it still rides the initial row.
+		const withUsage = makeHarness();
+		withUsage.recorder.begin(makeMeta());
+		withUsage.recorder.attachUsageSummary("req-1", makeSummary());
+		withUsage.recorder.finishTransport("req-1", "success");
+		await withUsage.flush();
+
+		const complete = withUsage.dbOps.saveRequestCalls[0];
+		expect(complete.usage).toBeDefined();
+		expect(complete.usageSource).toBe("provider");
+		expect(complete.usageFinalizedAt).toBe(1_000_000);
+	});
+
+	it("writes 'approximate' when the stream did not end cleanly", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: true }),
+		);
+		h.recorder.finishTransport("req-1", "error", "stream error");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("approximate");
+	});
+
+	// The case a naive implementation gets wrong: the SUMMARY is present, so a
+	// derivation keyed on `record.usage` would say 'provider' — but
+	// toRequestUsage drops a summary carrying neither a model nor a reported
+	// charge, so the row is persisted with no token vector at all.
+	it("writes 'none' for a summary with no model and no reported charge", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({
+				usage: {
+					model: undefined as unknown as string,
+					inputTokens: 100,
+					outputTokens: 50,
+					totalTokens: 150,
+					costUsd: 0.5,
+					costSource: "estimated",
+				},
+				outputApproximate: false,
+			}),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const call = h.dbOps.saveRequestCalls[0];
+		expect(call.usage).toBeUndefined();
+		expect(call.usageSource).toBe("none");
+	});
+
+	it("writes 'none' when usage was waived", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes 'none' on a synthetic terminal", async () => {
+		const h = makeHarness();
+		h.recorder.recordSynthetic(makeMeta(), "error", "pool_exhausted");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes NULL when grace elapsed, and a late patch fills it in", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace elapses → persist without usage
+		await h.flush();
+		// NULL is the one recoverable state: a patch can still settle it.
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls).toHaveLength(1);
+		expect(h.dbOps.updateUsageCalls[0].usageSource).toBe("provider");
+	});
+
+	it("settles a late patch that yields no token vector at 'none'", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// The patch window closes with this call, so "not finished yet" is no
+		// longer true even though no vector arrived.
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ usage: { inputTokens: 1, outputTokens: 2 } }),
+		);
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls[0].usage).toBeUndefined();
+		expect(h.dbOps.updateUsageCalls[0].usageSource).toBe("none");
+	});
+
+	it("writes 'none' when the patch-record TTL expires with no usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
+
+	// `AsyncWriter.enqueue` returns false and DROPS the job once the metadata
+	// queue is at its cap. The in-memory record is the only thing that can retry
+	// the settlement, so destroying it on a rejected enqueue leaves the row at
+	// usage_source NULL — reading "not finished yet" — for good.
+	it("keeps the record when the settlement enqueue is REJECTED, and settles it on a later retry", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The metadata queue is saturated exactly when the patch window shuts.
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// The backlog clears; the next sweep still has something to settle.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+
+	it("writes 'none' when the SWEEP drops the patch record first", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// Move the clock WITHOUT firing timers, so the sweep reaches the record
+		// before its own patch timer does — the other of the two expiry paths.
+		h.timers.current += 6_000;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.recorder.getRecordCount()).toBe(0);
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+	});
+
+	it("does NOT write on the TTL drop when usage already arrived", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// The patch lands, then dropRecord runs from patchUsage — the same drop
+		// the TTL would have done, but usage is in, so 'none' would be a lie.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.timers.advance(10_000);
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+	});
+
+	it("does NOT write on the TTL drop for a row that persisted WITH usage", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		h.timers.advance(10_000);
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+	});
+
+	it("writes 'none' when the RECORD CAP evicts the patch record first", async () => {
+		const h = makeHarness({ MAX_RECORDS: 1 });
+		h.recorder.begin(makeMeta({ requestId: "cap-0" }));
+		h.recorder.finishTransport("cap-0", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+
+		// A new request pushes the map over MAX_RECORDS; the retained patch record
+		// is the persisted one, so cap pressure evicts it well before its TTL.
+		h.recorder.begin(makeMeta({ requestId: "cap-1" }));
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "cap-0", usageSource: "none" },
+		]);
+	});
+
+	it("does NOT write under cap pressure for a row that persisted WITH usage", async () => {
+		const h = makeHarness({ MAX_RECORDS: 2 });
+		// Usage arrived before the transport ended, so this row is persisted
+		// complete and keeps no patch record.
+		h.recorder.begin(makeMeta({ requestId: "cap-usage" }));
+		h.recorder.attachUsageSummary(
+			"cap-usage",
+			makeSummary({ requestId: "cap-usage" }),
+		);
+		h.recorder.finishTransport("cap-usage", "success");
+		// This one has no usage, so it lingers for a late patch.
+		h.recorder.begin(makeMeta({ requestId: "cap-null" }));
+		h.recorder.finishTransport("cap-null", "success");
+		h.timers.advance(150);
+		await h.flush();
+
+		// Drive the map over the cap.
+		h.recorder.begin(makeMeta({ requestId: "cap-2" }));
+		h.recorder.begin(makeMeta({ requestId: "cap-3" }));
+		await h.flush();
+
+		// Only the recoverable row is settled; the complete one is never touched,
+		// which the write-once column alone could not distinguish from a spurious
+		// call that lost the race.
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "cap-null", usageSource: "none" },
+		]);
+		expect(
+			h.dbOps.saveRequestCalls.find((c) => c.id === "cap-usage")?.usageSource,
+		).toBe("provider");
+	});
+});
+
+/**
+ * Test-only reach-in at a record the recorder is holding. The record map is
+ * private and there is no accessor for a single record; `private` is erased at
+ * runtime, so this reads the very object the recorder holds without widening
+ * the production API for a test.
+ */
+function peekRecord(
+	recorder: RequestRecorder,
+	requestId: string,
+): { settlementPending: boolean; meta: RecordMeta } | undefined {
+	const map = (
+		recorder as unknown as {
+			records: Map<string, { settlementPending: boolean; meta: RecordMeta }>;
+		}
+	).records;
+	return map.get(requestId);
+}
+
+describe("RequestRecorder — settlement retention", () => {
+	it("settles usage_source on dispose even when the metadata queue is SATURATED", async () => {
+		// Graceful shutdown is the one path with no later sweep to retry from:
+		// dispose() clears the timers and the whole record map. If the settlement
+		// is refused there, the row stays usage_source NULL — reading "not
+		// finished yet" — for good, after an ORDERLY restart.
+		//
+		// The queue is filled with real jobs through the real AsyncDbWriter
+		// because ordinary capacity rejection is exactly what has to be survived;
+		// a stubbed `enqueue` would prove nothing about it.
+		const writer = new AsyncDbWriter();
+		const dbOps = new FakeDbOps([]);
+		const timers = new FakeTimers();
+		const recorder = new RequestRecorder({
+			dbOps: dbOps as never,
+			asyncWriter: writer as never,
+			emitSummaryEvent: () => {},
+			getStorePayloads: () => false,
+			getStoreHeaders: () => false,
+			now: timers.now,
+			scheduleTimer: timers.schedule,
+			clearTimer: timers.clear,
+			config: { SUMMARY_GRACE_MS: 100, PATCH_RECORD_TTL_MS: 5_000 },
+		});
+		// Holds the writer's drain tick open, so the queue filled below cannot
+		// empty itself out from under the assertions.
+		let releaseBlocker!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			releaseBlocker = resolve;
+		});
+
+		try {
+			recorder.begin(makeMeta());
+			recorder.finishTransport("req-1", "success");
+			timers.advance(150); // grace → persisted with usage_source NULL
+
+			// The real writer drains on its own; wait for the row to land.
+			for (let i = 0; i < 50 && dbOps.saveRequestCalls.length === 0; i++) {
+				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			}
+			expect(dbOps.saveRequestCalls).toHaveLength(1);
+			expect(dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+			// Saturate for real. One job holds the drain tick open, then the queue
+			// is filled until `enqueue` genuinely refuses at METADATA_QUEUE_CAP.
+			expect(writer.enqueue(() => blocked)).toBe(true);
+			let filled = 0;
+			while (filled < 10_000 && writer.enqueue(() => {})) filled++;
+			expect(writer.enqueue(() => {})).toBe(false);
+
+			// Shutdown. The recorder disposes BEFORE the writer (LifecycleManager
+			// disposes in reverse registration order), so whatever it enqueues is
+			// still in the FIFO when the writer drains it below.
+			recorder.dispose();
+
+			releaseBlocker();
+			await writer.dispose();
+
+			expect(dbOps.markUsageSourceCalls).toEqual([
+				{ id: "req-1", usageSource: "none" },
+			]);
+		} finally {
+			releaseBlocker();
+			await writer.dispose();
+		}
+	});
+
+	it("keeps the retry owner when a LATE summary arrives after a REFUSED settlement", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The patch window shuts while the metadata queue is saturated: the
+		// settlement is refused, so the record is held for ONE reason — it is the
+		// only thing that can retry the write. The window itself stays shut.
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS
+		await h.flush();
+		expect(h.dbOps.markUsageSourceCalls).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// A summary lands after that window closed, with the queue still full. It
+		// has no window to patch into and must not consume the retry owner: doing
+		// so leaves the row at usage_source NULL with nothing left to settle it.
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+		expect(h.recorder.getRecordCount()).toBe(1);
+
+		// The backlog clears; the retained record still has a row to settle.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		expect(h.dbOps.markUsageSourceCalls).toEqual([
+			{ id: "req-1", usageSource: "none" },
+		]);
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+
+	it("stops pinning the request body on a record retained for a settlement retry", async () => {
+		const h = makeHarness();
+		const meta = makeMeta();
+		h.recorder.begin(meta);
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+		await h.flush();
+
+		const retained = peekRecord(h.recorder, "req-1");
+		expect(retained).toBeDefined();
+		expect(retained?.settlementPending).toBe(true);
+		// `releaseBuffers` clears reqBytes and the response chunks, but the body
+		// copy in `meta` is a separate allocation outside the
+		// capturedBytesPending accounting. Retention now outlives both the TTL
+		// and cap eviction, so a retained record must not keep it alive.
+		//
+		// Do NOT add an assertion that the caller's own `meta` still holds its
+		// body. The recorder OWNS the metadata object from `begin` onward and
+		// `releaseCapturedBodies` nulls the body in place — see "releases the
+		// incoming body synchronously at persist time". Swapping in a private
+		// copy instead would leave the buffer reachable from the caller, which
+		// is the leak that ownership rule exists to close.
+		expect(retained?.meta.requestBody).toBeNull();
+	});
+});
+
+describe("RequestRecorder — refused token patch (F10)", () => {
+	// `patchUsage` enqueues the token-carrying update and DISCARDS the boolean,
+	// then drops the record unconditionally. Under metadata-queue saturation the
+	// patch is refused and the record — the only thing that could retry it — is
+	// destroyed, so the row keeps NULL tokens, a NULL stamp and a NULL
+	// usage_source, and the published API reads `finalized: false` for good.
+	it("keeps the record when the token patch enqueue is REFUSED", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageSource).toBeNull();
+
+		// The queue saturates, then the real token vector arrives. The patch is
+		// the only carrier of those tokens.
+		h.writer.acceptMetadata = false;
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+
+		// The write did not land — that part is the queue's prerogative.
+		expect(h.dbOps.updateUsageCalls).toHaveLength(0);
+		// ...but the record must survive it, exactly as the settlement path does.
+		expect(h.recorder.getRecordCount()).toBe(1);
+		const retained = peekRecord(h.recorder, "req-1");
+		expect(retained?.settlementPending).toBe(true);
+		// Retention now outlives the TTL, so the retained record must be small.
+		expect(retained?.meta.requestBody).toBeNull();
+	});
+
+	it("lands the REAL token vector on a later retry and never settles it to 'none'", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.timers.advance(150); // grace → persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		await h.flush();
+		expect(h.dbOps.updateUsageCalls).toHaveLength(0);
+
+		// Admission recovers; the sweep is what retries.
+		h.writer.acceptMetadata = true;
+		h.recorder.sweep();
+		await h.flush();
+
+		const patches = h.dbOps.updateUsageCalls.filter((c) => c.id === "req-1");
+		expect(patches).toHaveLength(1);
+		const usage = patches[0].usage as Record<string, unknown>;
+		expect(usage.totalTokens).toBe(165);
+		expect(usage.promptTokens).toBe(115);
+		expect(usage.completionTokens).toBe(50);
+		expect(patches[0].usageSource).toBe("provider");
+
+		// 'none' would be a FALSE statement — the tokens are known — and the
+		// write-once column would make the lie permanent.
+		expect(
+			h.dbOps.markUsageSourceCalls.filter((c) => c.id === "req-1"),
+		).toHaveLength(0);
+		expect(h.recorder.getRecordCount()).toBe(0);
+	});
+});
+
+describe("RequestRecorder — retained-record amplification (F11)", () => {
+	// (a) The refusal branch counts, fires onMetadataDrop and logs on EVERY
+	// refused retry, not just on the transition into the refused state. One
+	// saturated backlog therefore inflates the health metric and the log once
+	// per sweep for as long as it lasts.
+	it("counts and logs a refused settlement ONCE, not on every retry", async () => {
+		const warned = spyOn(Logger.prototype, "warn");
+		try {
+			const h = makeHarness();
+			h.recorder.begin(makeMeta());
+			h.recorder.finishTransport("req-1", "success");
+			h.timers.advance(150); // grace → persisted with usage_source NULL
+			await h.flush();
+
+			h.writer.acceptMetadata = false;
+			h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+			await h.flush();
+			expect(h.recorder.getMetadataDropped()).toBe(1);
+			expect(h.droppedMetadata.count).toBe(1);
+			expect(countSettlementWarnings(warned, "req-1")).toBe(1);
+
+			// The backlog persists and the sweep retries. A retry refused again is
+			// the SAME drop.
+			for (let i = 0; i < 3; i++) {
+				h.recorder.sweep();
+				await h.flush();
+			}
+			expect(h.recorder.getRecordCount()).toBe(1);
+
+			expect(h.recorder.getMetadataDropped()).toBe(1);
+			expect(h.droppedMetadata.count).toBe(1);
+			expect(countSettlementWarnings(warned, "req-1")).toBe(1);
+		} finally {
+			warned.mockRestore();
+		}
+	});
+
+	// (b) `enforceRecordCap` runs from begin() on every request. Retained records
+	// are the oldest entries, so the loop walks all of them first, retrying and
+	// logging each: N retained means N drops counted per INCOMING request.
+	it("does not re-count every retained record on each incoming request", async () => {
+		const h = makeHarness({ MAX_RECORDS: 3 });
+		for (const id of ["hold-0", "hold-1", "hold-2"]) {
+			h.recorder.begin(makeMeta({ requestId: id }));
+			h.recorder.finishTransport(id, "success");
+		}
+		h.timers.advance(150); // grace → all three persisted with usage_source NULL
+		await h.flush();
+
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → three REFUSED settlements
+		await h.flush();
+		expect(h.recorder.getMetadataDropped()).toBe(3);
+		expect(h.droppedMetadata.count).toBe(3);
+
+		// One more request arrives while the backlog is still saturated.
+		h.recorder.begin(makeMeta({ requestId: "probe" }));
+		await h.flush();
+
+		expect(h.recorder.getMetadataDropped()).toBe(3);
+		expect(h.droppedMetadata.count).toBe(3);
+	});
+
+	// (c) In that same loop a refused record `continue`s WITHOUT incrementing
+	// `removed`, so the walk carries on past it into younger, live records and
+	// takes the `transport === null` branch on them — releasing the buffers and
+	// setting bodyDiscarded, which suppresses the payload entirely. A record
+	// held for a settlement retry thereby destroys an in-flight request's
+	// captured payload.
+	it("does not evict a LIVE request's payload capture to make room past a retained record", async () => {
+		const h = makeHarness({ MAX_RECORDS: 2 });
+
+		// Oldest entry: persisted with usage_source NULL, settlement REFUSED, so
+		// it is retained as that row's only retry owner.
+		h.recorder.begin(makeMeta({ requestId: "held" }));
+		h.recorder.finishTransport("held", "success");
+		h.timers.advance(150);
+		await h.flush();
+		h.writer.acceptMetadata = false;
+		h.timers.advance(5_000); // PATCH_RECORD_TTL_MS → settlement REFUSED
+		await h.flush();
+		expect(peekRecord(h.recorder, "held")?.settlementPending).toBe(true);
+
+		// A live, still-streaming request with a captured body.
+		h.recorder.begin(
+			makeMeta({
+				requestId: "live",
+				isStream: true,
+				requestBody: makeArrayBuffer('{"live":"request"}'),
+			}),
+		);
+		// One more begin() pushes the map over MAX_RECORDS while the queue is
+		// still saturated, so the retained record cannot be evicted to satisfy it.
+		h.recorder.begin(makeMeta({ requestId: "next", isStream: true }));
+
+		// The backlog clears and the live request finishes normally.
+		h.writer.acceptMetadata = true;
+		h.recorder.captureResponseChunk(
+			"live",
+			new TextEncoder().encode('{"resp":1}'),
+		);
+		h.recorder.attachUsageSummary("live", makeSummary({ requestId: "live" }));
+		h.recorder.finishTransport("live", "success");
+		await h.flush();
+
+		const payload = h.dbOps.savePayloadCalls.find((c) => c.id === "live");
+		expect(payload).toBeDefined();
+		const env = JSON.parse(payload?.json ?? "{}");
+		expect(Buffer.from(env.request.body, "base64").toString("utf-8")).toBe(
+			'{"live":"request"}',
+		);
+	});
+});
+
+/**
+ * Count the settlement-refusal warnings the recorder emitted for one request.
+ * `log` is module-private, so the spy sits on the prototype and the message is
+ * filtered rather than the instance.
+ */
+function countSettlementWarnings(
+	warned: { mock: { calls: unknown[][] } },
+	requestId: string,
+): number {
+	return warned.mock.calls.filter((call) =>
+		String(call[0]).includes(
+			`Usage-source settlement dropped for ${requestId}`,
+		),
+	).length;
+}

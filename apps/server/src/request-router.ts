@@ -37,6 +37,7 @@ import type {
 } from "@clankermux/http-api";
 import {
 	API_KEY_REQUIRED_ERROR,
+	CLIENT_NO_STORE_HEADERS,
 	managementAuthRequirement,
 	NO_STORE_HEADERS,
 } from "@clankermux/http-api";
@@ -44,6 +45,7 @@ import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
 } from "@clankermux/proxy";
+import { isClientApiPath } from "./client-api-mount";
 import { terminalForRequestError } from "./request-error-terminal";
 import {
 	CHAT_COMPLETIONS_PATH,
@@ -69,11 +71,23 @@ export interface RequestRouterDeps {
 	 * path into proxy dispatch.
 	 */
 	handlePublicRequest(req: Request, url: URL): Promise<Response | null>;
+	/**
+	 * The credential-scoped client API at `/client/v1/*`. Takes the api-key id
+	 * the mount authenticated, because every route on that surface is scoped to
+	 * the caller's own requests. Returns null when no route matched, so this
+	 * router owns the namespace's 404.
+	 */
+	handleClientRequest(
+		req: Request,
+		url: URL,
+		apiKeyId: string,
+	): Promise<Response | null>;
 	authenticate(
 		req: Request,
 		path: string,
 		method: string,
 		requirement?: AuthRequirement,
+		options?: { recordUsage?: boolean },
 	): Promise<AuthenticationResult>;
 	dispatchProxy(
 		req: Request,
@@ -170,6 +184,9 @@ function isPublicApiPath(pathname: string): boolean {
 
 const RESPONSES_PATHS = new Set(["/v1/responses", "/v1/responses/compact"]);
 
+/** The id a client looks its own row up by under `/client/v1/requests/{id}`. */
+const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
 /**
  * Route one request. `fetch` is a thin wrapper around this.
  */
@@ -214,6 +231,11 @@ export async function routeRequest(
 			const headers = new Headers({ "content-type": "application/json" });
 			const retry = response.headers.get("retry-after");
 			if (retry) headers.set("retry-after", retry);
+			// The handle for `/client/v1/requests/{id}`: this rebuild is the last
+			// thing a chat client's error passes through, and a client that has to
+			// reconcile an error needs the id at least as much as a success does.
+			const requestId = response.headers.get(CLIENT_REQUEST_ID_HEADER);
+			if (requestId) headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
 			return new Response(
 				JSON.stringify(
 					errorEnvelope(
@@ -342,6 +364,7 @@ async function routeRootRequest(
 		RequestRouterDeps,
 		| "handleApiRequest"
 		| "handlePublicRequest"
+		| "handleClientRequest"
 		| "authenticate"
 		| "withDashboard"
 		| "dashboardManifest"
@@ -418,6 +441,15 @@ async function routeRootRequest(
 			`Unknown public API route: ${p}`,
 			NO_STORE_HEADERS,
 		);
+	}
+
+	// The credential-scoped client API. Same position as the widget surface
+	// above, and for the same two reasons: below the management gate a
+	// `/client/*` path would collect the session 401 a machine client can never
+	// satisfy, and below the dashboard branch an unknown one would be answered
+	// with the SPA shell instead of a visible 404.
+	if (isClientApiPath(p)) {
+		return await routeClientApiRequest(req, url, deps);
 	}
 
 	// The management gate, and it has to be HERE — above `handleApiRequest`,
@@ -497,6 +529,95 @@ async function routeRootRequest(
 		"not_found",
 		`Unknown route: ${p}. Agent traffic belongs under ${WIRE_MOUNTS.anthropic} ` +
 			`or ${WIRE_MOUNTS.openai}.`,
+	);
+}
+
+/**
+ * The `/client/v1/*` namespace: a client reading back the accounting of its own
+ * requests, with the same key it proxies them with.
+ *
+ * AUTHENTICATION FIRST, before the route lookup, so the namespace discloses
+ * nothing about which routes exist to a caller that holds no key — the mount
+ * claims every path under `/client`, and the 404 for the ones no route serves
+ * is answered only after the key has been checked.
+ *
+ * The requirement is passed EXPLICITLY, the way the wire mount passes its own,
+ * rather than being inferred a second time from the path: the classification is
+ * the router's, and it is the router that knows this arrived on the mount.
+ *
+ * `recordUsage: false` is the other half of what makes this surface a read.
+ * `AuthService.accept` otherwise bumps `last_used` and `usage_count`, which is
+ * what the dashboard renders as a client's last request and its activity
+ * marker; a client polling its own history is not sending a request, and
+ * counting it as one would make an idle client look live and stop
+ * `usage_count` from meaning "proxied requests".
+ */
+async function routeClientApiRequest(
+	req: Request,
+	url: URL,
+	deps: Pick<RequestRouterDeps, "handleClientRequest" | "authenticate">,
+): Promise<Response> {
+	const response = await answerClientApiRequest(req, url, deps);
+	// EVERY answer from this namespace, including the two exception paths below
+	// and whatever the client router produced, leaves with the cache directive.
+	// A throw is still an answer about one specific credential, and the two
+	// paths that produce one — `terminalForRequestError` here, which is shared
+	// with the wire mounts and so cannot carry this header itself — would
+	// otherwise be the surface's only responses a shared cache may retain.
+	for (const [name, value] of Object.entries(CLIENT_NO_STORE_HEADERS)) {
+		response.headers.set(name, value);
+	}
+	return response;
+}
+
+async function answerClientApiRequest(
+	req: Request,
+	url: URL,
+	deps: Pick<RequestRouterDeps, "handleClientRequest" | "authenticate">,
+): Promise<Response> {
+	const p = url.pathname;
+	let authResult: AuthenticationResult;
+	try {
+		authResult = await deps.authenticate(req, p, req.method, "api_key", {
+			recordUsage: false,
+		});
+	} catch (authError) {
+		return terminalForRequestError(req, authError, "auth", p);
+	}
+	// The identity every route on this surface is scoped to. The gate above
+	// refuses a keyless request, so the missing-id arm cannot fire today; it is
+	// here to make the narrowing TRUE rather than asserted, the same way
+	// `serveAgentRequest` does it.
+	if (!authResult.isAuthenticated || !authResult.apiKeyId) {
+		return jsonError(
+			401,
+			"authentication_error",
+			authResult.error || "Authentication failed",
+			CLIENT_NO_STORE_HEADERS,
+		);
+	}
+
+	// The reader talks to the database, so it throws for the same ordinary
+	// reasons the auth service does. Without a boundary here the throw escapes
+	// the namespace entirely and the client gets neither the documented error
+	// envelope nor the cache directive — from the surface whose whole job is to
+	// be reconciled against.
+	let clientResponse: Response | null;
+	try {
+		clientResponse = await deps.handleClientRequest(
+			req,
+			url,
+			authResult.apiKeyId,
+		);
+	} catch (dispatchError) {
+		return terminalForRequestError(req, dispatchError, "dispatch", p);
+	}
+	if (clientResponse) return clientResponse;
+	return jsonError(
+		HTTP_STATUS.NOT_FOUND,
+		"not_found",
+		`Unknown client API route: ${p}`,
+		CLIENT_NO_STORE_HEADERS,
 	);
 }
 

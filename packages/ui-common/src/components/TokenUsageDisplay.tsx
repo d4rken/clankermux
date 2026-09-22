@@ -45,7 +45,14 @@ export interface TokenUsageInfo {
 export function processTokenUsage(
 	data: TokenUsageData | undefined,
 ): TokenUsageInfo {
-	if (!data || (!data.inputTokens && !data.outputTokens)) {
+	// Tested against a real 0, not a falsy one: a request that consumed nothing
+	// has token data and it reads 0, while a request whose counts never arrived
+	// has none. Collapsing those two reports "no data available" for a row that
+	// states its usage exactly.
+	if (
+		!data ||
+		(data.inputTokens === undefined && data.outputTokens === undefined)
+	) {
 		return {
 			hasData: false,
 			sections: {},

@@ -279,6 +279,21 @@ async function jsonResponse(
 		...(usage ? { usage } : {}),
 	});
 }
+/**
+ * The handle a client uses to read its own request back from
+ * `/client/v1/requests/{id}`. `forwardToClient` sets it on the response this
+ * adapter receives from `handleProxy`; both client-facing legs then build a
+ * fresh Response, so it only reaches the client if it is copied deliberately.
+ */
+const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+
+/**
+ * One exit for every response this adapter produces, so the request id is
+ * applied in a single place rather than at each construction site — including
+ * the error envelopes, which is where a client most needs to look the row up.
+ * Only the id is carried over; the fresh headers each leg builds are otherwise
+ * exactly what the client should see.
+ */
 export async function handleChatCompletionsRequest(
 	req: Request,
 	url: URL,
@@ -287,6 +302,34 @@ export async function handleChatCompletionsRequest(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 	defaultMaxTokens = 8192,
+): Promise<Response> {
+	let captured: string | null = null;
+	const response = await respondToChatCompletionsRequest(
+		req,
+		url,
+		handleProxy,
+		proxyContext,
+		apiKeyId,
+		apiKeyName,
+		defaultMaxTokens,
+		(proxied) => {
+			captured = proxied.headers.get(CLIENT_REQUEST_ID_HEADER);
+		},
+	);
+	const requestId: string | null = captured;
+	if (requestId) response.headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
+	return response;
+}
+
+async function respondToChatCompletionsRequest(
+	req: Request,
+	url: URL,
+	handleProxy: HandleProxy,
+	proxyContext: unknown,
+	apiKeyId: string | null | undefined,
+	apiKeyName: string | null | undefined,
+	defaultMaxTokens: number,
+	captureProxyResponse: (proxied: Response) => void,
 ): Promise<Response> {
 	try {
 		const translated = translateChatRequest(await readRequest(req));
@@ -324,6 +367,7 @@ export async function handleChatCompletionsRequest(
 			apiKeyId,
 			apiKeyName,
 		);
+		captureProxyResponse(upstream);
 		if (req.signal.aborted) {
 			void upstream.body?.cancel().catch(() => {});
 			return new Response(null, { status: 499 });

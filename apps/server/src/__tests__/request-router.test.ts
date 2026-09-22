@@ -24,6 +24,7 @@ import { routeRequest } from "../request-router";
 interface Calls {
 	api: { pathname: string }[];
 	publicApi: { pathname: string; method: string }[];
+	clientApi: { pathname: string; method: string; apiKeyId: string }[];
 	dispatch: { pathname: string; search: string; apiKeyId?: string | null }[];
 	responses: { pathname: string; search: string }[];
 	models: number;
@@ -51,6 +52,8 @@ interface Options {
 	authenticated?: boolean;
 	/** Paths the read-only widget router claims. */
 	publicRoutes?: string[];
+	/** Paths the credential-scoped client router claims. */
+	clientRoutes?: string[];
 }
 
 function makeDeps(options: Options = {}): {
@@ -63,11 +66,13 @@ function makeDeps(options: Options = {}): {
 		dashboardManifest = { "/assets/app.js": "/assets/app.js" },
 		authenticated = true,
 		publicRoutes = ["/public/v1/status"],
+		clientRoutes = ["/client/v1/retention"],
 	} = options;
 
 	const calls: Calls = {
 		api: [],
 		publicApi: [],
+		clientApi: [],
 		dispatch: [],
 		responses: [],
 		models: 0,
@@ -92,6 +97,22 @@ function makeDeps(options: Options = {}): {
 				? new Response(JSON.stringify({ handler: "public" }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
+					})
+				: null;
+		},
+		async handleClientRequest(req, url, apiKeyId) {
+			calls.clientApi.push({
+				pathname: url.pathname,
+				method: req.method,
+				apiKeyId,
+			});
+			return clientRoutes.includes(url.pathname)
+				? new Response(JSON.stringify({ handler: "client" }), {
+						status: 200,
+						headers: {
+							"Content-Type": "application/json",
+							"Cache-Control": "private, no-store",
+						},
 					})
 				: null;
 		},
@@ -901,4 +922,73 @@ describe("Chat Completions mount", () => {
 			expect(r.status).toBe(404);
 			expect(calls.dispatch).toHaveLength(0);
 		});
+});
+
+describe("the client API namespace", () => {
+	// The whole prefix is claimed, so an unknown path here has to fail visibly.
+	// With the dashboard on, the alternative is the SPA shell — a 200 of HTML a
+	// machine client would have to parse to discover it was lost.
+	it("404s an unknown /client path instead of serving the dashboard shell", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(makeRequest("/client/v1/nope"), deps);
+
+		expect(res.status).toBe(404);
+		expect(res.headers.get("Content-Type")).toBe("application/json");
+		expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+		const body = (await res.json()) as { error: { message: string } };
+		expect(body.error.message).toBe(
+			"Unknown client API route: /client/v1/nope",
+		);
+		expect(calls.dashboard).toEqual([]);
+		expect(calls.dispatch).toEqual([]);
+	});
+
+	it("passes the api-key requirement explicitly and hands the id to the router", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(makeRequest("/client/v1/retention"), deps);
+
+		expect(res.status).toBe(200);
+		expect(calls.auth).toEqual([
+			{ path: "/client/v1/retention", method: "GET", requirement: "api_key" },
+		]);
+		expect(calls.clientApi).toEqual([
+			{ pathname: "/client/v1/retention", method: "GET", apiKeyId: "key-1" },
+		]);
+	});
+
+	it("refuses a request with no key before the router is reached", async () => {
+		const { deps, calls } = makeDeps({ authenticated: false });
+		const res = await routeRequest(makeRequest("/client/v1/retention"), deps);
+
+		expect(res.status).toBe(401);
+		expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+		expect(calls.clientApi).toEqual([]);
+	});
+
+	// Segment-bounded: these are ordinary root paths and still reach the
+	// dashboard. A prefix test that swept them in would hand an unclassified
+	// path to a credential-scoped surface.
+	for (const path of ["/clientevil", "/clientele", "/clients"]) {
+		it(`leaves ${path} outside the namespace`, async () => {
+			const { deps, calls } = makeDeps();
+			const res = await routeRequest(makeRequest(path), deps);
+
+			expect(res.status).toBe(200);
+			expect(calls.clientApi).toEqual([]);
+			expect(calls.auth).toEqual([]);
+			expect(calls.dashboard.map((c) => c.assetPath)).toEqual(["/index.html"]);
+		});
+	}
+
+	// A decoded spelling would be a second name for the mount that only the
+	// predicate understands. It falls through to the root flow, which has its
+	// own answer for it.
+	it("does not admit an encoded spelling of the mount", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(makeRequest("/%63lient/v1/retention"), deps);
+
+		expect(calls.clientApi).toEqual([]);
+		expect(res.status).toBe(200);
+		expect(calls.dashboard.map((c) => c.assetPath)).toEqual(["/index.html"]);
+	});
 });

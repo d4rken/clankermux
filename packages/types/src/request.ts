@@ -184,6 +184,21 @@ export interface RequestRow {
 	 */
 	usage_finalized_at: number | null;
 	/**
+	 * Where this row's token vector came from — see {@link UsageSource}.
+	 *
+	 * NULL is NOT a fourth value: it means accounting for the row is not
+	 * complete yet (persisted while a late usage patch was still possible), or
+	 * the row predates the column. Only a non-NULL value is a statement.
+	 */
+	usage_source: string | null;
+	/**
+	 * The client's `x-clankermux-correlation-tag`, VERBATIM — 1-128 bytes, every
+	 * byte 0x20-0x7E. NULL when the request sent no tag, sent one outside that
+	 * set (never repaired into a storable one, because it is an exact lookup
+	 * key), or predates the column.
+	 */
+	correlation_tag: string | null;
+	/**
 	 * The provider's terminal `stop_reason`, raw, for every provider and every
 	 * reason ('end_turn', 'tool_use', 'max_tokens', 'refusal', ...). NULL when
 	 * the response carried none (errors, aborted streams, native Responses
@@ -207,6 +222,18 @@ export interface RequestRow {
 	 */
 	fallback_from_model: string | null;
 }
+
+/**
+ * Provenance of a persisted row's token vector, as `requests.usage_source`
+ * records it.
+ *
+ * Written once, at persist time, from whether a token vector was actually
+ * STORED — never from what a usage summary claimed. `none` therefore covers
+ * three different-looking cases that are the same fact: usage was waived, the
+ * terminal was synthetic, or the summary carried neither a model nor a reported
+ * charge and so produced no vector to store.
+ */
+export type UsageSource = "provider" | "approximate" | "none";
 
 /**
  * How a token total was arrived at.

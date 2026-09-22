@@ -164,8 +164,8 @@ closure.
 no longer generated or imported. Stale gitignored copies may linger in the live
 checkout; they're dead weight. Don't hand-edit, commit, or recreate them.
 
-`./README.md` (root) is the only user-facing README. The other six —
-`deploy/caddy`, `deploy/systemd`, `docs/public-api`,
+`./README.md` (root) is the only user-facing README. The other seven —
+`deploy/caddy`, `deploy/systemd`, `docs/client-api`, `docs/public-api`,
 `docs/public-api/examples`,
 `packages/providers/src/providers/anthropic-compatible` and
 `packages/security` — document their own directory and nothing beyond it.

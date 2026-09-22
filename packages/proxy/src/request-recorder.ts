@@ -15,8 +15,10 @@ import {
 	type RequestResponse,
 	resolveCostSource,
 	type ToolCallStat,
+	type UsageSource,
 } from "@clankermux/types";
 
+import { extractCorrelationTag } from "./correlation-tag";
 import { extractGatewayHints } from "./gateway-hint-headers";
 
 const log = new Logger("RequestRecorder");
@@ -199,6 +201,13 @@ export interface SlimUsageSummary {
 	 * holding an estimate that looks measured.
 	 */
 	outputApproximate?: boolean;
+	/**
+	 * True when a counter did not fit its own total and the proxy cut it down.
+	 * The published vector is then a repair, and `usageSource` says
+	 * `approximate` for the same reason an estimated output does: the numbers
+	 * are not established as the provider's own.
+	 */
+	inputClamped?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
 	/**
@@ -324,6 +333,19 @@ interface SaveRequestData extends GatewayHintMetadata {
 	fallbackCreditClaimed?: boolean;
 	/** Refused-model origin — mirrors `RequestData.fallbackFromModel`. */
 	fallbackFromModel?: string | null;
+	/**
+	 * The client's correlation tag, verbatim — mirrors
+	 * `RequestData.correlationTag`. Read off the captured request headers by the
+	 * recorder itself, so it never travels through `RecordMeta`.
+	 */
+	correlationTag?: string | null;
+	/**
+	 * Provenance of the token vector this row actually carries — mirrors
+	 * `RequestData.usageSource`. Derived at persist time, never supplied by a
+	 * caller. Absent/null only for the one recoverable state (see
+	 * {@link RequestRecorder.deriveUsageSource}).
+	 */
+	usageSource?: UsageSource | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -357,6 +379,15 @@ interface DbOpsLike {
 		usage: unknown,
 		usageFinalizedAt?: number | null,
 		response?: { stopReason?: string; refusalCategory?: string },
+		usageSource?: UsageSource | null,
+	): Promise<void>;
+	/**
+	 * Settle `requests.usage_source` on an already-persisted row. Write-once in
+	 * SQL, so a second call can never contradict the first.
+	 */
+	markRequestUsageSource(
+		requestId: string,
+		usageSource: UsageSource,
 	): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
 	updateAccountUsage(accountId: string): Promise<void>;
@@ -370,6 +401,21 @@ interface PayloadReservationLike {
 
 interface AsyncWriterLike {
 	enqueue(job: () => void | Promise<void>): boolean;
+	/**
+	 * Append one job to the same FIFO, exempt from the metadata queue cap. Only
+	 * {@link RequestRecorder.dispose} may use it: see the call site for why a
+	 * refusal there is unrecoverable.
+	 */
+	enqueueShutdownBatch(job: () => void | Promise<void>): boolean;
+	/**
+	 * Non-counting capacity probe for the metadata queue. A refused
+	 * {@link enqueue} counts a dropped write into the writer's own health
+	 * metrics, so a caller holding a job it intends to RETRY asks this first
+	 * instead of re-counting one lost write on every attempt. Optional so
+	 * existing stand-ins stay assignable; absent means "assume there is room"
+	 * and the enqueue decides.
+	 */
+	canAcceptMetadata?(): boolean;
 	canAcceptPayload(bytes: number): boolean;
 	recordPayloadDrop(bytes: number): void;
 	reservePayload(estimatedBytes: number): PayloadReservationLike | null;
@@ -439,8 +485,23 @@ const PLAN_PROVIDERS = new Set([
 // Internal record
 // ---------------------------------------------------------------------------
 
+/** One late usage patch, resolved to the arguments it writes. */
+interface UsagePatchWrite {
+	requestId: string;
+	usage: unknown;
+	usageFinalizedAt: number | null;
+	response: { stopReason?: string; refusalCategory?: string };
+	usageSource: UsageSource | null;
+}
+
 interface InternalRecord {
 	gatewayHints: GatewayHintMetadata;
+	/**
+	 * The client's correlation tag, verbatim, or null when it sent none or sent
+	 * one the validator refused. Captured at record creation because the headers
+	 * are what carry it; nothing downstream re-reads them.
+	 */
+	correlationTag: string | null;
 	meta: RecordMeta;
 	billingType: string;
 	/** Captured request body bytes (base64-encodable), null when discarded. */
@@ -462,6 +523,20 @@ interface InternalRecord {
 	 */
 	usageFinalizedAt: number | null;
 	usageWaived: boolean;
+	/**
+	 * A `usage_source` settlement the metadata queue refused. The record is then
+	 * held past the end of its patch window for one reason only: it is the sole
+	 * thing that can retry the write, and the row reads "not finished yet" until
+	 * one lands. The next sweep tries again.
+	 */
+	settlementPending: boolean;
+	/**
+	 * A token vector whose patch the metadata queue refused. The record is the
+	 * only carrier of those tokens, so it is held — with the vector — until a
+	 * retry lands. Never settled to `'none'`: the tokens are known and the
+	 * column is write-once, so the statement would be false and permanent.
+	 */
+	pendingPatch?: SlimUsageSummary | null;
 	bodyDiscarded: boolean;
 	persisted: boolean;
 	createdAt: number;
@@ -603,6 +678,7 @@ export class RequestRecorder {
 
 		const record: InternalRecord = {
 			gatewayHints: extractGatewayHints(meta.requestHeaders),
+			correlationTag: extractCorrelationTag(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -614,6 +690,7 @@ export class RequestRecorder {
 			usage: null,
 			usageFinalizedAt: null,
 			usageWaived: false,
+			settlementPending: false,
 			bodyDiscarded,
 			persisted: false,
 			createdAt: this.now(),
@@ -690,6 +767,14 @@ export class RequestRecorder {
 	attachUsageSummary(requestId: string, summary: SlimUsageSummary): void {
 		const record = this.records.get(requestId);
 		if (!record) return;
+		// The record is being held for ONE reason: it owns the retry of a
+		// settlement the metadata queue refused. Its patch window shut when the
+		// patch timer fired and was deliberately not re-armed, so there is nothing
+		// for a summary to patch into. Falling through would route it to
+		// patchUsage, which drops the record unconditionally — taking the only
+		// thing that can still settle the row and leaving it `usage_source` NULL,
+		// reading "not finished yet", for good.
+		if (record.settlementPending) return;
 		// Stamp the moment a PERSISTABLE token vector became known — which is not
 		// the same as "a summary arrived". A model-less charge is persistable but
 		// does not establish a token vector and must not stamp. The first qualifying
@@ -739,9 +824,27 @@ export class RequestRecorder {
 				// summary can still patch — createdAt may be far past the TTL the
 				// instant a 30-min stream persists, which would defeat invariant 2.
 				const anchor = record.persistedAt ?? record.createdAt;
-				if (now - anchor > this.config.PATCH_RECORD_TTL_MS) {
-					this.dropRecord(id);
+				// A record whose write the queue refused is held past its TTL on
+				// purpose, so retry it on every pass rather than waiting the window
+				// out a second time: its patch window has already shut and the
+				// retry is the only reason it is still here.
+				const retrying = record.settlementPending;
+				if (!retrying && now - anchor <= this.config.PATCH_RECORD_TTL_MS) {
+					continue;
 				}
+				// Probe rather than letting `enqueue` refuse again: a refusal counts
+				// a dropped write into the writer's health metrics, so a backlog
+				// that outlasts one sweep would re-count the same held write.
+				if (retrying && !this.writerHasMetadataCapacity()) continue;
+				const pendingPatch = record.pendingPatch;
+				if (pendingPatch) {
+					// Retry the PATCH — it carries the tokens. Settling this record
+					// at 'none' instead would state that a row with known tokens has
+					// none, in a write-once column.
+					this.patchUsage(record, pendingPatch);
+					continue;
+				}
+				if (this.closeUnresolvedUsageSource(record)) this.dropRecord(id);
 				continue;
 			}
 			const overAge = now - record.createdAt > this.config.RECORD_MAX_AGE_MS;
@@ -805,6 +908,9 @@ export class RequestRecorder {
 		// identical to upstream responses.
 		const record: InternalRecord = {
 			gatewayHints: extractGatewayHints(meta.requestHeaders),
+			// A request that never reached a provider still has to be findable by
+			// its tag — that is the case a client most wants to look up.
+			correlationTag: extractCorrelationTag(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -817,6 +923,7 @@ export class RequestRecorder {
 			// A synthetic terminal has no provider usage at all — never a stamp.
 			usageFinalizedAt: null,
 			usageWaived: true,
+			settlementPending: false,
 			bodyDiscarded: !storePayloads,
 			persisted: true,
 			createdAt: this.now(),
@@ -834,10 +941,68 @@ export class RequestRecorder {
 		);
 	}
 
+	/**
+	 * Shut down: settle what is still settleable, then drop everything.
+	 *
+	 * The settlement is a plain synchronous enqueue and this stays synchronous.
+	 * `LifecycleManager.shutdown` disposes in REVERSE registration order and the
+	 * recorder registers after the async writer, so the job is still in the queue
+	 * when the writer's own dispose drains it. Without it a graceful shutdown
+	 * clears the map with every recoverable row left at `usage_source` NULL —
+	 * reading "not finished yet" — and the sweep that would have settled them
+	 * never runs again.
+	 *
+	 * ONE batch job, via the cap-exempt shutdown enqueue, rather than the
+	 * per-record {@link closeUnresolvedUsageSource}: dispose() clears the timers
+	 * and the whole map, so there is no later sweep to retry from and a refused
+	 * settlement here is lost outright. A shutdown that begins with a saturated
+	 * metadata queue is exactly when that happens. It still goes on the writer's
+	 * queue, behind the request writes already there, so a settlement can never
+	 * overtake the row it settles.
+	 *
+	 * Abrupt process death is a different matter and is still unhandled; it is
+	 * the residual the client contract documents.
+	 */
 	dispose(): void {
+		// Persisted only: a record whose transport never finished has no row to
+		// settle, and `needsUsageSourceSettlement` keeps a patched or waived one
+		// untouched.
+		const unsettled: string[] = [];
+		const heldPatches: UsagePatchWrite[] = [];
 		for (const record of this.records.values()) {
+			if (record.pendingPatch) {
+				// This record holds a token vector, not a statement: it is the only
+				// carrier of those tokens and there is no later sweep to retry from.
+				heldPatches.push(this.buildUsagePatch(record, record.pendingPatch));
+			} else if (this.needsUsageSourceSettlement(record)) {
+				unsettled.push(record.meta.requestId);
+			}
 			this.clearTimer(record.graceTimer);
 			this.clearTimer(record.patchTimer);
+		}
+		if (unsettled.length > 0 || heldPatches.length > 0) {
+			this.asyncWriter.enqueueShutdownBatch(async () => {
+				for (const patch of heldPatches) {
+					try {
+						await this.dbOps.updateRequestUsage(
+							patch.requestId,
+							patch.usage,
+							patch.usageFinalizedAt,
+							patch.response,
+							patch.usageSource,
+						);
+					} catch (error) {
+						log.error(`Failed to patch usage for ${patch.requestId}:`, error);
+					}
+				}
+				for (const requestId of unsettled) {
+					try {
+						await this.dbOps.markRequestUsageSource(requestId, "none");
+					} catch (error) {
+						log.error(`Failed to close usage source for ${requestId}:`, error);
+					}
+				}
+			});
 		}
 		if (this.sweepTimer !== null) {
 			this.clearTimer(this.sweepTimer);
@@ -934,6 +1099,11 @@ export class RequestRecorder {
 			// has already released its bodies, so what lingers is metadata only.
 			record.patchTimer = this.scheduleTimer(() => {
 				record.patchTimer = null;
+				// A refused settlement keeps the record: it is the only thing that
+				// can retry, and the sweep will. The patch window stays SHUT —
+				// the timer is deliberately not re-armed, since what is retained
+				// is the retry, not a renewed window for a late summary.
+				if (!this.closeUnresolvedUsageSource(record)) return;
 				this.dropRecord(requestId);
 			}, this.config.PATCH_RECORD_TTL_MS);
 		}
@@ -958,6 +1128,22 @@ export class RequestRecorder {
 		usage: unknown,
 	): void {
 		const meta = record.meta;
+		// Derived here rather than at each caller so the synthetic path and the
+		// ordinary path answer the question the same way: what is actually about
+		// to be written into the token columns?
+		const usageSource = this.deriveUsageSource(
+			usage,
+			record.usage,
+			record.usage === null && !record.usageWaived,
+		);
+		// Snapshotted HERE, alongside `usage` and `usageSource`, because the three
+		// are one fact about the row: when the vector existed, what it was, and
+		// where it came from. Read inside the queued job instead, a summary that
+		// lands while the write sits in the backlog stamps a row that has no
+		// tokens and no provenance — which the client contract then publishes as
+		// finalized with an 'approximate' source. Only `patchUsage` may publish
+		// the stamp that belongs to a late vector, and it already does.
+		const usageFinalizedAt = record.usageFinalizedAt;
 		const storePayloads = this.getStorePayloads();
 		// Read independently of storePayloads: headers are captured even when the
 		// envelope is dropped for the byte budget or payload storage is off, so
@@ -1021,7 +1207,7 @@ export class RequestRecorder {
 			reasoningEffort: meta.reasoningEffort ?? null,
 			contextComposition: meta.contextComposition ?? null,
 			requestedModel: meta.requestedModel ?? null,
-			usageFinalizedAt: record.usageFinalizedAt,
+			usageFinalizedAt,
 			sessionKey: meta.sessionKey ?? null,
 			cachePrefixHashes: meta.cachePrefixHashes ?? null,
 			clientUserAgent: meta.clientUserAgent ?? null,
@@ -1032,6 +1218,8 @@ export class RequestRecorder {
 			refusalCategory: record.usage?.refusalCategory,
 			fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
 			fallbackFromModel: meta.fallbackFromModel ?? undefined,
+			correlationTag: record.correlationTag,
+			usageSource,
 		};
 		const payloadJson = json;
 		const payloadReservation = reservation;
@@ -1142,29 +1330,180 @@ export class RequestRecorder {
 		}
 	}
 
-	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
-		const usage = this.toRequestUsage(summary);
-		// The stamp rides along with the late patch — the row was persisted before
-		// usage existed, so its column is still NULL. The repository COALESCEs the
-		// stored value first, so this can only ever fill it in, never move it.
-		const usageFinalizedAt = record.usageFinalizedAt;
-		this.asyncWriter.enqueue(async () => {
+	/**
+	 * What `requests.usage_source` should say about the row being written.
+	 *
+	 * Keyed on `usage` — the vector that is actually about to be STORED — not on
+	 * the summary that produced it. The two disagree exactly where it matters:
+	 * `toRequestUsage` returns undefined for a summary carrying neither a model
+	 * nor a reported charge, and the row still persists, so reading the summary
+	 * would label a row `provider` that holds no tokens at all.
+	 *
+	 * `recoverable` is the one state that gets NULL: transport finished, no
+	 * summary, not waived, patch window still open. Every other absence is final
+	 * (`'none'`) — waived usage, a synthetic terminal, a vector-less summary.
+	 */
+	private deriveUsageSource(
+		usage: unknown,
+		summary: SlimUsageSummary | null,
+		recoverable: boolean,
+	): UsageSource | null {
+		if (usage !== undefined) {
+			// `outputApproximate` is always stated by the collector, so `false` is a
+			// positive claim that the provider reported the output count. A clamped
+			// input vector disqualifies the row the same way: `provider` promises
+			// the counts ARE the provider's, and a repaired one is not.
+			return summary?.outputApproximate || summary?.inputClamped
+				? "approximate"
+				: "provider";
+		}
+		return recoverable ? null : "none";
+	}
+
+	/**
+	 * Close the row's accounting when the patch window shuts without usage.
+	 *
+	 * A row persisted with `usage_source` NULL is saying "not finished yet", and
+	 * the in-memory record is the only thing that could still finish it. Once it
+	 * is dropped, nothing will — so state `'none'` on the way out.
+	 *
+	 * Guarded on the RECORD's state, not on the call site: `dropRecord` is also
+	 * reached from `patchUsage`, where usage did arrive and this write would be
+	 * a lie. Write-once in SQL, so it can never overwrite that patch's value.
+	 *
+	 * Returns DROP PERMISSION, not a write result. `true` — the caller may
+	 * release the record: the settlement was admitted, or none was needed.
+	 * `false` — retain it: the settlement was refused, or a pending patch
+	 * belongs to another retry path and this record is its only carrier.
+	 *
+	 * So `false` is never merely "the write failed". `AsyncWriter.enqueue`
+	 * drops the job at the queue cap and nothing retries it, so a caller that
+	 * drops the record on a `false` here destroys the only thing that could
+	 * finish the row's accounting: it would stay `usage_source` NULL, reading
+	 * "not finished yet", permanently.
+	 */
+	private closeUnresolvedUsageSource(record: InternalRecord): boolean {
+		// A record holding a refused token patch is NOT settleable: its tokens are
+		// known, so `'none'` would be false, and the record is their only carrier,
+		// so a caller reading `true` as "safe to drop" would destroy them. Report
+		// it as unadmitted — {@link sweep} owns the retry of the patch itself.
+		if (record.pendingPatch) return false;
+		if (!this.needsUsageSourceSettlement(record)) return true;
+		const requestId = record.meta.requestId;
+		const accepted = this.asyncWriter.enqueue(async () => {
 			try {
-				await this.dbOps.updateRequestUsage(
-					record.meta.requestId,
-					usage,
-					usageFinalizedAt,
-					// The row was persisted before the response ended, so its
-					// stop-reason columns are still NULL; the late patch fills them.
-					{
-						stopReason: summary.stopReason,
-						refusalCategory: summary.refusalCategory,
-					},
-				);
+				await this.dbOps.markRequestUsageSource(requestId, "none");
 			} catch (error) {
-				log.error(`Failed to patch usage for ${record.meta.requestId}:`, error);
+				log.error(`Failed to close usage source for ${requestId}:`, error);
 			}
 		});
+		// Only on the TRANSITION into the refused state. A retry that is refused
+		// again is the same drop, and the counter feeds a health flag that means
+		// "request rows lost": re-counting it once per sweep for as long as the
+		// backlog lasts would inflate the metric and the log out of a single
+		// dropped write.
+		if (!accepted && !record.settlementPending) {
+			// The record now outlives both the patch TTL and cap eviction, and by
+			// design nothing bounds how many are retained: evicting one would lose a
+			// real request's token accounting permanently. So each retained record
+			// has to be SMALL, and `releaseCapturedBodies` is what makes it so —
+			// idempotent, so calling it on a record whose persist path already ran
+			// costs nothing and covers any path that did not.
+			this.releaseCapturedBodies(record);
+			// Counted the same way a rejected request-row write is, so queue
+			// saturation is observable here too rather than silent.
+			this.metadataDropped++;
+			this.onMetadataDrop?.(requestId);
+			log.warn(
+				`Usage-source settlement dropped for ${requestId} — row left unsettled for a later retry (total dropped: ${this.metadataDropped})`,
+			);
+		}
+		record.settlementPending = !accepted;
+		return accepted;
+	}
+
+	/**
+	 * Whether the record's row is still sitting at `usage_source` NULL with this
+	 * record as the only thing that can close it. Usage that arrived, or usage
+	 * explicitly waived, already stated a provenance; writing `'none'` over
+	 * either would be a lie (and SQL's write-once would refuse it anyway).
+	 */
+	private needsUsageSourceSettlement(record: InternalRecord): boolean {
+		return record.persisted && record.usage === null && !record.usageWaived;
+	}
+
+	/**
+	 * The exact write a late usage patch performs, built while the record is
+	 * still held. Shared with {@link dispose}, which flushes a patch the queue
+	 * refused rather than dropping the tokens with the record.
+	 */
+	private buildUsagePatch(
+		record: InternalRecord,
+		summary: SlimUsageSummary,
+	): UsagePatchWrite {
+		const usage = this.toRequestUsage(summary);
+		return {
+			requestId: record.meta.requestId,
+			usage,
+			// The stamp rides along with the late patch — the row was persisted
+			// before usage existed, so its column is still NULL. The repository
+			// COALESCEs the stored value first, so this can only ever fill it in,
+			// never move it.
+			usageFinalizedAt: record.usageFinalizedAt,
+			// The row was persisted before the response ended, so its stop-reason
+			// columns are still NULL; the late patch fills them.
+			response: {
+				stopReason: summary.stopReason,
+				refusalCategory: summary.refusalCategory,
+			},
+			// The patch window is already shut, so nothing is recoverable any
+			// more: a summary that yields no vector settles the column at 'none'
+			// rather than leaving it NULL.
+			usageSource: this.deriveUsageSource(usage, summary, false),
+		};
+	}
+
+	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
+		const patch = this.buildUsagePatch(record, summary);
+		const accepted = this.asyncWriter.enqueue(async () => {
+			try {
+				await this.dbOps.updateRequestUsage(
+					patch.requestId,
+					patch.usage,
+					patch.usageFinalizedAt,
+					patch.response,
+					patch.usageSource,
+				);
+			} catch (error) {
+				log.error(`Failed to patch usage for ${patch.requestId}:`, error);
+			}
+		});
+		if (!accepted) {
+			// This write CARRIES the tokens: dropping the record with it loses
+			// them, and the row keeps NULL tokens, a NULL stamp and a NULL
+			// usage_source for good. Hold the vector and let the sweep retry the
+			// patch — never a 'none' settlement, which would be a false statement
+			// in a write-once column.
+			if (!record.settlementPending) {
+				// Retention now outlives the TTL, so shed the bodies exactly as the
+				// settlement refusal does (see closeUnresolvedUsageSource).
+				this.releaseCapturedBodies(record);
+				log.warn(
+					`Usage patch dropped for ${patch.requestId} — tokens held in memory for a later retry`,
+				);
+			}
+			record.pendingPatch = summary;
+			// Shuts the patch window: a further summary has nothing to patch into,
+			// and the sweep revisits this record every pass.
+			record.settlementPending = true;
+			if (record.patchTimer !== null) {
+				// The timer's callback settles the row — which this record's tokens
+				// now forbid — and drops the record with them.
+				this.clearTimer(record.patchTimer);
+				record.patchTimer = null;
+			}
+			return;
+		}
 		// Keep the live dashboard in sync — re-emit with the patched usage.
 		const success = this.outcomeToSuccess(record);
 		const responseTime = this.computeResponseTime(record, summary);
@@ -1347,12 +1686,20 @@ export class RequestRecorder {
 		const u = summary.usage;
 		if (!u.model && !(u.costSource === "reported" && u.costUsd != null))
 			return undefined;
+		// Absent when NO part was reported. Summing three absences into 0 would
+		// publish a derived count the provider never stated, and the column
+		// cannot say afterwards which of its parts it was built from.
+		const promptParts = [
+			u.inputTokens,
+			u.cacheReadInputTokens,
+			u.cacheCreationInputTokens,
+		];
+		const promptTokens = promptParts.some((part) => part !== undefined)
+			? promptParts.reduce((sum, part) => (sum ?? 0) + (part ?? 0), 0)
+			: undefined;
 		return {
 			model: u.model,
-			promptTokens:
-				(u.inputTokens || 0) +
-				(u.cacheReadInputTokens || 0) +
-				(u.cacheCreationInputTokens || 0),
+			promptTokens,
 			completionTokens: u.outputTokens,
 			totalTokens: u.totalTokens,
 			costUsd: u.costUsd,
@@ -1462,16 +1809,46 @@ export class RequestRecorder {
 		this.records.delete(requestId);
 	}
 
+	private writerHasMetadataCapacity(): boolean {
+		return this.asyncWriter.canAcceptMetadata?.() ?? true;
+	}
+
 	private enforceRecordCap(): void {
 		if (this.records.size <= this.config.MAX_RECORDS) return;
-		const excess = this.records.size - this.config.MAX_RECORDS;
+		// Records held for a refused write are exempt from the cap by decision:
+		// nothing bounds how many there are, because evicting one loses a real
+		// request's token accounting permanently. Measure the excess over the
+		// EVICTABLE records only — counted toward the cap, retained records (the
+		// oldest entries, so the first the walk below reaches) would instead push
+		// live requests into the `transport === null` branch, and the
+		// `bodyDiscarded` it sets suppresses that request's whole payload row.
+		let retained = 0;
+		for (const record of this.records.values()) {
+			if (record.settlementPending) retained++;
+		}
+		let excess = this.records.size - retained - this.config.MAX_RECORDS;
+		if (excess <= 0) return;
 		let removed = 0;
 		let freed = 0;
 		for (const [id, record] of this.records) {
 			if (removed >= excess) break;
+			// Retrying belongs to the sweep alone. This runs from begin(), once per
+			// incoming request, so retrying here would re-attempt — and re-log —
+			// every retained record on every request that arrives.
+			if (record.settlementPending) continue;
 			if (record.persisted) {
 				// Already persisted (its row is written / will be) → safe to delete
-				// to shrink the map. Drops the patch window early under cap pressure.
+				// to shrink the map. Drops the patch window early under cap pressure,
+				// so settle the row's accounting on the way out — and keep the
+				// record when that settlement is refused, since evicting it for
+				// memory would leave the row unfinished for good.
+				if (!this.closeUnresolvedUsageSource(record)) {
+					// It just joined the retained, cap-exempt population, so it stops
+					// counting toward the excess too. Walking on to evict a younger
+					// record in its place is what takes a LIVE request's payload.
+					excess--;
+					continue;
+				}
 				this.dropRecord(id);
 				removed++;
 			} else if (record.transport === null && !record.bodyDiscarded) {

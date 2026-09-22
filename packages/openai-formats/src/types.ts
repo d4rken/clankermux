@@ -149,6 +149,21 @@ export interface OpenAIUsage {
 }
 
 export interface TransformStreamContext {
+	/**
+	 * Whether upstream reported each cache counter. The counts themselves
+	 * default to 0, so without these a class nobody mentioned is indistinguishable
+	 * from one reported as zero, and the persisted row publishes the second.
+	 */
+	sawCacheRead?: boolean;
+	sawCacheCreation?: boolean;
+	/**
+	 * Whether upstream sent a `usage` block at all. The Anthropic shape requires
+	 * the input and output counts, so this translator emits them either way;
+	 * without this nothing downstream could tell a placeholder from a report.
+	 */
+	sawUsage?: boolean;
+	/** From `x-clankermux-request-id`, for reporting the line above. */
+	requestId?: string | null;
 	buffer: string;
 	hasStarted: boolean;
 	extractedModel: string;
@@ -227,6 +242,8 @@ export interface AnthropicResponse {
 	usage?: {
 		input_tokens: number;
 		output_tokens: number;
+		cache_read_input_tokens?: number;
+		cache_creation_input_tokens?: number;
 	};
 	error?: {
 		type: string;

@@ -3,16 +3,13 @@ import { fileURLToPath } from "node:url";
 import { createGenerator } from "ts-json-schema-generator";
 import {
 	countFields,
-	type PublicResource,
-	resources,
+	groups,
+	type ResourceGroup,
+	schemaDirectory,
 } from "./manifest";
 
 export type Schema = { [key: string]: unknown };
 export const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
-export const schemaDirectory = new URL(
-	"../../docs/public-api/schemas/",
-	import.meta.url,
-);
 
 function isObject(value: unknown): value is Schema {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -75,13 +72,23 @@ function constrain(
 	}
 }
 
-function addWireConstraints(schema: Schema, resource: PublicResource): void {
+/**
+ * `resourceId` pins the `schema` discriminator of the resource being built,
+ * for DTOs that declare the field as a plain `string`.
+ *
+ * `??=`, because this walk reaches every definition in the document and a
+ * resource whose payload EMBEDS another resource has two discriminators in one
+ * schema: the list's rows each carry the row id, not the list's. A DTO that
+ * declares the field as a literal type has already said which one it is, and
+ * that statement wins.
+ */
+function addWireConstraints(schema: Schema, resourceId: string): void {
 	if (schema.type === "object" || isObject(schema.properties))
 		schema.additionalProperties = true;
 	if (isObject(schema.properties)) {
 		for (const [key, property] of Object.entries(schema.properties)) {
 			if (!isObject(property)) continue;
-			if (key === "schema") property.const = resources[resource].id;
+			if (key === "schema") property.const ??= resourceId;
 			if (key.endsWith("At") || key === "at" || key === "until") {
 				constrain(property, "string", { format: "date-time" });
 			}
@@ -101,57 +108,64 @@ function addWireConstraints(schema: Schema, resource: PublicResource): void {
 	for (const child of Object.values(schema)) {
 		if (Array.isArray(child)) {
 			for (const part of child)
-				if (isObject(part)) addWireConstraints(part, resource);
-		} else if (isObject(child)) addWireConstraints(child, resource);
+				if (isObject(part)) addWireConstraints(part, resourceId);
+		} else if (isObject(child)) addWireConstraints(child, resourceId);
 	}
 }
 
-export function generateSchemas(): Record<PublicResource, Schema> {
+/** Every schema of ONE group, generated from that group's entry file. */
+export function generateSchemas(group: ResourceGroup): Record<string, Schema> {
 	const generator = createGenerator({
-		path: `${projectRoot}packages/http-api/src/handlers/public/dto.ts`,
+		path: `${projectRoot}${group.source}`,
 		tsconfig: `${projectRoot}tsconfig.json`,
-		type: Object.values(resources).map((resource) => resource.type),
+		type: Object.values(group.resources).map((resource) => resource.type),
 		skipTypeCheck: true, // Repository typecheck remains the authority; avoid generator's bundled TS version.
 		additionalProperties: true,
 	});
 	return Object.fromEntries(
-		Object.entries(resources).map(([name, entry]) => {
-			const resource = name as PublicResource;
+		Object.entries(group.resources).map(([name, entry]) => {
 			const schema = toDraft2020(generator.createSchema(entry.type)) as Schema;
 			schema.$schema = "https://json-schema.org/draft/2020-12/schema";
 			schema.$id = `urn:clankermux:${entry.id.replace(/^clankermux\./, "")}`;
-			schema.$comment =
-				"Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. This is the replacement public contract.";
-			addWireConstraints(schema, resource);
-			return [resource, schema];
+			schema.$comment = group.comment;
+			addWireConstraints(schema, entry.id);
+			return [name, schema];
 		}),
-	) as Record<PublicResource, Schema>;
+	);
 }
 
 export function serializeSchema(schema: Schema): string {
 	return `${JSON.stringify(schema, null, 2)}\n`;
 }
 
-export async function writeOrCheckSchemas(check: boolean): Promise<void> {
-	const schemas = generateSchemas();
-	if (!check) await mkdir(schemaDirectory, { recursive: true });
-	for (const [resource, schema] of Object.entries(schemas)) {
-		const path = new URL(`${resource}.schema.json`, schemaDirectory);
-		const expected = serializeSchema(schema);
-		if (check) {
-			if ((await readFile(path, "utf8")) !== expected)
-				throw new Error(
-					`Schema drift: ${resource}; run bun run public-api:generate`,
-				);
-		} else await writeFile(path, expected);
+/** Every group, each written to (or checked against) its own schema directory. */
+export async function writeOrCheckSchemas(check: boolean): Promise<number> {
+	let count = 0;
+	for (const group of Object.values(groups)) {
+		const schemas = generateSchemas(group);
+		const directory = schemaDirectory(group);
+		if (!check) await mkdir(directory, { recursive: true });
+		for (const [resource, schema] of Object.entries(schemas)) {
+			const path = new URL(`${resource}.schema.json`, directory);
+			const expected = serializeSchema(schema);
+			if (check) {
+				if ((await readFile(path, "utf8")) !== expected)
+					throw new Error(
+						`Schema drift: ${resource}; run bun run public-api:generate`,
+					);
+			} else await writeFile(path, expected);
+			count++;
+		}
 	}
+	return count;
 }
 
 if (import.meta.main) {
-	await writeOrCheckSchemas(process.argv.includes("--check"));
+	const check = process.argv.includes("--check");
+	const count = await writeOrCheckSchemas(check);
 	console.log(
-		process.argv.includes("--check")
-			? "Public API schemas are current."
-			: "Generated five public API schemas.",
+		check
+			? `Published API schemas are current (${count}).`
+			: `Generated ${count} published API schemas.`,
 	);
 }

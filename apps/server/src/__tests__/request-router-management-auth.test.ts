@@ -29,6 +29,7 @@ import { routeRequest } from "../request-router";
 interface Calls {
 	api: { pathname: string; method: string }[];
 	publicApi: { pathname: string; method: string }[];
+	clientApi: { pathname: string; method: string }[];
 	dispatch: { pathname: string }[];
 	auth: { path: string; method: string; requirement?: AuthRequirement }[];
 }
@@ -54,7 +55,13 @@ function makeDeps(options: Options = {}): {
 		withDashboard = false,
 	} = options;
 
-	const calls: Calls = { api: [], publicApi: [], dispatch: [], auth: [] };
+	const calls: Calls = {
+		api: [],
+		publicApi: [],
+		clientApi: [],
+		dispatch: [],
+		auth: [],
+	};
 
 	const deps: RequestRouterDeps = {
 		async handleApiRequest(url, req) {
@@ -72,6 +79,18 @@ function makeDeps(options: Options = {}): {
 				? new Response(JSON.stringify({ handler: "public" }), {
 						status: 200,
 						headers: { "Content-Type": "application/json" },
+					})
+				: null;
+		},
+		async handleClientRequest(req, url) {
+			calls.clientApi.push({ pathname: url.pathname, method: req.method });
+			return url.pathname === "/client/v1/retention"
+				? new Response(JSON.stringify({ handler: "client" }), {
+						status: 200,
+						headers: {
+							"Content-Type": "application/json",
+							"Cache-Control": "private, no-store",
+						},
 					})
 				: null;
 		},
@@ -345,6 +364,18 @@ describe("surfaces outside the management namespace stay ungated", () => {
 		// Every response on this surface is uncacheable, this one included: a
 		// cached 404 keeps telling a device a route is gone after it was added.
 		expect(res.headers.get("cache-control")).toBe("no-store");
+	});
+
+	it("serves the client API on a gated deployment, with a key and no cookie", async () => {
+		const { deps, calls } = makeDeps();
+		const res = await routeRequest(request("/client/v1/retention"), deps);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ handler: "client" });
+		// The session gate never ran: `/client/*` is a sibling of the wire mounts,
+		// not a carve-out inside `/api/*`, so no exemption list stands between a
+		// client key and the management surface.
+		expect(calls.auth.map((c) => c.requirement)).toEqual(["api_key"]);
+		expect(calls.api).toEqual([]);
 	});
 
 	it("serves the dashboard shell for a client-side route", async () => {

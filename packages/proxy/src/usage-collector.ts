@@ -1,8 +1,12 @@
 import {
+	consumeUpstreamReportedNoUsage,
 	isPlausibleSpeed,
 	estimateCostUSD as realEstimateCostUSD,
 } from "@clankermux/core";
-import { normalizeCodexInputUsage } from "@clankermux/providers";
+import {
+	normalizeCodexInputUsage,
+	reportsTokenUsage,
+} from "@clankermux/providers";
 import {
 	type NativeJsonError,
 	NativeTerminalJson,
@@ -73,9 +77,22 @@ export interface UsageState {
 	/** Latest cumulative response charge, gated to OpenRouter during finalization. */
 	providerReportedCostUsd?: number;
 	costIsByok?: boolean;
-	inputTokens: number;
-	cacheReadInputTokens: number;
-	cacheCreationInputTokens: number;
+	/**
+	 * The three input classes, `undefined` until the provider reports one. Zero
+	 * is a POSITIVE claim that none of that class was consumed, so a provider
+	 * that reports nothing must not be given one: the persisted row publishes
+	 * absence as absence, and a client settling per-class accounting reads a
+	 * stored 0 as a figure it may act on. Same rule `costUsd` already follows.
+	 */
+	inputTokens: number | undefined;
+	cacheReadInputTokens: number | undefined;
+	cacheCreationInputTokens: number | undefined;
+	/**
+	 * True once a counter had to be cut down to fit its own total. What the row
+	 * then carries is the proxy's repair rather than the provider's report, so
+	 * the vector's provenance is no longer `provider`.
+	 */
+	inputClamped: boolean;
 	/**
 	 * The authoritative cumulative output-token count last seen from the
 	 * provider (`message_delta` or a Responses terminal while streaming, or a
@@ -192,9 +209,10 @@ export function getLineBufferLength(state: UsageState): number {
 export function createUsageState(): UsageState {
 	return {
 		model: undefined,
-		inputTokens: 0,
-		cacheReadInputTokens: 0,
-		cacheCreationInputTokens: 0,
+		inputTokens: undefined,
+		cacheReadInputTokens: undefined,
+		cacheCreationInputTokens: undefined,
+		inputClamped: false,
 		providerFinalOutputTokens: undefined,
 		providerReportedOutput: false,
 		streamedBytes: 0,
@@ -521,9 +539,10 @@ function applySseData(
 					cacheWrites,
 				);
 				state.inputTokens = normalizedInput.inputTokens;
-				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens ?? 0;
+				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens =
-					normalizedInput.cacheCreationInputTokens ?? 0;
+					normalizedInput.cacheCreationInputTokens;
+				if (normalizedInput.clamped) state.inputClamped = true;
 			} else if (
 				typeof inputTokenDetails?.cached_tokens === "number" &&
 				Number.isFinite(inputTokenDetails.cached_tokens) &&
@@ -990,9 +1009,9 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 		if (usage) {
 			if (json.model) state.model = json.model;
 			captureReportedCharge(state, usage);
-			state.inputTokens = usage.input_tokens ?? 0;
-			state.cacheReadInputTokens = usage.cache_read_input_tokens ?? 0;
-			state.cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
+			state.inputTokens = usage.input_tokens;
+			state.cacheReadInputTokens = usage.cache_read_input_tokens;
+			state.cacheCreationInputTokens = usage.cache_creation_input_tokens;
 			state.providerFinalOutputTokens = usage.output_tokens ?? 0;
 			state.providerReportedOutput = true;
 			// Model first, then the stop reason: a refusal registers its credit
@@ -1046,6 +1065,12 @@ export interface FinalizeOpts {
 	responseTimeMs: number;
 	providerName: string;
 	isStream: boolean;
+	/**
+	 * The request this response belongs to, for reading back whether its
+	 * upstream carried a usage block at all. A translated response always has
+	 * the required counts, so the stream itself cannot say.
+	 */
+	requestId?: string;
 	/**
 	 * Whether the response stream ended cleanly (R5). Pass `true` for a
 	 * successful/complete transport ('success', or a `message_stop` was seen),
@@ -1113,6 +1138,27 @@ export async function finalizeUsage(
 	// caller flag, default to clean for back-compat (trust the provider's count).
 	const endedCleanly = opts.endedCleanly ?? true;
 
+	// Two ways a vector here can be a placeholder rather than a measurement, and
+	// the translated stream shows neither: a provider that never reports usage,
+	// and a response from one that usually does but this time carried no usage
+	// block at all. The first is a fact about the provider, the second about the
+	// response, so they are answered by different things and checked together.
+	// Dropped before the precedence rules below, so the output falls to the
+	// content estimate and is marked approximate, exactly as an absent count is.
+	// Read unconditionally: the mark is consumed on read, and skipping it when
+	// the provider answer already decided the case would leave it behind.
+	const upstreamSentNoUsage = consumeUpstreamReportedNoUsage(opts.requestId);
+	if (
+		!reportsTokenUsage(opts.accountProvider ?? opts.providerName) ||
+		upstreamSentNoUsage
+	) {
+		state.inputTokens = undefined;
+		state.cacheReadInputTokens = undefined;
+		state.cacheCreationInputTokens = undefined;
+		state.providerReportedOutput = false;
+		state.providerFinalOutputTokens = undefined;
+	}
+
 	// PRECEDENCE + R5: trust the provider's count when it reported one AND the
 	// stream ended cleanly (even a 0 is authoritative then). On a non-clean end
 	// the reported count may be stale/partial, so take the larger of it and the
@@ -1134,9 +1180,9 @@ export async function finalizeUsage(
 	}
 
 	const totalTokens =
-		state.inputTokens +
-		state.cacheReadInputTokens +
-		state.cacheCreationInputTokens +
+		(state.inputTokens ?? 0) +
+		(state.cacheReadInputTokens ?? 0) +
+		(state.cacheCreationInputTokens ?? 0) +
 		finalOutput;
 
 	const model = state.model;
@@ -1154,10 +1200,10 @@ export async function finalizeUsage(
 			? await estimateCostUSD(
 					model,
 					{
-						inputTokens: state.inputTokens,
+						inputTokens: state.inputTokens ?? 0,
 						outputTokens: finalOutput,
-						cacheReadInputTokens: state.cacheReadInputTokens,
-						cacheCreationInputTokens: state.cacheCreationInputTokens,
+						cacheReadInputTokens: state.cacheReadInputTokens ?? 0,
+						cacheCreationInputTokens: state.cacheCreationInputTokens ?? 0,
 					},
 					{
 						provider: opts.accountProvider ?? opts.providerName,
@@ -1210,6 +1256,10 @@ export async function finalizeUsage(
 	// it", which is the more flattering of the two and wrong for any producer
 	// that simply does not set it.
 	summary.outputApproximate = outputApproximate;
+	// A repaired input vector is no more provider-reported than an estimated
+	// output is, and `usageSource` has one value for both: not established as
+	// provider-reported.
+	if (state.inputClamped) summary.inputClamped = true;
 	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
 	// Top-level, not inside `usage`: these describe how the response ENDED, not
 	// what it cost, and they persist to their own columns.
