@@ -59,6 +59,8 @@ import {
 } from "@clankermux/providers";
 import {
 	AccountModelPermissionService,
+	type AnthropicBankedResetApplyScheduler,
+	AnthropicBankedResetCoordinator,
 	AnthropicModelCatalogCache,
 	AutoRefreshScheduler,
 	bridgeStats,
@@ -67,6 +69,7 @@ import {
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
 	CodexUsagePoller,
+	createAnthropicBankedResetApplyScheduler,
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
@@ -80,6 +83,8 @@ import {
 	type ProxyContext,
 	RequestRecorder,
 	registerAffinityClearer,
+	registerAnthropicBankedResetClaimer,
+	registerAnthropicBankedResetRefresher,
 	registerCodexResetCreditConsumer,
 	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
@@ -91,6 +96,8 @@ import {
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
 	stopGlobalTokenHealthChecks,
+	unregisterAnthropicBankedResetClaimer,
+	unregisterAnthropicBankedResetRefresher,
 	unregisterCodexResetCreditConsumer,
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
@@ -297,6 +304,8 @@ let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let anthropicSubscriptionDiagnosis: AnthropicSubscriptionDiagnosis | null =
 	null;
 let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
+	null;
+let anthropicBankedResetApplyScheduler: AnthropicBankedResetApplyScheduler | null =
 	null;
 let quotaDriftScheduler: QuotaDriftScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
@@ -1280,6 +1289,11 @@ export default async function startServer(options?: {
 	// priming uses the native `/responses` ping instead of the translated Haiku
 	// dummy; Step 4 will reuse this SAME instance in the codex usage refresher.
 	const codexSpendCoordinator = new CodexSpendCoordinator(proxyContext);
+	// The one authority for Anthropic banked resets: the status read (shared
+	// /oauth/usage bucket) and the claim that spends a reset.
+	const anthropicBankedResetCoordinator = new AnthropicBankedResetCoordinator(
+		proxyContext,
+	);
 
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
@@ -1382,6 +1396,12 @@ export default async function startServer(options?: {
 	);
 	registerCodexResetCreditConsumer(serverId, (accountId, request) =>
 		codexSpendCoordinator.consumeResetCredit(accountId, request),
+	);
+	registerAnthropicBankedResetRefresher(serverId, (accountId, force) =>
+		anthropicBankedResetCoordinator.refreshStatus(accountId, force),
+	);
+	registerAnthropicBankedResetClaimer(serverId, (accountId, request) =>
+		anthropicBankedResetCoordinator.claim(accountId, request),
 	);
 	// Warm the read-only earned-reset cache without delaying server startup. The
 	// accounts handler keeps it fresh afterward with a TTL-gated background read.
@@ -1899,6 +1919,15 @@ Available endpoints:
 	});
 	codexResetCreditApplyScheduler.start();
 
+	// Start the Anthropic banked-reset auto-applier: claims the next grant for
+	// accounts with an auto-apply toggle on, before it expires unused or at a
+	// weekly limit it clears. Status reads and claims go through the
+	// coordinator; claims dispatch through the token-manager registry.
+	anthropicBankedResetApplyScheduler = createAnthropicBankedResetApplyScheduler(
+		{ dbOps, coordinator: anthropicBankedResetCoordinator },
+	);
+	anthropicBankedResetApplyScheduler.start();
+
 	// One-time, staggered, fail-open profile backfill: fetch GET /api/oauth/profile
 	// for Anthropic OAuth accounts that have never had a successful profile fetch
 	// (identity_profile_fetched_at IS NULL) and merge the identity into their
@@ -2067,6 +2096,10 @@ async function handleGracefulShutdown(signal: string) {
 			codexResetCreditApplyScheduler.stop();
 			codexResetCreditApplyScheduler = null;
 		}
+		if (anthropicBankedResetApplyScheduler) {
+			anthropicBankedResetApplyScheduler.stop();
+			anthropicBankedResetApplyScheduler = null;
+		}
 		if (quotaDriftScheduler) {
 			quotaDriftScheduler.stop();
 			quotaDriftScheduler = null;
@@ -2091,6 +2124,8 @@ async function handleGracefulShutdown(signal: string) {
 		// module-level registry doesn't keep a stale callback after restart.
 		// Mirrors the cleanup pattern used by the schedulers above.
 		if (registeredServerId) {
+			unregisterAnthropicBankedResetClaimer(registeredServerId);
+			unregisterAnthropicBankedResetRefresher(registeredServerId);
 			unregisterCodexResetCreditConsumer(registeredServerId);
 			unregisterCodexResetCreditsRefresher(registeredServerId);
 			unregisterCodexUsageRefresher(registeredServerId);
