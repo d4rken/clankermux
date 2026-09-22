@@ -9,6 +9,7 @@ import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 type SchedulerInternals = {
 	checkAndRefreshGrokSubscriptionTokens(): Promise<void>;
+	checkGrokSubscriptionState(): Promise<void>;
 };
 
 const ROW = {
@@ -32,10 +33,12 @@ function setup(rows: Array<typeof ROW>) {
 		runWithChanges: mock(async () => 1),
 	};
 	const updateAccountTokens = mock(async () => true);
+	const touchAccountSubscriptionCheck = mock(async () => {});
 	const dbOps = {
 		getAccount: mock(async () => ({ id: ROW.id, disabled: 0 })),
 		updateAccountTokens,
 		pauseAccountIfActive: mock(async () => false),
+		touchAccountSubscriptionCheck,
 	};
 	const scheduler = new AutoRefreshScheduler(
 		db as never,
@@ -45,7 +48,12 @@ function setup(rows: Array<typeof ROW>) {
 			dbOps,
 		} as never,
 	) as never as SchedulerInternals;
-	return { scheduler, queries, updateAccountTokens };
+	return {
+		scheduler,
+		queries,
+		updateAccountTokens,
+		touchAccountSubscriptionCheck,
+	};
 }
 
 describe("AutoRefreshScheduler — proactive grok-subscription refresh", () => {
@@ -89,5 +97,37 @@ describe("AutoRefreshScheduler — proactive grok-subscription refresh", () => {
 		// The compare-and-swap anchor is the generation this attempt spent, so a
 		// concurrent rotation wins instead of being overwritten.
 		expect(expectedRefreshToken).toBe("rt-old");
+	});
+
+	it("selects grok-subscription accounts with a live token whose subscription read is due", async () => {
+		const { scheduler, queries } = setup([]);
+
+		await scheduler.checkGrokSubscriptionState();
+
+		const select = queries.find((q) => q.sql.includes("grok-subscription"));
+		expect(select?.sql).toContain("disabled = 0");
+		expect(select?.sql).toContain("expires_at > ?");
+		expect(select?.sql).toContain("identity_subscription_checked_at IS NULL");
+		expect(select?.sql).toContain("identity_subscription_checked_at <= ?");
+		const [now, dueBefore] = select?.params as number[];
+		expect(now - dueBefore).toBe(6 * 60 * 60 * 1000);
+	});
+
+	it("reads grok.com with the stored access token and records the attempt", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("unavailable", { status: 503 }),
+		);
+		const { scheduler, touchAccountSubscriptionCheck } = setup([
+			{ ...ROW, access_token: "at-live", expires_at: Date.now() + 3_600_000 },
+		]);
+
+		await scheduler.checkGrokSubscriptionState();
+
+		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe("https://grok.com/rest/subscriptions");
+		expect(new Headers(init.headers).get("authorization")).toBe(
+			"Bearer at-live",
+		);
+		expect(touchAccountSubscriptionCheck).toHaveBeenCalledTimes(1);
 	});
 });
