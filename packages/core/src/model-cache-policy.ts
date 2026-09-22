@@ -371,6 +371,7 @@ const PROVIDER_POLICIES: Record<ProviderName, RouteResolver> = {
 	qwen: () => UNKNOWN,
 	ollama: () => UNKNOWN,
 	"ollama-cloud": () => UNKNOWN,
+	mimo: () => UNKNOWN,
 	devin: () => UNKNOWN,
 };
 

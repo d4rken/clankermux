@@ -76,6 +76,7 @@ family policy.
 | Qwen OAuth | Unknown | OAuth and the API-key product have distinct contracts. |
 | Ollama | Unknown | `keep_alive` controls model residency, not prompt-prefix retention; versions and backends vary. |
 | Ollama Cloud | Unknown | No substantiated prompt-cache lifetime contract. |
+| MiMo Token Plan | Unknown | The Token Plan endpoint publishes no prompt-cache lifetime contract. |
 | Devin | Unknown | Cache usage counters do not establish a policy for its Codeium endpoint. |
 
 Anthropic cache controls are lost in OpenAI-to-Anthropic translation, so those

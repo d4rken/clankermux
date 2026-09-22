@@ -831,7 +831,8 @@ export interface AccountListItem {
 		| "qwen"
 		| "ollama"
 		| "ollama-cloud"
-		| "grok";
+		| "grok"
+		| "mimo";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;

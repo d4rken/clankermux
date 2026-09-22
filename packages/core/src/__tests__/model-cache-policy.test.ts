@@ -322,6 +322,7 @@ describe("provider cache policies", () => {
 			["qwen", "coder-model"],
 			["ollama", "llama3.2"],
 			["ollama-cloud", "gpt-oss:120b"],
+			["mimo", "mimo-v2.6-pro"],
 			["devin", "swe-2"],
 			["anthropic-compatible", "claude-opus-4-8"],
 		]) {

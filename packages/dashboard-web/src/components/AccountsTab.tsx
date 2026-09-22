@@ -449,6 +449,23 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAddMimoAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		customEndpoint?: string;
+	}) => {
+		try {
+			await api.addMimoAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleRemoveAccount = (account: Account) => {
 		deleteTargetRef.current = account.id;
 		setConfirmDelete({
@@ -891,6 +908,7 @@ export function AccountsTab() {
 							onAddOllamaAccount={handleAddOllamaAccount}
 							onAddOllamaCloudAccount={handleAddOllamaCloudAccount}
 							onAddGrokAccount={handleAddGrokAccount}
+							onAddMimoAccount={handleAddMimoAccount}
 							onCancel={() => {
 								setAdding(false);
 								setActionError(null);

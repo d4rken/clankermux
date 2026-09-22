@@ -398,6 +398,7 @@ export {
 } from "./usage-window-extract";
 export { levenshteinDistance } from "./utils";
 export {
+	baseUrlShapeProblem,
 	patterns,
 	sanitizers,
 	validateApiKey,

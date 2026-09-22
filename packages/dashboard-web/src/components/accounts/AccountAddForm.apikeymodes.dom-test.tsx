@@ -67,6 +67,7 @@ function renderForm(): Promise<void> {
 				onAddOllamaAccount={async () => {}}
 				onAddOllamaCloudAccount={async () => {}}
 				onAddGrokAccount={record("grok")}
+				onAddMimoAccount={record("mimo")}
 				onCancel={() => {}}
 				onSuccess={() => {}}
 				onError={(message: string) => {

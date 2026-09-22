@@ -312,6 +312,57 @@ BUNDLED_PRICING.minimax = {
 	},
 };
 
+// Xiaomi MiMo, in dollars per 1M tokens: the published pay-as-you-go rate card
+// except where an entry says otherwise. A Token Plan subscription meters plan
+// credits rather than dollars, so these read as what the traffic would have
+// cost off-plan.
+BUNDLED_PRICING.mimo = {
+	models: {
+		"mimo-v2.6-pro": {
+			id: "mimo-v2.6-pro",
+			name: "MiMo V2.6 Pro",
+			cost: {
+				input: 0.435,
+				output: 0.87,
+				cache_read: 0.0036,
+				cache_write: 0,
+			},
+		},
+		"mimo-v2.6-flash": {
+			id: "mimo-v2.6-flash",
+			name: "MiMo V2.6 Flash",
+			cost: {
+				input: 0.14,
+				output: 0.28,
+				// DERIVED from this model's credit burn rates: the rate card
+				// publishes no dollar cache-read figure for flash.
+				cache_read: 0.0028,
+				cache_write: 0,
+			},
+		},
+		"mimo-v2.5-pro": {
+			id: "mimo-v2.5-pro",
+			name: "MiMo V2.5 Pro",
+			cost: {
+				input: 0.435,
+				output: 0.87,
+				cache_read: 0.0036,
+				cache_write: 0,
+			},
+		},
+		"mimo-v2.5": {
+			id: "mimo-v2.5",
+			name: "MiMo V2.5",
+			cost: {
+				input: 0.435,
+				output: 0.87,
+				cache_read: 0.0036,
+				cache_write: 0,
+			},
+		},
+	},
+};
+
 /**
  * Pricing for the Codex-served OpenAI models (dollars per 1M tokens).
  *

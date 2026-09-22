@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseCustomEndpointData } from "@clankermux/core";
+import { baseUrlShapeProblem, parseCustomEndpointData } from "@clankermux/core";
 import type { RoutingRepository } from "@clankermux/database";
 import {
 	DevinClient,
@@ -12,6 +12,7 @@ import type {
 	AccountModelPermissions,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
+import { getDefaultEndpoint, PROVIDER_NAMES } from "@clankermux/types";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
 export function modelPermissionScope(account: Account): string {
@@ -51,16 +52,21 @@ interface DiscoveryDeps {
 }
 
 /**
- * Whole-attempt discovery budget for providers whose catalogue endpoint is
- * INFERRED from protocol compatibility rather than a published contract.
+ * Whole-attempt discovery budget for providers whose catalogue endpoint rests on
+ * no published contract.
  *
  * Z.ai speaks the Anthropic Messages protocol, so `/v1/models` on its base is a
- * reasonable guess — but only a guess. A guess that hangs is worse than one that
- * 404s, because an in-flight attempt is joined by every request that arrives
- * during it. One second is long enough for a catalogue that exists and short
+ * reasonable guess — but only a guess. MiMo's path is not guessed (see the
+ * branch below), yet it is still a third-party host with nothing owed about how
+ * fast it answers. Either way a request that hangs is worse than one that fails
+ * outright, because an in-flight attempt is joined by every request that arrives
+ * during it. One second is long enough for a catalogue that answers and short
  * enough that one that does not costs little.
  */
-const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = { zai: 1000 };
+const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = {
+	zai: 1000,
+	mimo: 1000,
+};
 
 /** Providers whose client metadata requires an account discovery snapshot. */
 export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
@@ -71,7 +77,7 @@ export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
  * Providers that authenticate discovery with a stored API key and have no OAuth
  * path, so discovery must never reach for an access token on their behalf.
  */
-const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai", "mimo"]);
 
 /** Permission discovery never borrows a provider-wide or pin-wide catalogue. */
 export class AccountModelPermissionService {
@@ -165,9 +171,9 @@ export class AccountModelPermissionService {
 		// (routing-service), and `refresh` joins an in-flight attempt before it
 		// consults the backoff — so while one attempt hangs, arriving requests wait
 		// out the caller's budget even when a higher-priority account already
-		// permits the model. Providers whose catalogue contract is assumed rather
-		// than published get a tighter whole-attempt bound so a wrong guess costs
-		// one short wait per backoff window instead of the full background budget.
+		// permits the model. Providers with no published catalogue contract get a
+		// tighter whole-attempt bound so a slow or wrong one costs one short wait
+		// per backoff window instead of the full background budget.
 		const budgetMs = Math.min(
 			this.deps.backgroundBudgetMs ?? 10000,
 			ASSUMED_CATALOGUE_BUDGET_MS[account.provider] ?? Number.POSITIVE_INFINITY,
@@ -335,6 +341,40 @@ export class AccountModelPermissionService {
 			headers.set("anthropic-version", "2023-06-01");
 			url.searchParams.set("limit", "1000");
 			cursorParam = "after_id";
+		} else if (account.provider === "mimo") {
+			// One Token Plan host, two surfaces. The stored endpoint is the REQUEST
+			// base and normally ends in `/anthropic` — that is where the provider
+			// dials `/anthropic/v1/messages` — but the catalogue is OpenAI-shaped and
+			// sits on the host ROOT, so the segments the request path supplies for
+			// itself come off here instead of being extended: one terminal `/v1` (a
+			// stored base may already carry it), then one terminal `/anthropic`. Any
+			// deployment prefix ahead of them survives, so `/anthropic`,
+			// `/anthropic/v1` and a bare host all land on `<host>/v1/models`.
+			// The strip is not a typo: on a live Token Plan subscription
+			// `/anthropic/v1/models` 404s, while the root `/v1/models` answers 200
+			// with `{object:"list",data:[{id,…}]}` to a Bearer token and no cursor —
+			// hence one request, not a paged loop. If MiMo moves it the fetch fails
+			// and failDiscovery records it, leaving previously discovered and manual
+			// ids untouched: the account stays exactly as routable as it was.
+			//
+			// The base is READ FROM THE ACCOUNT where zai's is pinned, because MiMo's
+			// honoursCustomEndpoint is true — the region (cn / sgp / ams) is what
+			// custom_endpoint holds, and a Token Plan key is accepted by its own
+			// region alone. Discovering against a different region would describe a
+			// backend other than the one that serves the account's traffic, and would
+			// answer 401 anyway.
+			url = new URL(endpoint || getDefaultEndpoint(PROVIDER_NAMES.MIMO));
+			// Operator-supplied, so it earns the same base-shape guard the
+			// *-compatible branches use rather than a second derivation of it: a base
+			// carrying a query or credentials cannot have a path appended to it.
+			if (baseUrlShapeProblem(url))
+				throw new Error("Invalid discovery endpoint");
+			url.pathname = `${url.pathname
+				.replace(/\/+$/, "")
+				.replace(/\/v1$/, "")
+				.replace(/\/anthropic$/, "")}/v1/models`;
+			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
+			headers.set("authorization", `Bearer ${token}`);
 		} else if (account.provider === "openrouter") {
 			if (endpoint && !endpoint.startsWith("https://openrouter.ai/"))
 				throw new Error("Custom backend requires manual models");
@@ -350,13 +390,7 @@ export class AccountModelPermissionService {
 			["openai-compatible", "anthropic-compatible"].includes(account.provider)
 		) {
 			url = new URL(endpoint);
-			if (
-				url.username ||
-				url.password ||
-				url.search ||
-				url.hash ||
-				!["http:", "https:"].includes(url.protocol)
-			)
+			if (baseUrlShapeProblem(url))
 				throw new Error("Invalid discovery endpoint");
 			const base = url.pathname.replace(/\/+$/, "");
 			url.pathname = `${base}${base.endsWith("/v1") ? "" : "/v1"}/models`;

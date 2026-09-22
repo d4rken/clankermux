@@ -69,6 +69,7 @@ export {
 } from "./codex/index";
 export { GrokProvider } from "./grok/index";
 export { KiloProvider } from "./kilo/index";
+export { MimoProvider } from "./mimo/index";
 export { MinimaxProvider } from "./minimax/index";
 export { OllamaCloudProvider, OllamaProvider } from "./ollama/index";
 export { OpenAICompatibleProvider } from "./openai/index";

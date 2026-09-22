@@ -688,6 +688,72 @@ describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
 	});
 });
 
+describe("bundled MiMo pricing (offline fallback)", () => {
+	// MiMo Token Plan is metered in plan credits, so the bundled figures are the
+	// pay-as-you-go rate card: $0.435/M input, $0.87/M output and $0.0036/M cache
+	// read across the Pro tier, and cache writes free.
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+
+	it("prices mimo-v2.6-pro input/output from bundled data", async () => {
+		expect(
+			await estimateCostUSD("mimo-v2.6-pro", ioTokens, { provider: "mimo" }),
+		).toBeCloseTo(1.305, 6);
+	});
+
+	it("charges cache reads at the cache_read rate, not the input rate", async () => {
+		// 1M cache-read tokens is $0.0036, not the $0.435 the same tokens would
+		// cost billed as input — a two-order-of-magnitude difference, so bucketing
+		// them wrongly could never pass as rounding.
+		expect(
+			await estimateCostUSD(
+				"mimo-v2.6-pro",
+				{
+					cacheReadInputTokens: 1_000_000,
+					cacheCreationInputTokens: 1_000_000,
+				},
+				{ provider: "mimo" },
+			),
+		).toBeCloseTo(0.0036, 9);
+	});
+
+	it("prices mimo-v2.6-flash input/output from bundled data", async () => {
+		expect(
+			await estimateCostUSD("mimo-v2.6-flash", ioTokens, { provider: "mimo" }),
+		).toBeCloseTo(0.42, 6);
+	});
+
+	it("prices the v2.5 family at the shared Pro rate", async () => {
+		for (const id of ["mimo-v2.5-pro", "mimo-v2.5"]) {
+			expect(
+				await estimateCostUSD(id, ioTokens, { provider: "mimo" }),
+			).toBeCloseTo(1.305, 6);
+		}
+	});
+
+	it("leaves ids a Token Plan subscription cannot reach unpriced", async () => {
+		// The live Token Plan catalogue serves neither: UltraSpeed is API-billing
+		// only and v2-pro is gone. An entry for either would put a number on
+		// traffic this integration can never send.
+		for (const id of ["mimo-v2.6-pro-ultraspeed", "mimo-v2-pro"]) {
+			expect(
+				await estimateCostUSD(id, ioTokens, { provider: "mimo" }),
+			).toBeNull();
+		}
+	});
+
+	it("scopes a MiMo account's lookup to the mimo catalogue entries", async () => {
+		// The table key is the provider name itself, which is what makes
+		// selectModelEntry's provider scoping engage: another provider's bundled id
+		// is not priced for a MiMo account.
+		expect(
+			await estimateCostUSD("glm-4.6", ioTokens, { provider: "mimo" }),
+		).toBeNull();
+	});
+});
+
 describe("getModelCacheRates", () => {
 	it("returns Opus 5 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-opus-5")).toEqual({
@@ -878,6 +944,21 @@ describe("pricing-miss registry", () => {
 		);
 		expect(byModel.get("absent-from-catalogue")).toBe("model_missing");
 		expect(byModel.get("MiniMax-M2")).toBe("cost_missing");
+	});
+
+	it("prices a MiMo cache read rather than recording it as a gap", async () => {
+		// mimo-v2.6-flash carries all four rates, so a cache-reading request is
+		// priced in full: $0.14/M input plus $0.0028/M cache read. Billing those
+		// cache tokens as input would give 0.28, and a missing rate would void the
+		// whole request into a null plus a cost_missing gap.
+		const cost = await estimateCostUSD(
+			"mimo-v2.6-flash",
+			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
+			{ provider: "mimo", ...report },
+		);
+
+		expect(cost).toBeCloseTo(0.1428, 9);
+		expect(getPricingGaps()).toEqual([]);
 	});
 
 	it("sanitizes control characters and truncates oversized model ids", async () => {

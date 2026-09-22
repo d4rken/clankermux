@@ -376,6 +376,97 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(row("acct")).toBeNull();
 		});
 
+		describe("MiMo regional base URLs", () => {
+			function mimoHandler() {
+				return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.mimo);
+			}
+
+			it.each([
+				["cn", "https://token-plan-cn.xiaomimimo.com/anthropic"],
+				["sgp", "https://token-plan-sgp.xiaomimimo.com/anthropic"],
+				["ams", "https://token-plan-ams.xiaomimimo.com/anthropic"],
+			])("stores the %s region verbatim", async (region, endpoint) => {
+				const res = await mimoHandler()(
+					post({
+						name: `mimo-${region}`,
+						apiKey: "tp-key",
+						customEndpoint: endpoint,
+					}),
+				);
+
+				expect(res.status).toBe(200);
+				expect(row(`mimo-${region}`)?.custom_endpoint).toBe(endpoint);
+			});
+
+			it("leaves the column NULL when no region is named", async () => {
+				// MimoProvider supplies Singapore at request time; writing it here
+				// would freeze today's default into every account row.
+				const res = await mimoHandler()(
+					post({ name: "mimo-default", apiKey: "tp-key" }),
+				);
+
+				expect(res.status).toBe(200);
+				expect(row("mimo-default")?.custom_endpoint).toBeNull();
+			});
+
+			it("mirrors the Token Plan key into both token columns", async () => {
+				await mimoHandler()(post({ name: "mimo-key", apiKey: "tp-key" }));
+
+				expect(row("mimo-key")).toMatchObject({
+					provider: "mimo",
+					api_key: "tp-key",
+					refresh_token: "tp-key",
+					access_token: "tp-key",
+				});
+			});
+
+			it.each([
+				[
+					"a query string",
+					"https://token-plan-sgp.xiaomimimo.com/anthropic?x=1",
+				],
+				["a fragment", "https://token-plan-sgp.xiaomimimo.com/anthropic#frag"],
+				[
+					"embedded credentials",
+					"https://user:pw@token-plan-sgp.xiaomimimo.com/anthropic",
+				],
+				["a non-http scheme", "ftp://token-plan-sgp.xiaomimimo.com/anthropic"],
+			])("rejects %s with a 400", async (_case, endpoint) => {
+				// Each of these parses as a URL, so only the shape check stops it —
+				// and it has to be a 400, not the 500 a bare Error would produce.
+				const res = await mimoHandler()(
+					post({
+						name: "mimo-bad",
+						apiKey: "tp-key",
+						customEndpoint: endpoint,
+					}),
+				);
+
+				expect(res.status).toBe(400);
+				expect(row("mimo-bad")).toBeNull();
+			});
+
+			it("leaves the other body-endpoint providers unconstrained", async () => {
+				// Operators may already have such a value stored for these, so the
+				// constraint belongs to the mimo spec rather than to readEndpoint.
+				const res = await createApiKeyAccountAddHandler(
+					dbOps,
+					API_KEY_PROVIDERS.anthropicCompatible,
+				)(
+					post({
+						name: "anth-query",
+						apiKey: "k",
+						customEndpoint: "https://mirror.example.com/v1?tenant=7",
+					}),
+				);
+
+				expect(res.status).toBe(200);
+				expect(row("anth-query")?.custom_endpoint).toBe(
+					"https://mirror.example.com/v1?tenant=7",
+				);
+			});
+		});
+
 		it("writes NULL for providers with no endpoint", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,

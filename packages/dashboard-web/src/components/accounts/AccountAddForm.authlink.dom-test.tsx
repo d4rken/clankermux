@@ -92,6 +92,7 @@ function renderForm(
 				onAddOllamaAccount={async () => {}}
 				onAddOllamaCloudAccount={async () => {}}
 				onAddGrokAccount={async () => {}}
+				onAddMimoAccount={async () => {}}
 				onCancel={() => {}}
 				onSuccess={callbacks.onSuccess ?? (() => {})}
 				onError={callbacks.onError ?? (() => {})}
