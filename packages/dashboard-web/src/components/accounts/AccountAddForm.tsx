@@ -18,6 +18,7 @@ import {
 import { AccountSetupSection } from "./AccountSetupSection";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
 import { DevinAccountFields } from "./DevinAccountFields";
+import { MimoAccountFields } from "./MimoAccountFields";
 import { ZaiAccountFields } from "./ZaiAccountFields";
 
 /**
@@ -47,6 +48,7 @@ const EXPERIMENTAL_ACCOUNT_MODES = [
 	{ value: "ollama", label: "Ollama (v0.14.0+, local)" },
 	{ value: "ollama-cloud", label: "Ollama Cloud (ollama.com)" },
 	{ value: "grok", label: "Grok (API Key)" },
+	{ value: "mimo", label: "MiMo Token Plan (API Key)" },
 ] as const;
 
 const isExperimentalMode = (mode: string) =>
@@ -133,6 +135,12 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 	}) => Promise<void>;
+	onAddMimoAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+		customEndpoint?: string;
+	}) => Promise<void>;
 	onCancel: () => void;
 	onSuccess: () => void;
 	onError: (error: string) => void;
@@ -152,6 +160,7 @@ export function AccountAddForm({
 	onAddOllamaAccount,
 	onAddOllamaCloudAccount,
 	onAddGrokAccount,
+	onAddMimoAccount,
 	onCancel,
 	onSuccess,
 	onError,
@@ -184,6 +193,7 @@ export function AccountAddForm({
 			| "ollama"
 			| "ollama-cloud"
 			| "grok"
+			| "mimo"
 			| "devin",
 		priority: 0,
 		apiKey: "",
@@ -747,6 +757,37 @@ export function AccountAddForm({
 			return;
 		}
 
+		if (newAccount.mode === "mimo") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for MiMo Token Plan accounts");
+				return;
+			}
+
+			await onAddMimoAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+				// Omitted, never blank: an account with no endpoint of its own takes
+				// MiMo's default region.
+				...(newAccount.customEndpoint && {
+					customEndpoint: newAccount.customEndpoint.trim(),
+				}),
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+			});
+			onSuccess();
+			return;
+		}
+
 		// Step 1: Initialize OAuth flow for Max/Console accounts
 		const result = await onAddAccount(accountParams);
 		setSessionId(result.sessionId);
@@ -869,6 +910,7 @@ export function AccountAddForm({
 									| "ollama"
 									| "ollama-cloud"
 									| "grok"
+									| "mimo"
 									| "devin",
 							) => updateAccountSource({ mode: value })}
 						>
@@ -1229,6 +1271,16 @@ export function AccountAddForm({
 								placeholder="Enter your xAI API key"
 							/>
 						</div>
+					)}
+					{newAccount.mode === "mimo" && (
+						<MimoAccountFields
+							apiKey={newAccount.apiKey}
+							customEndpoint={newAccount.customEndpoint}
+							onApiKeyChange={(value) => updateAccountSource({ apiKey: value })}
+							onCustomEndpointChange={(value) =>
+								updateAccountSource({ customEndpoint: value })
+							}
+						/>
 					)}
 					{newAccount.mode === "alibaba-coding-plan" && (
 						<div className="flex flex-col gap-item">
