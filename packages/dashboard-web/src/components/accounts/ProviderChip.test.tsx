@@ -5,13 +5,7 @@ import { ProviderChip } from "./ProviderChip";
 import { getProviderMark } from "./provider-marks";
 
 /** Providers with no published single-color logo we can vendor. */
-const TEXT_ONLY_PROVIDERS = new Set<string>([
-	"kilo",
-	"devin",
-	"grok",
-	"mimo",
-	"grok-subscription",
-]);
+const TEXT_ONLY_PROVIDERS = new Set<string>(["kilo", "devin"]);
 
 describe("ProviderChip", () => {
 	it("renders the human-readable provider name", () => {
@@ -70,13 +64,14 @@ describe("getProviderMark", () => {
 
 	it("gives a per-theme fill to brands that fail 3:1 on one theme", () => {
 		// Claude coral is 2.8:1 on the light pill; Qwen indigo is 2.7:1 on the
-		// dark one and Alibaba orange 2.6:1 on the light one. Each needs both
-		// halves, not a single hex.
+		// dark one, Alibaba orange 2.6:1 and Xiaomi orange 2.4:1 on the light
+		// one. Each needs both halves, not a single hex.
 		for (const provider of [
 			"anthropic",
 			"claude-console-api",
 			"qwen",
 			"alibaba-coding-plan",
+			"mimo",
 		]) {
 			expect(getProviderMark(provider)?.fill, provider).toMatch(
 				/^fill-\[#[0-9A-F]{6}\] dark:fill-\[#[0-9A-F]{6}\]$/,
@@ -85,7 +80,7 @@ describe("getProviderMark", () => {
 	});
 
 	it("inherits the text color for monochrome brands", () => {
-		// OpenAI, Ollama, OpenRouter, Z.ai and the Anthropic wordmark are
+		// OpenAI, Grok, Ollama, OpenRouter, Z.ai and the Anthropic wordmark are
 		// near-black or near-neutral by brand, so a literal hex would either
 		// disappear on a dark card or wash out on a light one.
 		for (const provider of [
@@ -96,6 +91,8 @@ describe("getProviderMark", () => {
 			"openrouter",
 			"zai",
 			"anthropic-compatible",
+			"grok",
+			"grok-subscription",
 		]) {
 			expect(getProviderMark(provider)?.fill, provider).toBeUndefined();
 		}
