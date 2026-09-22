@@ -1,4 +1,5 @@
 import {
+	consumeUpstreamReportedNoUsage,
 	isPlausibleSpeed,
 	estimateCostUSD as realEstimateCostUSD,
 } from "@clankermux/core";
@@ -1065,6 +1066,12 @@ export interface FinalizeOpts {
 	providerName: string;
 	isStream: boolean;
 	/**
+	 * The request this response belongs to, for reading back whether its
+	 * upstream carried a usage block at all. A translated response always has
+	 * the required counts, so the stream itself cannot say.
+	 */
+	requestId?: string;
+	/**
 	 * Whether the response stream ended cleanly (R5). Pass `true` for a
 	 * successful/complete transport ('success', or a `message_stop` was seen),
 	 * `false` for a disconnect/timeout/error. When the provider reported an
@@ -1131,13 +1138,20 @@ export async function finalizeUsage(
 	// caller flag, default to clean for back-compat (trust the provider's count).
 	const endedCleanly = opts.endedCleanly ?? true;
 
-	// A provider that reports no usage still has to emit the fields the
-	// Anthropic streaming shape requires, so what reached this state from one is
-	// a placeholder rather than a measurement. Reading the same stream the
-	// client does, nothing here can tell the two apart — the provider can.
+	// Two ways a vector here can be a placeholder rather than a measurement, and
+	// the translated stream shows neither: a provider that never reports usage,
+	// and a response from one that usually does but this time carried no usage
+	// block at all. The first is a fact about the provider, the second about the
+	// response, so they are answered by different things and checked together.
 	// Dropped before the precedence rules below, so the output falls to the
 	// content estimate and is marked approximate, exactly as an absent count is.
-	if (!reportsTokenUsage(opts.accountProvider ?? opts.providerName)) {
+	// Read unconditionally: the mark is consumed on read, and skipping it when
+	// the provider answer already decided the case would leave it behind.
+	const upstreamSentNoUsage = consumeUpstreamReportedNoUsage(opts.requestId);
+	if (
+		!reportsTokenUsage(opts.accountProvider ?? opts.providerName) ||
+		upstreamSentNoUsage
+	) {
 		state.inputTokens = undefined;
 		state.cacheReadInputTokens = undefined;
 		state.cacheCreationInputTokens = undefined;

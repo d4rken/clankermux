@@ -178,7 +178,7 @@ function trackFinalize(
 	},
 	ctx: ProxyContext,
 ): void {
-	const promise = finalizeUsage(state, opts)
+	const promise = finalizeUsage(state, { ...opts, requestId })
 		.then((summary) => {
 			// Diagnostic (observational only): an Anthropic stream that reached clean
 			// EOF and reported output but never sent `message_stop` — the condition

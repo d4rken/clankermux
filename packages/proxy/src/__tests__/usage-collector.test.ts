@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { PricingEstimateContext, TokenBreakdown } from "@clankermux/core";
+import {
+	markUpstreamReportedNoUsage,
+	type PricingEstimateContext,
+	resetUpstreamUsagePresence,
+	type TokenBreakdown,
+} from "@clankermux/core";
 import {
 	hashCreditToken,
 	refusalFallbackRegistry,
@@ -235,6 +240,10 @@ describe("usage-collector", () => {
 	});
 
 	describe("absent counts stay absent", () => {
+		// The presence registry is process-wide; a mark left by one case would
+		// silently suppress the next one's counts.
+		beforeEach(() => resetUpstreamUsagePresence());
+
 		// A 0 is a POSITIVE claim that none of that class was consumed, and the
 		// persisted row now publishes one. A provider that reports nothing must
 		// not be given one on its behalf.
@@ -325,6 +334,99 @@ describe("usage-collector", () => {
 			// The output falls to the content estimate and says so.
 			expect(summary.outputApproximate).toBe(true);
 			expect(summary.usage.outputTokens).toBe(10);
+		});
+
+		it("drops the placeholders a translated response had to invent", async () => {
+			// qwen, kilo and openai-compatible normally DO report usage, so nothing
+			// about the provider answers this. What decides it is the response: a
+			// body that carried no usage block at all still gets the input and
+			// output counts its wire shape requires, and those are this proxy's
+			// placeholders rather than anything a provider stated.
+			markUpstreamReportedNoUsage("req-no-usage");
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "qwen3-coder-plus",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "x".repeat(40) },
+				}),
+				1050,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 0 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "openai-compatible",
+					accountProvider: "qwen",
+					requestId: "req-no-usage",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBeUndefined();
+			expect(summary.usage.cacheReadInputTokens).toBeUndefined();
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("keeps the counts of a response that DID carry a usage block", async () => {
+			// Same provider, no mark: this response reported, so 0 means 0.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "qwen3-coder-plus",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { input_tokens: 0, output_tokens: 7 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "openai-compatible",
+					accountProvider: "qwen",
+					requestId: "req-with-usage",
+					isStream: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+
+			expect(summary.usage.inputTokens).toBe(0);
+			expect(summary.usage.outputTokens).toBe(7);
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("keeps a reported 0 as 0", async () => {

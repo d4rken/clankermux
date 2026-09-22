@@ -1,3 +1,4 @@
+import { markUpstreamReportedNoUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
 import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
@@ -92,6 +93,12 @@ function emitStreamEnd(
 		sawCacheRead,
 		sawCacheCreation,
 	} = context;
+
+	// Upstream said nothing about tokens, so the required counts below are this
+	// translator's placeholders. Say so on the side rather than in the stream:
+	// the client needs the fields, and the collector needs to know they are not
+	// measurements.
+	if (!context.sawUsage) markUpstreamReportedNoUsage(context.requestId ?? null);
 	// Send content_block_stop for all blocks
 	if (toolCallBlockIndices) {
 		// Tool call blocks — use Anthropic block indices (not OpenAI tool_call indices)
@@ -200,6 +207,7 @@ export function transformStreamingResponse(response: Response): Response {
 					hasStarted: false,
 					extractedModel:
 						response.headers.get("x-clankermux-resolved-model") ?? "unknown",
+					requestId: response.headers.get("x-clankermux-request-id"),
 					hasSentStart: false,
 					hasSentContentBlockStart: false,
 					hasSentThinkingBlockStart: false,
@@ -310,6 +318,7 @@ export function transformStreamingResponse(response: Response): Response {
 
 							// Extract usage data if present (typically in last chunk before [DONE])
 							if (data.usage) {
+								context.sawUsage = true;
 								if (data.usage.prompt_tokens) {
 									context.promptTokens = data.usage.prompt_tokens;
 								}

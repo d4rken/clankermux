@@ -354,6 +354,11 @@ export {
 	type UnifiedClaimReading,
 } from "./unified-claim-headers";
 export {
+	consumeUpstreamReportedNoUsage,
+	markUpstreamReportedNoUsage,
+	resetUpstreamUsagePresence,
+} from "./upstream-usage-presence";
+export {
 	collectObservedWindows,
 	getRepresentativeUtilization as getNormalizedRepresentativeUtilization,
 	isAnthropicUsageShape,

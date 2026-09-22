@@ -234,6 +234,12 @@ it. A row reporting `provider` carries counts as the provider stated them.
 reports zero is stating that none of that class was consumed, and that is
 published as `0`.
 
+That holds for responses the proxy translates as well as the ones it forwards
+untouched. Some provider dialects require an input and an output count in their
+wire shape, so a translator handed a response that reported neither still has to
+emit the fields; those placeholders are tracked per response and never reach a
+row. A `0` on this surface is always a count some provider actually stated.
+
 Rows written before this guarantee existed are not backfilled, and on those a
 null may still be a collapsed zero. A client whose traffic begins after the
 version that publishes this document has no such rows.

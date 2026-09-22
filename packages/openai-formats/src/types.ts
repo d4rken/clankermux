@@ -156,6 +156,14 @@ export interface TransformStreamContext {
 	 */
 	sawCacheRead?: boolean;
 	sawCacheCreation?: boolean;
+	/**
+	 * Whether upstream sent a `usage` block at all. The Anthropic shape requires
+	 * the input and output counts, so this translator emits them either way;
+	 * without this nothing downstream could tell a placeholder from a report.
+	 */
+	sawUsage?: boolean;
+	/** From `x-clankermux-request-id`, for reporting the line above. */
+	requestId?: string | null;
 	buffer: string;
 	hasStarted: boolean;
 	extractedModel: string;
