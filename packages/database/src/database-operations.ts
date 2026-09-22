@@ -2067,13 +2067,15 @@ OAuth tokens will need to be re-authenticated.
 			return empty;
 		} finally {
 			worker.terminate();
-			// Row counts/sizes may have changed (even a partial/failed run) — drop
-			// the cached storage-usage measurement so the next dashboard read
-			// recomputes. Must happen on THIS instance; the worker can't touch it.
-			// The generation bump stops an in-flight pre-cleanup scan from
-			// re-caching its stale snapshot, and detaching the in-flight promise
-			// makes the dashboard's immediate post-cleanup refetch start a fresh
-			// scan instead of adopting the pre-cleanup one.
+			// Row counts/sizes may have changed (even a partial/failed run), so
+			// drop every route by which the next read could still be answered
+			// from before this cleanup: the generation bump keeps a still-running
+			// pre-cleanup scan from re-caching its snapshot when it lands, and
+			// detaching the in-flight promise keeps the next caller from being
+			// handed that same scan. Must happen on THIS instance; the worker
+			// can't touch it. Detaching does not put a second worker on the file
+			// alongside the first — see the "across cleanupOldRequests" tests in
+			// __tests__/retention-storage-usage.test.ts for what does prevent it.
 			this.retentionUsageGeneration += 1;
 			this.retentionUsageCache = null;
 			this.retentionUsageInFlight = null;
