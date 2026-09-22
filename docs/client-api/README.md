@@ -121,7 +121,7 @@ ingest header uses, so a tag that can be stored can always be searched for.
 | `cacheReadInputTokens` | number \| null | Prompt tokens served from the cache |
 | `cacheCreationInputTokens` | number \| null | Prompt tokens written to the cache |
 | `usageSource` | `provider` \| `approximate` \| `none` \| null | Provenance of the token vector |
-| `failoverAttempts` | number \| null | Upstream attempts abandoned before the one the counts describe |
+| `failoverAttempts` | number \| null | The attempt index the answering try was made under. Above 0 means earlier attempts happened; 0 does not prove none did, and null says the same as 0 |
 | `project` | string \| null | The project the proxy attributed the request to |
 | `apiKeyId` | string | The client id the row is scoped to |
 | `correlationTag` | string \| null | The stored tag, null when none was accepted |
@@ -254,7 +254,19 @@ precisely. Above 0 it means earlier attempts happened and their cost is missing.
 At 0 it does NOT prove none did: the value is the attempt index the answering
 try was made under, and a retry against the same account after a hold restarts
 that index. Read a positive value as evidence, and 0 as absence of evidence
-rather than evidence of absence.
+rather than evidence of absence. **Null says exactly what 0 says**, for the same
+reason: the column defaults to 0 and is written on every row this surface
+publishes, so a null is a row from before the column existed, not a distinct
+outcome.
+
+The hold that restarts the index decides whether a 0 can be trusted on a
+FORWARDED row, and it cannot. The rejection that sends a request into such a
+hold does bill nothing on its own: exclusion for context-window size is decided
+locally, by comparing an estimate against the model's own window, and nothing
+reaches a provider. But the hold's re-probes are ordinary upstream attempts and
+carry the same risk any attempt does, including a response discarded because the
+provider answered as a different model than it was sent. So a forwarded row can
+read 0 and still have had a billed attempt thrown away before it.
 
 `usageSource` qualifies the counts independently and both have to be read. An
 `approximate` row had its output count estimated from the generated content
