@@ -196,6 +196,76 @@ describe("PoolQuotaCard pace", () => {
 		expect(html).toContain("5h: 75% used");
 		expect(html).not.toContain("sustainable pace");
 	});
+
+	it("keeps speaking when one account's window is too young to divide by", () => {
+		// Two accounts halfway through their week at 75% are 1.5x each. The third
+		// reset an hour ago, so an even burn expects 0.6% of its window — under
+		// the floor, and the only account that cannot be measured. Averaging into
+		// null hid both good readings behind it.
+		const html = render([
+			account({
+				usageData: weeklyAt(75, NOW + 3.5 * DAY) as never,
+			}),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageData: weeklyAt(75, NOW + 3.5 * DAY) as never,
+			}),
+			account({
+				id: "acc-3",
+				name: "gamma",
+				usageData: weeklyAt(0, NOW + 7 * DAY - HOUR) as never,
+			}),
+		]);
+
+		expect(html).toContain("Average pace 1.5× sustainable pace");
+		expect(html).toContain("2 of 3 accounts");
+	});
+
+	it("states no coverage when every account is in the average", () => {
+		const html = render([
+			account({ usageData: weeklyAt(75, NOW + 3.5 * DAY) as never }),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageData: weeklyAt(25, NOW + 3.5 * DAY) as never,
+			}),
+		]);
+
+		expect(html).toContain("Average pace 1.0× sustainable pace");
+		expect(html).not.toContain("· 2 of 2 accounts");
+	});
+
+	it("leaves an unstarted window out of the average rather than pacing a placeholder", () => {
+		// `now + 7d` is re-stamped on every poll, so it is not a deadline. The
+		// measured account must be the whole average, and the coverage has to say
+		// so — a silently-included placeholder would read as a second data point.
+		const html = render([
+			account({ usageData: weeklyAt(75, NOW + 3.5 * DAY) as never }),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageAsOfIso: new Date(NOW).toISOString(),
+				usageData: weeklyAt(0, NOW + 7 * DAY) as never,
+			}),
+		]);
+
+		expect(html).toContain("Average pace 1.5× sustainable pace");
+		expect(html).toContain("1 of 2 accounts");
+	});
+
+	it("still says nothing when no account can be measured at all", () => {
+		const html = render([
+			account({ usageData: weeklyAt(0, NOW + 7 * DAY - HOUR) as never }),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageData: weeklyAt(1, NOW + 7 * DAY - HOUR) as never,
+			}),
+		]);
+
+		expect(html).not.toContain("sustainable pace");
+	});
 });
 
 describe("PoolQuotaCard quota used", () => {

@@ -9,11 +9,11 @@ import { computePacingScan } from "../services/pacing-scan";
  * `GET /api/pacing` — how fast the pool is spending its weekly budget, and what
  * the 5-hour limit is holding back right now.
  *
- * The scan itself lives in `services/pacing-scan.ts`, because
- * `GET /public/v1/pacing` serves a de-identified projection of the SAME scan and
- * a second implementation is how a widget comes to disagree with the dashboard
- * about whether a pace is sustainable. Everything this handler adds is what only
- * the MANAGEMENT surface may say: account names beside every figure.
+ * The scan itself lives in `services/pacing-scan.ts`, so that a second surface
+ * built on it resolves the same readings rather than growing an implementation
+ * that disagrees with the dashboard about whether a pace is sustainable.
+ * Everything this handler adds is what only the MANAGEMENT surface may say:
+ * account names beside every figure.
  *
  * NOT the answer to "should I run more work" on its own. The per-class burn
  * ratio here is a per-account reading — a pool of staggered accounts with

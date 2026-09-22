@@ -126,6 +126,27 @@ export interface PoolAccountBar {
 	 * poll, and is NEVER a deadline. Omitted otherwise.
 	 */
 	unstarted?: boolean;
+	/**
+	 * What this account's window reads, independent of whether the account can be
+	 * routed to right now.
+	 *
+	 * `pct` above is availability-coupled on purpose — an account that is paused,
+	 * cooling down or spent draws no bar, and the `resetMs` beside it is the
+	 * EXCLUSION's instant, which for a cooldown belongs to a different clock
+	 * entirely. Both are therefore the wrong inputs for measuring how fast a class
+	 * burned its window: an account at 100% burned more of it than anyone, and
+	 * dropping it flatters the average exactly when the pool is in trouble.
+	 *
+	 * Null when there is no reading, which is never a zero. Optional so that bars
+	 * assembled outside {@link computePoolUsage} — the per-family strips — need
+	 * not invent one; {@link poolBurnRatio} is the only consumer, and it treats an
+	 * absent reading as unmeasurable rather than as room.
+	 */
+	windowReading?: {
+		pct: number;
+		resetMs: number | null;
+		unstarted: boolean;
+	} | null;
 }
 
 /**
@@ -177,10 +198,10 @@ export interface ServableClassPool {
 	/**
 	 * The same account as {@link earliestResetAccountName}, by id.
 	 *
-	 * Carried alongside the name because a published surface needs a JOIN KEY:
-	 * `/public/v1/pacing` may not re-serve account names (they live once, on the
-	 * accounts resource), so a consumer resolves this id against that list. The
-	 * name stays for the dashboard, which renders it directly.
+	 * Carried alongside the name as the JOIN KEY. Account names are user-set and
+	 * not unique, so a consumer resolving this row against an account list has to
+	 * match on the id — the same reason {@link scopeResultToClass} keys on ids
+	 * throughout. The name stays for the dashboard, which renders it directly.
 	 */
 	earliestResetAccountId: string | null;
 }
@@ -480,6 +501,33 @@ function extractWindow(
 	if (window === "five_hour") return extractFiveHour(usageData);
 	if (window === "daily") return extractDaily(usageData);
 	return extractSevenDay(usageData);
+}
+
+/**
+ * An extraction as {@link PoolAccountBar.windowReading}, or null when it carries
+ * no percentage. One helper so every bar decides `unstarted` the same way — a
+ * reporting bar and an excluded one that disagreed about the same window would
+ * make the pooled burn depend on whether the account happened to be routable.
+ */
+function windowReadingOf(
+	extracted: ExtractedValue | null,
+	account: AccountResponse,
+	window: PoolWindow,
+): PoolAccountBar["windowReading"] {
+	if (extracted?.pct == null) return null;
+	return {
+		pct: extracted.pct,
+		resetMs: extracted.resetMs,
+		unstarted: isUnstartedWindow({
+			utilizationPct: extracted.pct,
+			windowStartMs:
+				extracted.resetMs == null
+					? null
+					: computeWindowStartMs(extracted.resetMs, window),
+			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
+			windowKind: window,
+		}),
+	};
 }
 
 function classifyExclusion(
@@ -1169,6 +1217,9 @@ export function computePoolUsage(
 			classifyExclusion(account, now) ??
 			classifyQuotaExhaustion(account, window);
 		if (exclusion) {
+			// Read anyway, though the bar will not draw one. Being unroutable at
+			// this instant says nothing about how much of the window this account
+			// already spent.
 			accountBars.push({
 				accountId: account.id,
 				name: account.name,
@@ -1177,6 +1228,13 @@ export function computePoolUsage(
 				state: "exhausted",
 				reason: exclusion.reason,
 				resetMs: exclusion.resetMs,
+				windowReading: account.usageData
+					? windowReadingOf(
+							extractWindow(account.usageData, window),
+							account,
+							window,
+						)
+					: null,
 			});
 			continue;
 		}
@@ -1190,6 +1248,7 @@ export function computePoolUsage(
 				state: "unknown",
 				reason: "no_usage_data",
 				resetMs: null,
+				windowReading: null,
 			});
 			continue;
 		}
@@ -1214,11 +1273,17 @@ export function computePoolUsage(
 				state: "unknown",
 				reason: "no_usage_data",
 				resetMs: extracted.resetMs,
+				windowReading: null,
 			});
 			continue;
 		}
 
 		const observedAtMs = usageObservedAtMs(account.usageAsOfIso);
+		// A 0% window whose structural start tracks the reading is one the provider
+		// has not started: its reset slides forward every poll, so it must never be
+		// offered as a deadline. `window` is passed so a calendar cycle, which
+		// rolls over untouched, keeps its real reset.
+		const reading = windowReadingOf(extracted, account, window);
 		accountBars.push({
 			accountId: account.id,
 			name: account.name,
@@ -1227,21 +1292,8 @@ export function computePoolUsage(
 			state: "reporting",
 			reason: null,
 			resetMs: extracted.resetMs,
-			// A 0% window whose structural start tracks the reading is one the
-			// provider has not started: its reset slides forward every poll, so it
-			// must never be offered as a deadline. `window` is passed so a calendar
-			// cycle, which rolls over untouched, keeps its real reset.
-			...(isUnstartedWindow({
-				utilizationPct: extracted.pct,
-				windowStartMs:
-					extracted.resetMs == null
-						? null
-						: computeWindowStartMs(extracted.resetMs, window),
-				observedAtMs,
-				windowKind: window,
-			})
-				? { unstarted: true }
-				: {}),
+			windowReading: reading,
+			...(reading?.unstarted ? { unstarted: true } : {}),
 		});
 		// `daily` gets none: the server predicts the two windows it records into
 		// `usage_snapshots`, and no daily-window provider is in that set. Undefined
