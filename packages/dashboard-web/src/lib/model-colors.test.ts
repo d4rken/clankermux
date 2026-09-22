@@ -387,7 +387,7 @@ describe("getModelColor", () => {
 		expect(conflicts).toEqual([]);
 	});
 
-	it("keeps Opus 4.5 through 5 off Opus 4's color", () => {
+	it("keeps Opus 4.5 through 5.5 off Opus 4's color", () => {
 		const opus4 = getModelColor(CLAUDE_MODEL_IDS.OPUS_4);
 		for (const modelId of [
 			CLAUDE_MODEL_IDS.OPUS_4_5,
@@ -395,6 +395,7 @@ describe("getModelColor", () => {
 			CLAUDE_MODEL_IDS.OPUS_4_7,
 			CLAUDE_MODEL_IDS.OPUS_4_8,
 			CLAUDE_MODEL_IDS.OPUS_5,
+			CLAUDE_MODEL_IDS.OPUS_5_5,
 		]) {
 			expect(getModelColor(modelId)).not.toBe(opus4);
 		}
@@ -420,6 +421,14 @@ describe("getModelColor", () => {
 		);
 		expect(getModelColor(CLAUDE_MODEL_IDS.MYTHOS_5_1)).not.toBe(
 			getModelColor(CLAUDE_MODEL_IDS.MYTHOS_5),
+		);
+	});
+
+	it("keeps Opus 5.5 off Opus 5's color", () => {
+		// `claude-opus-5.5` contains `claude-opus-5`, so without its explicit entry
+		// the substring fallback would draw both as one azure line.
+		expect(getModelColor(CLAUDE_MODEL_IDS.OPUS_5_5)).not.toBe(
+			getModelColor(CLAUDE_MODEL_IDS.OPUS_5),
 		);
 	});
 
