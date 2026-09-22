@@ -157,6 +157,9 @@ async function pollThroughDispatch(
 		startDevin: () => {
 			throw new Error("a zai account must not take the Devin path");
 		},
+		createTokenProvider: () => {
+			throw new Error("a zai account authenticates with its stored key");
+		},
 		resetAccountSession: () => {},
 		onCapacityRestored: (evidence) => {
 			reported = evidence;

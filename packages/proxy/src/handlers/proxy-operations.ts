@@ -2095,6 +2095,11 @@ export async function proxyWithAccount(
 			// that is NOT quota-derived cannot be misclassified as one: it fails
 			// either the freshness gate or the exhaustion verdict.
 			//
+			// grok-subscription is admitted on the same terms: its one weekly pool
+			// IS the account (Chat, Imagine, Voice, Build and API all draw on it),
+			// so a spent reading is an account-wide verdict. It has no session
+			// class, so only the weekly reason can bind for it.
+			//
 			// Weekly outranks session (see `accountWideExhaustionFor`), so whenever the
 			// weekly window is spent this behaves exactly as it did when the block
 			// was weekly-only; the session-only case is the new behaviour.
@@ -2109,7 +2114,9 @@ export async function proxyWithAccount(
 			// headers are client-spoofable.
 			if (
 				rawResponse.status === 429 &&
-				(account.provider === "anthropic" || account.provider === "zai") &&
+				(account.provider === "anthropic" ||
+					account.provider === "zai" ||
+					account.provider === "grok-subscription") &&
 				!liveScopedOnlyRejection &&
 				!options?.reprobe &&
 				!isTrustedProbe("any")
@@ -2601,7 +2608,7 @@ export async function proxyWithAccount(
 				: (prefix?.servedModel ?? null);
 		if (
 			servedModel !== null &&
-			isModelSubstitution(resolvedTargetModel, servedModel)
+			isModelSubstitution(resolvedTargetModel, servedModel, account.provider)
 		) {
 			// An accepted swap is still a swap: it is logged, it is written onto
 			// the attempt row by the observer, and it reaches every dashboard
@@ -2612,6 +2619,7 @@ export async function proxyWithAccount(
 				parseModelSubstitutionExceptions(
 					ctx.config.getServedModelSubstitutionExceptions?.() ?? [],
 				),
+				account.provider,
 			);
 			log.warn(
 				`Account ${account.name} answered as ${servedModel} for ${resolvedTargetModel}${excepted ? " (accepted by exception)" : ""}`,

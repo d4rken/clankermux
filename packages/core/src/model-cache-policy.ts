@@ -362,6 +362,9 @@ const PROVIDER_POLICIES: Record<ProviderName, RouteResolver> = {
 	zai: (model) => glmPolicy(model),
 	minimax: (model, route) => minimaxPolicy(model, route.format),
 	grok: (model) => grokPolicy(model),
+	// Same xAI models over a different front door; the endpoint is fixed in the
+	// provider, so there is no custom endpoint to qualify the answer.
+	"grok-subscription": (model) => grokPolicy(model),
 	openrouter: (model, route) =>
 		!route.customEndpoint ||
 		officialEndpoint(route.customEndpoint, "https://openrouter.ai", ["/api/v1"])

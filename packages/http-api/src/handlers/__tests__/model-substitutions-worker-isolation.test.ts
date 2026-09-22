@@ -51,11 +51,15 @@ afterAll(() => {
 	terminateAnalyticsWorker();
 });
 
-async function insertAccount(id: string, name: string): Promise<void> {
+async function insertAccount(
+	id: string,
+	name: string,
+	provider = "codex",
+): Promise<void> {
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (id, name, provider, refresh_token, created_at, priority, request_count)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		[id, name, "codex", "tok", Date.now(), 0, 0],
+		[id, name, provider, "tok", Date.now(), 0, 0],
 	);
 }
 
@@ -77,6 +81,7 @@ async function insertAttempt(opts: {
 	outgoing: string;
 	reported: string | null;
 	startedAt: number;
+	provider?: string;
 }): Promise<void> {
 	const snapshotId = await insertSnapshot();
 	await dbOps.getAdapter().run(
@@ -87,7 +92,7 @@ async function insertAttempt(opts: {
 			`req-${opts.id}`,
 			snapshotId,
 			opts.accountId,
-			"codex",
+			opts.provider ?? "codex",
 			opts.outgoing,
 			opts.outgoing,
 			opts.outgoing,
@@ -132,6 +137,51 @@ describe("model-substitutions worker isolation", () => {
 		expect(data.pairs[0]?.accountName).toBe("Codex-me");
 		// 2, not 1: the correctly-served attempt belongs in the denominator.
 		expect(data.pairs[0]?.comparable).toBe(2);
+	});
+
+	// The provider-keyed pair table lives in `@clankermux/proxy`, and the
+	// provider reaches it from the ATTEMPT row rather than from the account, so
+	// both the import and the column have to survive into the worker bundle.
+	// The history chart is judged in the same pass: its buckets come back as
+	// mismatch candidates and the handler decides which of them count.
+	it("drops a provider's own rename from both the pairs and the chart", async () => {
+		const now = Date.now();
+		await insertAccount("acct-1", "SuperGrok", "grok-subscription");
+		await insertAttempt({
+			id: "a1",
+			accountId: "acct-1",
+			outgoing: "grok-4.6",
+			reported: "grok-4.6-build",
+			startedAt: now - 60_000,
+			provider: "grok-subscription",
+		});
+		await insertAttempt({
+			id: "a2",
+			accountId: "acct-1",
+			outgoing: "grok-4.7",
+			reported: "grok-4.7-build-fast",
+			startedAt: now - 30_000,
+			provider: "grok-subscription",
+		});
+
+		const handler = createModelSubstitutionsHandler(makeContext(dbOps));
+		const response = await handler(new URLSearchParams({ range: "24h" }));
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
+
+		const data = (await response.json()) as ModelSubstitutionsResponse;
+		expect(data.pairs).toHaveLength(1);
+		expect(data.pairs[0]?.outgoingModel).toBe("grok-4.7");
+		// Two attempts in the window, one of them a real swap.
+		const totals = data.series.reduce(
+			(sum, point) => ({
+				substituted: sum.substituted + point.substituted,
+				comparable: sum.comparable + point.comparable,
+			}),
+			{ substituted: 0, comparable: 0 },
+		);
+		expect(totals).toEqual({ substituted: 1, comparable: 2 });
 	});
 
 	it("returns an empty answer rather than failing when nothing substituted", async () => {

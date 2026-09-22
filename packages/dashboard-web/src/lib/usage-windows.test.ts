@@ -596,3 +596,69 @@ it("does not invent Devin daily quota when the plan reports only weekly", () => 
 	if (card.kind !== "windows") throw new Error("missing windows");
 	expect(card.usages.map(usageWindowLabel)).toEqual(["Weekly"]);
 });
+
+describe("grok-subscription's single weekly pool", () => {
+	const grok = (
+		weeklyUtilization: number | null,
+		weeklyResetAt = NOW + 3 * 24 * 60 * 60 * 1000,
+	): UsageCardSource => ({
+		resetIso: null,
+		provider: "grok-subscription",
+		// Deliberately left false: this shape is matched on its `kind`
+		// discriminant, so the card must not depend on the caller's weekly flag.
+		showWeekly: false,
+		usageData: {
+			kind: "grok-subscription",
+			weeklyUtilization,
+			weeklyResetAt,
+			weeklyPeriodStartAt: weeklyResetAt - 7 * 24 * 60 * 60 * 1000,
+			onDemandCapCents: null,
+			onDemandUsedCents: null,
+			prepaidBalanceCents: null,
+		},
+	});
+
+	it("renders exactly one weekly window with the pool's reset", () => {
+		const reset = NOW + 2 * 24 * 60 * 60 * 1000;
+		const card = classifyUsageCard(grok(63, reset), NOW);
+		expect(card.kind).toBe("windows");
+		if (card.kind !== "windows") throw new Error("missing windows");
+		expect(card.usages).toEqual([
+			{
+				utilization: 63,
+				window: "weekly",
+				resetTime: new Date(reset).toISOString(),
+			},
+		]);
+		expect(card.usages.map(usageWindowLabel)).toEqual(["Weekly"]);
+	});
+
+	it("marks an unknown reading as unknown instead of 0%", () => {
+		const reset = NOW + 2 * 24 * 60 * 60 * 1000;
+		const card = classifyUsageCard(grok(null, reset), NOW);
+		if (card.kind !== "windows") throw new Error("missing windows");
+		expect(card.usages).toEqual([
+			{
+				utilization: null,
+				window: "weekly",
+				resetTime: new Date(reset).toISOString(),
+				state: "unknown",
+			},
+		]);
+	});
+
+	it("compares its week against other providers' weekly windows", () => {
+		// The card's own reset category, not a provider-specific one: a category
+		// only one account reports is never marked, so a bespoke window name here
+		// would silently opt the account out of the comparison.
+		const card = classifyUsageCard(grok(10), NOW);
+		if (card.kind !== "windows") throw new Error("missing windows");
+		expect(usageWindowCategoryKey(card.usages[0])).toBe(
+			usageWindowCategoryKey({
+				utilization: 20,
+				window: "seven_day",
+				resetTime: null,
+			}),
+		);
+	});
+});

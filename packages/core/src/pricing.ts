@@ -523,11 +523,41 @@ BUNDLED_PRICING.openai = {
 	},
 };
 
-// Verbatim from the models.dev `xai` base tier, snapshotted 2026-09-15.
+// Verbatim from the models.dev `xai` base tier, snapshotted 2026-09-15, except
+// where an entry cites its own source.
+//
+// `grok-4.7-build-fast` is deliberately absent: xAI publishes no rate for it
+// (the chat proxy's catalogue only describes it as "2x the price", naming no
+// tier), so the unpriced-model guard firing on it is intended, not a gap to fill
+// from a neighbour.
 BUNDLED_PRICING.xai = {
 	models: {
+		// xAI model pricing page (https://docs.x.ai/docs/models), base tier
+		// (prompts under 200k tokens), fetched 2026-09-22.
+		"grok-4.7": {
+			id: "grok-4.7",
+			name: "Grok 4.7",
+			cost: {
+				input: 2,
+				output: 6,
+				cache_read: 0.5,
+			},
+		},
 		"grok-4.6": {
 			id: "grok-4.6",
+			name: "Grok 4.6",
+			cost: {
+				input: 2,
+				output: 6,
+				cache_read: 0.5,
+			},
+		},
+		// Not a separate model: the SuperGrok chat proxy answers a grok-4.6
+		// request under this name (VERIFIED_SERVED_MODEL_PAIRS in
+		// packages/proxy/src/handlers/model-substitution.ts). Usage is priced by
+		// the name upstream reported, so it carries grok-4.6's rates.
+		"grok-4.6-build": {
+			id: "grok-4.6-build",
 			name: "Grok 4.6",
 			cost: {
 				input: 2,
@@ -1811,6 +1841,32 @@ const COST_KINDS = ["input", "output", "cache_read", "cache_write"] as const;
 type CostKind = (typeof COST_KINDS)[number];
 
 /**
+ * The catalogue key a serving provider's entries live under, before asking
+ * whether the loaded catalogue actually carries it. A provider whose own name
+ * is the key answers itself.
+ *
+ * One mapping for both readers, the cost path ({@link selectModelEntry}) and
+ * the metadata path ({@link catalogueKeyFor}). Kept apart, a provider added to
+ * one is priced by an unscoped cross-provider scan in the other — a reseller's
+ * rate card instead of the vendor's — while reporting no context window at all.
+ */
+function catalogueProviderKey(provider: string): string {
+	switch (provider) {
+		case PROVIDER_NAMES.CODEX:
+			return "openai";
+		case PROVIDER_NAMES.CLAUDE_CONSOLE_API:
+			return PROVIDER_NAMES.ANTHROPIC;
+		case PROVIDER_NAMES.GROK:
+		// A SuperGrok plan serves the same xAI models the metered API does; only
+		// the billing differs.
+		case PROVIDER_NAMES.GROK_SUBSCRIPTION:
+			return "xai";
+		default:
+			return provider;
+	}
+}
+
+/**
  * Pick the ONE entry a request is priced from.
  *
  * A `-YYYY-MM-DD` release-date suffix is the only id rewriting allowed:
@@ -1856,13 +1912,7 @@ function selectModelEntry(
 	provider?: string,
 ): { entry: ModelDef | null; exact: boolean } {
 	const catalogueProvider =
-		provider === PROVIDER_NAMES.CODEX
-			? "openai"
-			: provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
-				? PROVIDER_NAMES.ANTHROPIC
-				: provider === PROVIDER_NAMES.GROK
-					? "xai"
-					: provider;
+		provider === undefined ? undefined : catalogueProviderKey(provider);
 	// A matching account/catalogue provider uses only its own entries, including
 	// dated fallbacks. Bundled zai/minimax entries make those scopes available
 	// offline too. Account types without a catalogue key (generic compatible
@@ -1948,21 +1998,14 @@ function firstEntryFor(pricing: ApiResponse, modelId: string): ModelDef | null {
 }
 
 /**
- * The catalogue key a serving provider's entries live under, or null when the
- * catalogue has no key for it. Same mapping {@link selectModelEntry} uses.
+ * {@link catalogueProviderKey} narrowed to the keys this catalogue actually
+ * carries; null when it carries none for the provider.
  */
 function catalogueKeyFor(
 	pricing: ApiResponse,
 	provider: string,
 ): string | null {
-	const key =
-		provider === PROVIDER_NAMES.CODEX
-			? "openai"
-			: provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
-				? PROVIDER_NAMES.ANTHROPIC
-				: provider === PROVIDER_NAMES.GROK
-					? "xai"
-					: provider;
+	const key = catalogueProviderKey(provider);
 	return Object.hasOwn(pricing, key) ? key : null;
 }
 

@@ -468,6 +468,14 @@ describe("canAttemptStaleTokenRefresh guard", () => {
 		).toBe(true);
 	});
 
+	it("allows grok-subscription, whose refreshToken is a real xAI exchange", () => {
+		expect(
+			canAttemptStaleTokenRefresh(
+				makeAccount({ provider: "grok-subscription", refresh_token: "r" }),
+			),
+		).toBe(true);
+	});
+
 	it("rejects accounts without a refresh token", () => {
 		expect(
 			canAttemptStaleTokenRefresh(

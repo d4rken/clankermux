@@ -58,6 +58,7 @@ interface AccountListProps {
 	onCodexReauth?: (account: Account) => void;
 	onDevinReauth?: (account: Account) => void;
 	onZaiReauth?: (account: Account) => void;
+	onGrokSubscriptionReauth?: (account: Account) => void;
 }
 
 export function AccountList({
@@ -91,6 +92,7 @@ export function AccountList({
 	onCodexReauth,
 	onDevinReauth,
 	onZaiReauth,
+	onGrokSubscriptionReauth,
 }: AccountListProps) {
 	// The comparison below needs its own clock. React Query hands back the same
 	// `accounts` reference when a poll returns unchanged data, so keying the memo
@@ -198,6 +200,7 @@ export function AccountList({
 					onCodexReauth={onCodexReauth}
 					onDevinReauth={onDevinReauth}
 					onZaiReauth={onZaiReauth}
+					onGrokSubscriptionReauth={onGrokSubscriptionReauth}
 				/>
 			))}
 		</div>

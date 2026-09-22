@@ -18,6 +18,7 @@ export const PROVIDER_NAMES = {
 	OLLAMA_CLOUD: "ollama-cloud",
 	GROK: "grok",
 	MIMO: "mimo",
+	GROK_SUBSCRIPTION: "grok-subscription",
 } as const;
 
 export type ProviderName = (typeof PROVIDER_NAMES)[keyof typeof PROVIDER_NAMES];
@@ -223,6 +224,14 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		supportsOAuth: false, // Token Plan uses a tp- API key
 		honoursCustomEndpoint: true, // the region is stored per account in custom_endpoint
 		defaultEndpoint: "https://token-plan-sgp.xiaomimimo.com/anthropic",
+	},
+	[PROVIDER_NAMES.GROK_SUBSCRIPTION]: {
+		requiresSessionTracking: false, // a SuperGrok plan draws on a weekly pool, not a 5h window
+		supportsUsageTracking: true,
+		supportsUsagePolling: true, // GET /v1/billing?format=credits, weekly pool
+		supportsOAuth: true, // xAI OAuth device flow
+		honoursCustomEndpoint: false,
+		defaultEndpoint: "https://cli-chat-proxy.grok.com",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
 

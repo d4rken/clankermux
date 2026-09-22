@@ -482,6 +482,9 @@ const PLAN_PROVIDERS = new Set([
 	"qwen",
 	"codex",
 	"mimo",
+	// SuperGrok/X Premium draws on the plan's weekly pool. The API-key `grok`
+	// provider is metered and stays "api".
+	"grok-subscription",
 ]);
 
 // ---------------------------------------------------------------------------

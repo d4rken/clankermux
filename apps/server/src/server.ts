@@ -1323,6 +1323,8 @@ export default async function startServer(options?: {
 				undefined,
 				devinPollingEffects,
 			),
+		createTokenProvider: (account) =>
+			createUsagePollingTokenProvider(account, proxyContext),
 		resetAccountSession: (accountId) => {
 			dbOps
 				.resetAccountSession(accountId, Date.now())

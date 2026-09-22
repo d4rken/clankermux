@@ -85,8 +85,49 @@ function stripRouteVariant(model: string): string {
 		: model;
 }
 
-/** Every spelling of one model id, cheapest test first. */
-function aliases(model: string): string[] {
+/**
+ * Ids that name ONE model on one provider, keyed by the provider that answers
+ * with them.
+ *
+ * `grok-4.6` sent to a SuperGrok subscription account comes back named
+ * `grok-4.6-build`, in the non-stream body and in `message_start` alike. Same
+ * model, different name, so it belongs here and not in an operator exception:
+ * an exception waives only the enforcement and still reports the pair as a
+ * substitution, which would claim a swap that is not happening.
+ *
+ * Every entry is a pair someone has OBSERVED a live upstream return. Do not
+ * generalise it into a suffix rule: this proxy's own `/v1/models` publishes
+ * `grok-4.7` and `grok-4.7-build-fast` as two separate models, so stripping
+ * `-build`/`-build-fast` would equate them and let a real swap between them
+ * through undetected.
+ *
+ * Membership is an equivalence, not a direction. Both spellings are the same
+ * model, so either may be sent and either may come back; the pair is written
+ * request-first only because that is the order it was observed in.
+ */
+const VERIFIED_SERVED_MODEL_PAIRS: ReadonlyMap<
+	string,
+	readonly (readonly [string, string])[]
+> = new Map([["grok-subscription", [["grok-4.6", "grok-4.6-build"]] as const]]);
+
+/** The counterpart ids `provider` is known to use for any of `ids`. */
+function pairedIds(
+	ids: readonly string[],
+	provider: string | undefined,
+): string[] {
+	const pairs = provider
+		? VERIFIED_SERVED_MODEL_PAIRS.get(provider)
+		: undefined;
+	if (pairs === undefined) return [];
+	const out: string[] = [];
+	for (const [first, second] of pairs) {
+		if (ids.includes(first)) out.push(second);
+		if (ids.includes(second)) out.push(first);
+	}
+	return out;
+}
+
+function normalizedAliases(model: string): string[] {
 	const base = stripRouteVariant(stripVendorPrefix(model.toLowerCase().trim()));
 	const undated =
 		stripDatedModelSuffix(base) ?? COMPACT_DATED_SUFFIX.exec(base)?.[1] ?? null;
@@ -94,14 +135,35 @@ function aliases(model: string): string[] {
 }
 
 /**
+ * Every spelling of one model id, cheapest test first.
+ *
+ * `provider` is optional, and omitting it is not a weaker form of the same
+ * question: a caller that cannot say which provider answered gets the
+ * provider-blind comparison, never the verified pairs of a guessed one.
+ */
+function aliases(model: string, provider?: string): string[] {
+	const direct = normalizedAliases(model);
+	const out = [...direct];
+	for (const paired of pairedIds(direct, provider))
+		for (const alias of normalizedAliases(paired))
+			if (!out.includes(alias)) out.push(alias);
+	return out;
+}
+
+/**
  * @param sent the model this proxy put on the wire
  * @param served the model the provider named in its response
+ * @param provider the account's provider, for its verified pairs
  */
-export function isModelSubstitution(sent: string, served: string): boolean {
+export function isModelSubstitution(
+	sent: string,
+	served: string,
+	provider?: string,
+): boolean {
 	if (!sent || !served) return false;
 	if (BACKEND_RESOLVED_SLUGS.has(sent.toLowerCase().trim())) return false;
-	const sentAliases = aliases(sent);
-	const servedAliases = aliases(served);
+	const sentAliases = aliases(sent, provider);
+	const servedAliases = aliases(served, provider);
 	return !sentAliases.some((candidate) => servedAliases.includes(candidate));
 }
 
@@ -121,19 +183,24 @@ export function isSubstitutionExcepted(
 	sent: string,
 	served: string,
 	exceptions: readonly ModelSubstitutionException[],
+	provider?: string,
 ): boolean {
 	if (exceptions.length === 0) return false;
-	const sentAliases = aliases(sent);
-	const servedAliases = aliases(served);
+	const sentAliases = aliases(sent, provider);
+	const servedAliases = aliases(served, provider);
 	return exceptions.some(
 		(exception) =>
-			matchesSide(exception.sent, sentAliases) &&
-			matchesSide(exception.served, servedAliases),
+			matchesSide(exception.sent, sentAliases, provider) &&
+			matchesSide(exception.served, servedAliases, provider),
 	);
 }
 
-function matchesSide(pattern: string, candidates: readonly string[]): boolean {
+function matchesSide(
+	pattern: string,
+	candidates: readonly string[],
+	provider?: string,
+): boolean {
 	if (pattern === MODEL_SUBSTITUTION_EXCEPTION_WILDCARD) return true;
-	const patternAliases = aliases(pattern);
+	const patternAliases = aliases(pattern, provider);
 	return patternAliases.some((alias) => candidates.includes(alias));
 }

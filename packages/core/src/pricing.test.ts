@@ -860,6 +860,57 @@ describe("bundled MiMo pricing (offline fallback)", () => {
 	});
 });
 
+describe("bundled xAI subscription pricing (offline fallback)", () => {
+	const tokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+		cacheReadInputTokens: 1_000_000,
+	};
+	const subscription = { provider: "grok-subscription", reportGaps: true };
+
+	beforeEach(() => {
+		__pricingTestHooks.reset();
+	});
+
+	afterEach(() => {
+		__pricingTestHooks.reset();
+	});
+
+	it("prices grok-4.7 at $2 input, $6 output, $0.50 cached input", async () => {
+		expect(await estimateCostUSD("grok-4.7", tokens, subscription)).toBeCloseTo(
+			8.5,
+			6,
+		);
+		expect(getPricingGaps()).toEqual([]);
+	});
+
+	it("prices the served name grok-4.6-build exactly as grok-4.6", async () => {
+		const served = await estimateCostUSD(
+			"grok-4.6-build",
+			tokens,
+			subscription,
+		);
+		expect(served).toBeCloseTo(8.5, 6);
+		expect(served).toBe(
+			await estimateCostUSD("grok-4.6", tokens, subscription),
+		);
+		expect(getPricingGaps()).toEqual([]);
+	});
+
+	it("leaves grok-4.7-build-fast unpriced, so the gap guard reports it", async () => {
+		expect(
+			await estimateCostUSD("grok-4.7-build-fast", tokens, subscription),
+		).toBeNull();
+		const gaps = getPricingGaps();
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({
+			modelId: "grok-4.7-build-fast",
+			provider: "grok-subscription",
+			reason: "model_missing",
+		});
+	});
+});
+
 describe("getModelCacheRates", () => {
 	it("returns Opus 5 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-opus-5")).toEqual({

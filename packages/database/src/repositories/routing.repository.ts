@@ -58,6 +58,55 @@ export function isClientInputError(error: unknown): boolean {
 	);
 }
 
+/** One row of the substitution-history query: see `getModelSubstitutions`. */
+type SubstitutionSeriesRow = {
+	bucket: number;
+	mismatch_provider: string | null;
+	mismatch_outgoing: string | null;
+	mismatch_reported: string | null;
+	c: number;
+};
+
+/**
+ * Regroup the flat bucket × mismatch-pair rows into one point per bucket.
+ *
+ * Every row counts towards its bucket's denominator; only the ones the CASEs
+ * left non-null describe a mismatch. Insertion order follows the query's
+ * `ORDER BY bucket`, so the points come out ascending without a second sort.
+ */
+function collectSubstitutionSeries(rows: readonly SubstitutionSeriesRow[]) {
+	const byBucket = new Map<
+		number,
+		{
+			bucketMs: number;
+			comparable: number;
+			candidates: Array<{
+				provider: string | null;
+				outgoingModel: string;
+				reportedModel: string;
+				count: number;
+			}>;
+		}
+	>();
+	for (const row of rows) {
+		let point = byBucket.get(row.bucket);
+		if (point === undefined) {
+			point = { bucketMs: row.bucket, comparable: 0, candidates: [] };
+			byBucket.set(row.bucket, point);
+		}
+		point.comparable += row.c;
+		if (row.mismatch_outgoing !== null && row.mismatch_reported !== null) {
+			point.candidates.push({
+				provider: row.mismatch_provider,
+				outgoingModel: row.mismatch_outgoing,
+				reportedModel: row.mismatch_reported,
+				count: row.c,
+			});
+		}
+	}
+	return [...byBucket.values()];
+}
+
 export class RoutingRepository extends BaseRepository<RoutingRule> {
 	async listRules(): Promise<RoutingRule[]> {
 		return (
@@ -561,10 +610,26 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 			outgoingModel: string;
 			comparable: number;
 		}>;
+		/**
+		 * History buckets, reported as a denominator plus the mismatch
+		 * CANDIDATES that make it up.
+		 *
+		 * A bucket cannot carry a `substituted` count, because SQL cannot decide
+		 * what a substitution is: the comparison that does lives in
+		 * `@clankermux/proxy` and knows alias spellings and provider-keyed
+		 * renames this query has no access to. Counting raw inequality here
+		 * would draw a model its provider simply names differently as a swap,
+		 * for as long as the rows are retained.
+		 */
 		series: Array<{
 			bucketMs: number;
-			substituted: number;
 			comparable: number;
+			candidates: Array<{
+				provider: string | null;
+				outgoingModel: string;
+				reportedModel: string;
+				count: number;
+			}>;
 		}>;
 	}> {
 		// One predicate, three shapes. `started_at` carries the only index that
@@ -597,12 +662,19 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				 GROUP BY account_id,outgoing_model`,
 				[opts.sinceMs],
 			),
-			this.query<{ bucket: number; subs: number; total: number }>(
+			// Matching attempts collapse to ONE null-keyed row per bucket, so the
+			// extra grouping columns only fan out over the distinct mismatched
+			// pairs the caller has to judge anyway. Positional GROUP BY: naming
+			// the aliases would bind to the source columns of the same name
+			// (SQLite prefers those) and split the matched rows by provider too.
+			this.query<SubstitutionSeriesRow>(
 				`SELECT (started_at/?)*? AS bucket,
-				        SUM(CASE WHEN reported_model<>outgoing_model THEN 1 ELSE 0 END) AS subs,
-				        COUNT(*) AS total
+				        CASE WHEN reported_model<>outgoing_model THEN provider END AS mismatch_provider,
+				        CASE WHEN reported_model<>outgoing_model THEN outgoing_model END AS mismatch_outgoing,
+				        CASE WHEN reported_model<>outgoing_model THEN reported_model END AS mismatch_reported,
+				        COUNT(*) AS c
 				 FROM routing_attempts WHERE ${live}
-				 GROUP BY bucket ORDER BY bucket`,
+				 GROUP BY 1,2,3,4 ORDER BY bucket`,
 				[opts.bucketMs, opts.bucketMs, opts.sinceMs],
 			),
 		]);
@@ -621,11 +693,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				outgoingModel: r.outgoing_model,
 				comparable: r.c,
 			})),
-			series: series.map((r) => ({
-				bucketMs: r.bucket,
-				substituted: r.subs,
-				comparable: r.total,
-			})),
+			series: collectSubstitutionSeries(series),
 		};
 	}
 

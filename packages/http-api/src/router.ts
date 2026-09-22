@@ -84,6 +84,9 @@ import {
 	createCodexDeviceFlowInitHandler,
 	createCodexDeviceFlowStatusHandler,
 	createCodexReauthHandler,
+	createGrokSubscriptionDeviceFlowInitHandler,
+	createGrokSubscriptionDeviceFlowStatusHandler,
+	createGrokSubscriptionReauthHandler,
 	createOAuthCallbackHandler,
 	createOAuthInitHandler,
 	createQwenDeviceFlowInitHandler,
@@ -149,12 +152,15 @@ export class APIRouter {
 	>;
 	private qwenStatusHandler: (sessionId: string) => Response;
 	private codexStatusHandler: (sessionId: string) => Response;
+	private grokSubscriptionStatusHandler: (sessionId: string) => Response;
 
 	constructor(context: APIContext) {
 		this.context = context;
 		this.handlers = new Map();
 		this.qwenStatusHandler = createQwenDeviceFlowStatusHandler();
 		this.codexStatusHandler = createCodexDeviceFlowStatusHandler();
+		this.grokSubscriptionStatusHandler =
+			createGrokSubscriptionDeviceFlowStatusHandler();
 		this.registerHandlers();
 	}
 
@@ -260,6 +266,10 @@ export class APIRouter {
 		const qwenReauthHandler = createQwenReauthHandler(dbOps);
 		const codexDeviceFlowInitHandler = createCodexDeviceFlowInitHandler(dbOps);
 		const codexReauthHandler = createCodexReauthHandler(dbOps);
+		const grokSubscriptionDeviceFlowInitHandler =
+			createGrokSubscriptionDeviceFlowInitHandler(dbOps);
+		const grokSubscriptionReauthHandler =
+			createGrokSubscriptionReauthHandler(dbOps);
 		const anthropicReauthInitHandler = createAnthropicReauthInitHandler(
 			dbOps,
 			config,
@@ -413,6 +423,12 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/oauth/codex/reauth", (req) =>
 			codexReauthHandler(req),
+		);
+		this.handlers.set("POST:/api/oauth/grok-subscription/init", (req) =>
+			grokSubscriptionDeviceFlowInitHandler(req),
+		);
+		this.handlers.set("POST:/api/oauth/grok-subscription/reauth", (req) =>
+			grokSubscriptionReauthHandler(req),
 		);
 		this.handlers.set("GET:/api/requests", (_req, url) => {
 			const limitParam = url.searchParams.get("limit");
@@ -1050,6 +1066,20 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// Check for grok-subscription device flow status endpoint
+		if (
+			path.startsWith("/api/oauth/grok-subscription/status/") &&
+			method === "GET"
+		) {
+			const parts = path.split("/");
+			const sessionId = parts[5];
+			if (sessionId) {
+				return await this.wrapHandler(() =>
+					this.grokSubscriptionStatusHandler(sessionId),
+				)(req, url);
 			}
 		}
 

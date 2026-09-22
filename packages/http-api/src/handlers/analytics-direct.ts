@@ -223,8 +223,20 @@ type AdditionalDataBranch = {
 // requesting it always emits the pair and the NULL bucket can never be ranked
 // out.
 /**
- * The model a request was SENT as, when the answer it got came back under a
- * different name. NULL for ordinary usage.
+ * Separator packing the origin model and the answering provider into
+ * {@link SUBSTITUTION_ORIGIN_MODEL}'s single column. ASCII unit separator,
+ * because both halves are printable slugs, so neither can contain it and the
+ * split is unambiguous — `char(31)` is how the SQL side writes it.
+ *
+ * Constructed rather than written as a literal: `biome check --unsafe` rewrites
+ * a `""` escape into the raw control byte, which is invisible in a diff
+ * and one careless edit away from disappearing.
+ */
+const SUBSTITUTION_ORIGIN_SEPARATOR = String.fromCharCode(31);
+
+/**
+ * The model a request was SENT as and the provider that answered it, when the
+ * answer came back under a different name. NULL for ordinary usage.
  *
  * Find the attempt FIRST, then ask whether it substituted. The order is the
  * whole correctness argument, and doing it the other way round is subtly wrong:
@@ -248,14 +260,27 @@ type AdditionalDataBranch = {
  * derived table materialised every mismatched attempt ever recorded. On the
  * 15 GB production database over a 24h range that was 1.13s against 0.43s, and
  * only the correlated form stays flat as the history grows.
+ *
+ * The provider comes out of THIS subquery, packed alongside the origin, rather
+ * than from a join or a second correlated read. The comparison needs it because
+ * part of what it knows is per-provider, and neither query that uses this
+ * expression can supply it: both group by model rather than by account, so one
+ * row can aggregate requests several accounts on different providers served.
+ * A second correlated subquery would double exactly the work the measurement
+ * above exists to keep down, so the one attempt this already found carries both
+ * values out in one column and `foldSubstitutedModelRows` splits them.
+ *
+ * `provider` is nullable, and COALESCE keeps a row that has none: without it
+ * the concatenation would be NULL and a real substitution would silently read
+ * as ordinary usage.
  */
 const SUBSTITUTION_ORIGIN_MODEL = `(
 						SELECT CASE
 							WHEN answered.outgoing_model <> answered.reported_model
-							THEN answered.outgoing_model
+							THEN answered.outgoing_model || char(31) || COALESCE(answered.provider, '')
 						END
 						FROM (
-							SELECT ra.outgoing_model, ra.reported_model
+							SELECT ra.outgoing_model, ra.reported_model, ra.provider
 							FROM routing_attempts ra
 							WHERE ra.request_id = r.id
 							  AND ra.kind = 'upstream_send'
@@ -265,6 +290,25 @@ const SUBSTITUTION_ORIGIN_MODEL = `(
 							LIMIT 1
 						) answered
 					)`;
+
+/**
+ * Split {@link SUBSTITUTION_ORIGIN_MODEL} back into the model that was sent and
+ * the provider that answered.
+ *
+ * An empty provider half means the attempt row carried none, and the comparison
+ * gets `undefined` — the provider-blind answer, not a guessed provider.
+ */
+function unpackSubstitutionOrigin(
+	packed: string | null,
+): { origin: string; provider: string | undefined } | null {
+	if (packed === null) return null;
+	const at = packed.indexOf(SUBSTITUTION_ORIGIN_SEPARATOR);
+	if (at < 0) return { origin: packed, provider: undefined };
+	return {
+		origin: packed.slice(0, at),
+		provider: packed.slice(at + 1) || undefined,
+	};
+}
 
 /**
  * Collapse the SQL's over-selected substitution candidates into final rows.
@@ -277,15 +321,26 @@ const SUBSTITUTION_ORIGIN_MODEL = `(
  * canonical form. Two spellings of one origin model would therefore render as
  * two rows. Left alone deliberately: canonicalising would mean picking one
  * spelling to show, and the row is meant to say what actually went on the wire.
+ *
+ * The provider is a judging input only: it decides whether the candidate
+ * survives, and never reaches the key. Two providers that really did swap the
+ * same pair are one line, as they were before the provider was carried at all.
+ *
+ * @param packedOrigin the {@link SUBSTITUTION_ORIGIN_MODEL} column, origin and
+ * provider in one string
  */
 function foldSubstitutedModelRows<T extends { model: string }>(
-	rows: ReadonlyArray<{ row: T; origin: string | null }>,
+	rows: ReadonlyArray<{ row: T; packedOrigin: string | null }>,
 	add: (into: T, from: T) => void,
 ): Array<T & { substitutedFrom?: string }> {
 	const byKey = new Map<string, T & { substitutedFrom?: string }>();
-	for (const { row, origin } of rows) {
+	for (const { row, packedOrigin } of rows) {
+		const candidate = unpackSubstitutionOrigin(packedOrigin);
 		const real =
-			origin !== null && isModelSubstitution(origin, row.model) ? origin : null;
+			candidate !== null &&
+			isModelSubstitution(candidate.origin, row.model, candidate.provider)
+				? candidate.origin
+				: null;
 		const key = JSON.stringify([row.model, real]);
 		const existing = byKey.get(key);
 		if (existing) add(existing, row);
@@ -881,7 +936,7 @@ export function createAnalyticsHandler(context: APIContext) {
 							.filter((row) => row.data_type === "model_distribution")
 							.map((row) => ({
 								row: { model: row.name, count: Number(row.count) || 0 },
-								origin: row.secondary_name,
+								packedOrigin: row.secondary_name,
 							})),
 						(into, from) => {
 							into.count += from.count;
@@ -913,7 +968,7 @@ export function createAnalyticsHandler(context: APIContext) {
 									requests: Number(row.requests) || 0,
 									totalTokens: Number(row.total_tokens) || 0,
 								},
-								origin: row.secondary_name,
+								packedOrigin: row.secondary_name,
 							})),
 						(into, from) => {
 							into.costUsd += from.costUsd;

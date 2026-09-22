@@ -2,6 +2,7 @@ import type {
 	AnthropicUsageData,
 	DevinUsageData,
 	FullUsageData,
+	GrokSubscriptionUsageData,
 	ZaiUsageData,
 } from "@clankermux/types";
 import {
@@ -44,6 +45,9 @@ export const SEVEN_DAY_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
 	"codex",
 	"alibaba-coding-plan",
 	"devin",
+	// One weekly pool feeds every Grok surface, so the week is the ONLY
+	// account-wide window here — hence no five-hour entry above.
+	"grok-subscription",
 ]);
 
 /**
@@ -117,6 +121,21 @@ export function isDevinShape(
 	);
 }
 
+/**
+ * Grok's payload is matched on its `kind` discriminant for the same reason
+ * Devin's is, plus one of its own: it carries none of the key names the other
+ * detectors sniff for, so a key-presence rule here would have to be re-proved
+ * against every shape added to {@link FullUsageData} afterwards.
+ */
+export function isGrokSubscriptionShape(
+	usageData: FullUsageData | null | undefined,
+): usageData is GrokSubscriptionUsageData {
+	return (
+		usageData != null &&
+		(usageData as { kind?: unknown }).kind === "grok-subscription"
+	);
+}
+
 export function isAnthropicStyleShape(
 	usageData: FullUsageData | null | undefined,
 ): boolean {
@@ -124,6 +143,7 @@ export function isAnthropicStyleShape(
 	if (isAlibabaShape(usageData)) return false;
 	if (isZaiShape(usageData)) return false;
 	if (isDevinShape(usageData)) return false;
+	if (isGrokSubscriptionShape(usageData)) return false;
 	// Flat five_hour/seven_day OR a non-empty `limits[]` (upstream is dropping the
 	// flat keys). Alibaba/Zai were already excluded above, so a bare `limits[]`
 	// array here is unambiguously an Anthropic-style payload.
@@ -141,6 +161,9 @@ export function extractFiveHour(
 	// Devin runs calendar daily and weekly windows and no 5-hour one. Null, not
 	// `{ pct: null }`: there is no window here to be waiting on a reading from.
 	if (isDevinShape(usageData)) return null;
+	// Same answer for the same reason: a Grok plan's one weekly pool covers
+	// every surface, so there is no shorter window to report on.
+	if (isGrokSubscriptionShape(usageData)) return null;
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			five_hour: { percentUsed: number | null; resetAt: number | null };
@@ -187,6 +210,16 @@ export function extractSevenDay(
 	usageData: FullUsageData,
 ): ExtractedValue | null {
 	if (isDevinShape(usageData)) return devinWindow(usageData.weekly);
+	if (isGrokSubscriptionShape(usageData)) {
+		// `weeklyUtilization` is null for UNKNOWN, never for zero, and carries
+		// through as `{ pct: null }` — the window exists and is waiting on a
+		// reading. Anything that folded it to 0 here would claim headroom on an
+		// account that may in fact be spent.
+		return {
+			pct: usageData.weeklyUtilization,
+			resetMs: normalizeResetMs(usageData.weeklyResetAt),
+		};
+	}
 	if (isAlibabaShape(usageData)) {
 		const data = usageData as {
 			weekly: { percentUsed: number | null; resetAt: number | null };

@@ -1821,3 +1821,55 @@ describe("projection wording", () => {
 		expect(hedgedPhrases(html)).toEqual([]);
 	});
 });
+
+describe("RateLimitProgress — grok-subscription weekly pool", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+
+	const grokUsage = (weeklyUtilization: number | null, weeklyResetAt: number) =>
+		({
+			kind: "grok-subscription",
+			weeklyUtilization,
+			weeklyResetAt,
+			weeklyPeriodStartAt: weeklyResetAt - 7 * DAY,
+			onDemandCapCents: null,
+			onDemandUsedCents: null,
+			prepaidBalanceCents: null,
+		}) as const;
+
+	it("renders the weekly utilization and its reset", () => {
+		const resetMs = Date.now() + 2 * DAY + 20_000;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				provider="grok-subscription"
+				usageData={grokUsage(37, resetMs)}
+			/>,
+		);
+
+		expect(html).toContain("Weekly");
+		expect(html).toContain("37%");
+		expect(html).toContain("Resets");
+		expect(html).toContain("2d 0h");
+	});
+
+	it("renders an unknown reading as unknown, with no bar and no percentage", () => {
+		const resetMs = Date.now() + 2 * DAY + 20_000;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				provider="grok-subscription"
+				usageData={grokUsage(null, resetMs)}
+			/>,
+		);
+
+		expect(html).toContain("Usage unknown");
+		// Neither a zero bar nor a full one: the Progress track is not rendered
+		// at all, so there is no fill to misread as a measurement.
+		expect(html).not.toContain('role="progressbar"');
+		expect(html).not.toContain("0%");
+		expect(html).not.toContain("100%");
+		// The reset IS real and stays visible — only the reading is missing.
+		expect(html).toContain("Resets");
+		expect(html).toContain("2d 0h");
+	});
+});

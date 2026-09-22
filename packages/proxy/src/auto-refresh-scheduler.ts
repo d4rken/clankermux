@@ -307,6 +307,7 @@ export class AutoRefreshScheduler {
 			// nothing below depends on their result.
 			await this.checkAndRefreshQwenTokens();
 			await this.checkAndRefreshCodexTokens();
+			await this.checkAndRefreshGrokSubscriptionTokens();
 
 			// Get all accounts with auto-refresh enabled that have reset windows OR need immediate refresh
 			const accounts = await this.db.query<{
@@ -1335,6 +1336,65 @@ export class AutoRefreshScheduler {
 				row,
 				provider,
 				providerLabel: "Codex",
+				proxyContext: this.proxyContext,
+			});
+		}
+	}
+
+	/**
+	 * Proactively refresh grok-subscription OAuth access tokens that are expiring
+	 * within the safety window. xAI hands out six-hour access tokens and rotates
+	 * the refresh token as it goes, so an idle SuperGrok account would otherwise
+	 * meet its next request with a dead bearer.
+	 */
+	private async checkAndRefreshGrokSubscriptionTokens(): Promise<void> {
+		if (!this.db) return;
+
+		const now = Date.now();
+		const expiryThreshold = now + TOKEN_SAFETY_WINDOW_MS;
+
+		const accounts = await this.db.query<{
+			id: string;
+			name: string;
+			provider: string;
+			refresh_token: string;
+			access_token: string | null;
+			expires_at: number | null;
+			custom_endpoint: string | null;
+		}>(
+			`
+			SELECT id, name, provider, refresh_token, access_token, expires_at, custom_endpoint
+			FROM accounts
+			WHERE disabled = 0 AND
+				provider = 'grok-subscription'
+				AND refresh_token IS NOT NULL
+				AND (
+					access_token IS NULL
+					OR expires_at IS NULL
+					OR expires_at <= ?
+				)
+		`,
+			[expiryThreshold],
+		);
+
+		if (accounts.length === 0) return;
+
+		log.info(
+			`Proactive grok-subscription token refresh: ${accounts.length} account(s) need refresh`,
+		);
+
+		for (const row of accounts) {
+			const provider = getProvider(row.provider);
+			if (!provider) {
+				log.error(
+					`No provider found for grok-subscription (account: ${row.name})`,
+				);
+				continue;
+			}
+			await refreshProactiveAccountToken({
+				row,
+				provider,
+				providerLabel: "Grok subscription",
 				proxyContext: this.proxyContext,
 			});
 		}

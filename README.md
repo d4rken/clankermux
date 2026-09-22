@@ -28,9 +28,9 @@ what each client may reach.
 * **Harnesses**: Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi. Two
   endpoints: `/wire/anthropic` for the Messages API, `/wire/openai` for
   Responses and Chat Completions.
-* **Providers**: Anthropic and Codex OAuth logins, Claude and OpenAI API keys,
-  OpenRouter, Ollama, and other compatible endpoints. Experimental ones are
-  marked in the dashboard.
+* **Providers**: Anthropic, Codex and Grok (SuperGrok / X Premium) OAuth
+  logins, Claude and OpenAI API keys, OpenRouter, Ollama, and other compatible
+  endpoints. Experimental ones are marked in the dashboard.
 * Priority-based account selection, preferring earlier weekly resets among
   accounts with capacity at the same priority.
 * Sticky session routing for prompt-cache hit rates, surviving priority edits

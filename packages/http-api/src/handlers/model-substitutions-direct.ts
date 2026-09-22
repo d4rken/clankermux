@@ -52,8 +52,19 @@ export interface ModelSubstitutionSources {
 		}>;
 		series: Array<{
 			bucketMs: number;
-			substituted: number;
 			comparable: number;
+			/**
+			 * Raw `reported_model <> outgoing_model` groups. The comparison
+			 * below decides which of them are really substitutions, exactly as
+			 * it does for `pairs` — a bucket the database counted itself could
+			 * never unlearn a spelling.
+			 */
+			candidates: Array<{
+				provider: string | null;
+				outgoingModel: string;
+				reportedModel: string;
+				count: number;
+			}>;
 		}>;
 	}>;
 	getAllAccounts: () => Promise<Account[]>;
@@ -67,9 +78,19 @@ export interface ModelSubstitutionSources {
  * before a normalisation existed would otherwise keep reading as substitutions
  * forever. A dated snapshot recorded last week must stop showing as a swap the
  * moment the comparison learns that spelling.
+ *
+ * The provider is part of the question, not decoration: some of what the
+ * comparison knows is a fact about one provider's naming, and the attempt rows
+ * carry the provider that answered. A row recorded before that column was
+ * populated passes `null` and gets the provider-blind comparison, which is the
+ * strictest answer available rather than a guess.
  */
-function isRealSubstitution(outgoing: string, reported: string): boolean {
-	return isModelSubstitution(outgoing, reported);
+function isRealSubstitution(
+	outgoing: string,
+	reported: string,
+	provider: string | null,
+): boolean {
+	return isModelSubstitution(outgoing, reported, provider ?? undefined);
 }
 
 /**
@@ -95,7 +116,9 @@ export function computeModelSubstitutions(
 		]),
 	);
 	const pairs: ModelSubstitutionPair[] = raw.pairs
-		.filter((p) => isRealSubstitution(p.outgoingModel, p.reportedModel))
+		.filter((p) =>
+			isRealSubstitution(p.outgoingModel, p.reportedModel, p.provider),
+		)
 		.map((p) => ({
 			accountId: p.accountId,
 			accountName: nameById.get(p.accountId) ?? p.accountId,
@@ -106,6 +129,7 @@ export function computeModelSubstitutions(
 				p.outgoingModel,
 				p.reportedModel,
 				exceptions,
+				p.provider,
 			),
 			substituted: p.substituted,
 			comparable:
@@ -143,9 +167,21 @@ export function computeModelSubstitutions(
 		}))
 		.sort((a, b) => a.accountName.localeCompare(b.accountName));
 
+	// Each bucket is counted by the same rule as the pair list, so the chart and
+	// the table below it cannot disagree about what happened.
 	const series: ModelSubstitutionPoint[] = raw.series.map((point) => ({
 		bucketMs: point.bucketMs,
-		substituted: point.substituted,
+		substituted: point.candidates.reduce(
+			(sum, candidate) =>
+				isRealSubstitution(
+					candidate.outgoingModel,
+					candidate.reportedModel,
+					candidate.provider,
+				)
+					? sum + candidate.count
+					: sum,
+			0,
+		),
 		comparable: point.comparable,
 	}));
 

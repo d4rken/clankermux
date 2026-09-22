@@ -174,7 +174,7 @@ describe("all production INSERT INTO accounts sites are guarded", () => {
 		// api-key-account-add.ts. Only the OAuth insert remains in accounts.ts.
 		["packages/http-api/src/handlers/accounts.ts", 1],
 		["packages/http-api/src/handlers/api-key-account-add.ts", 1],
-		["packages/http-api/src/handlers/oauth.ts", 2],
+		["packages/http-api/src/handlers/oauth.ts", 3],
 		["packages/oauth-flow/src/index.ts", 2],
 	] as const;
 

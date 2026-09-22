@@ -243,6 +243,39 @@ export interface AlibabaCodingPlanUsageData {
 	remainingDays: number | null;
 }
 
+// Usage data for grok-subscription (SuperGrok / X Premium) accounts.
+/**
+ * A paid Grok plan draws Chat, Imagine, Voice, Build and API from ONE weekly
+ * pool, reported as a percentage — so there is no session window here, and
+ * deliberately no `five_hour` key: several consumers sniff usage shapes by key
+ * presence rather than by discriminant (`usage-throttling.ts`,
+ * `usage-window-extract.ts`) and would read one as an Anthropic-style window.
+ * The `kind` discriminant is what those consumers should match on instead.
+ */
+export interface GrokSubscriptionUsageData {
+	kind: "grok-subscription";
+	/**
+	 * Weekly pool utilization percent (0-100), or null for UNKNOWN.
+	 *
+	 * Null is NOT zero. `config.creditUsagePercent` was absent from the live
+	 * billing probe, and proto3 omits zero-valued scalars — but that explains how
+	 * a zero COULD vanish, not that the endpoint ever populates the field for
+	 * this billing mode. A fabricated 0% reads as actionable headroom and could
+	 * release a cooldown on an account that is in fact exhausted.
+	 */
+	weeklyUtilization: number | null;
+	/** ms-epoch of `currentPeriod.end`: when the weekly pool refills. */
+	weeklyResetAt: number;
+	/** ms-epoch of `currentPeriod.start`; null when the payload omits it. */
+	weeklyPeriodStartAt: number | null;
+	/** `onDemandCap.val`, in cents. Null when the payload omits the wrapper. */
+	onDemandCapCents: number | null;
+	/** `onDemandUsed.val`, in cents. Null when the payload omits the wrapper. */
+	onDemandUsedCents: number | null;
+	/** `prepaidBalance.val`, in cents. Null when the payload omits the wrapper. */
+	prepaidBalanceCents: number | null;
+}
+
 // Combined usage data type that supports all providers
 /**
  * Devin's `PlanStatus.gracePeriodStatus`, lowercased. Captured and DISPLAYED
@@ -286,7 +319,8 @@ export type FullUsageData =
 	| AnthropicUsageData
 	| ZaiUsageData
 	| KiloUsageData
-	| AlibabaCodingPlanUsageData;
+	| AlibabaCodingPlanUsageData
+	| GrokSubscriptionUsageData;
 
 /**
  * Normalized account profile identity, resolved from provider token claims
@@ -832,7 +866,8 @@ export interface AccountListItem {
 		| "ollama"
 		| "ollama-cloud"
 		| "grok"
-		| "mimo";
+		| "mimo"
+		| "grok-subscription";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
