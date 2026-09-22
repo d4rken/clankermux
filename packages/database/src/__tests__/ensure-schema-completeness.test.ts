@@ -228,6 +228,39 @@ describe("ensureSchema completeness", () => {
 		}
 	});
 
+	it("creates the anthropic_banked_reset_events table and its indexes", () => {
+		expect(tableExists(db, "anthropic_banked_reset_events")).toBe(true);
+		const cols = columnNames(db, "anthropic_banked_reset_events");
+		for (const col of [
+			"id",
+			"account_id",
+			"account_name",
+			"grant_id",
+			"trigger",
+			"cause",
+			"attempt_seq",
+			"request_id",
+			"status",
+			"reason",
+			"cleared",
+			"resets_left",
+			"error_message",
+			"grant_ends_at",
+			"next_attempt_at",
+			"created_at",
+			"resolved_at",
+		]) {
+			expect(cols.has(col)).toBe(true);
+		}
+		for (const idx of [
+			"idx_anthropic_banked_reset_events_auto_attempt",
+			"idx_anthropic_banked_reset_events_request",
+			"idx_anthropic_banked_reset_events_account",
+		]) {
+			expect(indexExists(db, idx)).toBe(true);
+		}
+	});
+
 	it("creates the representative performance indexes", () => {
 		for (const idx of [
 			"idx_requests_summary_covering",

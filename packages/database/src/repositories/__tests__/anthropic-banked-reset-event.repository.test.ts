@@ -1,0 +1,306 @@
+/**
+ * AnthropicBankedResetEventRepository — the ledger behind banked-reset claims.
+ * Every claim, manual or automatic, is written `pending` BEFORE its POST, so a
+ * crash or a lost response is replayed with the same request_id instead of
+ * spending a second reset. Runs against the real ensureSchema() table so the
+ * unique indexes and CHECKs are the deployed ones.
+ */
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+// Force @clankermux/core to initialise before @clankermux/types resolves its
+// circular dependency. Same pattern as codex-reset-credit-event.repository.test.ts.
+import "@clankermux/core";
+import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
+import { ensureSchema } from "../../migrations";
+import { AnthropicBankedResetEventRepository } from "../anthropic-banked-reset-event.repository";
+
+const NOW = Date.parse("2026-09-22T12:00:00Z");
+const HOUR = 60 * 60 * 1000;
+
+const AUTO = {
+	accountId: "acc-1",
+	accountName: "Claude One",
+	grantId: "g_week_1",
+	grantEndsAt: NOW + 5 * 60_000,
+	cause: "expiry" as const,
+	now: NOW,
+};
+
+const MANUAL = {
+	accountId: "acc-1",
+	accountName: "Claude One",
+	grantId: "g_week_1",
+	requestId: "req-manual-1",
+	grantEndsAt: NOW + HOUR,
+	now: NOW,
+};
+
+describe("AnthropicBankedResetEventRepository", () => {
+	let db: Database;
+	let repo: AnthropicBankedResetEventRepository;
+
+	beforeEach(() => {
+		db = new Database(":memory:");
+		ensureSchema(db);
+		repo = new AnthropicBankedResetEventRepository(new BunSqlAdapter(db));
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	describe("claimAutoAttempt", () => {
+		it("mints attempt 1 as a pending row with a deterministic id and a valid request id", async () => {
+			const claim = await repo.claimAutoAttempt(AUTO);
+			expect(claim).toMatchObject({
+				id: "acc-1:g_week_1:1",
+				attemptSeq: 1,
+				reused: false,
+			});
+			expect(claim?.requestId).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+
+			const row = await repo.findByRequestId("acc-1", claim?.requestId ?? "");
+			expect(row).toMatchObject({
+				id: "acc-1:g_week_1:1",
+				trigger: "auto",
+				cause: "expiry",
+				status: "pending",
+				grant_id: "g_week_1",
+				grant_ends_at: AUTO.grantEndsAt,
+				next_attempt_at: null,
+				created_at: NOW,
+				resolved_at: null,
+			});
+		});
+
+		it("reuses a pending attempt with the SAME request id", async () => {
+			const first = await repo.claimAutoAttempt(AUTO);
+			const again = await repo.claimAutoAttempt({
+				...AUTO,
+				cause: "weekly-limit",
+				now: NOW + 60_000,
+			});
+			expect(again).toEqual({
+				id: first?.id ?? "",
+				requestId: first?.requestId ?? "",
+				attemptSeq: 1,
+				reused: true,
+			});
+			// The original cause stays on the row.
+			expect((await repo.findRecentForAccount("acc-1", 10))[0]?.cause).toBe(
+				"expiry",
+			);
+		});
+
+		it("mints the next attempt_seq with a NEW request id once the last one resolved", async () => {
+			const first = await repo.claimAutoAttempt(AUTO);
+			if (!first) throw new Error("expected a claim");
+			await repo.resolveAttempt(first.id, {
+				status: "not_limited",
+				reason: "not_limited",
+				now: NOW + 1,
+			});
+			const second = await repo.claimAutoAttempt({ ...AUTO, now: NOW + 2 });
+			expect(second?.attemptSeq).toBe(2);
+			expect(second?.id).toBe("acc-1:g_week_1:2");
+			expect(second?.requestId).not.toBe(first.requestId);
+			expect(await repo.nextAttemptSeq("acc-1", "g_week_1")).toBe(3);
+		});
+
+		it("absorbs two concurrent claims into one row", async () => {
+			const [a, b] = await Promise.all([
+				repo.claimAutoAttempt(AUTO),
+				repo.claimAutoAttempt(AUTO),
+			]);
+			expect(a?.id).toBe(b?.id ?? "");
+			expect(a?.requestId).toBe(b?.requestId ?? "");
+			expect(await repo.findPendingForAccount("acc-1")).toHaveLength(1);
+		});
+
+		it("blocks a weekly claim while another auto attempt on the account is pending, but not an expiry claim", async () => {
+			await repo.claimAutoAttempt({ ...AUTO, grantId: "g_other" });
+			expect(
+				await repo.claimAutoAttempt({
+					...AUTO,
+					cause: "weekly-limit",
+				}),
+			).toBeNull();
+			expect(
+				await repo.claimAutoAttempt({ ...AUTO, cause: "expiry" }),
+			).not.toBeNull();
+		});
+	});
+
+	describe("beginManualAttempt", () => {
+		it("creates a pending manual row with the caller's request id", async () => {
+			const begun = await repo.beginManualAttempt(MANUAL);
+			expect(begun.kind).toBe("created");
+			expect(begun.row).toMatchObject({
+				trigger: "manual",
+				cause: null,
+				attempt_seq: null,
+				request_id: "req-manual-1",
+				status: "pending",
+				grant_ends_at: MANUAL.grantEndsAt,
+			});
+		});
+
+		it("reconciles a replayed request id onto the existing row", async () => {
+			const first = await repo.beginManualAttempt(MANUAL);
+			const replay = await repo.beginManualAttempt({
+				...MANUAL,
+				now: NOW + 5_000,
+			});
+			expect(replay.kind).toBe("existing");
+			expect(replay.row.id).toBe(first.row.id);
+			expect(await repo.findRecentForAccount("acc-1", 10)).toHaveLength(1);
+		});
+
+		it("rejects a request id already bound to a different grant", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			const clash = await repo.beginManualAttempt({
+				...MANUAL,
+				grantId: "g_other",
+			});
+			expect(clash.kind).toBe("grant_mismatch");
+			expect(clash.row.grant_id).toBe("g_week_1");
+			expect(await repo.findRecentForAccount("acc-1", 10)).toHaveLength(1);
+		});
+
+		it("scopes request ids per account", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			const other = await repo.beginManualAttempt({
+				...MANUAL,
+				accountId: "acc-2",
+			});
+			expect(other.kind).toBe("created");
+		});
+	});
+
+	describe("resolution and replay bookkeeping", () => {
+		it("resolves a pending row once, storing reason, cleared and resets left", async () => {
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			expect(
+				await repo.resolveAttempt(row.id, {
+					status: "reset",
+					reason: null,
+					cleared: ["seven_day", "five_hour"],
+					resetsLeft: 1,
+					now: NOW + 1_000,
+				}),
+			).toBe(true);
+			expect(
+				await repo.resolveAttempt(row.id, {
+					status: "failed",
+					errorMessage: "late",
+					now: NOW + 2_000,
+				}),
+			).toBe(false);
+
+			const stored = await repo.findByRequestId("acc-1", "req-manual-1");
+			expect(stored).toMatchObject({
+				status: "reset",
+				reason: null,
+				cleared: '["seven_day","five_hour"]',
+				resets_left: 1,
+				error_message: null,
+				resolved_at: NOW + 1_000,
+			});
+		});
+
+		it("schedules the next replay only on a still-pending row", async () => {
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			expect(
+				await repo.setNextAttemptAt(row.id, NOW + 60_000, "HTTP 503"),
+			).toBe(true);
+			const pending = await repo.findPendingForAccount("acc-1");
+			expect(pending).toHaveLength(1);
+			expect(pending[0]).toMatchObject({
+				next_attempt_at: NOW + 60_000,
+				error_message: "HTTP 503",
+			});
+
+			await repo.resolveAttempt(row.id, { status: "cooldown", now: NOW + 1 });
+			expect(await repo.setNextAttemptAt(row.id, NOW + 120_000, null)).toBe(
+				false,
+			);
+			expect(await repo.findPendingForAccount("acc-1")).toEqual([]);
+		});
+
+		it("filters pending rows by trigger, oldest first", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			await repo.claimAutoAttempt({ ...AUTO, now: NOW + 10 });
+			expect(
+				(await repo.findPendingForAccount("acc-1")).map((r) => r.trigger),
+			).toEqual(["manual", "auto"]);
+			expect(
+				(await repo.findPendingForAccount("acc-1", "auto")).map(
+					(r) => r.trigger,
+				),
+			).toEqual(["auto"]);
+		});
+
+		it("expires rows pending for an hour or more to failed", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			await repo.beginManualAttempt({
+				...MANUAL,
+				requestId: "req-fresh",
+				now: NOW + 30 * 60_000,
+			});
+			expect(await repo.expireStalePending(NOW + HOUR - 1)).toBe(0);
+			expect(await repo.expireStalePending(NOW + HOUR)).toBe(1);
+
+			const expired = await repo.findByRequestId("acc-1", "req-manual-1");
+			expect(expired?.status).toBe("failed");
+			expect(expired?.resolved_at).toBe(NOW + HOUR);
+			expect(expired?.error_message).not.toBeNull();
+			expect((await repo.findByRequestId("acc-1", "req-fresh"))?.status).toBe(
+				"pending",
+			);
+		});
+	});
+
+	describe("getLatestAutoApplyCooldownAnchorAt", () => {
+		it("anchors on the latest auto reset, already_used or not_limited resolution only", async () => {
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();
+
+			const statuses = [
+				["reset", NOW + 1],
+				["cooldown", NOW + 50],
+				["not_limited", NOW + 10],
+				["failed", NOW + 60],
+				["already_used", NOW + 20],
+				["ineligible", NOW + 70],
+			] as const;
+			for (const [status, at] of statuses) {
+				const claim = await repo.claimAutoAttempt({ ...AUTO, now: at });
+				if (!claim) throw new Error("expected a claim");
+				await repo.resolveAttempt(claim.id, { status, now: at });
+			}
+			// A manual reset never anchors the automatic cooldown.
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			await repo.resolveAttempt(row.id, { status: "reset", now: NOW + 99 });
+
+			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBe(
+				NOW + 20,
+			);
+		});
+	});
+
+	it("lists recent events newest first", async () => {
+		await repo.beginManualAttempt(MANUAL);
+		await repo.beginManualAttempt({
+			...MANUAL,
+			requestId: "req-2",
+			now: NOW + 1,
+		});
+		await repo.beginManualAttempt({
+			...MANUAL,
+			requestId: "req-3",
+			now: NOW + 2,
+		});
+		expect(
+			(await repo.findRecentForAccount("acc-1", 2)).map((r) => r.request_id),
+		).toEqual(["req-3", "req-2"]);
+	});
+});

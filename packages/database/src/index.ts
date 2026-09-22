@@ -37,6 +37,15 @@ export {
 // dashboard worker against its own connection — stats, usage-history,
 // memory-history and payments-summary all run there)
 export { AccountPaymentRepository } from "./repositories/account-payment.repository";
+export {
+	ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS,
+	type AnthropicBankedResetAutoClaim,
+	AnthropicBankedResetEventRepository,
+	type AnthropicBankedResetEventResolvedStatus,
+	type AnthropicBankedResetEventRow,
+	type AnthropicBankedResetManualBegin,
+	type AnthropicBankedResetResolution,
+} from "./repositories/anthropic-banked-reset-event.repository";
 export { ApiKeyRepository } from "./repositories/api-key.repository";
 export {
 	AuthRepository,

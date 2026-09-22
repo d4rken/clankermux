@@ -958,6 +958,54 @@ export function ensureSchema(db: Database): void {
 			ON codex_reset_credit_events(account_id, created_at DESC)`,
 	);
 
+	// Ledger of Anthropic banked-reset claims (Claude Code's cedar_ember
+	// program), manual and automatic. Every row is written 'pending' before its
+	// POST and replayed with the same request_id until it resolves or expires to
+	// 'failed'. Auto rows use a deterministic id
+	// "{account_id}:{grant_id}:{attempt_seq}". Times are ms epoch; cleared is a
+	// JSON array of window names. Deliberately NO foreign key on account_id: the
+	// ledger must survive account deletion.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS anthropic_banked_reset_events (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			account_name TEXT NOT NULL,
+			grant_id TEXT NOT NULL,
+			trigger TEXT NOT NULL CHECK (trigger IN ('manual','auto')),
+			cause TEXT CHECK (cause IN ('expiry','weekly-limit')),
+			attempt_seq INTEGER,
+			request_id TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('pending','reset','already_used','not_limited','cooldown','ineligible','unavailable','failed')),
+			reason TEXT,
+			cleared TEXT,
+			resets_left INTEGER,
+			error_message TEXT,
+			grant_ends_at INTEGER,
+			next_attempt_at INTEGER,
+			created_at INTEGER NOT NULL,
+			resolved_at INTEGER
+		)
+	`);
+
+	// One auto attempt row per (account, grant, seq): INSERT OR IGNORE against
+	// it makes concurrent auto claims race-safe.
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_auto_attempt
+			ON anthropic_banked_reset_events(account_id, grant_id, attempt_seq)
+			WHERE trigger = 'auto'`,
+	);
+
+	// A replayed request_id lands on its existing row instead of a new claim.
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_request
+			ON anthropic_banked_reset_events(account_id, request_id)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_account
+			ON anthropic_banked_reset_events(account_id, created_at DESC)`,
+	);
+
 	// Dashboard/management session auth.
 	//
 	// `auth_password` holds AT MOST ONE row — the CHECK on the primary key is

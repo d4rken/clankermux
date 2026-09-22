@@ -953,6 +953,21 @@ export interface AnthropicBankedResetClaimResult {
 	errorMessage: string | null;
 }
 
+/**
+ * Lifecycle status of an `anthropic_banked_reset_events` ledger row. Every
+ * claim is written `pending` before its POST; the rest are resolutions, with
+ * `failed` for a claim that stayed unconfirmed for an hour.
+ */
+export type AnthropicBankedResetEventStatus =
+	| "pending"
+	| "reset"
+	| "already_used"
+	| "not_limited"
+	| "cooldown"
+	| "ineligible"
+	| "unavailable"
+	| "failed";
+
 // UI display type - used in CLI and web dashboard
 export interface AccountDisplay {
 	id: string;
