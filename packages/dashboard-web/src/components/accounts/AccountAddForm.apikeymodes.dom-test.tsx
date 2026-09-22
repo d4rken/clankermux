@@ -208,6 +208,25 @@ describe("account add form: API key provider modes", () => {
 		expect(saved.openrouter[0].apiKey).toBe("openrouter-key");
 	});
 
+	it("offers the Grok subscription mode a device login and no API key field", async () => {
+		await renderForm();
+		await selectMode("Grok (Subscription)");
+		// Two Grok modes sit next to each other in the picker and only one of
+		// them takes a pasted key: the subscription account is created by the
+		// xAI device flow, so an API key field here would collect a credential
+		// that is never sent anywhere.
+		expect(document.querySelector("#apiKey")).toBeNull();
+		expect(document.querySelector("#customEndpoint")).toBeNull();
+		expect(
+			byText<HTMLButtonElement>("button", "Sign in with Grok"),
+		).not.toBeNull();
+		expect(
+			[...document.querySelectorAll("button")].some(
+				(node) => node.textContent?.trim() === "Continue",
+			),
+		).toBe(false);
+	});
+
 	it("clears the API key when the mode changes", async () => {
 		await renderForm();
 		await selectMode("Anthropic-Compatible");

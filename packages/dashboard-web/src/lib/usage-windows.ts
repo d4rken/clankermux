@@ -1,6 +1,7 @@
 import {
 	classifyScopedFamilyEvidence,
 	getModelFamily,
+	isGrokSubscriptionShape,
 	type LiveScopedFamily,
 	normalizeAnthropicUsage,
 	servableClassFor,
@@ -34,8 +35,13 @@ export interface UsageDisplay {
 	 * never be rendered as a bar, a percentage or a countdown — a 0% bar claims a
 	 * measurement nobody made, and the generic "Usage data unavailable" copy
 	 * blames the proxy for a fact about the account.
+	 *
+	 * `"unknown"`: the window is real and its reset is known, but the provider
+	 * reported no percentage for it. `utilization` is null BY CONTRACT and gets
+	 * no bar, for the same reason: an empty track is a claim of zero usage that
+	 * nobody made. `resetTime` here IS a real deadline and does render.
 	 */
-	state?: "unopened";
+	state?: "unopened" | "unknown";
 }
 
 /**
@@ -146,6 +152,31 @@ export function classifyUsageCard(
 				});
 		}
 		return { kind: "windows", usages };
+	}
+	// A paid Grok plan draws Chat, Imagine, Voice, Build and API from ONE weekly
+	// pool, so it renders one card and never a five-hour one. Matched on the
+	// `kind` discriminant, not on key presence: this payload shares no key names
+	// with the shapes sniffed further down, and matching a name it happens not
+	// to carry today is how a later union member inherits the wrong semantics.
+	if (isGrokSubscriptionShape(usageData)) {
+		const resetMs = usageData.weeklyResetAt;
+		const utilization = usageData.weeklyUtilization;
+		return {
+			kind: "windows",
+			usages: [
+				{
+					utilization,
+					window: "weekly",
+					resetTime: Number.isFinite(resetMs)
+						? new Date(resetMs).toISOString()
+						: null,
+					// Null is UNKNOWN, never 0. The `unknown` state is what keeps the
+					// card from drawing an empty bar beside a real countdown, which
+					// reads as a full week of untouched quota.
+					...(utilization === null ? { state: "unknown" as const } : {}),
+				},
+			],
+		};
 	}
 	// Kilo Gateway: a credit balance in USD instead of a utilization window.
 	if (providerShowsCreditsBalance(provider) && usageData) {

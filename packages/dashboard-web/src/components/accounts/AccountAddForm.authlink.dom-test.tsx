@@ -20,9 +20,9 @@ import { AccountAddForm } from "./AccountAddForm";
  * `window.open` is therefore counted, not merely stubbed — zero calls is the
  * guarantee.
  *
- * All four legs are covered: the Anthropic/console code flow, the Codex and
- * Qwen device flows (which also surface a user code to copy), and the Z.AI
- * sign-in whose redirect URL comes back by paste.
+ * All five legs are covered: the Anthropic/console code flow, the Codex, Qwen
+ * and Grok subscription device flows (which also surface a user code to copy),
+ * and the Z.AI sign-in whose redirect URL comes back by paste.
  *
  * Mounted for real rather than rendered to static markup: the link only exists
  * after the init call resolves, which needs a click and a state transition.
@@ -37,7 +37,7 @@ const AUTH_URL =
 const USER_CODE = "ABCD-1234";
 /** Failure the stubbed status poll reports, to send a leg to its error step. */
 const POLL_ERROR = "boom";
-/** Poll cadence both device flows hand to `setInterval`. */
+/** Poll cadence every device flow hands to `setInterval`. */
 const POLL_INTERVAL_MS = 3000;
 
 let root: Root | null = null;
@@ -319,6 +319,40 @@ const DEVICE_FLOWS: Array<
 					userCode: USER_CODE,
 				};
 			});
+		},
+	],
+	[
+		"Grok",
+		"Grok (Subscription)",
+		"Sign in with Grok",
+		() => {
+			spyOn(api, "initGrokSubscriptionDeviceFlow").mockImplementation(
+				async () => ({
+					sessionId: "s1",
+					authUrl: AUTH_URL,
+					userCode: USER_CODE,
+				}),
+			);
+			spyOn(api, "getGrokSubscriptionAuthStatus").mockImplementation(
+				async () => ({ status: "pending" as const }),
+			);
+		},
+		() => {
+			spyOn(api, "getGrokSubscriptionAuthStatus").mockImplementation(
+				async () => ({ status: "error" as const, error: POLL_ERROR }),
+			);
+		},
+		(gate) => {
+			spyOn(api, "initGrokSubscriptionDeviceFlow").mockImplementation(
+				async () => {
+					await gate();
+					return {
+						sessionId: "s2",
+						authUrl: AUTH_URL,
+						userCode: USER_CODE,
+					};
+				},
+			);
 		},
 	],
 ];

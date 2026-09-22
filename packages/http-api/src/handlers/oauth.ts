@@ -27,6 +27,11 @@ import {
 	pollCodexForToken,
 } from "@clankermux/providers/codex";
 import {
+	initiateGrokSubscriptionDeviceFlow,
+	pollGrokSubscriptionForToken,
+	resolveGrokSubscriptionIdentity,
+} from "@clankermux/providers/grok-subscription";
+import {
 	initiateDeviceFlow as initiateQwenDeviceFlow,
 	pollForToken as pollQwenForToken,
 } from "@clankermux/providers/qwen";
@@ -1124,6 +1129,371 @@ export function createOAuthCallbackHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to process OAuth callback"),
+			);
+		}
+	};
+}
+
+// In-memory session store for the xAI device flow (grok-subscription accounts)
+type GrokSubscriptionSession =
+	| { status: "pending"; accountName: string }
+	| { status: "complete"; accountName: string }
+	| { status: "error"; accountName: string; error: string };
+
+const grokSubscriptionSessions = new Map<string, GrokSubscriptionSession>();
+
+const GROK_SUBSCRIPTION_SESSION_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * The network edges of the flow, injectable so tests never reach auth.x.ai or
+ * the chat proxy.
+ */
+export interface GrokSubscriptionOAuthDeps {
+	initiate: typeof initiateGrokSubscriptionDeviceFlow;
+	poll: typeof pollGrokSubscriptionForToken;
+	resolveIdentity: typeof resolveGrokSubscriptionIdentity;
+}
+
+const liveGrokSubscriptionOAuth: GrokSubscriptionOAuthDeps = {
+	initiate: initiateGrokSubscriptionDeviceFlow,
+	poll: pollGrokSubscriptionForToken,
+	resolveIdentity: resolveGrokSubscriptionIdentity,
+};
+
+function endGrokSubscriptionSession(
+	sessionId: string,
+	session: GrokSubscriptionSession,
+): void {
+	grokSubscriptionSessions.set(sessionId, session);
+	// Unref'd: expiring a finished session is housekeeping, never a reason to
+	// hold the process open.
+	setTimeout(
+		() => grokSubscriptionSessions.delete(sessionId),
+		GROK_SUBSCRIPTION_SESSION_TTL_MS,
+	).unref?.();
+}
+
+/**
+ * Capture identity for an account whose credentials are ALREADY durable.
+ *
+ * Strictly best-effort and strictly last: the `/v1/user` read behind it can 426
+ * on the version gate, 403, time out or answer nonsense, and a failure there
+ * must not take down the token write that preceded it — on a reauth that would
+ * leave the account holding a refresh token xAI has already replaced.
+ *
+ * Which writer is used is not cosmetic: only a real profile read may stamp
+ * `identity_profile_fetched_at`, so a claims-only capture goes through the
+ * token-agnostic sibling.
+ */
+async function captureGrokSubscriptionIdentity(
+	dbOps: DatabaseOperations,
+	account: { id: string; name: string },
+	tokens: { access_token: string; id_token?: string },
+	deps: GrokSubscriptionOAuthDeps,
+): Promise<void> {
+	try {
+		const resolved = await deps.resolveIdentity(
+			tokens.access_token,
+			tokens.id_token ?? null,
+		);
+		if (!resolved.hasIdentity) return;
+		if (resolved.fromProfile) {
+			await dbOps.setAccountIdentityFromProfile(account.id, resolved.identity);
+		} else {
+			await dbOps.setAccountIdentity(account.id, resolved.identity);
+		}
+	} catch (err) {
+		log.warn(
+			`Identity capture failed for grok-subscription account '${account.name}':`,
+			err,
+		);
+	}
+}
+
+/**
+ * Create a grok-subscription device flow initialization handler.
+ * Returns { sessionId, authUrl, userCode } immediately, then polls in background.
+ */
+export function createGrokSubscriptionDeviceFlowInitHandler(
+	dbOps: DatabaseOperations,
+	deps: GrokSubscriptionOAuthDeps = liveGrokSubscriptionOAuth,
+) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const name = validateString(body.name, "name", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+				pattern: patterns.accountName,
+				patternErrorMessage:
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
+			});
+
+			if (!name) {
+				return errorResponse(BadRequest("Valid account name is required"));
+			}
+
+			const priority = validatePriority(body.priority ?? 0, "priority");
+
+			let deviceFlow: Awaited<ReturnType<typeof deps.initiate>>;
+			try {
+				deviceFlow = await deps.initiate();
+			} catch (err) {
+				log.error("xAI device flow initiation failed:", err);
+				return errorResponse(
+					InternalServerError(
+						`Failed to initiate xAI device flow: ${(err as Error).message}`,
+					),
+				);
+			}
+
+			const sessionId = crypto.randomUUID();
+			grokSubscriptionSessions.set(sessionId, {
+				status: "pending",
+				accountName: name,
+			});
+
+			// Poll in background — do not await
+			(async () => {
+				try {
+					const tokens = await deps.poll(deviceFlow);
+
+					const accountId = crypto.randomUUID();
+					const now = Date.now();
+
+					// auto_pause_on_overage_enabled is named explicitly rather than
+					// left to the table default: databases at or below the migration
+					// floor have DEFAULT 0 where a fresh install has DEFAULT 1, and
+					// no ALTER can change that, so inheriting it would silently give
+					// older installs accounts with overage auto-pause off.
+					await insertAccountUnique(
+						dbOps.getAdapter(),
+						`INSERT INTO accounts (
+							id, name, provider, api_key, refresh_token, access_token,
+							expires_at, created_at, request_count, total_requests, priority,
+							custom_endpoint,
+							auto_pause_on_overage_enabled
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1)`,
+						[
+							accountId,
+							name,
+							"grok-subscription",
+							null,
+							tokens.refresh_token,
+							tokens.access_token,
+							now + tokens.expires_in * 1000,
+							now,
+							priority,
+							// The provider resolves the chat proxy itself and ignores a
+							// stored override (honoursCustomEndpoint: false).
+							null,
+						],
+						name,
+					);
+
+					await captureGrokSubscriptionIdentity(
+						dbOps,
+						{ id: accountId, name },
+						tokens,
+						deps,
+					);
+
+					await primeUsagePollingForNewAccount({
+						id: accountId,
+						provider: "grok-subscription",
+						name,
+					});
+
+					endGrokSubscriptionSession(sessionId, {
+						status: "complete",
+						accountName: name,
+					});
+					log.info(
+						`grok-subscription account '${name}' added via web device flow`,
+					);
+				} catch (err) {
+					log.error(
+						`grok-subscription device flow polling failed for '${name}':`,
+						err,
+					);
+					endGrokSubscriptionSession(sessionId, {
+						status: "error",
+						accountName: name,
+						error: (err as Error).message,
+					});
+				}
+			})();
+
+			return jsonResponse({
+				success: true,
+				sessionId,
+				authUrl:
+					deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+				userCode: deviceFlow.userCode,
+			});
+		} catch (error) {
+			log.error("grok-subscription device flow init error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to initialize the xAI device flow"),
+			);
+		}
+	};
+}
+
+/**
+ * Create a grok-subscription device flow status handler.
+ * Returns { status, error? } for the given sessionId.
+ */
+export function createGrokSubscriptionDeviceFlowStatusHandler() {
+	return (sessionId: string): Response => {
+		const session = grokSubscriptionSessions.get(sessionId);
+		if (!session) {
+			return errorResponse(NotFound("Session not found or expired"));
+		}
+		if (session.status === "error") {
+			return jsonResponse({ status: "error", error: session.error });
+		}
+		return jsonResponse({ status: session.status });
+	};
+}
+
+/**
+ * Create a grok-subscription re-authentication handler.
+ * Re-runs the device flow for an existing account, updating tokens in-place.
+ * Returns { sessionId, authUrl, userCode } immediately, then polls in background.
+ */
+export function createGrokSubscriptionReauthHandler(
+	dbOps: DatabaseOperations,
+	deps: GrokSubscriptionOAuthDeps = liveGrokSubscriptionOAuth,
+) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const accountId = validateString(body.accountId, "accountId", {
+				required: true,
+				minLength: 1,
+				maxLength: 100,
+			});
+
+			if (!accountId) {
+				return errorResponse(BadRequest("Valid accountId is required"));
+			}
+
+			const account = await dbOps.getAdapter().get<{
+				id: string;
+				name: string;
+				provider: string;
+			}>("SELECT id, name, provider FROM accounts WHERE id = ?", [accountId]);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider !== "grok-subscription") {
+				return errorResponse(
+					BadRequest(
+						"Re-authentication via the xAI device flow is only supported for grok-subscription accounts",
+					),
+				);
+			}
+
+			let deviceFlow: Awaited<ReturnType<typeof deps.initiate>>;
+			try {
+				deviceFlow = await deps.initiate();
+			} catch (err) {
+				log.error("xAI reauth device flow initiation failed:", err);
+				return errorResponse(
+					InternalServerError(
+						`Failed to initiate xAI device flow: ${(err as Error).message}`,
+					),
+				);
+			}
+
+			const sessionId = crypto.randomUUID();
+			grokSubscriptionSessions.set(sessionId, {
+				status: "pending",
+				accountName: account.name,
+			});
+
+			// Poll in background — do not await
+			(async () => {
+				try {
+					const tokens = await deps.poll(deviceFlow);
+
+					// The canonical token-write path: it stamps
+					// refresh_token_issued_at and COALESCE-merges identity, so the
+					// capture below adds to the row without erasing anything.
+					await dbOps.updateAccountTokens(
+						account.id,
+						tokens.access_token,
+						Date.now() + tokens.expires_in * 1000,
+						tokens.refresh_token,
+					);
+
+					// Auto-resume an oauth_invalid_grant pause and drop stale refresh
+					// backoff so the account returns to rotation immediately.
+					// Best-effort: the tokens were already updated, so a resume failure
+					// must not fail the reauth or skip the cache clear.
+					try {
+						await dbOps.resumeAccountIfNeedsReauth(account.id);
+					} catch (resumeErr) {
+						log.error(
+							`Failed to auto-resume needs-reauth pause for '${account.name}':`,
+							resumeErr,
+						);
+					}
+					clearAccountRefreshCache(account.id);
+					// See the Qwen handler: only a completed reauth may drop a pending
+					// rotation, because these fresh credentials supersede it.
+					clearPendingRotation(account.id);
+
+					await captureGrokSubscriptionIdentity(dbOps, account, tokens, deps);
+
+					// Whatever the poller learned under the old credentials — including
+					// a retry-after it is still honouring — would otherwise defer the
+					// first test of the new token. Restarting drops it.
+					await restartUsagePollingForAccount(account.id);
+
+					endGrokSubscriptionSession(sessionId, {
+						status: "complete",
+						accountName: account.name,
+					});
+					log.info(
+						`grok-subscription account '${account.name}' re-authenticated via web device flow`,
+					);
+				} catch (err) {
+					log.error(
+						`grok-subscription reauth polling failed for '${account.name}':`,
+						err,
+					);
+					endGrokSubscriptionSession(sessionId, {
+						status: "error",
+						accountName: account.name,
+						error: (err as Error).message,
+					});
+				}
+			})();
+
+			return jsonResponse({
+				success: true,
+				sessionId,
+				authUrl:
+					deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+				userCode: deviceFlow.userCode,
+			});
+		} catch (error) {
+			log.error("grok-subscription reauth error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error(
+							"Failed to initialize grok-subscription re-authentication",
+						),
 			);
 		}
 	};

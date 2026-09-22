@@ -45,14 +45,18 @@ const log = new Logger("TokenManager");
  * "refreshing" one of those would overwrite the stored access token with the
  * refresh token and retry upstream with the wrong bearer (credential corruption),
  * so a denylist that forgets one is a security bug. An allowlist fails safe: an
- * unlisted provider simply falls over on 401 as before. `anthropic` and `codex`
- * are the only providers with a real OAuth refresh; `claude-oauth` is the legacy
- * alias for anthropic OAuth accounts.
+ * unlisted provider simply falls over on 401 as before. `anthropic`, `codex` and
+ * `grok-subscription` are the providers with a real OAuth refresh; `claude-oauth`
+ * is the legacy alias for anthropic OAuth accounts.
+ *
+ * A name belongs here only once its provider performs that exchange — adding one
+ * that still inherits the echo is exactly the corruption described above.
  */
 const OAUTH_REACTIVE_REFRESH_PROVIDERS: ReadonlySet<string> = new Set([
 	"anthropic",
 	"claude-oauth",
 	"codex",
+	"grok-subscription",
 ]);
 
 /**

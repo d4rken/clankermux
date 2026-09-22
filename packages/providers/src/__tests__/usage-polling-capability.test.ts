@@ -38,6 +38,7 @@ const EXPECTED_HOST: Partial<Record<ProviderName, string>> = {
 	[PROVIDER_NAMES.KILO]: "api.kilo.ai",
 	[PROVIDER_NAMES.DEVIN]: "server.codeium.com",
 	[PROVIDER_NAMES.MINIMAX]: "www.minimax.io",
+	[PROVIDER_NAMES.GROK_SUBSCRIPTION]: "cli-chat-proxy.grok.com",
 };
 
 async function hostDialledFor(provider: ProviderName): Promise<string | null> {

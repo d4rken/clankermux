@@ -5,7 +5,13 @@ import { ProviderChip } from "./ProviderChip";
 import { getProviderMark } from "./provider-marks";
 
 /** Providers with no published single-color logo we can vendor. */
-const TEXT_ONLY_PROVIDERS = new Set<string>(["kilo", "devin", "grok", "mimo"]);
+const TEXT_ONLY_PROVIDERS = new Set<string>([
+	"kilo",
+	"devin",
+	"grok",
+	"mimo",
+	"grok-subscription",
+]);
 
 describe("ProviderChip", () => {
 	it("renders the human-readable provider name", () => {

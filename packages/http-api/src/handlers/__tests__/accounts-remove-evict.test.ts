@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+	clearGrokSubscriptionUserIdCache,
 	codexRateLimitResetCreditsCache,
+	fetchGrokSubscriptionUsage,
+	peekGrokSubscriptionUserIdMemo,
 	usageCache,
 } from "@clankermux/providers";
 import {
@@ -21,6 +24,7 @@ import {
 	recordWeeklyBurnSlope,
 	sessionCacheStore,
 } from "@clankermux/proxy";
+import { mockFetch } from "@clankermux/test-support";
 import { createAccountRemoveHandler } from "../accounts";
 
 /**
@@ -536,5 +540,42 @@ describe("createAccountRemoveHandler — token-manager refresh state", () => {
 		).toBe(200);
 
 		expect(getCoalescibleRecentRefresh(ACCOUNT_ID, null)).toBeNull();
+	});
+});
+
+describe("createAccountRemoveHandler — Grok user-id memo", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		// Seeds the memo through the real billing read: /v1/user names the user,
+		// /v1/billing answers with nothing the read needs to succeed.
+		globalThis.fetch = mockFetch(async (input) => {
+			const url = String(input instanceof Request ? input.url : input);
+			return url.includes("/v1/user")
+				? Response.json({ userId: "grok-user" })
+				: new Response("", { status: 500 });
+		});
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		clearGrokSubscriptionUserIdCache(ACCOUNT_ID);
+		clearGrokSubscriptionUserIdCache(OTHER_ID);
+	});
+
+	it("drops the removed account's memo entry, keeping other accounts'", async () => {
+		await fetchGrokSubscriptionUsage("grok-token", { accountId: ACCOUNT_ID });
+		await fetchGrokSubscriptionUsage("grok-token", { accountId: OTHER_ID });
+		expect(peekGrokSubscriptionUserIdMemo(ACCOUNT_ID)).toBeDefined();
+
+		const { dbOps } = makeDbOps();
+		expect(
+			(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+				.status,
+		).toBe(200);
+
+		expect(peekGrokSubscriptionUserIdMemo(ACCOUNT_ID)).toBeUndefined();
+		expect(peekGrokSubscriptionUserIdMemo(OTHER_ID)?.userId).toBe("grok-user");
 	});
 });

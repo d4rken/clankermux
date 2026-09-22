@@ -719,6 +719,12 @@ describe("catalogue entry lookup", () => {
 						name: "xai entry",
 						cost: { input: 1, output: 3 },
 					},
+					"grok-4.6": {
+						id: "grok-4.6",
+						name: "grok entry",
+						cost: { input: 2, output: 10 },
+						limit: { context: 2_000_000, output: 64_000 },
+					},
 				},
 			},
 		};
@@ -740,6 +746,7 @@ describe("catalogue entry lookup", () => {
 			["codex", "openai entry"],
 			["claude-console-api", "anthropic entry"],
 			["grok", "xai entry"],
+			["grok-subscription", "xai entry"],
 		];
 		for (const [provider, name] of scopes) {
 			const result = await lookupCatalogueEntry("gpt-9-rich", provider);
@@ -750,6 +757,25 @@ describe("catalogue entry lookup", () => {
 		expect(scoped.entry?.reasoning).toBe(true);
 		expect(scoped.entry?.modalities?.input).toEqual(["text", "image"]);
 		expect(scoped.loaded).toBe(true);
+	});
+
+	it("prices a SuperGrok subscription from the xAI catalogue", async () => {
+		// The subscription front door serves the same xAI models as the metered
+		// API. Without the mapping the scope is null, cost falls back to an
+		// unscoped cross-provider scan, and the metadata resolver reports no
+		// context window at all.
+		const entry = (await lookupCatalogueEntry("grok-4.6", "grok-subscription"))
+			.entry;
+		expect(entry?.name).toBe("grok entry");
+		expect(entry?.limit).toEqual({ context: 2_000_000, output: 64_000 });
+	});
+
+	it("leaves a model the xAI catalogue does not list unpriced", async () => {
+		// Scoping must not become a licence to answer from a neighbouring
+		// provider's entry: an id xai never published stays unknown.
+		expect(
+			(await lookupCatalogueEntry("claude-9-rich", "grok-subscription")).entry,
+		).toBeNull();
 	});
 
 	it("answers unknown for a provider the catalogue has no key for", async () => {

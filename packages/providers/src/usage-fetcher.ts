@@ -19,6 +19,11 @@ import {
 	getRepresentativeAlibabaCodingPlanWindow,
 } from "./alibaba-coding-plan-usage-fetcher";
 import {
+	fetchGrokSubscriptionUsage,
+	type GrokSubscriptionUsageData,
+	getRepresentativeGrokSubscriptionUtilization,
+} from "./grok-subscription-usage-fetcher";
+import {
 	fetchKiloUsageData,
 	getRepresentativeKiloUtilization,
 	getRepresentativeKiloWindow,
@@ -353,7 +358,8 @@ export type AnyUsageData =
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData
-	| MinimaxUsageData;
+	| MinimaxUsageData
+	| GrokSubscriptionUsageData;
 
 /**
  * Extract the primary window reset timestamp (ms) from usage data.
@@ -375,6 +381,12 @@ export function extractWindowResetTime(
 		// sooner than the 5h.
 		const zai = data as ZaiUsageData;
 		return getRepresentativeZaiTokenWindow(zai)?.window.resetAt ?? null;
+	}
+	if (provider === "grok-subscription") {
+		// The weekly pool is the only window, so its refill is the only boundary
+		// there is. Reported whether or not the percentage is known: a rollover is
+		// a fact about the clock, not about the reading.
+		return (data as GrokSubscriptionUsageData).weeklyResetAt ?? null;
 	}
 	if (provider === "minimax") {
 		const m = data as MinimaxUsageData;
@@ -781,6 +793,11 @@ export function getRepresentativeUtilizationForProvider(
 		case "minimax": {
 			return getRepresentativeMinimaxUtilization(data as MinimaxUsageData);
 		}
+		case "grok-subscription": {
+			return getRepresentativeGrokSubscriptionUtilization(
+				data as GrokSubscriptionUsageData,
+			);
+		}
 		default:
 			return null;
 	}
@@ -885,6 +902,48 @@ function zaiCapacity(usage: ZaiUsageData, now: number): CapacitySignal | null {
 }
 
 /**
+ * A grok-subscription reading as a capacity signal. One weekly pool and no
+ * session axis, so `sessionHeadroom` is the "no such window" value (100) and
+ * `sessionResetMs` is null — the same convention `zaiCapacity` uses for a
+ * missing window, kept so no consumer has to know which providers have one.
+ *
+ * Null when the percentage is UNKNOWN, matching the content-staleness rule
+ * below: a signal with `minHeadroom: 100` would state full headroom on an
+ * account nobody measured.
+ */
+function grokSubscriptionCapacity(
+	usage: GrokSubscriptionUsageData,
+	now: number,
+): CapacitySignal | null {
+	const util = usage.weeklyUtilization;
+	if (util === null || !Number.isFinite(util)) return null;
+	const resetMs =
+		typeof usage.weeklyResetAt === "number" &&
+		Number.isFinite(usage.weeklyResetAt)
+			? usage.weeklyResetAt
+			: null;
+	// Content-staleness, as on the Anthropic and Zai branches: a reset that has
+	// already arrived means the cached datum predates the roll, so the answer is
+	// "unknown" rather than a number the caller would act on.
+	if (resetMs !== null && resetMs <= now) return null;
+	const headroom = 100 - util;
+	return {
+		minHeadroom: headroom,
+		sessionHeadroom: 100,
+		soonestResetMs: resetMs,
+		bindingUtilization: util,
+		weeklyResetMs: resetMs,
+		// One weekly window, so it is the binding one by construction.
+		bindingWeeklyResetMs: resetMs,
+		weeklyHeadroom: headroom,
+		sessionResetMs: null,
+		// On-demand spend is tracked in cents against a cap, not as a utilization
+		// window, so there is no resetless constraint to fold in here.
+		extraUsageUtilization: null,
+	};
+}
+
+/**
  * Every Zai MODEL window this reading reports with a reset, as the listener's
  * staleness test sees them. {@link ObservedWindow} carries no window name — the
  * consumer matches by reset-timestamp proximity plus utilization — so Zai's own
@@ -941,6 +1000,8 @@ export function getAccountCapacitySignal(
 	if (!data) return null;
 	if (provider === "devin") return devinCapacity(data as DevinUsageData, now);
 	if (provider === "zai") return zaiCapacity(data as ZaiUsageData, now);
+	if (provider === "grok-subscription")
+		return grokSubscriptionCapacity(data as GrokSubscriptionUsageData, now);
 	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
 	if (provider !== "anthropic" && provider !== "codex") return null;
 	const d = data as UsageData;
@@ -2162,6 +2223,77 @@ class UsageCache {
 					);
 					log.debug(
 						`Successfully fetched Alibaba Coding Plan usage data for account ${accountId}: ${utilization?.toFixed(1)}% used (${window} window)`,
+					);
+					return { success: true, retryAfterMs: null };
+				}
+			} else if (provider === "grok-subscription") {
+				// One weekly pool, read from the billing endpoint. `fetchStartedAt` is
+				// the causal boundary evidence drawn from this reading has to be
+				// ordered against: a cooldown written while this request was in flight
+				// is temporally ambiguous against whatever the response reports, so the
+				// instant the request LEFT is the one that matters, not the instant it
+				// landed.
+				const fetchStartedAt = Date.now();
+				const outcome = await fetchGrokSubscriptionUsage(token, { accountId });
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
+				if (outcome.status === "unrecognized") {
+					// The endpoint answered in a shape this parser does not know.
+					// Nothing to cache, but nothing failed — a failure here would back
+					// the poller off toward MAX_BACKOFF_MS and space out the very
+					// warning that names the unreadable shape. The previous reading
+					// stands.
+					return { success: true, retryAfterMs: null };
+				}
+				data = outcome.status === "ok" ? outcome.data : null;
+				if (data) {
+					// Before the cache write, as on every other branch: the comparison
+					// needs the PREVIOUS reading as its baseline. The weekly pool is
+					// the only window, so its refill is the only roll there is.
+					const callback = this.windowResetCallbacks.get(accountId);
+					if (callback)
+						this.notifyWindowReset(
+							accountId,
+							data,
+							"grok-subscription",
+							callback,
+						);
+					this.writeFetchedEntry(accountId, data);
+					const reading = data as GrokSubscriptionUsageData;
+					const weekly = reading.weeklyUtilization;
+					// Report capacity-restored evidence on EVERY successful poll that
+					// sees headroom in the weekly pool, exactly as the Anthropic and Zai
+					// arms do: polling is the ONLY channel that observes a locked
+					// account recovering. The poller REPORTS; the listener decides.
+					//
+					// The gate takes the reading as it is: an UNKNOWN percentage is not
+					// evidence of headroom and never reaches it, so no report is made at
+					// 0% utilization or 100 headroom for an account nobody measured.
+					if (shouldReportCapacityRestored(weekly)) {
+						const capacityCallback =
+							this.capacityRestoredCallbacks.get(accountId);
+						if (capacityCallback)
+							capacityCallback({
+								accountId,
+								utilization: weekly,
+								// No overage axis: on-demand spend is cents against a cap,
+								// not a utilization window.
+								extraUsageUtilization: null,
+								fetchStartedAt,
+								// The one window there is. The parser only returns data for
+								// a period that has NOT ended, so this reset is in the
+								// future by construction.
+								observedWindows: [
+									{ resetMs: reading.weeklyResetAt, utilization: weekly },
+								],
+							});
+					}
+					log.debug(
+						`Successfully fetched Grok subscription usage for account ${accountId}: ${
+							weekly === null
+								? "weekly utilization unknown"
+								: `${weekly}% weekly`
+						} in ${Date.now() - fetchStartedAt}ms`,
 					);
 					return { success: true, retryAfterMs: null };
 				}

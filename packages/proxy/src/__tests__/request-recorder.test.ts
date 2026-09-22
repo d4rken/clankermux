@@ -789,6 +789,22 @@ describe("RequestRecorder — billingType derivation", () => {
 		expect(h2.dbOps.saveRequestCalls[0].billingType).toBe("api");
 	});
 
+	it("classifies a SuperGrok subscription as plan while metered xAI stays api", async () => {
+		const plan = makeHarness();
+		plan.recorder.begin(makeMeta({ providerName: "grok-subscription" }));
+		plan.recorder.attachUsageSummary("req-1", makeSummary());
+		plan.recorder.finishTransport("req-1", "success");
+		await plan.flush();
+		expect(plan.dbOps.saveRequestCalls[0].billingType).toBe("plan");
+
+		const api = makeHarness();
+		api.recorder.begin(makeMeta({ providerName: "grok" }));
+		api.recorder.attachUsageSummary("req-1", makeSummary());
+		api.recorder.finishTransport("req-1", "success");
+		await api.flush();
+		expect(api.dbOps.saveRequestCalls[0].billingType).toBe("api");
+	});
+
 	it("honors an explicit account billing type override", async () => {
 		const h = makeHarness();
 		h.recorder.begin(

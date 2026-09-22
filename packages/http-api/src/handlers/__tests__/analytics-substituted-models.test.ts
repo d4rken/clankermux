@@ -60,14 +60,15 @@ function seedAttempt(
 	requestId: string,
 	outgoing: string,
 	reported: string,
-	opts: { status?: number; atMs?: number } = {},
+	opts: { status?: number; atMs?: number; provider?: string | null } = {},
 ): void {
 	db.run(
 		`INSERT INTO routing_attempts (id, request_id, route_snapshot_id, account_id, provider, requested_model, resolved_model, outgoing_model, reported_model, kind, started_at, status)
-		 VALUES (?, ?, 'snap-1', 'acct-1', 'codex', ?, ?, ?, ?, 'upstream_send', ?, ?)`,
+		 VALUES (?, ?, 'snap-1', 'acct-1', ?, ?, ?, ?, ?, 'upstream_send', ?, ?)`,
 		[
 			id,
 			requestId,
+			opts.provider === undefined ? "codex" : opts.provider,
 			outgoing,
 			outgoing,
 			outgoing,
@@ -251,6 +252,73 @@ describe("model distribution splits substituted requests", () => {
 
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.substitutedFrom).toBeUndefined();
+	});
+
+	// A provider that answers one model under two names is not substituting,
+	// and only the provider that served the attempt can say so. The origin and
+	// the provider therefore travel out of the same correlated subquery.
+	it("does not split a rename the answering provider is known to make", async () => {
+		seedRequest("r1", "grok-4.6", "grok-4.6-build");
+		seedAttempt("a1", "r1", "grok-4.6", "grok-4.6-build", {
+			provider: "grok-subscription",
+		});
+		seedRequest("r2", "grok-4.6-build", "grok-4.6-build");
+		seedAttempt("a2", "r2", "grok-4.6-build", "grok-4.6-build", {
+			provider: "grok-subscription",
+		});
+
+		const rows = await modelDistribution();
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.model).toBe("grok-4.6-build");
+		expect(rows[0]?.count).toBe(2);
+		expect(rows[0]?.substitutedFrom).toBeUndefined();
+	});
+
+	// Same two ids, two providers, one served model: the pair is a fact about
+	// how ONE provider names its models, so the other one is still a swap.
+	it("splits the same rename on a provider that has no such pair", async () => {
+		seedRequest("r1", "grok-4.6", "grok-4.6-build");
+		seedAttempt("a1", "r1", "grok-4.6", "grok-4.6-build", {
+			provider: "grok-subscription",
+		});
+		seedRequest("r2", "grok-4.6", "grok-4.6-build");
+		seedAttempt("a2", "r2", "grok-4.6", "grok-4.6-build", {
+			provider: "openrouter",
+		});
+
+		const rows = await modelDistribution();
+
+		const ordinary = rows.find((row) => !row.substitutedFrom);
+		const substituted = rows.find((row) => row.substitutedFrom);
+		expect(ordinary?.count).toBe(1);
+		expect(substituted?.substitutedFrom).toBe("grok-4.6");
+		expect(substituted?.count).toBe(1);
+	});
+
+	// `grok-4.7` and `grok-4.7-build-fast` are two separately published models.
+	it("still splits a genuine swap on a provider that has a verified pair", async () => {
+		seedRequest("r1", "grok-4.7", "grok-4.7-build-fast");
+		seedAttempt("a1", "r1", "grok-4.7", "grok-4.7-build-fast", {
+			provider: "grok-subscription",
+		});
+
+		const rows = await modelDistribution();
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.substitutedFrom).toBe("grok-4.7");
+	});
+
+	// Attempts recorded before the provider column was populated still have to
+	// report their origin; only the provider-keyed pairs are unavailable.
+	it("splits a candidate whose attempt recorded no provider", async () => {
+		seedRequest("r1", "gpt-6-astra", "gpt-5.6-luna");
+		seedAttempt("a1", "r1", "gpt-6-astra", "gpt-5.6-luna", { provider: null });
+
+		const rows = await modelDistribution();
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.substitutedFrom).toBe("gpt-6-astra");
 	});
 
 	// The top-N cut lands on MODELS, before the split. Cutting the split rows

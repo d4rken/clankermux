@@ -14,6 +14,8 @@ export * from "./alibaba-coding-plan-usage-fetcher";
 export { BaseProvider } from "./base";
 // Export add-time credential checks
 export * from "./credential-check";
+// Export grok-subscription weekly-pool usage fetcher
+export * from "./grok-subscription-usage-fetcher";
 // Export Kilo usage fetcher
 export * from "./kilo-usage-fetcher";
 export * from "./minimax-usage-fetcher";
@@ -43,6 +45,7 @@ import { AnthropicProvider } from "./providers/anthropic/provider";
 import { AnthropicCompatibleProvider } from "./providers/anthropic-compatible/provider";
 import { CodexProvider } from "./providers/codex/provider";
 import { GrokProvider } from "./providers/grok/provider";
+import { GrokSubscriptionProvider } from "./providers/grok-subscription/provider";
 import { KiloProvider } from "./providers/kilo/provider";
 import { MimoProvider } from "./providers/mimo/provider";
 import { MinimaxProvider } from "./providers/minimax/provider";
@@ -60,6 +63,7 @@ registry.registerProvider(new AlibabaCodingPlanProvider());
 registry.registerProvider(new AnthropicProvider());
 registry.registerProvider(new CodexProvider());
 registry.registerProvider(new GrokProvider());
+registry.registerProvider(new GrokSubscriptionProvider());
 registry.registerProvider(new KiloProvider());
 registry.registerProvider(new OpenRouterProvider());
 registry.registerProvider(new QwenProvider());

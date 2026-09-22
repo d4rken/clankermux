@@ -307,6 +307,7 @@ describe("provider cache policies", () => {
 			["minimax", "MiniMax-M2.7"],
 			["minimax", "MiniMax-M3"],
 			["grok", "grok-4"],
+			["grok-subscription", "grok-4.6"],
 		]) {
 			for (const format of ["anthropic", "openai", "codex"] as const) {
 				expect(policy(provider, model, format)).toEqual(implicit);

@@ -49,6 +49,7 @@ const EXPERIMENTAL_ACCOUNT_MODES = [
 	{ value: "ollama-cloud", label: "Ollama Cloud (ollama.com)" },
 	{ value: "grok", label: "Grok (API Key)" },
 	{ value: "mimo", label: "MiMo Token Plan (API Key)" },
+	{ value: "grok-subscription", label: "Grok (Subscription)" },
 ] as const;
 
 const isExperimentalMode = (mode: string) =>
@@ -194,6 +195,7 @@ export function AccountAddForm({
 			| "ollama-cloud"
 			| "grok"
 			| "mimo"
+			| "grok-subscription"
 			| "devin",
 		priority: 0,
 		apiKey: "",
@@ -209,6 +211,19 @@ export function AccountAddForm({
 			Pick<typeof newAccount, "apiKey" | "customEndpoint" | "mode">
 		>,
 	) => {
+		if (
+			changes.mode !== undefined &&
+			changes.mode !== newAccount.mode &&
+			newAccount.mode === "grok-subscription"
+		) {
+			// Leaving Grok mode abandons its sign-in; a completion arriving later
+			// would otherwise reset the form and report success under another mode.
+			abandonGrokSubscriptionFlow();
+			setGrokSubscriptionStep("idle");
+			setGrokSubscriptionAuthUrl("");
+			setGrokSubscriptionUserCode("");
+			setGrokSubscriptionError("");
+		}
 		setNewAccount((prev) => {
 			// Rule 1: every mode switch starts from a clean source. Each mode
 			// renders its own subset of the source fields, so a value typed under
@@ -238,6 +253,24 @@ export function AccountAddForm({
 		null,
 	);
 
+	// Grok subscription (xAI) device flow state
+	const [grokSubscriptionStep, setGrokSubscriptionStep] = useState<
+		"idle" | "pending" | "complete" | "error"
+	>("idle");
+	const [grokSubscriptionAuthUrl, setGrokSubscriptionAuthUrl] = useState("");
+	const [grokSubscriptionUserCode, setGrokSubscriptionUserCode] = useState("");
+	const [grokSubscriptionError, setGrokSubscriptionError] = useState("");
+	const grokSubscriptionSessionIdRef = useRef<string>("");
+	const grokSubscriptionPollIntervalRef = useRef<ReturnType<
+		typeof setInterval
+	> | null>(null);
+	const grokSubscriptionCompletionTimeoutRef = useRef<ReturnType<
+		typeof setTimeout
+	> | null>(null);
+	// Generation of the current sign-in. Bumped whenever the flow is abandoned,
+	// so an init or status call still in flight sees it no longer owns the form.
+	const grokSubscriptionFlowRef = useRef(0);
+
 	// Codex device flow state
 	const [codexStep, setCodexStep] = useState<
 		"idle" | "pending" | "complete" | "error"
@@ -264,6 +297,19 @@ export function AccountAddForm({
 		return () => {
 			if (codexPollIntervalRef.current !== null) {
 				clearInterval(codexPollIntervalRef.current);
+			}
+		};
+	}, []);
+
+	// Cleanup Grok subscription polling on unmount
+	useEffect(() => {
+		return () => {
+			grokSubscriptionFlowRef.current++;
+			if (grokSubscriptionPollIntervalRef.current !== null) {
+				clearInterval(grokSubscriptionPollIntervalRef.current);
+			}
+			if (grokSubscriptionCompletionTimeoutRef.current !== null) {
+				clearTimeout(grokSubscriptionCompletionTimeoutRef.current);
 			}
 		};
 	}, []);
@@ -308,6 +354,22 @@ export function AccountAddForm({
 			clearInterval(codexPollIntervalRef.current);
 			codexPollIntervalRef.current = null;
 		}
+	};
+
+	const stopGrokSubscriptionPolling = () => {
+		if (grokSubscriptionPollIntervalRef.current !== null) {
+			clearInterval(grokSubscriptionPollIntervalRef.current);
+			grokSubscriptionPollIntervalRef.current = null;
+		}
+		if (grokSubscriptionCompletionTimeoutRef.current !== null) {
+			clearTimeout(grokSubscriptionCompletionTimeoutRef.current);
+			grokSubscriptionCompletionTimeoutRef.current = null;
+		}
+	};
+
+	const abandonGrokSubscriptionFlow = () => {
+		grokSubscriptionFlowRef.current++;
+		stopGrokSubscriptionPolling();
 	};
 
 	const handleStartQwenAuthInner = async () => {
@@ -429,6 +491,82 @@ export function AccountAddForm({
 		} catch (err) {
 			setCodexStep("error");
 			setCodexError(
+				err instanceof Error ? err.message : "Failed to start authentication",
+			);
+		}
+	};
+
+	const handleStartGrokSubscriptionAuthInner = async () => {
+		if (!newAccount.name) {
+			onError("Account name is required");
+			return;
+		}
+		setGrokSubscriptionStep("pending");
+		setGrokSubscriptionError("");
+		// The pending step is entered before the init call resolves, so clear the
+		// previous attempt's link and code rather than showing stale ones.
+		setGrokSubscriptionAuthUrl("");
+		setGrokSubscriptionUserCode("");
+		const flow = ++grokSubscriptionFlowRef.current;
+		try {
+			const result = await api.initGrokSubscriptionDeviceFlow({
+				name: newAccount.name,
+				priority: newAccount.priority,
+			});
+			if (flow !== grokSubscriptionFlowRef.current) return;
+			grokSubscriptionSessionIdRef.current = result.sessionId;
+			setGrokSubscriptionAuthUrl(result.authUrl);
+			setGrokSubscriptionUserCode(result.userCode);
+
+			// Poll for status every 3s
+			grokSubscriptionPollIntervalRef.current = setInterval(async () => {
+				try {
+					const status = await api.getGrokSubscriptionAuthStatus(
+						grokSubscriptionSessionIdRef.current,
+					);
+					if (flow !== grokSubscriptionFlowRef.current) return;
+					if (status.status === "complete") {
+						stopGrokSubscriptionPolling();
+						setGrokSubscriptionStep("complete");
+						grokSubscriptionCompletionTimeoutRef.current = setTimeout(() => {
+							grokSubscriptionCompletionTimeoutRef.current = null;
+							setGrokSubscriptionStep("idle");
+							setGrokSubscriptionAuthUrl("");
+							setGrokSubscriptionUserCode("");
+							setNewAccount({
+								name: "",
+								mode: "claude-oauth",
+								priority: 0,
+								apiKey: "",
+								customEndpoint: "",
+								projectId: "",
+								region: "global",
+								profile: "",
+								awsRegion: "",
+							});
+							onSuccess();
+						}, 1500);
+					} else if (status.status === "expired") {
+						// The session the server was holding is gone, so no further
+						// poll can ever settle: say so instead of spinning.
+						stopGrokSubscriptionPolling();
+						setGrokSubscriptionStep("error");
+						setGrokSubscriptionError(
+							"Authorization session expired. Start again to get a new code.",
+						);
+					} else if (status.status === "error") {
+						stopGrokSubscriptionPolling();
+						setGrokSubscriptionStep("error");
+						setGrokSubscriptionError(status.error || "Authentication failed");
+					}
+				} catch {
+					// Network error — keep polling
+				}
+			}, 3000);
+		} catch (err) {
+			if (flow !== grokSubscriptionFlowRef.current) return;
+			setGrokSubscriptionStep("error");
+			setGrokSubscriptionError(
 				err instanceof Error ? err.message : "Failed to start authentication",
 			);
 		}
@@ -832,10 +970,12 @@ export function AccountAddForm({
 	};
 
 	// Guarded entry points. Every account-creation submit goes through the same
-	// latch — Qwen/Codex device-flow starts included, since a duplicate device
-	// session is the same bug class as a duplicate account row.
+	// latch — device-flow starts included, since a duplicate device session is
+	// the same bug class as a duplicate account row.
 	const handleStartQwenAuth = () => guardSubmit(handleStartQwenAuthInner);
 	const handleStartCodexAuth = () => guardSubmit(handleStartCodexAuthInner);
+	const handleStartGrokSubscriptionAuth = () =>
+		guardSubmit(handleStartGrokSubscriptionAuthInner);
 	const handleAddAccount = () => guardSubmit(handleAddAccountInner);
 	const handleCodeSubmit = () => guardSubmit(handleCodeSubmitInner);
 
@@ -850,6 +990,11 @@ export function AccountAddForm({
 		setCodexVerificationUrl("");
 		setCodexUserCode("");
 		setCodexError("");
+		abandonGrokSubscriptionFlow();
+		setGrokSubscriptionStep("idle");
+		setGrokSubscriptionAuthUrl("");
+		setGrokSubscriptionUserCode("");
+		setGrokSubscriptionError("");
 		setAuthStep("form");
 		setAuthCode("");
 		setSessionId("");
@@ -914,6 +1059,7 @@ export function AccountAddForm({
 									| "ollama-cloud"
 									| "grok"
 									| "mimo"
+									| "grok-subscription"
 									| "devin",
 							) => updateAccountSource({ mode: value })}
 						>
@@ -1080,6 +1226,67 @@ export function AccountAddForm({
 										onClick={() => {
 											setQwenStep("idle");
 											setQwenError("");
+										}}
+									>
+										Try again
+									</Button>
+								</Alert>
+							)}
+						</div>
+					)}
+					{newAccount.mode === "grok-subscription" && (
+						<div className="flex min-w-0 flex-col gap-group">
+							{grokSubscriptionStep === "idle" && (
+								<AccountSetupSection title="Connect to Grok">
+									<p>
+										Sign in with the xAI account that holds your SuperGrok
+										subscription, or the X account with X Premium. You’ll get a
+										link to accounts.x.ai and a code to enter there.
+									</p>
+								</AccountSetupSection>
+							)}
+							{grokSubscriptionStep === "pending" && (
+								<Alert
+									size="form"
+									className="bg-muted/30 border-border"
+									role="status"
+									title="Waiting for authorization..."
+								>
+									{grokSubscriptionAuthUrl ? (
+										<>
+											<p>Enter this code on the authorization page:</p>
+											<AuthorizationHandoff
+												url={grokSubscriptionAuthUrl}
+												userCode={grokSubscriptionUserCode}
+											/>
+										</>
+									) : (
+										<p>Requesting a device code…</p>
+									)}
+								</Alert>
+							)}
+							{grokSubscriptionStep === "complete" && (
+								<Alert
+									size="form"
+									tone="success"
+									role="status"
+									title="Authorization successful! Account added."
+								/>
+							)}
+							{grokSubscriptionStep === "error" && (
+								<Alert
+									size="form"
+									tone="destructive"
+									role="alert"
+									title="Authentication failed"
+								>
+									<p>{grokSubscriptionError}</p>
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => {
+											setGrokSubscriptionStep("idle");
+											setGrokSubscriptionError("");
 										}}
 									>
 										Try again
@@ -1365,6 +1572,21 @@ export function AccountAddForm({
 							{(codexStep === "idle" || codexStep === "error") && (
 								<Button onClick={handleStartCodexAuth} disabled={isSubmitting}>
 									Sign in with Codex
+								</Button>
+							)}
+							<Button variant="outline" onClick={handleCancel}>
+								Cancel
+							</Button>
+						</>
+					) : newAccount.mode === "grok-subscription" ? (
+						<>
+							{(grokSubscriptionStep === "idle" ||
+								grokSubscriptionStep === "error") && (
+								<Button
+									onClick={handleStartGrokSubscriptionAuth}
+									disabled={isSubmitting}
+								>
+									Sign in with Grok
 								</Button>
 							)}
 							<Button variant="outline" onClick={handleCancel}>

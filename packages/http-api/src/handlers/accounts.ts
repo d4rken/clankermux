@@ -37,11 +37,14 @@ import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
 	type CodexCreditsInfo,
+	clearGrokSubscriptionUserIdCache,
 	codexRateLimitResetCreditsCache,
 	devinClient,
 	extractDevinIdentity,
 	fetchUsageData,
 	getRepresentativeDevinWindow,
+	getRepresentativeGrokSubscriptionUtilization,
+	getRepresentativeGrokSubscriptionWindow,
 	getRepresentativeMinimaxUtilization,
 	getRepresentativeMinimaxWindow,
 	getRepresentativeUtilization,
@@ -1057,6 +1060,25 @@ export async function listAccountResponses(
 						usageWindow = getRepresentativeMinimaxWindow(minimax);
 						fullUsageData = usageData as FullUsageData;
 					}
+				} else if (
+					account.provider === "grok-subscription" &&
+					usageData &&
+					"kind" in usageData &&
+					usageData.kind === "grok-subscription"
+				) {
+					// One weekly pool feeds Chat, Imagine, Voice, Build and API, so
+					// there is one window and nothing to rank. Matched on the `kind`
+					// discriminant rather than on key presence: this payload shares no
+					// key names with the branches above, so a presence test here would
+					// have to be re-proved against every shape added after it.
+					//
+					// `weeklyUtilization` is null for UNKNOWN and is passed through as
+					// null — a 0 here would render as a full week of headroom on an
+					// account whose percentage the billing endpoint never reported.
+					usageUtilization =
+						getRepresentativeGrokSubscriptionUtilization(usageData);
+					usageWindow = getRepresentativeGrokSubscriptionWindow(usageData);
+					fullUsageData = usageData;
 				}
 
 				// Last-known usage recovered from a persisted snapshot when the live
@@ -1674,6 +1696,9 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// usage-refresh paths already call.
 			clearAccountRefreshCache(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
+			// The Grok billing read's memoised user id is only replaced on a token
+			// change, never expired.
+			clearGrokSubscriptionUserIdCache(accountId);
 			clearUsageRevisionAnchors(accountId);
 			// The fitted weekly burn slope, for the same reason: nothing else ever
 			// evicts an entry, so a deleted id would occupy one for the process's

@@ -645,6 +645,12 @@ export function RateLimitProgress({
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
+				// The window is real and its reset is a deadline, but the provider
+				// reported no percentage for it. The bar is suppressed rather than
+				// drawn empty: an empty track beside a live countdown reads as a full
+				// window of untouched quota, which is the one claim an unknown
+				// reading must never make.
+				const isUnknownReading = usage.state === "unknown";
 
 				// A model family this account has not used this week. It carries no
 				// reading BY CONTRACT, so this card has no bar, no pace tick, no
@@ -915,15 +921,17 @@ export function RateLimitProgress({
 						)}
 					>
 						<div className="relative">
-							<Progress
-								value={isAvailable ? percentage : 0}
-								className="h-2"
-								indicatorClassName={projectionFillClass(
-									displayTone,
-									isWindowThrottled,
-								)}
-							/>
-							{expectedPct !== null && (
+							{!isUnknownReading && (
+								<Progress
+									value={isAvailable ? percentage : 0}
+									className="h-2"
+									indicatorClassName={projectionFillClass(
+										displayTone,
+										isWindowThrottled,
+									)}
+								/>
+							)}
+							{!isUnknownReading && expectedPct !== null && (
 								// The tick and its halo are tokens, not literals. They used to
 								// be a hard white line with a black glow, which is a dark-mode
 								// assumption: in light mode that is a white line on a light
@@ -997,7 +1005,11 @@ export function RateLimitProgress({
 									isWindowThrottled && "text-warning-strong",
 								)}
 							>
-								{isAvailable ? `${percentage?.toFixed(0)}%` : "N/A"}
+								{isUnknownReading
+									? "Usage unknown"
+									: isAvailable
+										? `${percentage?.toFixed(0)}%`
+										: "N/A"}
 							</span>
 						</div>
 						{inlineProjection && projection && (

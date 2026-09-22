@@ -105,8 +105,8 @@ describe("runGuarded", () => {
 
 /**
  * Structural coverage for the wiring. There is no DOM test harness in this repo
- * (component tests use `renderToStaticMarkup`, which cannot click), so the four
- * handlers' use of the guard is pinned against the source instead of simulated.
+ * (component tests use `renderToStaticMarkup`, which cannot click), so every
+ * handler's use of the guard is pinned against the source instead of simulated.
  */
 describe("AccountAddForm submit wiring", () => {
 	const source = readFileSync(
@@ -117,13 +117,19 @@ describe("AccountAddForm submit wiring", () => {
 	const handlers = [
 		"handleStartQwenAuth",
 		"handleStartCodexAuth",
+		"handleStartGrokSubscriptionAuth",
 		"handleAddAccount",
 		"handleCodeSubmit",
 	] as const;
 
+	// Whitespace collapsed: a declaration wide enough to exceed the line budget
+	// is wrapped by the formatter, and where that break lands is not what these
+	// assertions pin.
+	const collapsed = source.replace(/\s+/g, " ");
+
 	for (const handler of handlers) {
 		it(`routes ${handler} through the guard`, () => {
-			expect(source).toContain(
+			expect(collapsed).toContain(
 				`const ${handler} = () => guardSubmit(${handler}Inner);`,
 			);
 		});

@@ -31,6 +31,7 @@ import {
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
 	DevinReauthDialog,
+	GrokSubscriptionReauthDialog,
 	QwenReauthDialog,
 	RecordPaymentDialog,
 	RenameAccountDialog,
@@ -225,6 +226,8 @@ export function AccountsTab() {
 	const [zaiReauthAccount, setZaiReauthAccount] = useState<Account | null>(
 		null,
 	);
+	const [grokSubscriptionReauthAccount, setGrokSubscriptionReauthAccount] =
+		useState<Account | null>(null);
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	const handleAddAccount = async (params: {
@@ -954,6 +957,7 @@ export function AccountsTab() {
 						onCodexReauth={handleCodexReauth}
 						onDevinReauth={setDevinReauthAccount}
 						onZaiReauth={setZaiReauthAccount}
+						onGrokSubscriptionReauth={setGrokSubscriptionReauthAccount}
 					/>
 				</CardContent>
 			</Card>
@@ -1089,6 +1093,15 @@ export function AccountsTab() {
 				onClose={() => setZaiReauthAccount(null)}
 				onSuccess={() => {
 					loadAccounts();
+				}}
+			/>
+			<GrokSubscriptionReauthDialog
+				isOpen={grokSubscriptionReauthAccount !== null}
+				account={grokSubscriptionReauthAccount}
+				onClose={() => setGrokSubscriptionReauthAccount(null)}
+				onSuccess={() => {
+					loadAccounts();
+					setGrokSubscriptionReauthAccount(null);
 				}}
 			/>
 			<CodexReauthDialog

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { Account } from "../../api";
 import { AnthropicReauthDialog } from "./AnthropicReauthDialog";
 import { CodexReauthDialog } from "./CodexReauthDialog";
+import { GrokSubscriptionReauthDialog } from "./GrokSubscriptionReauthDialog";
 import { QwenReauthDialog } from "./QwenReauthDialog";
 
 /**
@@ -89,6 +90,11 @@ const DIALOGS: Array<[string, ComponentType<ReauthDialogProps>, string]> = [
 	["AnthropicReauthDialog", AnthropicReauthDialog, "anthropic"],
 	["CodexReauthDialog", CodexReauthDialog, "codex"],
 	["QwenReauthDialog", QwenReauthDialog, "qwen"],
+	[
+		"GrokSubscriptionReauthDialog",
+		GrokSubscriptionReauthDialog,
+		"grok-subscription",
+	],
 ];
 
 let root: Root | null = null;

@@ -5,6 +5,8 @@ import {
 	DevinClient,
 	devinClient,
 	fetchCodexModelCatalog,
+	GROK_CHAT_PROXY_ENDPOINT,
+	GROK_CLI_IDENTITY_HEADERS,
 	mimoCatalogueUrl,
 	readChatgptAccountId,
 } from "@clankermux/providers";
@@ -370,6 +372,16 @@ export class AccountModelPermissionService {
 			if (endpoint && !endpoint.startsWith("https://api.x.ai/"))
 				throw new Error("Custom backend requires manual models");
 			url = new URL("https://api.x.ai/v1/models");
+			headers.set("authorization", `Bearer ${token}`);
+		} else if (account.provider === "grok-subscription") {
+			// Fixed host, like zai: honoursCustomEndpoint is false for this provider
+			// (pinned by provider-custom-endpoint.test.ts), so a stored value is
+			// inert and must neither redirect the bearer nor block discovery. The
+			// chat proxy answers a bare bearer with 426, so the CLI identity is
+			// mandatory here, not decoration.
+			url = new URL(`${GROK_CHAT_PROXY_ENDPOINT}/v1/models`);
+			for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS))
+				headers.set(name, value);
 			headers.set("authorization", `Bearer ${token}`);
 		} else if (
 			endpoint &&

@@ -347,6 +347,35 @@ describe("tool-error query plans", () => {
 	});
 });
 
+describe("substitution origin stays one correlated read", () => {
+	// The origin model and the provider that answered it both come out of a
+	// single correlated subquery, driven off idx_routing_attempts_request once
+	// per request in the range. The cheap-looking alternatives are what this
+	// guards: a second correlated read for the provider doubles that work, and a
+	// joined derived table materialises every mismatched attempt ever recorded —
+	// 1.13s against 0.43s on the 15 GB production database over a 24h range.
+	it.each([
+		"modelDistribution",
+		"costByModel",
+	])("reads the answering attempt once for %s", async (section) => {
+		const marker =
+			section === "modelDistribution"
+				? "'model_distribution'"
+				: "'cost_by_model'";
+		await fetch(`range=24h&sections=${section}`);
+		const statement = statements.find(({ sql }) => sql.includes(marker));
+		if (!statement) throw new Error(`${section} did not execute a query`);
+		const details = plan(statement);
+
+		expect(
+			details.filter((detail) => detail.includes("CORRELATED SCALAR SUBQUERY")),
+		).toHaveLength(1);
+		expect(details).toContain(
+			"SEARCH ra USING INDEX idx_routing_attempts_request (request_id=?)",
+		);
+	});
+});
+
 it("keeps payment range and per-account cost coverage scans covered by an index", async () => {
 	const response = await createPaymentsSummaryDataHandler(context)(
 		new URLSearchParams("range=24h"),

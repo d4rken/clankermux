@@ -103,6 +103,7 @@ interface AccountListItemProps {
 	onCodexReauth?: (account: Account) => void;
 	onDevinReauth?: (account: Account) => void;
 	onZaiReauth?: (account: Account) => void;
+	onGrokSubscriptionReauth?: (account: Account) => void;
 }
 
 /**
@@ -156,6 +157,7 @@ export function AccountListItem({
 	onCodexReauth,
 	onDevinReauth,
 	onZaiReauth,
+	onGrokSubscriptionReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const handleRefreshUsage = async () => {
@@ -210,7 +212,8 @@ export function AccountListItem({
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth) ||
 		(account.provider === "devin" && !!onDevinReauth) ||
-		(account.provider === "zai" && !!onZaiReauth);
+		(account.provider === "zai" && !!onZaiReauth) ||
+		(account.provider === "grok-subscription" && !!onGrokSubscriptionReauth);
 
 	// Menu copy for one automation flag. Sourced from the shared descriptors the
 	// policy chips render from, so an item's label and explanation cannot drift
@@ -578,6 +581,16 @@ export function AccountListItem({
 									Re-authenticate
 								</DropdownMenuItem>
 							)}
+							{account.provider === "grok-subscription" &&
+								onGrokSubscriptionReauth && (
+									<DropdownMenuItem
+										onClick={() => onGrokSubscriptionReauth(account)}
+										title="Re-authenticate this Grok account (preserves all metadata)"
+									>
+										<KeyRound className="mr-item h-4 w-4" />
+										Re-authenticate
+									</DropdownMenuItem>
+								)}
 							<DropdownMenuSeparator />
 							{onDisabledToggle && (
 								<DropdownMenuItem

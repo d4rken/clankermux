@@ -182,7 +182,20 @@ describe("createModelSubstitutionsHandlerFromSources", () => {
 					comparable: [
 						{ accountId: "a", outgoingModel: "gpt-6-astra", comparable: 10 },
 					],
-					series: [{ bucketMs: NOW, substituted: 9, comparable: 10 }],
+					series: [
+						{
+							bucketMs: NOW,
+							comparable: 10,
+							candidates: [
+								{
+									provider: "codex",
+									outgoingModel: "gpt-6-astra",
+									reportedModel: "gpt-5.6-luna",
+									count: 9,
+								},
+							],
+						},
+					],
 				});
 			},
 			getAllAccounts: async () => [account("a", "Codex-me")],

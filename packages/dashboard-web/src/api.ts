@@ -2321,6 +2321,47 @@ class API extends HttpClient {
 		}
 	}
 
+	async initGrokSubscriptionDeviceFlow(data: {
+		name: string;
+		priority: number;
+	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
+		const url = "/api/oauth/grok-subscription/init";
+		this.logger.debug(`→ POST ${url}`, { data });
+		try {
+			const response = await this.post<{
+				sessionId: string;
+				authUrl: string;
+				userCode: string;
+			}>(url, data);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async initGrokSubscriptionReauth(data: {
+		accountId: string;
+	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
+		const url = "/api/oauth/grok-subscription/reauth";
+		this.logger.debug(`→ POST ${url}`, { data });
+		try {
+			const response = await this.post<{
+				sessionId: string;
+				authUrl: string;
+				userCode: string;
+			}>(url, data);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
 	async initCodexReauth(data: { accountId: string }): Promise<{
 		sessionId: string;
 		verificationUrl: string;
@@ -2482,6 +2523,39 @@ class API extends HttpClient {
 			this.logger.debug(`← GET ${url} - 200`);
 			return response;
 		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	/**
+	 * Poll one device-login session.
+	 *
+	 * `expired` is this client's own fourth status, not one the server sends:
+	 * the session store drops a settled session ten minutes later and answers
+	 * 404 from then on. That is a settled outcome the caller has to stop
+	 * polling on, so it is reported as a status rather than as the thrown
+	 * error a transient network failure produces.
+	 */
+	async getGrokSubscriptionAuthStatus(sessionId: string): Promise<{
+		status: "pending" | "complete" | "error" | "expired";
+		error?: string;
+	}> {
+		const url = `/api/oauth/grok-subscription/status/${sessionId}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<{
+				status: "pending" | "complete" | "error";
+				error?: string;
+			}>(url);
+			this.logger.debug(`← GET ${url} - 200`);
+			return response;
+		} catch (error) {
+			if (error instanceof HttpError && error.status === 404) {
+				this.logger.debug(`← GET ${url} - 404`);
+				return { status: "expired" };
+			}
 			this.logger.error(`✗ GET ${url} - ERROR`, { error });
 			if (error instanceof HttpError) throw new Error(error.message);
 			throw error;

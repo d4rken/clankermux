@@ -68,4 +68,39 @@ describe("GrokProvider", () => {
 			expect(getProvider("grok")).toBeInstanceOf(GrokProvider);
 		});
 	});
+
+	describe("separation from the subscription provider", () => {
+		it("keeps the metered API endpoint and auth shape", () => {
+			expect({
+				endpoint: provider.getEndpoint(),
+				authHeader: provider.getAuthHeader(),
+				authType: provider.getAuthType(),
+			}).toEqual({
+				endpoint: "https://api.x.ai",
+				authHeader: "authorization",
+				authType: "bearer",
+			});
+		});
+
+		it("sends no Grok CLI identity headers", () => {
+			// Those belong to cli-chat-proxy.grok.com. An API key account must not
+			// start claiming to be the CLI because the two providers share a name
+			// prefix.
+			const prepared = provider.prepareHeaders(
+				new Headers(),
+				undefined,
+				"test-key",
+			);
+			for (const name of [
+				"x-grok-client-identifier",
+				"x-grok-client-version",
+				"x-grok-client-mode",
+				"x-xai-token-auth",
+				"x-authenticateresponse",
+				"user-agent",
+			]) {
+				expect(prepared.get(name)).toBeNull();
+			}
+		});
+	});
 });

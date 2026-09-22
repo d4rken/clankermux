@@ -1,10 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { isModelPermitted } from "@clankermux/core";
 import {
 	BunSqlAdapter,
 	ensureSchema,
 	RoutingRepository,
 } from "@clankermux/database";
+import { GROK_CLI_IDENTITY_HEADERS } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import {
 	ClientModelConfigSchema,
@@ -933,5 +935,221 @@ describe("mimo model discovery", () => {
 			discovered_ids: [],
 		});
 		expect((await repo.getPermissions(a.id))?.last_error).not.toBeNull();
+	});
+});
+
+/**
+ * SuperGrok / X Premium discovery against cli-chat-proxy.grok.com. The fixture
+ * is the catalogue that proxy returned when probed live: four ids, each on the
+ * Responses backend with a 500k window.
+ */
+describe("grok-subscription model discovery", () => {
+	const PUBLISHED = ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"];
+	const catalogue = (ids: readonly string[] = PUBLISHED) =>
+		Response.json({
+			object: "list",
+			data: ids.map((id) => ({
+				id,
+				object: "model",
+				api_backend: "responses",
+				context_window: 500000,
+			})),
+		});
+	const grok = (id = "grok-sub", patch: Partial<Account> = {}) =>
+		account(id, {
+			provider: "grok-subscription",
+			api_key: null,
+			custom_endpoint: null,
+			identity_external_id: `principal-${id}`,
+			...patch,
+		});
+	/**
+	 * Stands in for the proxy's version gate: a request that lacks any one of the
+	 * Grok-CLI identity headers is answered 426, exactly as a bare bearer is.
+	 */
+	const gated =
+		(ids: () => readonly string[] = () => PUBLISHED) =>
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS))
+				if (headers.get(name) !== value)
+					return new Response(
+						"Your Grok CLI is out of date. Please update to version 0.2.101 or later.",
+						{ status: 426 },
+					);
+			return catalogue(ids());
+		};
+	const permitted = async (
+		service: AccountModelPermissionService,
+		a: Account,
+		model: string,
+	) => isModelPermitted(await service.permissions(a), a.id, model, null);
+
+	it("reads the fixed chat-proxy catalogue with the OAuth bearer and the CLI identity", async () => {
+		const a = grok();
+		const seen: { url: string; headers: Headers; redirect?: string }[] = [];
+		const gate = gated();
+		const { service } = setup(
+			[a],
+			async (input, init) => {
+				seen.push({
+					url: String(input),
+					headers: new Headers(init?.headers),
+					redirect: init?.redirect,
+				});
+				return gate(input, init);
+			},
+			async () => "grok-oauth-token",
+		);
+		await service.refresh(a);
+		expect(seen).toHaveLength(1);
+		expect(seen[0].url).toBe("https://cli-chat-proxy.grok.com/v1/models");
+		expect(seen[0].headers.get("authorization")).toBe(
+			"Bearer grok-oauth-token",
+		);
+		for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS))
+			expect(seen[0].headers.get(name)).toBe(value);
+		expect(seen[0].redirect).toBe("error");
+		const permissions = await service.permissions(a);
+		expect(permissions.completeness).toBe("known-complete");
+		expect(permissions.last_error).toBeNull();
+	});
+
+	it("commits exactly the published ids and routes each of them", async () => {
+		const a = grok("grok-routes");
+		const { service } = setup([a], gated());
+		await service.refresh(a);
+		expect([...(await service.permissions(a)).discovered_ids].sort()).toEqual(
+			[...PUBLISHED].sort(),
+		);
+		for (const id of PUBLISHED)
+			expect(await permitted(service, a, id)).toBe(true);
+	});
+
+	it("refuses the served-only grok-4.6-build name after discovery", async () => {
+		// xAI answers a grok-4.6 request under the name grok-4.6-build, but a
+		// request that NAMES grok-4.6-build is a 404. Permitting it would route
+		// clients into that 404.
+		const a = grok("grok-served-name");
+		const { service } = setup([a], gated());
+		await service.refresh(a);
+		expect(await permitted(service, a, "grok-4.6")).toBe(true);
+		expect((await service.permissions(a)).discovered_ids).not.toContain(
+			"grok-4.6-build",
+		);
+		expect(await permitted(service, a, "grok-4.6-build")).toBe(false);
+	});
+
+	it("refuses an id in neither the discovered nor the manual set, and admits a manual one", async () => {
+		const a = grok("grok-unlisted");
+		const { repo, service } = setup([a], gated());
+		await repo.setManualModels(a.id, modelPermissionScope(a), [
+			"grok-manual-extra",
+		]);
+		await service.refresh(a);
+		expect(await permitted(service, a, "grok-4.3")).toBe(false);
+		expect(await permitted(service, a, "grok-4.20-0309-reasoning")).toBe(false);
+		expect(await permitted(service, a, "grok-manual-extra")).toBe(true);
+	});
+
+	it("drops a model the catalogue stops publishing while keeping manual ids", async () => {
+		const a = grok("grok-removal");
+		let ids: readonly string[] = PUBLISHED;
+		const { repo, service } = setup(
+			[a],
+			gated(() => ids),
+		);
+		await repo.setManualModels(a.id, modelPermissionScope(a), ["grok-manual"]);
+		await service.refresh(a, true);
+		expect(await permitted(service, a, "grok-4.5")).toBe(true);
+		ids = PUBLISHED.filter((id) => id !== "grok-4.5");
+		await service.refresh(a, true);
+		expect(await permitted(service, a, "grok-4.5")).toBe(false);
+		expect(await permitted(service, a, "grok-4.7")).toBe(true);
+		expect(await permitted(service, a, "grok-manual")).toBe(true);
+	});
+
+	it("records an empty catalogue as known-empty and leaves manual ids routable", async () => {
+		const a = grok("grok-empty");
+		const { repo, service } = setup(
+			[a],
+			gated(() => []),
+		);
+		await repo.setManualModels(a.id, modelPermissionScope(a), ["grok-manual"]);
+		await service.refresh(a);
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: [],
+			completeness: "known-empty",
+			last_error: null,
+		});
+		expect(await permitted(service, a, "grok-manual")).toBe(true);
+		expect(await permitted(service, a, "grok-4.7")).toBe(false);
+	});
+
+	it("answers a bare-bearer request with 426, which discovery records as a failure", async () => {
+		// The gate stub must actually gate, or the header assertions above prove
+		// nothing: a bearer on its own is the 426 case.
+		const gate = gated();
+		const bare = await gate("https://cli-chat-proxy.grok.com/v1/models", {
+			headers: { authorization: "Bearer grok-oauth-token" },
+		});
+		expect(bare.status).toBe(426);
+
+		// And a 426 during discovery (the proxy raising its version floor) is a
+		// recorded failure that keeps the last good catalogue, not a silent no-op.
+		const a = grok("grok-426");
+		let raised = false;
+		const { repo, service } = setup([a], async (input, init) =>
+			raised
+				? new Response(
+						"Your Grok CLI is out of date. Please update to version 9.9.9 or later.",
+						{ status: 426 },
+					)
+				: gate(input, init),
+		);
+		await service.refresh(a, true);
+		raised = true;
+		await service.refresh(a, true);
+		const permissions = await repo.getPermissions(a.id);
+		expect(permissions?.last_error).not.toBeNull();
+		expect(permissions?.completeness).toBe("known-complete");
+		expect([...(permissions?.discovered_ids ?? [])].sort()).toEqual(
+			[...PUBLISHED].sort(),
+		);
+	});
+
+	it("ignores a stored custom endpoint rather than sending the bearer to it", async () => {
+		// The provider pins its endpoint (honoursCustomEndpoint is false), so a
+		// stored value is inert for inference and must be inert here too: neither
+		// a credential redirect nor a reason to refuse discovery.
+		const a = grok("grok-endpoint", {
+			custom_endpoint: "https://attacker.example/v1",
+		});
+		const hosts: string[] = [];
+		const gate = gated();
+		const { service } = setup([a], async (input, init) => {
+			hosts.push(new URL(String(input)).hostname);
+			return gate(input, init);
+		});
+		await service.refresh(a);
+		expect(hosts).toEqual(["cli-chat-proxy.grok.com"]);
+		expect(await permitted(service, a, "grok-4.7")).toBe(true);
+	});
+
+	it("leaves the metered grok provider on api.x.ai without the CLI identity", async () => {
+		const a = account("grok-metered", {
+			provider: "grok",
+			api_key: "xai-key",
+			custom_endpoint: null,
+		});
+		const seen: { url: string; headers: Headers }[] = [];
+		const { service } = setup([a], async (input, init) => {
+			seen.push({ url: String(input), headers: new Headers(init?.headers) });
+			return Response.json({ object: "list", data: [{ id: "grok-4.6" }] });
+		});
+		await service.refresh(a);
+		expect(seen[0].url).toBe("https://api.x.ai/v1/models");
+		for (const name of Object.keys(GROK_CLI_IDENTITY_HEADERS))
+			expect(seen[0].headers.has(name)).toBe(false);
 	});
 });

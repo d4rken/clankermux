@@ -18,8 +18,9 @@ const log = new Logger("UsagePollingDispatch");
  * Providers differ in more than a credential, so this dispatches to explicit
  * per-provider starters rather than flattening them into one generic call:
  * Anthropic carries five callbacks and a demand-aware cadence, Devin re-reads
- * its key per poll and reports identity metadata, and Z.ai needs the session
- * reset that Kilo must NOT get.
+ * its key per poll and reports identity metadata, Z.ai needs the session reset
+ * that Kilo must NOT get, and grok-subscription authenticates with a refreshed
+ * OAuth token rather than a stored key.
  */
 export interface UsagePollingStarters {
 	/**
@@ -29,6 +30,12 @@ export interface UsagePollingStarters {
 	startAnthropic: (account: Account, initialDelayMs: number) => void;
 	/** Devin's starter, including its endpoint handling and metadata effects. */
 	startDevin: (account: Account) => boolean;
+	/**
+	 * Refresh-aware token provider for the OAuth providers that need no bespoke
+	 * starter. Injected for the same reason `startAnthropic` is: this module
+	 * must load without pulling in server.ts.
+	 */
+	createTokenProvider: (account: Account) => () => Promise<string>;
 	/** Resets the account's session window when a usage window rolls over. */
 	resetAccountSession: (accountId: string) => void;
 	/**
@@ -53,8 +60,15 @@ const SESSION_WINDOW_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
  * that sees headroom is evidence the account as a whole recovered and a
  * quota-derived cooldown can be released early. Kilo reports a credit balance,
  * which is not a window and says nothing about a lock.
+ *
+ * grok-subscription qualifies because its single weekly pool IS the account:
+ * Chat, Imagine, Voice, Build and API all draw on it, so there is no surface
+ * whose exhaustion the reading could miss.
  */
-const ACCOUNT_WIDE_WINDOW_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+const ACCOUNT_WIDE_WINDOW_PROVIDERS: ReadonlySet<string> = new Set([
+	"zai",
+	"grok-subscription",
+]);
 
 /**
  * Start usage polling for one account.
@@ -91,6 +105,41 @@ export function startUsagePollingFor(
 	if (account.provider === "devin") {
 		usageCache.stopPolling(account.id);
 		return starters.startDevin(account);
+	}
+
+	// Created the Qwen/Codex way: `api_key` is NULL and the credentials live in
+	// `access_token`/`refresh_token`. This has to precede the API-key
+	// fallthrough below, which would refuse the account on its missing key and
+	// leave EVERY lifecycle path — the boot sweep, the restarter behind re-auth,
+	// account-add priming and the manual refresh button — with no poller at all.
+	if (account.provider === "grok-subscription") {
+		if (!account.access_token && !account.refresh_token) {
+			log.warn(
+				`Account ${account.name} has no access token or refresh token, skipping usage polling`,
+			);
+			return false;
+		}
+		// No custom endpoint (the provider ignores one) and no session-reset
+		// callback: a paid Grok plan draws Chat, Imagine, Voice, Build and API
+		// from one weekly pool, so it has no session window to roll. That same
+		// pool is what makes the reading account-wide, hence the capacity-restored
+		// callback — gated on the set above so membership stays the one place
+		// that decides which providers may release a cooldown early.
+		usageCache.startPolling(
+			account.id,
+			starters.createTokenProvider(account),
+			account.provider,
+			starters.intervalMs(),
+			undefined, // customEndpoint
+			undefined, // onWindowReset
+			ACCOUNT_WIDE_WINDOW_PROVIDERS.has(account.provider)
+				? (evidence) => starters.onCapacityRestored(evidence)
+				: undefined,
+		);
+		log.info(
+			`Started usage polling for ${account.provider} account ${account.name}`,
+		);
+		return true;
 	}
 
 	// API-key providers (zai, kilo). No token to refresh: the poller re-reads the

@@ -14,10 +14,11 @@ import type { Account } from "../../api";
 import { api } from "../../api";
 import { AnthropicReauthDialog } from "./AnthropicReauthDialog";
 import { CodexReauthDialog } from "./CodexReauthDialog";
+import { GrokSubscriptionReauthDialog } from "./GrokSubscriptionReauthDialog";
 import { QwenReauthDialog } from "./QwenReauthDialog";
 
 /**
- * The three re-auth dialogs must hand the authorization URL over instead of
+ * The four re-auth dialogs must hand the authorization URL over instead of
  * opening it: the browser showing the dashboard is usually signed in to a
  * different account than the one being re-authenticated, so an auto-opened tab
  * lands in the wrong browser. The URL has to survive as a real anchor (for
@@ -38,7 +39,7 @@ const AUTH_URL =
 const USER_CODE = "ABCD-1234";
 /** Failure the stubbed status poll reports, to send the dialog to its error step. */
 const POLL_ERROR = "boom";
-/** Poll cadence both device-flow dialogs hand to `setInterval`. */
+/** Poll cadence every device-flow dialog hands to `setInterval`. */
 const POLL_INTERVAL_MS = 3000;
 
 interface ReauthDialogProps {
@@ -128,6 +129,26 @@ const DIALOGS: Array<
 				status: "error" as const,
 				error: POLL_ERROR,
 			}));
+		},
+	],
+	[
+		"GrokSubscriptionReauthDialog",
+		GrokSubscriptionReauthDialog,
+		"grok-subscription",
+		(gate) => {
+			spyOn(api, "initGrokSubscriptionReauth").mockImplementation(async () => {
+				await gate();
+				return { sessionId: "s1", authUrl: AUTH_URL, userCode: USER_CODE };
+			});
+			spyOn(api, "getGrokSubscriptionAuthStatus").mockImplementation(
+				async () => ({ status: "pending" as const }),
+			);
+		},
+		USER_CODE,
+		() => {
+			spyOn(api, "getGrokSubscriptionAuthStatus").mockImplementation(
+				async () => ({ status: "error" as const, error: POLL_ERROR }),
+			);
 		},
 	],
 ];

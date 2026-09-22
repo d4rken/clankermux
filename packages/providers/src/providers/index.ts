@@ -68,6 +68,16 @@ export {
 	targetsChatGptCodexBackend,
 } from "./codex/index";
 export { GrokProvider } from "./grok/index";
+export {
+	describeGrokUpgradeRequired,
+	GROK_CHAT_PROXY_ENDPOINT,
+	GROK_CLI_IDENTITY_HEADERS,
+	GROK_CLI_USER_AGENT,
+	GROK_CLI_VERSION,
+	GrokSubscriptionProvider,
+	isGrokUpgradeRequired,
+	parseRequiredGrokCliVersion,
+} from "./grok-subscription/index";
 export { KiloProvider } from "./kilo/index";
 export { MimoProvider } from "./mimo/index";
 export { MinimaxProvider } from "./minimax/index";

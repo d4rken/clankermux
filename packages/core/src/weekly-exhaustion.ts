@@ -1,6 +1,7 @@
 import type {
 	AnthropicUsageData,
 	FullUsageData,
+	GrokSubscriptionUsageData,
 	UsageExhaustionBinding,
 	ZaiUsageData,
 } from "@clankermux/types";
@@ -207,6 +208,26 @@ export function zaiAccountWideExhaustion(
 }
 
 /**
+ * {@link accountWideExhaustion} for a grok-subscription reading, which has ONE
+ * account-wide window: the weekly pool every Grok surface draws from. There is
+ * no session class to rank against it, so the precedence the two helpers above
+ * implement has nothing to decide here.
+ *
+ * An unknown `weeklyUtilization` reads as `{ pct: null }`, which `spentWindow`
+ * rejects — so an account whose percentage the billing endpoint omitted is
+ * reported as no-evidence rather than as either spent or healthy.
+ */
+export function grokSubscriptionAccountWideExhaustion(
+	usage: GrokSubscriptionUsageData | null | undefined,
+	now: number,
+): AccountWideExhaustionVerdict {
+	if (!usage) return NOT_EXHAUSTED;
+	const weeklyReset = spentWindow(extractSevenDay(usage), now);
+	if (weeklyReset === null) return NOT_EXHAUSTED;
+	return { exhausted: true, binding: "weekly", resetMs: weeklyReset };
+}
+
+/**
  * The account-wide exhaustion verdict for ONE account, dispatched on its
  * provider, so the four surfaces that report it — `/api/accounts`, `/health`,
  * the public snapshot and the proxy's 429 classification — cannot disagree
@@ -234,6 +255,14 @@ export function accountWideExhaustionFor(
 			usage as ZaiUsageData | null | undefined,
 			now,
 			sessionUsage as ZaiUsageData | null | undefined,
+		);
+	}
+	if (provider === "grok-subscription") {
+		// No `sessionUsage`: the fresh-view parameter exists for the fast-moving
+		// 5h window, and this provider has none.
+		return grokSubscriptionAccountWideExhaustion(
+			usage as GrokSubscriptionUsageData | null | undefined,
+			now,
 		);
 	}
 	return NOT_EXHAUSTED;

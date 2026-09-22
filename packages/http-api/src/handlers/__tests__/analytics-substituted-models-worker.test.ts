@@ -58,6 +58,7 @@ async function seed(
 	sent: string,
 	served: string,
 	atMs: number,
+	provider = "codex",
 ): Promise<void> {
 	const adapter = dbOps.getAdapter();
 	await adapter.run(
@@ -70,8 +71,8 @@ async function seed(
 	);
 	await adapter.run(
 		`INSERT INTO routing_attempts (id, request_id, route_snapshot_id, account_id, provider, requested_model, resolved_model, outgoing_model, reported_model, kind, started_at, status)
-		 VALUES (?, ?, 'snap-1', 'acct-1', 'codex', ?, ?, ?, ?, 'upstream_send', ?, 200)`,
-		[`att-${id}`, id, sent, sent, sent, served, atMs],
+		 VALUES (?, ?, 'snap-1', 'acct-1', ?, ?, ?, ?, ?, 'upstream_send', ?, 200)`,
+		[`att-${id}`, id, provider, sent, sent, sent, served, atMs],
 	);
 }
 
@@ -113,5 +114,52 @@ describe("substituted-model split through the analytics worker", () => {
 		// The genuine request and the backend-resolved one, together.
 		expect(ordinary).toHaveLength(1);
 		expect(ordinary[0]?.count).toBe(2);
+	});
+
+	// The provider decides whether a rename is a swap, and it is packed into the
+	// same scalar column as the origin so the query keeps ONE correlated
+	// subquery per row. Packing it in SQL and splitting it in TypeScript is a
+	// seam the bundle has to carry across, so it is pinned in the worker rather
+	// than only on the main thread.
+	it("resolves the answering provider inside the worker", async () => {
+		await dbOps.getAdapter().run(
+			`INSERT INTO accounts (id, name, provider, refresh_token, created_at, priority, request_count)
+			 VALUES ('acct-1', 'SuperGrok', 'grok-subscription', 'tok', ?, 0, 0)`,
+			[NOW],
+		);
+		// Same two ids either side: one provider renames its own model, the
+		// other really swapped.
+		await seed(
+			"r1",
+			"grok-4.6",
+			"grok-4.6-build",
+			NOW - 60_000,
+			"grok-subscription",
+		);
+		await seed("r2", "grok-4.6", "grok-4.6-build", NOW - 50_000, "openrouter");
+
+		const response = await createAnalyticsHandler(makeContext(dbOps))(
+			new URLSearchParams({ range: "24h", sections: "modelDistribution" }),
+		);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
+
+		const body = (await response.json()) as {
+			modelDistribution?: Array<{
+				model: string;
+				count: number;
+				substitutedFrom?: string;
+			}>;
+		};
+		const rows = body.modelDistribution ?? [];
+		const substituted = rows.filter((row) => row.substitutedFrom);
+		const ordinary = rows.filter((row) => !row.substitutedFrom);
+
+		expect(ordinary).toHaveLength(1);
+		expect(ordinary[0]?.count).toBe(1);
+		expect(substituted).toHaveLength(1);
+		expect(substituted[0]?.substitutedFrom).toBe("grok-4.6");
+		expect(substituted[0]?.count).toBe(1);
 	});
 });

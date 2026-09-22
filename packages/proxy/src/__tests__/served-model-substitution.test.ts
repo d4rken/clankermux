@@ -74,6 +74,14 @@ function makeAnthropicAccount(overrides: Partial<Account> = {}): Account {
 	});
 }
 
+/** `grok-subscription` or the metered API-key `grok`, which share model ids. */
+function makeGrokAccount(
+	provider: "grok" | "grok-subscription",
+	overrides: Partial<Account> = {},
+): Account {
+	return makeAnthropicAccount({ name: "Grok", provider, ...overrides });
+}
+
 const suppressed: Array<{ accountId: string; model: string; reason: string }> =
 	[];
 
@@ -181,7 +189,23 @@ function sseResponse(body: string): Response {
 	});
 }
 
-function makeRequest(model: string): Request {
+/** The same answer off the non-stream path, where the model is in the body. */
+function anthropicJson(model: string): Response {
+	return new Response(
+		JSON.stringify({
+			id: "msg_1",
+			type: "message",
+			role: "assistant",
+			model,
+			content: [{ type: "text", text: "hello" }],
+			stop_reason: "end_turn",
+			usage: { input_tokens: 1, output_tokens: 1 },
+		}),
+		{ status: 200, headers: { "content-type": "application/json" } },
+	);
+}
+
+function makeRequest(model: string, stream = true): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -189,7 +213,7 @@ function makeRequest(model: string): Request {
 			model,
 			messages: [{ role: "user", content: "hi" }],
 			max_tokens: 16,
-			stream: true,
+			stream,
 		}),
 	});
 }
@@ -378,5 +402,156 @@ describe("served-model substitution — enforcement", () => {
 		expect(res.status).toBe(200);
 		expect(await res.text()).toBe(body);
 		expect(suppressed).toEqual([]);
+	});
+});
+
+/**
+ * The verified `grok-4.6` → `grok-4.6-build` pair, exercised with enforcement
+ * on and no operator exception configured — the default a SuperGrok account
+ * runs under, and the configuration under which every one of its requests
+ * failed before the pair table existed.
+ */
+describe("served-model substitution — grok-subscription's verified rename", () => {
+	it("serves the renamed stream instead of failing it over", async () => {
+		const body = anthropicSse("grok-4.6-build");
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return sseResponse(body);
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("grok-4.6"),
+			makeContext(
+				[
+					makeGrokAccount("grok-subscription", { priority: 1 }),
+					makeGrokAccount("grok-subscription", {
+						name: "Sibling",
+						priority: 2,
+					}),
+				],
+				"enforce",
+			),
+		);
+
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(body);
+		// The sibling must not be reached: there is nothing to fail over from.
+		expect(call).toBe(1);
+		expect(suppressed).toEqual([]);
+	});
+
+	it("serves the renamed non-stream body instead of failing it over", async () => {
+		// The model is read from the JSON body here rather than message_start, so
+		// the two paths have to be asserted separately.
+		globalThis.fetch = mock(async () =>
+			anthropicJson("grok-4.6-build"),
+		) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("grok-4.6", false),
+			makeContext([makeGrokAccount("grok-subscription")], "enforce"),
+		);
+
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { model: string }).model).toBe(
+			"grok-4.6-build",
+		);
+		expect(suppressed).toEqual([]);
+	});
+
+	it("still fails over an uncovered rename on the non-stream path", async () => {
+		// Pins the non-stream peek as live: without it the body test above would
+		// pass because nothing was compared at all.
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return anthropicJson(call === 1 ? "grok-4.5" : "grok-4.6");
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("grok-4.6", false),
+			makeContext(
+				[
+					makeGrokAccount("grok-subscription", { priority: 1 }),
+					makeGrokAccount("grok-subscription", {
+						name: "Honest",
+						priority: 2,
+					}),
+				],
+				"enforce",
+			),
+		);
+
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { model: string }).model).toBe("grok-4.6");
+		expect(call).toBe(2);
+		expect(suppressed).toHaveLength(1);
+		expect(suppressed[0]?.reason).toBe(MODEL_SUBSTITUTION_SUPPRESSION_REASON);
+	});
+
+	it("still fails over a rename the catalogue publishes as its own model", async () => {
+		// `grok-4.7-build-fast` is a separate entry on /v1/models, so answering a
+		// `grok-4.7` request with it is a swap the operator has to see.
+		const served = anthropicSse("grok-4.7");
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return sseResponse(
+				call === 1 ? anthropicSse("grok-4.7-build-fast") : served,
+			);
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("grok-4.7"),
+			makeContext(
+				[
+					makeGrokAccount("grok-subscription", { priority: 1 }),
+					makeGrokAccount("grok-subscription", {
+						name: "Honest",
+						priority: 2,
+					}),
+				],
+				"enforce",
+			),
+		);
+
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(served);
+		expect(call).toBe(2);
+		expect(suppressed).toHaveLength(1);
+		expect(suppressed[0]?.model).toBe("grok-4.7");
+	});
+
+	it("still fails the same pair over on the metered grok provider", async () => {
+		// The pair is scoped to the subscription upstream that was observed
+		// producing it; api.x.ai renaming a model would be news.
+		const served = anthropicSse("grok-4.6");
+		let call = 0;
+		globalThis.fetch = mock(async () => {
+			call += 1;
+			return sseResponse(call === 1 ? anthropicSse("grok-4.6-build") : served);
+		}) as never;
+
+		const res = await callHandleProxy(
+			makeRequest("grok-4.6"),
+			makeContext(
+				[
+					makeGrokAccount("grok", { priority: 1, api_key: "xai-key" }),
+					makeGrokAccount("grok", {
+						name: "Honest",
+						priority: 2,
+						api_key: "xai-key",
+					}),
+				],
+				"enforce",
+			),
+		);
+
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(served);
+		expect(call).toBe(2);
+		expect(suppressed).toHaveLength(1);
+		expect(suppressed[0]?.reason).toBe(MODEL_SUBSTITUTION_SUPPRESSION_REASON);
 	});
 });
