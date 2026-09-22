@@ -1,4 +1,8 @@
-import { FAMILY_PRIORITY, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
+import {
+	FAMILY_PRIORITY,
+	normalizeAnthropicUsage,
+	PAUSE_REASON_NEEDS_REAUTH,
+} from "@clankermux/core";
 import type { AnthropicBankedResetEventRow } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import {
@@ -17,6 +21,7 @@ import type {
 	AnthropicBankedResetEventStatus,
 	AnthropicBankedResetStatus,
 	AnthropicBankedResetWindow,
+	AnthropicUsageData,
 } from "@clankermux/types";
 import { clearFamilyWeeklyExhausted } from "./family-weekly-memo";
 import type { ProxyContext } from "./handlers/proxy-types";
@@ -67,6 +72,10 @@ export function bankedResetsLeftTotal(
 	return status.grants.reduce((sum, grant) => sum + grant.resetsLeft, 0);
 }
 
+function notYetDue(row: AnthropicBankedResetEventRow, now: number): boolean {
+	return row.next_attempt_at !== null && row.next_attempt_at > now;
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -95,7 +104,7 @@ export interface AnthropicBankedResetCoordinatorDeps {
 	canFetchProfile?: typeof canFetchAnthropicProfile;
 	usage?: Pick<
 		typeof usageCache,
-		"fenceAndRefetch" | "noteRateLimited" | "getRateLimitedUntil"
+		"fenceAndRefetch" | "get" | "noteRateLimited" | "getRateLimitedUntil"
 	>;
 	now?: () => number;
 }
@@ -107,6 +116,8 @@ type LedgerTarget =
 			createdAt: number;
 			/** The row was pending before this call, so an earlier POST may have landed. */
 			replay: boolean;
+			/** A manual row written by this call: no POST under its request id yet. */
+			createdHere: boolean;
 	  }
 	| { kind: "settled"; row: AnthropicBankedResetEventRow }
 	| {
@@ -329,23 +340,45 @@ export class AnthropicBankedResetCoordinator {
 		// store the pre-claim status.
 		await this.settleStatusRead(accountId);
 
-		// Last look at the account before the POST: it may have been disabled,
-		// or its auto-apply toggle turned off, while the reads above ran.
-		const gate = await this.claimableAccount(accountId, request);
-		if ("message" in gate) return gate;
-		account = gate.account;
-
 		const target = await this.openLedgerRow(account, request);
 		if (target.kind === "refused") return target.outcome;
 		if (target.kind === "settled")
 			return this.settledOutcome(account, target.row);
+
+		// Last look at the account before the POST, after every await above: it
+		// may have been disabled, or its auto-apply toggle turned off, meanwhile.
+		const gate = await this.claimableAccount(accountId, request);
+		if ("message" in gate) {
+			if (target.createdHere) {
+				// Never sent, so it must not hold off the account's next claim.
+				await this.writeLedger(account.name, target.rowId, (id) =>
+					this.ctx.dbOps.resolveAnthropicBankedResetAttempt(id, {
+						status: "failed",
+						errorMessage: `Not sent: ${gate.message}`,
+						now: this.now(),
+					}),
+				);
+			}
+			return gate;
+		}
+		account = gate.account;
 
 		const claimStartedAt = this.now();
 		const ids = { grantId: request.grantId, requestId: request.requestId };
 		let result = await this.claimReset(accessToken, orgUuid, ids);
 		if (result.result === "auth_error") {
 			const refreshed = await this.forceTokenRefresh(account, accessToken);
-			if (refreshed) result = await this.claimReset(refreshed, orgUuid, ids);
+			// The retry is a second POST; the account gets the same last look.
+			const retryGate = refreshed
+				? await this.claimableAccount(accountId, request)
+				: null;
+			if (retryGate && "message" in retryGate) {
+				log.warn(
+					`Banked-reset claim for '${account.name}' not retried after an auth error: ${retryGate.message}`,
+				);
+			} else if (refreshed) {
+				result = await this.claimReset(refreshed, orgUuid, ids);
+			}
 		}
 
 		// An answer of already_used to a replayed request id means an earlier
@@ -353,17 +386,17 @@ export class AnthropicBankedResetCoordinator {
 		const windowsRestored =
 			result.result === "reset" ||
 			(result.result === "already_used" && target.replay);
+		let refetch: Promise<boolean> | null = null;
 		if (windowsRestored) {
 			// Synchronously, before any await: the fence must cover every usage
 			// fetch that left before the claim, and a memo entry recorded after
 			// the claim started must survive.
-			this.usage
-				.fenceAndRefetch(accountId)
-				.catch((error) =>
-					log.warn(
-						`Usage refetch after a banked reset failed for '${account.name}': ${errorMessage(error)}`,
-					),
+			refetch = this.usage.fenceAndRefetch(accountId).catch((error) => {
+				log.warn(
+					`Usage refetch after a banked reset failed for '${account.name}': ${errorMessage(error)}`,
 				);
+				return false;
+			});
 			for (const family of FAMILY_PRIORITY) {
 				clearFamilyWeeklyExhausted(accountId, family, claimStartedAt);
 			}
@@ -383,6 +416,7 @@ export class AnthropicBankedResetCoordinator {
 					reason: result.reason,
 					cleared: result.cleared,
 					resetsLeft: result.resetsLeft,
+					cooldownUntil: result.cooldownUntil,
 					now,
 				}),
 			);
@@ -409,11 +443,22 @@ export class AnthropicBankedResetCoordinator {
 			`banked_reset_claim account=${account.name} grant=${request.grantId} trigger=${request.autoApply ? `auto:${request.autoApply.cause}` : "manual"} replay=${target.replay} result=${result.result} reason=${result.reason ?? "none"} ledger=${ledgerStatus}`,
 		);
 
-		if (result.result === "reset") {
+		if (result.result === "reset" && refetch) {
 			// `reset` only: an already_used replay may surface long after the
 			// windows were restored, and the account may have spent them since.
+			const keepPause = await this.overagePauseKeptBy(
+				accountId,
+				result,
+				refetch,
+			);
 			try {
-				if (await this.ctx.dbOps.resumeAccountIfOveragePaused(accountId)) {
+				if (keepPause) {
+					log.info(
+						`Overage pause of '${account.name}' kept after a banked reset: ${keepPause}`,
+					);
+				} else if (
+					await this.ctx.dbOps.resumeAccountIfOveragePaused(accountId)
+				) {
 					log.info(
 						`Resumed '${account.name}' from its overage pause: a banked reset restored its usage windows`,
 					);
@@ -445,6 +490,40 @@ export class AnthropicBankedResetCoordinator {
 			windowsRestored,
 			statusRefreshed,
 		};
+	}
+
+	/**
+	 * Why a fresh reset must not lift the overage pause, or null when it may.
+	 * The pause stands for spending past a spent window; only a reset that
+	 * cleared the weekly window, confirmed by a post-claim reading with headroom
+	 * in both the 5-hour and weekly windows, removes its reason.
+	 */
+	private async overagePauseKeptBy(
+		accountId: string,
+		result: AnthropicBankedResetClaimResult,
+		refetch: Promise<boolean>,
+	): Promise<string | null> {
+		if (
+			!result.cleared.includes("seven_day") &&
+			!result.cleared.includes("seven_day_overage_included")
+		) {
+			return `the reset cleared ${result.cleared.join(", ") || "no window"}, not the weekly window`;
+		}
+		if (!(await refetch)) return "the post-claim usage read failed";
+		const normalized = normalizeAnthropicUsage(
+			this.usage.get(accountId) as AnthropicUsageData | null,
+			this.now(),
+		);
+		if (!normalized.session || !normalized.weeklyAll) {
+			return "the post-claim usage reading lacks the 5-hour or weekly window";
+		}
+		if (
+			normalized.session.utilization >= 100 ||
+			normalized.weeklyAll.utilization >= 100
+		) {
+			return `the post-claim reading is still at a limit (5h ${normalized.session.utilization}%, weekly ${normalized.weeklyAll.utilization}%)`;
+		}
+		return null;
 	}
 
 	/**
@@ -481,12 +560,15 @@ export class AnthropicBankedResetCoordinator {
 						},
 					};
 				}
-				if (row && row.status !== "pending") return { kind: "settled", row };
+				if (row && (row.status !== "pending" || notYetDue(row, now))) {
+					return { kind: "settled", row };
+				}
 				return {
 					kind: "post",
 					rowId: request.autoApply.ledgerRowId,
 					createdAt: row?.created_at ?? now,
 					replay: request.autoApply.replay,
+					createdHere: false,
 				};
 			}
 
@@ -525,7 +607,12 @@ export class AnthropicBankedResetCoordinator {
 					},
 				};
 			}
-			if (begin.kind === "existing" && begin.row.status !== "pending") {
+			// A resolved row answers from the ledger, and so does a pending one
+			// still backing off: its retry time is the server's or ours to keep.
+			if (
+				begin.kind === "existing" &&
+				(begin.row.status !== "pending" || notYetDue(begin.row, now))
+			) {
 				return { kind: "settled", row: begin.row };
 			}
 			return {
@@ -533,6 +620,7 @@ export class AnthropicBankedResetCoordinator {
 				rowId: begin.row.id,
 				createdAt: begin.row.created_at,
 				replay: begin.kind === "existing",
+				createdHere: begin.kind === "created",
 			};
 		} catch (error) {
 			log.error(

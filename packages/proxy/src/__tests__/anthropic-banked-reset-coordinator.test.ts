@@ -55,6 +55,9 @@ let claimImpl: (
 let profileImpl: () => Promise<AccountIdentity | null>;
 let canFetchProfile = true;
 let rateLimitedUntil: number | null = null;
+/** What the usage cache holds after the post-claim refetch. */
+let usageReading: unknown = null;
+let refetchSucceeds = true;
 /** Ledger methods replaced on the coordinator's dbOps, e.g. to make one throw. */
 let dbOverrides: Partial<DatabaseOperations>;
 
@@ -70,7 +73,8 @@ const fetchProfile = mock(() => profileImpl());
 const getValidAccessToken = mock(async () => "token");
 const refreshAccessTokenSafe = mock(async () => "fresh-token");
 const usage = {
-	fenceAndRefetch: mock(async (_id: string) => true),
+	fenceAndRefetch: mock(async (_id: string) => refetchSucceeds),
+	get: mock((_id: string) => usageReading as never),
 	noteRateLimited: mock((_id: string, _until: number) => {}),
 	getRateLimitedUntil: mock((_id: string) => rateLimitedUntil),
 };
@@ -103,6 +107,14 @@ function status(
 		weeklyResetsAt: null,
 		cooldownUntil: null,
 		...overrides,
+	};
+}
+
+function reading(fiveHour: number, sevenDay: number) {
+	const resetsAt = new Date(NOW + 86_400_000).toISOString();
+	return {
+		five_hour: { utilization: fiveHour, resets_at: resetsAt },
+		seven_day: { utilization: sevenDay, resets_at: resetsAt },
 	};
 }
 
@@ -181,6 +193,8 @@ beforeEach(() => {
 	profileImpl = async () => null;
 	canFetchProfile = true;
 	rateLimitedUntil = null;
+	usageReading = reading(10, 10);
+	refetchSucceeds = true;
 	dbOverrides = {};
 	for (const fn of [
 		fetchStatus,
@@ -189,6 +203,7 @@ beforeEach(() => {
 		getValidAccessToken,
 		refreshAccessTokenSafe,
 		usage.fenceAndRefetch,
+		usage.get,
 		usage.noteRateLimited,
 		usage.getRateLimitedUntil,
 	]) {
@@ -374,6 +389,7 @@ describe("claim", () => {
 		expect(first.status === "completed" && first.ledgerStatus).toBe("pending");
 		expect(usage.fenceAndRefetch).not.toHaveBeenCalled();
 
+		clock = NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS;
 		claimImpl = async () => claimResult({ result: "already_used" });
 		const second = await coordinator().claim(ACCOUNT_ID, {
 			grantId: "g1",
@@ -640,14 +656,133 @@ describe("claim", () => {
 		);
 	});
 
-	it("sends no POST when the account is disabled during the reads before it", async () => {
-		accountReads = [{}, { disabled: true }];
+	it("sends no POST when the account is disabled while its ledger row is written, and releases the row", async () => {
+		dbOverrides = {
+			beginManualAnthropicBankedResetAttempt: async (input) => {
+				const begun =
+					await realDbOps.beginManualAnthropicBankedResetAttempt(input);
+				baseAccount.disabled = true;
+				return begun;
+			},
+		};
 		const outcome = await coordinator().claim(ACCOUNT_ID, {
 			grantId: "g1",
 			requestId: "req-disabled",
 		});
 		expect(outcome.status === "failed" && outcome.code).toBe("account_state");
 		expect(claim).not.toHaveBeenCalled();
+		// Never sent, so it must not hold off the next claim for an hour.
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			"req-disabled",
+		);
+		expect(row?.status).toBe("failed");
+		expect(
+			await realDbOps.getPendingAnthropicBankedResetAttempts(ACCOUNT_ID),
+		).toEqual([]);
+	});
+
+	it("keeps a replayed manual row pending when the account is disabled before its POST", async () => {
+		await realDbOps.beginManualAnthropicBankedResetAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			requestId: "req-replay-disabled",
+			grantEndsAt: null,
+			now: NOW - 60_000,
+		});
+		accountReads = [{}, { disabled: true }];
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-replay-disabled",
+		});
+		expect(outcome.status).toBe("failed");
+		expect(claim).not.toHaveBeenCalled();
+		expect(
+			(
+				await realDbOps.getAnthropicBankedResetEventByRequestId(
+					ACCOUNT_ID,
+					"req-replay-disabled",
+				)
+			)?.status,
+		).toBe("pending");
+	});
+
+	it("re-checks the account before the retry after an auth error", async () => {
+		claimImpl = async () => {
+			baseAccount.pause_reason = "oauth_invalid_grant";
+			baseAccount.paused = true;
+			return claimResult({
+				result: "auth_error",
+				httpStatus: 401,
+				errorMessage: "401",
+			});
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-401-reauth",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"pending",
+		);
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			"req-401-reauth",
+		);
+		expect(row?.status).toBe("pending");
+		expect(row?.next_attempt_at).not.toBeNull();
+	});
+
+	it("answers a manual retry before its next attempt time from the ledger, without a POST", async () => {
+		claimImpl = async () =>
+			claimResult({
+				result: "rate_limited",
+				httpStatus: 429,
+				retryAfterMs: 120_000,
+			});
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-early",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+
+		clock = NOW + 60_000;
+		const early = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-early",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(early.status === "completed" && early.ledgerStatus).toBe("pending");
+		expect(early.status === "completed" && early.nextAttemptAt).toBe(
+			NOW + 120_000,
+		);
+		expect(early.status === "completed" && early.result).toBeNull();
+
+		clock = NOW + 120_000;
+		claimImpl = async () => claimResult();
+		const due = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-early",
+		});
+		expect(claim).toHaveBeenCalledTimes(2);
+		expect(due.status === "completed" && due.ledgerStatus).toBe("reset");
+	});
+
+	it("persists the server's cooldown as the re-arm deadline when it is later than an hour", async () => {
+		claimImpl = async () =>
+			claimResult({
+				result: "cooldown",
+				cleared: [],
+				cooldownUntil: NOW + 3 * 60 * 60_000,
+			});
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-cooldown",
+		});
+		expect(await realDbOps.getAnthropicBankedResetRearmAt(ACCOUNT_ID)).toBe(
+			NOW + 3 * 60 * 60_000,
+		);
 	});
 
 	it("sends no auto POST when its toggle was turned off meanwhile", async () => {
@@ -757,5 +892,48 @@ describe("claim", () => {
 		expect(outcome.status).toBe("failed");
 		expect(fetchProfile).not.toHaveBeenCalled();
 		expect(claim).not.toHaveBeenCalled();
+	});
+});
+
+describe("the overage pause after a reset", () => {
+	const claimOnce = (requestId: string) =>
+		coordinator().claim(ACCOUNT_ID, { grantId: "g1", requestId });
+
+	it("is lifted when the weekly window was cleared and the refetched reading has headroom", async () => {
+		await claimOnce("req-lift");
+		expect(dbCalls).toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("is lifted for a cleared seven_day_overage_included window", async () => {
+		claimImpl = async () =>
+			claimResult({ cleared: ["seven_day_overage_included"] });
+		await claimOnce("req-overage-window");
+		expect(dbCalls).toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("is kept when only the 5-hour window was cleared", async () => {
+		claimImpl = async () => claimResult({ cleared: ["five_hour"] });
+		await claimOnce("req-5h");
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("is kept when the post-claim usage fetch failed", async () => {
+		refetchSucceeds = false;
+		await claimOnce("req-no-refetch");
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("is kept while the refetched reading shows a window still at its limit", async () => {
+		usageReading = reading(100, 20);
+		await claimOnce("req-5h-full");
+		usageReading = reading(20, 100);
+		await claimOnce("req-7d-full");
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("is kept when the refetched reading lacks a window", async () => {
+		usageReading = { five_hour: { utilization: 10, resets_at: null } };
+		await claimOnce("req-partial");
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
 	});
 });
