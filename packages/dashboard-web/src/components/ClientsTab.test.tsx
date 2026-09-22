@@ -20,6 +20,7 @@ it("lists clients by name and highlights requests from the last 24 hours", () =>
 		key: {
 			id: name,
 			name,
+			application: null,
 			prefixLast8: "12345678",
 			createdAt: "2026-01-01",
 			lastUsed:

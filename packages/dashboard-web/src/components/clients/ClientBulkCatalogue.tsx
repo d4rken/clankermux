@@ -21,6 +21,7 @@ import {
 import { Input } from "../ui/input";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
+import { ClientLabel, clientLabelText } from "./ClientLabel";
 import type { DestinationAccount } from "./ClientWizard";
 import { suggestedModel } from "./ClientWizard";
 import { ModelFilterField, matchesModelQuery } from "./model-filter";
@@ -270,7 +271,9 @@ export function ClientBulkCatalogue({
 		});
 	const accountName = (id: string) =>
 		accounts.find((a) => a.id === id)?.name ?? id;
-	const shown = clients.slice(0, 3).map((c) => c.key.name);
+	const shown = clients
+		.slice(0, 3)
+		.map((c) => clientLabelText(c.key.name, c.application));
 
 	return (
 		<Card>
@@ -281,7 +284,9 @@ export function ClientBulkCatalogue({
 				</CardTitle>
 				<p
 					className="text-sm text-muted-foreground"
-					title={clients.map((c) => c.key.name).join(", ")}
+					title={clients
+						.map((c) => clientLabelText(c.key.name, c.application))
+						.join(", ")}
 				>
 					{shown.join(", ")}
 					{clients.length > shown.length
@@ -593,7 +598,8 @@ export function ClientBulkCatalogue({
 										<option value="">Choose a client</option>
 										{clients.map((c) => (
 											<option key={c.apiKeyId} value={c.apiKeyId}>
-												{c.key.name} ({c.catalogues[format].models.length})
+												{clientLabelText(c.key.name, c.application)} (
+												{c.catalogues[format].models.length})
 											</option>
 										))}
 									</select>
@@ -667,10 +673,12 @@ export function ClientBulkCatalogue({
 							Every one of the {clients.length} selected{" "}
 							{clients.length === 1 ? "client's" : "clients'"} current{" "}
 							{FORMATS[format]} entries are discarded and replaced with the{" "}
-							{source?.models.length ?? 0} entries from{" "}
-							{clients.find((c) => c.apiKeyId === source?.id)?.key.name ??
-								"the chosen client"}
-							. Other formats are untouched.
+							{source?.models.length ?? 0} entries from {(() => {
+								const picked = clients.find((c) => c.apiKeyId === source?.id);
+								return picked
+									? clientLabelText(picked.key.name, picked.application)
+									: "the chosen client";
+							})()}. Other formats are untouched.
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
@@ -735,7 +743,12 @@ function PreviewRow({
 	return (
 		<div data-preview={result.apiKeyId} className="px-3 py-2 text-sm">
 			<div className="flex flex-wrap items-baseline gap-x-3">
-				<span className="font-medium">{result.name}</span>
+				<ClientLabel
+					apiKeyId={result.apiKeyId}
+					name={result.name}
+					application={stored?.application ?? null}
+					className="font-medium"
+				/>
 				<span
 					className={
 						result.status === "rejected"

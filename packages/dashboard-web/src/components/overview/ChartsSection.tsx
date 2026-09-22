@@ -10,6 +10,7 @@ import {
 	toProjectDonutData,
 } from "../../lib/project-donut";
 import { BasePieChart, RequestVolumeSuccessChart } from "../charts";
+import { ClientLabel } from "../clients/ClientLabel";
 import {
 	Card,
 	CardContent,
@@ -238,9 +239,11 @@ export function ChartsSection({
 															series.sequence[index % series.sequence.length],
 													}}
 												/>
-												<span className="text-muted-foreground font-medium">
-													{apiKey.name}
-												</span>
+												<ClientLabel
+													apiKeyId={apiKey.id === NO_KEY_ID ? null : apiKey.id}
+													name={apiKey.name}
+													className="text-muted-foreground font-medium"
+												/>
 											</div>
 											<span className="font-medium">{apiKey.value}</span>
 										</div>

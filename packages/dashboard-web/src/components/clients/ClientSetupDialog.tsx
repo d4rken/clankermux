@@ -17,6 +17,7 @@ import {
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientModelMetadata, clientRequest } from "./api";
+import { ClientLabel } from "./ClientLabel";
 import { clientSetupExports, preferredFormat } from "./setup";
 
 /**
@@ -152,7 +153,15 @@ export function ClientSetupDialog({
 		>
 			<DialogContent className="max-w-3xl max-h-[90dvh] overflow-auto gap-5">
 				<DialogHeader className="space-y-2">
-					<DialogTitle>{client.key.name} setup</DialogTitle>
+					<DialogTitle className="flex min-w-0 items-center gap-1.5">
+						<ClientLabel
+							apiKeyId={client.apiKeyId}
+							name={client.key.name}
+							application={client.application}
+							iconClassName="h-5 w-5"
+						/>
+						<span className="shrink-0">setup</span>
+					</DialogTitle>
 					<DialogDescription>
 						Copy the configuration for this installation. Its saved API key is
 						filled in whenever you open setup.

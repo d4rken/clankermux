@@ -24,6 +24,7 @@ const client = (id: string, models: ClientModel[]): ClientView => ({
 	key: {
 		id,
 		name: `Client ${id}`,
+		application: null,
 		prefixLast8: "abcdefgh",
 		createdAt: "2026-01-01",
 		lastUsed: null,

@@ -7,6 +7,14 @@ import { MemoryRouter } from "react-router";
 import { queryKeys } from "../lib/query-keys";
 import { ClientsTab } from "./ClientsTab";
 
+/**
+ * A row checkbox's accessible name, which NAMES THE HARNESS as well as the
+ * client. The name alone would not do: the accessible name is read on its own
+ * when tabbing, so it cannot lean on the harness spelled out in the row's
+ * sub-line, and two clients from one machine differ only by that harness.
+ */
+const selectLabel = (name: string) => `Select ${name} (Generic / script)`;
+
 function makeClient(name: string): ClientView {
 	return {
 		apiKeyId: name,
@@ -17,6 +25,7 @@ function makeClient(name: string): ClientView {
 		key: {
 			id: name,
 			name,
+			application: null,
 			prefixLast8: "12345678",
 			createdAt: "2026-01-01",
 			lastUsed: null,
@@ -61,6 +70,7 @@ it("sorts each client header in both directions and retains sorting after refres
 		key: {
 			id: name,
 			name,
+			application: null,
 			prefixLast8: "12345678",
 			createdAt: "2026-01-01",
 			lastUsed:
@@ -228,8 +238,8 @@ it("selects clients, opens the bulk editor, and forgets clients that disappear",
 		if (!target) throw new Error(`Missing button ${label}`);
 		await act(async () => target.click());
 	};
-	await clickBox("Select One");
-	await clickBox("Select Two");
+	await clickBox(selectLabel("One"));
+	await clickBox(selectLabel("Two"));
 	expect(container.textContent).toContain("2 selected");
 	// React has no `indeterminate` prop, so this is set through a ref; a header
 	// box that never leaves "unchecked" misreports a partial selection.
@@ -239,8 +249,8 @@ it("selects clients, opens the bulk editor, and forgets clients that disappear",
 	expect(container.textContent).toContain("3 selected");
 
 	await clickBox("Clear client selection");
-	await clickBox("Select One");
-	await clickBox("Select Two");
+	await clickBox(selectLabel("One"));
+	await clickBox(selectLabel("Two"));
 	await act(async () => {
 		query.setQueryData(["clients"], [makeClient("One"), makeClient("Three")]);
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -332,7 +342,7 @@ it("keeps the bulk panel open on the committed catalogues, then closes with the 
 			throw new Error(`Missing ${selector} ${label}`);
 		await act(async () => target.click());
 	};
-	await clickLabelled("input", "Select One");
+	await clickLabelled("input", selectLabel("One"));
 	await clickLabelled("button", "Edit catalogues");
 	await act(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));

@@ -13,6 +13,7 @@ import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
 import { ApplicationMarkIcon } from "./clients/application-marks";
 import { ClientBulkCatalogue } from "./clients/ClientBulkCatalogue";
+import { clientLabelText } from "./clients/ClientLabel";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
 import { APPLICATIONS, destinationsLabel } from "./clients/setup";
@@ -363,7 +364,7 @@ export function ClientsTab() {
 									<input
 										type="checkbox"
 										className="shrink-0 justify-self-start"
-										aria-label={`Select ${client.key.name}`}
+										aria-label={`Select ${clientLabelText(client.key.name, client.application)}`}
 										checked={selected.has(client.apiKeyId)}
 										onChange={() => toggleClient(client.apiKeyId)}
 									/>
@@ -453,7 +454,7 @@ export function ClientsTab() {
 													variant="ghost"
 													size="icon"
 													className="h-8 w-8 shrink-0"
-													aria-label={`Actions for ${client.key.name}`}
+													aria-label={`Actions for ${clientLabelText(client.key.name, client.application)}`}
 												>
 													<MoreHorizontal className="h-4 w-4" />
 												</Button>
@@ -539,10 +540,10 @@ export function ClientsTab() {
 						</DialogTitle>
 						<DialogDescription>
 							{action?.kind === "rotate"
-								? `Replace the key for ${action.client.key.name}. Update that installation with the new key; the old key stops working immediately.`
+								? `Replace the key for ${clientLabelText(action.client.key.name, action.client.application)}. Update that installation with the new key; the old key stops working immediately.`
 								: action?.kind === "delete"
-									? `Delete ${action.client.key.name}, its catalogue and setup-owned alias rules. Manually created routing references must be removed first.`
-									: `${action?.kind === "disable" ? "Block" : "Allow"} requests using ${action?.client.key.name}'s key.`}
+									? `Delete ${clientLabelText(action.client.key.name, action.client.application)}, its catalogue and setup-owned alias rules. Manually created routing references must be removed first.`
+									: `${action?.kind === "disable" ? "Block" : "Allow"} requests using ${action ? clientLabelText(action.client.key.name, action.client.application) : ""}'s key.`}
 						</DialogDescription>
 					</DialogHeader>
 					{actionError && (

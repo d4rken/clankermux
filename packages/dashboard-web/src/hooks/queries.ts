@@ -305,6 +305,26 @@ export const useApiKeys = () => {
 	});
 };
 
+/**
+ * `api_key_id -> application` for every configured key, for rendering a client
+ * by id. Shares `fetchApiKeys` and the `apiKeys()` cache key deliberately:
+ * a second queryFn on one key would let whichever observer fetched first decide
+ * the cached shape. The `select` runs per observer, not per fetch.
+ *
+ * A key absent from the map is one the dashboard has never heard of — a deleted
+ * key still named on an old request row, or a list that has not loaded yet.
+ */
+export const useClientApplications = () => {
+	return useQuery({
+		queryKey: queryKeys.apiKeys(),
+		queryFn: fetchApiKeys,
+		staleTime: 60000,
+		gcTime: 5 * 60 * 1000,
+		select: (keys: ApiKeyResponse[]) =>
+			new Map(keys.map((key) => [key.id, key.application])),
+	});
+};
+
 export const useStats = (
 	refetchInterval?: number,
 	errorsSinceHours?: number,

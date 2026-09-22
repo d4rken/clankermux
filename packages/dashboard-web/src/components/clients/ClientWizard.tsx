@@ -17,6 +17,7 @@ import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import { CatalogueSelector } from "./CatalogueSelector";
+import { ClientLabel, clientLabelText } from "./ClientLabel";
 import {
 	APPLICATIONS,
 	destinationsLabel,
@@ -569,8 +570,20 @@ export function ClientWizard({
 	return (
 		<Card>
 			<CardHeader className="gap-5 border-b px-5 py-5 sm:px-6">
-				<CardTitle className="text-lg leading-6">
-					{client ? `Configure ${client.key.name}` : "Add client"}
+				<CardTitle className="flex min-w-0 items-center gap-1.5 text-lg leading-6">
+					{client ? (
+						<>
+							<span className="shrink-0">Configure</span>
+							<ClientLabel
+								apiKeyId={client.apiKeyId}
+								name={client.key.name}
+								application={client.application}
+								iconClassName="h-5 w-5"
+							/>
+						</>
+					) : (
+						"Add client"
+					)}
 				</CardTitle>
 				<ol
 					aria-label="Setup steps"
@@ -875,7 +888,7 @@ export function ClientWizard({
 											<option value="">Choose a client</option>
 											{copySources.map((c) => (
 												<option key={c.apiKeyId} value={c.apiKeyId}>
-													{c.key.name}
+													{clientLabelText(c.key.name, c.application)}
 												</option>
 											))}
 										</select>
