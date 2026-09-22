@@ -31,6 +31,7 @@ import {
 	decideResetCreditAction,
 	RESET_CREDIT_AUTO_APPLY_LEAD_MS,
 	RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS,
+	RESET_CREDIT_WEEKLY_LIMIT_MIN_GAIN_MS,
 	type ResetCreditApplyDecision,
 } from "../codex-reset-credit-applier";
 import type { CodexResetCreditConsumeDispatchOutcome } from "../handlers/token-manager";
@@ -47,6 +48,9 @@ const weeklyOnly: Partial<Account> = {
 	codex_auto_apply_reset_credits_enabled: false,
 	codex_auto_apply_reset_on_weekly_limit_enabled: true,
 };
+
+/** Default natural weekly reset: far enough out that a redemption gains time. */
+const WEEKLY_RESETS_AT = NOW + 5 * 86_400_000;
 
 /** Unix-seconds expiry that is `msFromNow` in the future of NOW. */
 function expirySec(msFromNow: number): number {
@@ -110,6 +114,7 @@ function decide(inputs: {
 	credits?: CodexRateLimitResetCredit[] | null;
 	resolved?: ReadonlySet<string>;
 	weeklyUsedPercent?: number | null;
+	weeklyResetsAt?: number | null;
 	autoApplyCooldownAnchorAt?: number | null;
 	now?: number;
 }) {
@@ -119,6 +124,10 @@ function decide(inputs: {
 		credits: inputs.credits === undefined ? [makeCredit()] : inputs.credits,
 		terminallyResolvedCreditIds: inputs.resolved ?? new Set(),
 		weeklyUsedPercent: inputs.weeklyUsedPercent ?? null,
+		weeklyResetsAt:
+			inputs.weeklyResetsAt === undefined
+				? WEEKLY_RESETS_AT
+				: inputs.weeklyResetsAt,
 		autoApplyCooldownAnchorAt: inputs.autoApplyCooldownAnchorAt ?? null,
 		now: inputs.now ?? NOW,
 	});
@@ -374,6 +383,61 @@ describe("decideResetCreditAction — weekly-limit trigger", () => {
 				weeklyUsedPercent: null,
 			}),
 		).toEqual({ action: "skip", reason: "weekly-not-exhausted" });
+	});
+
+	it("does NOT fire when the natural weekly reset is closer than the minimum gain", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				weeklyResetsAt: NOW + RESET_CREDIT_WEEKLY_LIMIT_MIN_GAIN_MS - 1,
+			}),
+		).toEqual({ action: "skip", reason: "natural-reset-soon" });
+	});
+
+	it("fires when the natural weekly reset is exactly the minimum gain away", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				weeklyResetsAt: NOW + RESET_CREDIT_WEEKLY_LIMIT_MIN_GAIN_MS,
+			}),
+		).toMatchObject({ action: "consume", cause: "weekly-limit" });
+	});
+
+	it("does NOT fire on a stale reading whose weekly reset already passed", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				weeklyResetsAt: NOW - 1,
+			}),
+		).toEqual({ action: "skip", reason: "natural-reset-soon" });
+	});
+
+	it("does NOT fire when the weekly reset time is unknown (fail-closed)", () => {
+		expect(
+			decide({
+				account: weeklyOnly,
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+				weeklyResetsAt: null,
+			}),
+		).toEqual({ action: "skip", reason: "weekly-reset-unknown" });
+	});
+
+	it("an imminent natural reset does not block the expiry trigger", () => {
+		expect(
+			decide({
+				account: { codex_auto_apply_reset_on_weekly_limit_enabled: true },
+				credits: [makeCredit()],
+				weeklyUsedPercent: 100,
+				weeklyResetsAt: NOW + 60_000,
+			}),
+		).toMatchObject({ action: "consume", cause: "expiry" });
 	});
 
 	it("does NOT fire with the weekly toggle off even at 100%", () => {
@@ -660,7 +724,9 @@ describe("decideResetCreditAction — weekly-limit trigger", () => {
 // ---------------------------------------------------------------------------
 
 interface HarnessOptions {
-	getPendingAttempt?: () => Promise<CodexResetCreditEventRow | null>;
+	getPendingAttempt?: (
+		accountId: string,
+	) => Promise<CodexResetCreditEventRow | null>;
 	refreshResult?: (force: boolean) => boolean;
 	/** Accounts returned by listCandidateAccounts. */
 	candidates?: Array<{ id: string; name: string }>;
@@ -671,10 +737,20 @@ interface HarnessOptions {
 	 * seen so far, so a test can change the picture between discovery (0) and
 	 * confirmation (1).
 	 */
-	credits?: (forceRefreshes: number) => CodexRateLimitResetCredit[] | null;
+	credits?: (
+		forceRefreshes: number,
+		accountId: string,
+	) => CodexRateLimitResetCredit[] | null;
 	resolvedIds?: Set<string>;
-	/** Weekly used percent served by getWeeklyUsedPercent (default null). */
+	/** Weekly used percent served by getWeeklyWindow (default null). */
 	weeklyUsedPercent?: number | null;
+	/** Natural weekly reset served by getWeeklyWindow (default 5 days out). */
+	weeklyResetsAt?: number | null;
+	/** Per-account weekly window; overrides the two scalar options above. */
+	weeklyWindow?: (accountId: string) => {
+		usedPercent: number | null;
+		resetsAt: number | null;
+	};
 	/** Cooldown anchor timestamp (ms) served to the weekly cooldown gate. */
 	autoApplyCooldownAnchorAt?: number | null;
 	hasOtherAvailableCodexAccount?: (accountId: string) => Promise<boolean>;
@@ -706,8 +782,10 @@ function makeHarness(opts: HarnessOptions = {}) {
 			opts.candidates ?? [{ id: "acct-1", name: "codex-account" }],
 		getAccount: opts.getAccount ?? (async (id) => makeCodexAccount({ id })),
 		getPendingAttempt: opts.getPendingAttempt ?? (async () => null),
-		getCachedCredits: (): CodexRateLimitResetCreditsCacheEntry | null => {
-			const credits = creditsFn(forceRefreshes());
+		getCachedCredits: (
+			accountId,
+		): CodexRateLimitResetCreditsCacheEntry | null => {
+			const credits = creditsFn(forceRefreshes(), accountId);
 			return {
 				summary: {
 					availableCount: credits?.length ?? 0,
@@ -722,7 +800,14 @@ function makeHarness(opts: HarnessOptions = {}) {
 		},
 		getTerminallyResolvedCreditIds: async () =>
 			opts.resolvedIds ?? new Set<string>(),
-		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		getWeeklyWindow: (accountId) =>
+			opts.weeklyWindow?.(accountId) ?? {
+				usedPercent: opts.weeklyUsedPercent ?? null,
+				resetsAt:
+					opts.weeklyResetsAt === undefined
+						? WEEKLY_RESETS_AT
+						: opts.weeklyResetsAt,
+			},
 		hasOtherAvailableCodexAccount:
 			opts.hasOtherAvailableCodexAccount ?? (async () => false),
 		getAutoApplyCooldownAnchorAt: async () =>
@@ -1008,6 +1093,120 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 		expect(h.dispatchCalls).toHaveLength(0);
 	});
 
+	describe("weekly-limit pick across exhausted accounts", () => {
+		const DAY = 86_400_000;
+		const accounts = (ids: string[]) => ids.map((id) => ({ id, name: id }));
+		const exhausted =
+			(resetsAt: Record<string, number>) => (accountId: string) => ({
+				usedPercent: 100,
+				resetsAt: resetsAt[accountId] ?? null,
+			});
+
+		it("redeems only on the account whose natural reset is farthest away", async () => {
+			const h = makeHarness({
+				candidates: accounts(["soon", "late", "middle"]),
+				getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+				credits: () => [makeCredit({ expiresAt: null })],
+				weeklyWindow: exhausted({
+					soon: NOW + 1 * DAY,
+					late: NOW + 6 * DAY,
+					middle: NOW + 3 * DAY,
+				}),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["late"]);
+			expect(h.claimCalls.map((c) => c.accountId)).toEqual(["late"]);
+		});
+
+		it("breaks a reset-time tie on the credit that expires soonest", async () => {
+			const h = makeHarness({
+				candidates: accounts(["long-credit", "short-credit"]),
+				getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+				credits: (_force, accountId) => [
+					makeCredit({
+						expiresAt: accountId === "short-credit" ? expirySec(2 * DAY) : null,
+					}),
+				],
+				weeklyWindow: exhausted({
+					"long-credit": NOW + 4 * DAY,
+					"short-credit": NOW + 4 * DAY,
+				}),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["short-credit"]);
+		});
+
+		it("falls through to the next-ranked account when the best one fails confirmation", async () => {
+			let lateReads = 0;
+			const h = makeHarness({
+				candidates: accounts(["soon", "late"]),
+				getAccount: async (id) =>
+					makeCodexAccount({
+						id,
+						...weeklyOnly,
+						// Discovery sees "late" eligible; confirmation sees a manual pause.
+						paused: id === "late" && ++lateReads > 1,
+						pause_reason: "manual",
+					}),
+				credits: () => [makeCredit({ expiresAt: null })],
+				weeklyWindow: exhausted({ soon: NOW + 1 * DAY, late: NOW + 6 * DAY }),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["soon"]);
+		});
+
+		it("does not redeem a second account in the same tick after a failed dispatch", async () => {
+			const h = makeHarness({
+				candidates: accounts(["soon", "late"]),
+				getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+				credits: () => [makeCredit({ expiresAt: null })],
+				weeklyWindow: exhausted({ soon: NOW + 1 * DAY, late: NOW + 6 * DAY }),
+				dispatchImpl: async () => ({ status: "failed", message: "timeout" }),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["late"]);
+		});
+
+		it("does not redeem another account in the tick that replays a pending weekly attempt", async () => {
+			const h = makeHarness({
+				candidates: accounts(["stuck", "late"]),
+				getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+				// Only "stuck" holds a pending weekly row.
+				getPendingAttempt: async (id) =>
+					id === "stuck" ? pendingAttempt() : null,
+				credits: () => [makeCredit({ expiresAt: null })],
+				weeklyWindow: exhausted({ stuck: NOW + 1 * DAY, late: NOW + 6 * DAY }),
+				dispatchImpl: async () => ({ status: "failed", message: "timeout" }),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["stuck"]);
+			expect(h.claimCalls).toHaveLength(0);
+		});
+
+		it("keeps expiry redemption per account while ranking weekly candidates", async () => {
+			const h = makeHarness({
+				candidates: accounts(["expiring", "soon", "late"]),
+				getAccount: async (id) =>
+					makeCodexAccount(id === "expiring" ? { id } : { id, ...weeklyOnly }),
+				credits: (_force, accountId) => [
+					accountId === "expiring"
+						? makeCredit()
+						: makeCredit({ expiresAt: expirySec(3 * DAY) }),
+				],
+				weeklyWindow: exhausted({ soon: NOW + 1 * DAY, late: NOW + 6 * DAY }),
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls.map((c) => c.accountId)).toEqual([
+				"expiring",
+				"late",
+			]);
+			expect(h.claimCalls.map((c) => c.cause)).toEqual([
+				"expiry",
+				"weekly-limit",
+			]);
+		});
+	});
+
 	it("dispatches with the exact claim idempotencyKey, creditId, and autoApply row id", async () => {
 		const { scheduler, refreshCalls, claimCalls, dispatchCalls } = makeHarness({
 			claim: {
@@ -1258,7 +1457,10 @@ function makeLedgerHarness(opts: {
 		// This fake ledger only ever holds pending/nothingToReset rows, and
 		// neither status is terminal for automation.
 		getTerminallyResolvedCreditIds: async () => new Set<string>(),
-		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		getWeeklyWindow: () => ({
+			usedPercent: opts.weeklyUsedPercent ?? null,
+			resetsAt: WEEKLY_RESETS_AT,
+		}),
 		hasOtherAvailableCodexAccount: async () => false,
 		// Widened anchor semantics: nothingToReset resolutions anchor too.
 		getAutoApplyCooldownAnchorAt: async () => {
@@ -1364,6 +1566,7 @@ describe("nothingToReset anchors the weekly cooldown (no 60s retry storm)", () =
 				credits: [makeCredit({ id: "c-forever", expiresAt: null })],
 				terminallyResolvedCreditIds: new Set(),
 				weeklyUsedPercent: 100,
+				weeklyResetsAt: WEEKLY_RESETS_AT,
 				autoApplyCooldownAnchorAt: NOW,
 				now: NOW + 60_000,
 			}),
@@ -1758,6 +1961,21 @@ describe("weekly reset conservation with the production pool check", () => {
 			expect(h.consumed).toEqual(c.consume ? [targetId] : []);
 		});
 	}
+
+	it("conserves the reset when the target's own weekly window resets soon", async () => {
+		usageCache.set(targetId, {
+			...usage(100),
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(
+					NOW + RESET_CREDIT_WEEKLY_LIMIT_MIN_GAIN_MS - 60_000,
+				).toISOString(),
+			},
+		});
+		const h = poolHarness([makeCodexAccount({ id: targetId, ...weeklyOnly })]);
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([]);
+	});
 
 	it("redeems in a single-account pool", async () => {
 		usageCache.set(targetId, usage(100));
