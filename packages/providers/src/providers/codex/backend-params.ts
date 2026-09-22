@@ -58,6 +58,19 @@ export const CHATGPT_BACKEND_GPT6_REASONING_EFFORTS = [
 ] as const;
 
 /**
+ * GPT-6 Luna's catalog entry (codex-cli 0.155, openai/codex#47332) stops at
+ * `max`: it is the one GPT-6 tier without `ultra`, so `ultra` clamps down to
+ * `max` for it.
+ */
+export const CHATGPT_BACKEND_GPT6_LUNA_REASONING_EFFORTS = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+
+/**
  * Every reasoning effort we know of, ascending by how much reasoning it buys —
  * including the ones some generation rejects (`minimal`, `max`, `ultra`),
  * which is precisely what lets them be clamped to a neighbour instead of being
@@ -75,9 +88,6 @@ const KNOWN_EFFORTS_ASCENDING = [
 	"ultra",
 ] as const;
 
-const ACCEPTED_GPT5 = new Set<string>(CHATGPT_BACKEND_REASONING_EFFORTS);
-const ACCEPTED_GPT6 = new Set<string>(CHATGPT_BACKEND_GPT6_REASONING_EFFORTS);
-
 /**
  * The effort set the backend accepts for `model`, in ascending order. Keyed on
  * the generation prefix so a dated variant (`gpt-6-astra-2026-09-03`) or a
@@ -87,13 +97,12 @@ const ACCEPTED_GPT6 = new Set<string>(CHATGPT_BACKEND_GPT6_REASONING_EFFORTS);
 export function chatGptBackendReasoningEffortsFor(
 	model: string | undefined,
 ): readonly string[] {
-	return isGpt6Model(model)
-		? CHATGPT_BACKEND_GPT6_REASONING_EFFORTS
-		: CHATGPT_BACKEND_REASONING_EFFORTS;
-}
-
-function isGpt6Model(model: string | undefined): boolean {
-	return typeof model === "string" && model.toLowerCase().startsWith("gpt-6");
+	const normalized = model?.toLowerCase();
+	if (!normalized?.startsWith("gpt-6"))
+		return CHATGPT_BACKEND_REASONING_EFFORTS;
+	return /^gpt-6-luna(?:$|-)/.test(normalized)
+		? CHATGPT_BACKEND_GPT6_LUNA_REASONING_EFFORTS
+		: CHATGPT_BACKEND_GPT6_REASONING_EFFORTS;
 }
 
 /**
@@ -115,7 +124,7 @@ export function clampChatGptBackendReasoningEffort(
 	effort: string,
 	model?: string,
 ): string {
-	const accepted = isGpt6Model(model) ? ACCEPTED_GPT6 : ACCEPTED_GPT5;
+	const accepted = new Set<string>(chatGptBackendReasoningEffortsFor(model));
 	if (accepted.has(effort)) return effort;
 	const rank = KNOWN_EFFORTS_ASCENDING.indexOf(
 		effort as (typeof KNOWN_EFFORTS_ASCENDING)[number],

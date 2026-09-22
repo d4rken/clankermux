@@ -92,7 +92,7 @@ function routeRetention(
 	if (openai) {
 		const modern =
 			policy.defaultTtlMs === 1_800_000 ||
-			/^gpt-(?:5\.6(?:-|$)|6-astra(?:-|$))/.test(model);
+			/^gpt-(?:5\.6(?:-|$)|6-(?:astra|sol|luna)(?:-|$))/.test(model);
 		const note = modern
 			? "OpenAI documents a 30-minute minimum after the latest cache write or reuse for GPT-5.6 and later."
 			: "OpenAI documents typical inactive in-memory retention of five to ten minutes for earlier models; account settings and retention options can differ.";

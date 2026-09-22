@@ -93,7 +93,7 @@ arbitrary service OpenAI or Anthropic.
 
 | API | Recognized base | Model scope and policy |
 |---|---|---|
-| OpenAI | `https://api.openai.com` or `/v1`; Codex adapter with exact `/v1/responses` | GPT-5.6/Sol/Terra/Luna and GPT-6 Astra: automatic, 30-minute minimum, refreshed on reuse. Earlier supported GPT/o-series: automatic with typical retention, no numeric default. No documented request-start/end anchor, so no countdown. |
+| OpenAI | `https://api.openai.com` or `/v1`; Codex adapter with exact `/v1/responses` | GPT-5.6/Sol/Terra/Luna and GPT-6 Astra/Sol/Luna: automatic, 30-minute minimum, refreshed on reuse. Earlier supported GPT/o-series: automatic with typical retention, no numeric default. No documented request-start/end anchor, so no countdown. |
 | DeepSeek | `https://api.deepseek.com` or `/v1`; Anthropic-compatible `/anthropic` | DeepSeek chat/reasoner and language model families: automatic, no fixed lifetime. |
 | Moonshot | `https://api.moonshot.ai` or `/v1` | Kimi and Moonshot families: automatic, no documented lifetime. |
 | Groq | `https://api.groq.com/openai/v1` | Only `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `openai/gpt-oss-safeguard-20b`: automatic, two hours without use. Anchor unknown, expiry unavailable. |
@@ -152,7 +152,7 @@ of a hit. A documented duration with an assumed anchor is still an estimate.
 |---|---|---|
 | Known Anthropic explicit caching | 5 minutes, request-start anchor | Documented minimum; promotion can retain longer |
 | Modern direct OpenAI API models | 30 minutes | Documented minimum after write/reuse; request-start anchor assumed |
-| Codex GPT-5.6+ and GPT-6 Astra | 30 minutes | Inferred from OpenAI API documentation; subscription applicability and refresh unverified |
+| Codex GPT-5.6+ and GPT-6 Astra/Sol/Luna | 30 minutes | Inferred from OpenAI API documentation; subscription applicability and refresh unverified |
 | Earlier OpenAI / Codex models | 5 minutes, typical range 5–10 minutes | Documented API behavior or inferred subscription behavior; account retention settings may differ |
 | Supported Groq GPT-OSS models | 2 hours | Documented inactivity period; request-start anchor assumed |
 | Known MiniMax/DashScope explicit caching | 5 minutes | Documented duration; request-start anchor assumed |

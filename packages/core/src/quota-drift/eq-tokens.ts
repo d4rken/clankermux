@@ -87,10 +87,13 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	Record<string, EqTokenWeights>
 > = {
 	"gpt-5.3-codex-spark": { ...OPENAI_EQ_WEIGHTS, output: 8 },
-	// GPT-6 Astra lists $10 in / $50 out and GPT-5.6 Sol $4 in / $20 out, a 5x
-	// output ratio against the 6x the rest of the tier carries; cache read
-	// (0.1x) and cache write (1.25x) match on both.
+	// GPT-6 Astra lists $10 in / $50 out, GPT-6 Sol $2 / $10, GPT-6 Luna
+	// $0.10 / $0.50 and GPT-5.6 Sol $4 / $20: a 5x output ratio against the 6x
+	// the rest of the tier carries. Cache read (0.1x) and cache write (1.25x)
+	// match on all four.
 	"gpt-6-astra": { ...OPENAI_EQ_WEIGHTS, output: 5 },
+	"gpt-6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
+	"gpt-6-luna": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"gpt-5.6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },

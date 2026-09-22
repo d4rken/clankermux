@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	CHATGPT_BACKEND_GPT6_LUNA_REASONING_EFFORTS,
 	CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
 	CHATGPT_BACKEND_REASONING_EFFORTS,
 	chatGptBackendReasoningEffortsFor,
@@ -77,6 +78,30 @@ describe("clampChatGptBackendReasoningEffort", () => {
 			expect(
 				clampChatGptBackendReasoningEffort("ludicrous", "gpt-6-astra"),
 			).toBe("ludicrous");
+		});
+
+		it("keeps ultra on GPT-6 Sol but clamps it to max on GPT-6 Luna", () => {
+			expect(chatGptBackendReasoningEffortsFor("gpt-6-sol")).toBe(
+				CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor("gpt-6-luna")).toBe(
+				CHATGPT_BACKEND_GPT6_LUNA_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor("GPT-6-Luna-2026-09-22")).toBe(
+				CHATGPT_BACKEND_GPT6_LUNA_REASONING_EFFORTS,
+			);
+			expect(clampChatGptBackendReasoningEffort("ultra", "gpt-6-sol")).toBe(
+				"ultra",
+			);
+			expect(clampChatGptBackendReasoningEffort("ultra", "gpt-6-luna")).toBe(
+				"max",
+			);
+			expect(clampChatGptBackendReasoningEffort("max", "gpt-6-luna")).toBe(
+				"max",
+			);
+			expect(clampChatGptBackendReasoningEffort("none", "gpt-6-luna")).toBe(
+				"low",
+			);
 		});
 	});
 });

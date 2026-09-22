@@ -62,6 +62,8 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	// Promoted out of FALLBACK_HUES when GPT-6 Astra became routable
 	// (2026-09-03): a registered model outranks an unknown-model bucket.
 	"gpt-6-astra": "leaf",
+	"gpt-6-sol": "steel",
+	"gpt-6-luna": "blush",
 };
 
 /**

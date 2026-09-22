@@ -34,6 +34,8 @@ describe("handleModelsRequest", () => {
 		};
 		const ids = body.data.map((m) => m.id);
 		expect(ids).toContain("gpt-6-astra");
+		expect(ids).toContain("gpt-6-sol");
+		expect(ids).toContain("gpt-6-luna");
 		expect(ids).toContain("gpt-5.6-sol");
 		expect(ids).toContain("gpt-5.6-terra");
 		expect(ids).toContain("gpt-5.6-luna");

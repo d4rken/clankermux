@@ -59,6 +59,8 @@ describe("advisory model cache retention", () => {
 			for (const model of [
 				"gpt-6-astra",
 				"gpt-6-astra-2026-09-03",
+				"gpt-6-sol",
+				"gpt-6-luna-2026-09-22",
 				"gpt-5.6-sol",
 			]) {
 				const estimate = retention("codex", model, undefined, format);
