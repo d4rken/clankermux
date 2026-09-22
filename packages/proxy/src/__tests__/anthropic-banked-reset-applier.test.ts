@@ -20,6 +20,7 @@ import type {
 import {
 	AnthropicBankedResetApplyScheduler,
 	BANKED_RESET_AUTO_APPLY_LEAD_MS,
+	BANKED_RESET_CONFIRM_READ_INTERVAL_MS,
 	BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS,
 	type BankedResetApplyDeps,
 	createAnthropicBankedResetApplyScheduler,
@@ -433,6 +434,20 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				},
 			},
 		]);
+	});
+
+	it("forces at most one status read per account per confirm interval", async () => {
+		let now = NOW;
+		const h = harness({ accounts: [weeklyOnly], otherAvailable: true });
+		h.deps.now = () => now;
+		const scheduler = new AnthropicBankedResetApplyScheduler(h.deps);
+		await scheduler.tick();
+		now += BANKED_RESET_CONFIRM_READ_INTERVAL_MS - 1;
+		await scheduler.tick();
+		expect(h.forcedReads).toBe(1);
+		now += 1;
+		await scheduler.tick();
+		expect(h.forcedReads).toBe(2);
 	});
 
 	it("conserves the grant while another account can serve the scope", async () => {

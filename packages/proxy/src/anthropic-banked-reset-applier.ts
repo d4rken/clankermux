@@ -20,7 +20,9 @@
  *
  * Every tick replays due pending auto claims first, with their stored request
  * id. Discovery then reads only caches; a candidate it finds gets a forced
- * status read and the decision is taken again on that before the ledger claim.
+ * status read (at most one per account per
+ * {@link BANKED_RESET_CONFIRM_READ_INTERVAL_MS}) and the decision is taken on
+ * that before the ledger claim.
  */
 
 import {
@@ -69,6 +71,13 @@ export const BANKED_RESET_AUTO_APPLY_TICK_MS = 60_000;
  * re-claim every tick.
  */
 export const BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS = 60 * 60 * 1_000;
+/**
+ * At most one forced status read per account in this span. The read shares
+ * the usage poll's rate-limit bucket, and an account held at its limit (a
+ * grant conserved for another account's headroom) stays a candidate every
+ * tick. Half the expiry lead, so an expiring grant still gets two chances.
+ */
+export const BANKED_RESET_CONFIRM_READ_INTERVAL_MS = 5 * 60 * 1_000;
 
 export type BankedResetApplyCause = "expiry" | "weekly-limit";
 
@@ -338,6 +347,7 @@ export class AnthropicBankedResetApplyScheduler {
 	private readonly deps: BankedResetApplyDeps;
 	private stopInterval: (() => void) | null = null;
 	private readonly intervalId = "anthropic-banked-reset-applier";
+	private readonly confirmReadAt = new Map<string, number>();
 
 	constructor(deps: BankedResetApplyDeps) {
 		this.deps = { ...deps };
@@ -432,6 +442,16 @@ export class AnthropicBankedResetApplyScheduler {
 		}
 		if (!this.discover(account)) return;
 
+		// A claim only ever follows a forced read in the same tick.
+		const lastRead = this.confirmReadAt.get(id);
+		const now = this.now();
+		if (
+			lastRead !== undefined &&
+			now - lastRead < BANKED_RESET_CONFIRM_READ_INTERVAL_MS
+		) {
+			return;
+		}
+		this.confirmReadAt.set(id, now);
 		if (!(await this.deps.refreshStatus(id, true))) {
 			log.debug(`Banked-reset applier: status read failed for '${name}'`);
 			return;
