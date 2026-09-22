@@ -14,6 +14,7 @@ import {
 import { XAI_CLIENT_ID, XAI_TOKEN_ENDPOINT } from "./device-oauth";
 import { extractGrokSubscriptionIdentity } from "./identity";
 import { normalizeGrokRequestBody } from "./request-body";
+import { indexContentBlockDeltas } from "./response-stream";
 import {
 	describeGrokUpgradeRequired,
 	isGrokUpgradeRequired,
@@ -236,7 +237,14 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 		_account: Account | null,
 	): Promise<Response> {
 		if (!isGrokUpgradeRequired(response)) {
-			return new Response(response.body, {
+			const streamed = (response.headers.get("content-type") ?? "").includes(
+				"text/event-stream",
+			);
+			const body =
+				streamed && response.body
+					? indexContentBlockDeltas(response.body)
+					: response.body;
+			return new Response(body, {
 				status: response.status,
 				statusText: response.statusText,
 				headers: sanitizeGrokResponseHeaders(response.headers),
