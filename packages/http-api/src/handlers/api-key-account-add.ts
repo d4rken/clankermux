@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import {
+	baseUrlShapeProblem,
 	patterns,
 	sanitizers,
 	validateNumber,
@@ -40,8 +41,14 @@ type ApiKeySource =
 
 /** Where the value written to `accounts.custom_endpoint` comes from. */
 type EndpointSource =
-	/** Read from the request body; `required` decides whether omitting it is a 400. */
-	| { from: "body"; required: boolean }
+	/**
+	 * Read from the request body; `required` decides whether omitting it is a
+	 * 400, and `baseUrlOnly` additionally refuses a URL that cannot act as a
+	 * base for an appended request path — see `readEndpoint`. Opt-in per spec,
+	 * not the default, because the providers that already take a body endpoint
+	 * have accepted those shapes for as long as they have existed.
+	 */
+	| { from: "body"; required: boolean; baseUrlOnly?: boolean }
 	/** A constant (or null when the provider has a single well-known endpoint). */
 	| { from: "fixed"; value: string | null };
 
@@ -155,10 +162,23 @@ export const API_KEY_PROVIDERS = {
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
 	},
+	mimo: {
+		provider: "mimo",
+		label: "MiMo",
+		apiKey: { from: "body" },
+		// `body` and optional: Token Plan is served from three regions and the
+		// region is a per-account choice, but MimoProvider falls back to
+		// Singapore, so the column stays NULL when the operator names none.
+		// `baseUrlOnly` because MimoProvider.buildUrl appends the request path
+		// and query to whatever is stored here.
+		endpoint: { from: "body", required: false, baseUrlOnly: true },
+		mirrorKeyToTokens: true,
+	},
 } as const satisfies Record<string, ApiKeyProviderSpec>;
 
 /**
- * Parse and validate `customEndpoint` as an absolute URL.
+ * Parse and validate `customEndpoint` as an absolute URL, and — when the spec
+ * asks for it — as one shaped like a base a request path can be appended to.
  *
  * The rejection is a `ValidationError` rather than a bare `Error` because
  * `validateString` invokes `transform` unwrapped: a bare `Error` carries no
@@ -172,6 +192,7 @@ function readEndpoint(
 	if (spec.endpoint.from === "fixed") return spec.endpoint.value;
 
 	const required = spec.endpoint.required;
+	const baseUrlOnly = spec.endpoint.baseUrlOnly === true;
 	const raw = required ? body.customEndpoint : body.customEndpoint || null;
 
 	const invalid = () =>
@@ -185,10 +206,20 @@ function readEndpoint(
 				if (required) throw invalid();
 				return "";
 			}
+			let parsed: URL;
 			try {
-				new URL(trimmed);
+				parsed = new URL(trimmed);
 			} catch {
 				throw invalid();
+			}
+			// Name the offending part: "invalid URL" on a string the operator can
+			// see parses fine reads as a bug in the check.
+			const problem = baseUrlOnly ? baseUrlShapeProblem(parsed) : null;
+			if (problem) {
+				throw new ValidationError(
+					`customEndpoint ${problem}`,
+					"customEndpoint",
+				);
 			}
 			return trimmed;
 		},

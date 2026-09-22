@@ -30,6 +30,7 @@ import {
 	createAnthropicCompatibleAccountAddHandler,
 	createGrokAccountAddHandler,
 	createKiloAccountAddHandler,
+	createMimoAccountAddHandler,
 	createMinimaxAccountAddHandler,
 	createOllamaAccountAddHandler,
 	createOllamaCloudAccountAddHandler,
@@ -203,6 +204,7 @@ export class APIRouter {
 			createAlibabaCodingPlanAccountAddHandler(dbOps);
 		const kiloAccountAddHandler = createKiloAccountAddHandler(dbOps);
 		const grokAccountAddHandler = createGrokAccountAddHandler(dbOps);
+		const mimoAccountAddHandler = createMimoAccountAddHandler(dbOps);
 		const openrouterAccountAddHandler =
 			createOpenRouterAccountAddHandler(dbOps);
 		const anthropicCompatibleAccountAddHandler =
@@ -330,6 +332,9 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/accounts/grok", (req) =>
 			grokAccountAddHandler(req),
+		);
+		this.handlers.set("POST:/api/accounts/mimo", (req) =>
+			mimoAccountAddHandler(req),
 		);
 		this.handlers.set("POST:/api/accounts/devin", devinHandlers.add);
 		this.handlers.set(

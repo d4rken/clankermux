@@ -233,6 +233,23 @@ export function validateEndpointUrl(url: unknown, field = "endpoint"): string {
 }
 
 /**
+ * Why `url` cannot serve as a base that a request path and query get appended
+ * to, or `null` when nothing is wrong with it.
+ *
+ * Worded as a message fragment so a caller can name the offending part:
+ * `customEndpoint ${problem}`.
+ */
+export function baseUrlShapeProblem(url: URL): string | null {
+	if (url.username || url.password) return "must not embed credentials";
+	if (url.search) return "must not carry a query string";
+	if (url.hash) return "must not carry a fragment";
+	if (!["http:", "https:"].includes(url.protocol)) {
+		return "must use http or https";
+	}
+	return null;
+}
+
+/**
  * Validate API key format (basic check)
  */
 export function validateApiKey(apiKey: unknown, field = "apiKey"): string {

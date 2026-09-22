@@ -2075,6 +2075,10 @@ export function createGrokAccountAddHandler(dbOps: DatabaseOperations) {
 	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.grok);
 }
 
+export function createMimoAccountAddHandler(dbOps: DatabaseOperations) {
+	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.mimo);
+}
+
 export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.kilo);
 }

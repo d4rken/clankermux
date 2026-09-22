@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseCustomEndpointData } from "@clankermux/core";
+import { baseUrlShapeProblem, parseCustomEndpointData } from "@clankermux/core";
 import type { RoutingRepository } from "@clankermux/database";
 import {
 	DevinClient,
@@ -350,13 +350,7 @@ export class AccountModelPermissionService {
 			["openai-compatible", "anthropic-compatible"].includes(account.provider)
 		) {
 			url = new URL(endpoint);
-			if (
-				url.username ||
-				url.password ||
-				url.search ||
-				url.hash ||
-				!["http:", "https:"].includes(url.protocol)
-			)
+			if (baseUrlShapeProblem(url))
 				throw new Error("Invalid discovery endpoint");
 			const base = url.pathname.replace(/\/+$/, "");
 			url.pathname = `${base}${base.endsWith("/v1") ? "" : "/v1"}/models`;
