@@ -1,7 +1,6 @@
 import type {
 	AccountBurnAnchors,
 	AccountUsagePrediction,
-	ApiKeyResponse,
 	FullUsageData,
 	RunwayBand,
 	RunwayKeyEntry,
@@ -539,6 +538,25 @@ function runwayFor(
 }
 
 /**
+ * What a runway needs to know about a key: who it is, whether it can route, and
+ * where it may route to.
+ *
+ * Narrower than the `/api/api-keys` response on purpose. A runway is about
+ * reachable capacity, which the harness a client is set up as cannot change,
+ * so `computeRunwayScan` reads its keys straight out of the database instead
+ * of shaping a response it would throw most of away. Both the database row and
+ * the response shape satisfy this structurally.
+ */
+export interface RunwayKeyInput {
+	id: string;
+	name: string;
+	isActive: boolean;
+	pinnedAccountId: string | null;
+	pinnedProviders: string[] | null;
+	excludedProviders?: string[] | null;
+}
+
+/**
  * One runway row per API key. Inactive keys are listed (they still describe a
  * configured route) but are excluded from {@link worstKeyRunway}.
  *
@@ -549,7 +567,7 @@ function runwayFor(
  * client has.
  */
 export function computeApiKeyRunways(
-	keys: ApiKeyResponse[],
+	keys: RunwayKeyInput[],
 	accounts: RunwayAccountSource[],
 	now: number,
 ): KeyRunway[] {

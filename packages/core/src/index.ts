@@ -14,6 +14,7 @@ export {
 	type KeyRunway,
 	type RunwayAccountSource,
 	type RunwayHeadline,
+	type RunwayKeyInput,
 	type RunwayWindowObservations,
 	scopedFamilyIdle,
 	scopedFamilyPresence,

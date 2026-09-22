@@ -36,7 +36,6 @@ import type {
 	RunwayWindowSummary,
 	UsagePrediction,
 } from "@clankermux/types";
-import { listApiKeys } from "./admin/api-keys";
 import { buildPredictionsForAccounts } from "./build-account-predictions-for";
 import {
 	getCachedOrPersistedCodexUsage,
@@ -517,9 +516,12 @@ export async function computeRunwayScan(
 	_now: number = Date.now(),
 ): Promise<RunwayScan> {
 	const now = Date.now();
+	// The database rows, not the `/api/api-keys` response shape: a runway reads
+	// six fields off a key, and `listApiKeys` would resolve a client profile per
+	// key for a field no runway consults.
 	const [accounts, keys] = await Promise.all([
 		dbOps.getAllAccounts(),
-		listApiKeys(dbOps),
+		dbOps.getApiKeys(),
 	]);
 
 	// One non-evicting cache read per account, split into the two documented
