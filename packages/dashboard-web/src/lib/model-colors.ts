@@ -38,6 +38,7 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	"claude-opus-4.7": "skyBlue",
 	"claude-opus-4.8": "yellow",
 	"claude-opus-5": "azure",
+	"claude-opus-5.5": "taupe",
 	"claude-sonnet-4": "mint",
 	"claude-sonnet-4.5": "purple",
 	"claude-sonnet-4.6": "indigo",

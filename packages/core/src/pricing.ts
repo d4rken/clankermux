@@ -201,6 +201,19 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 6.25,
 				},
 			},
+			// Opus 5.5 drops the tier to $4/$20 and reads cache at $0.20/M — a
+			// 0.05x multiplier unique to it; writes stay at 1.25x. Source: the
+			// pricing docs' model table, 2026-09-22.
+			[CLAUDE_MODEL_IDS.OPUS_5_5]: {
+				id: CLAUDE_MODEL_IDS.OPUS_5_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.OPUS_5_5],
+				cost: {
+					input: 4,
+					output: 20,
+					cache_read: 0.2,
+					cache_write: 5,
+				},
+			},
 			// Mythos-class 5.0 generation: $10/M input, $50/M output,
 			// $1.00/M cache read (0.1x), $12.50/M cache write (1.25x).
 			[CLAUDE_MODEL_IDS.FABLE_5]: {

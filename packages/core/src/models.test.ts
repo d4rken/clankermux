@@ -31,13 +31,32 @@ describe("Claude Sonnet 5 registration", () => {
 	});
 });
 
-describe("Claude Opus 5 registration", () => {
-	it("exposes the claude-opus-5 model id", () => {
-		expect(CLAUDE_MODEL_IDS.OPUS_5).toBe("claude-opus-5");
+describe("Claude Opus 5.5 registration", () => {
+	it("exposes the claude-opus-5-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.OPUS_5_5).toBe("claude-opus-5-5");
 	});
 
 	it("is the latest opus model", () => {
-		expect(LATEST_OPUS_MODEL).toBe("claude-opus-5");
+		expect(LATEST_OPUS_MODEL).toBe("claude-opus-5-5");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-opus-5-5")).toBe("Claude Opus 5.5");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		// Dot-decimal for an x.y version — matches the Opus 4.8 precedent.
+		expect(getModelShortName("claude-opus-5-5")).toBe("claude-opus-5.5");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-opus-5-5")).toBe(true);
+	});
+});
+
+describe("Claude Opus 5 registration", () => {
+	it("exposes the claude-opus-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.OPUS_5).toBe("claude-opus-5");
 	});
 
 	it("has a human-readable display name", () => {

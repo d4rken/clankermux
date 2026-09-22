@@ -172,6 +172,24 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		}
 	});
 
+	it("prices Opus 5.5's cheaper cache reads on its own weights", () => {
+		// $0.20/M against $4/M input: 0.05x, half the rate the rest of the Opus
+		// line reads at.
+		const entry = entriesFor("anthropic").find(
+			([entryId]) => entryId === "claude-opus-5-5",
+		);
+		expect(entry).toBeDefined();
+		const [, cost] = entry as [string, ModelCost];
+		expect((cost.cache_read as number) / cost.input).toBeCloseTo(0.05, 9);
+
+		const override = MODEL_EQ_WEIGHT_OVERRIDES["claude-opus-5-5"];
+		expect(override).toBeDefined();
+		expect(override.cacheRead).toBeCloseTo(0.05, 9);
+		expect(override.input).toBe(ANTHROPIC_EQ_WEIGHTS.input);
+		expect(override.output).toBe(ANTHROPIC_EQ_WEIGHTS.output);
+		expect(override.cacheCreate).toBe(ANTHROPIC_EQ_WEIGHTS.cacheCreate);
+	});
+
 	it("tolerates a Codex entry that omits cache_write", () => {
 		// Not a hypothetical: Codex reports no cache-creation tokens, so several
 		// entries carry no rate for it.

@@ -76,6 +76,9 @@ export const OPENAI_EQ_WEIGHTS: EqTokenWeights = {
  * Code traffic is cache-read-dominated, so the shared weight would overstate
  * their exposure fourfold on the class that carries most of their tokens.
  *
+ * Opus 5.5 reads cache at $0.20/M against $4/M input — 0.05x, the same
+ * overstatement at half the size.
+ *
  * `eq-tokens.test.ts` derives its expectations from this map, so an entry that
  * stops matching the bundled price table fails, and so does a NEW divergence
  * with no entry.
@@ -91,6 +94,7 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	"gpt-5.6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
+	"claude-opus-5-5": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.05 },
 };
 
 /** Provider axis the weights are selected on. */

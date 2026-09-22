@@ -647,6 +647,33 @@ describe("bundled Mythos-class pricing (offline fallback)", () => {
 	});
 });
 
+describe("bundled Opus 5.5 pricing (offline fallback)", () => {
+	// $4/M input, $20/M output, $5/M cache write, and cache reads at $0.20/M —
+	// 0.05x, unique to Opus 5.5.
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+	const cacheTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	it("prices claude-opus-5-5 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5-5", ioTokens)).toBeCloseTo(
+			24,
+			6,
+		);
+	});
+
+	it("prices claude-opus-5-5 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-opus-5-5", cacheTokens)).toBeCloseTo(
+			5.2,
+			6,
+		);
+	});
+});
+
 describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
 	// The 5.1 generation keeps $10/M input, $50/M output, $12.50/M cache write
 	// but drops cache reads to $0.25/M — 0.025x, unique to Fable/Mythos 5.1.
