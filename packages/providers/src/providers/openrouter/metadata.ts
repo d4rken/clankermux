@@ -50,37 +50,62 @@ export function parseOpenRouterMetadata(
 	};
 }
 
+export interface OpenRouterKeyAnswer {
+	status: number;
+	/** Null on a non-2xx answer or a body that does not parse. */
+	metadata: OpenRouterAccountMetadata | null;
+}
+
+/**
+ * One read of the current-key endpoint, reporting the status alongside the
+ * parsed body. Throws on network failure, timeout, abort or redirect; the
+ * caller decides whether that fails open or means "could not verify".
+ */
+export async function requestOpenRouterKey(
+	apiKey: string,
+	signal: AbortSignal,
+): Promise<OpenRouterKeyAnswer> {
+	const response = await fetch(OPENROUTER_KEY_ENDPOINT, {
+		headers: {
+			Authorization: `Bearer ${apiKey}`,
+			Accept: "application/json",
+		},
+		signal,
+		redirect: "error",
+	});
+	if (!response.ok) {
+		await response.body?.cancel();
+		return { status: response.status, metadata: null };
+	}
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { status: response.status, metadata: null };
+	}
+	const metadata = parseOpenRouterMetadata(body);
+	// Only a provider-redacted label is safe to publish. Never expose the key
+	// if a malformed response echoes it as a label or another string field.
+	if (metadata) {
+		for (const field of [
+			"label",
+			"creatorUserId",
+			"limitReset",
+			"expiresAt",
+		] as const) {
+			if (metadata[field]?.includes(apiKey)) metadata[field] = null;
+		}
+	}
+	return { status: response.status, metadata };
+}
+
 /** Free metadata read. Failures never prevent account creation or proxying. */
 export async function fetchOpenRouterMetadata(
 	apiKey: string,
 ): Promise<OpenRouterAccountMetadata | null> {
 	try {
-		const response = await fetch(OPENROUTER_KEY_ENDPOINT, {
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				Accept: "application/json",
-			},
-			signal: AbortSignal.timeout(5_000),
-			redirect: "error",
-		});
-		if (!response.ok) {
-			await response.body?.cancel();
-			return null;
-		}
-		const metadata = parseOpenRouterMetadata(await response.json());
-		// Only a provider-redacted label is safe to publish. Never expose the key
-		// if a malformed response echoes it as a label or another string field.
-		if (metadata) {
-			for (const field of [
-				"label",
-				"creatorUserId",
-				"limitReset",
-				"expiresAt",
-			] as const) {
-				if (metadata[field]?.includes(apiKey)) metadata[field] = null;
-			}
-		}
-		return metadata;
+		return (await requestOpenRouterKey(apiKey, AbortSignal.timeout(5_000)))
+			.metadata;
 	} catch {
 		return null;
 	}

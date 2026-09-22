@@ -14,6 +14,7 @@ import {
 	readOpenRouterAccountMetadata,
 	refreshOpenRouterAccountMetadata,
 	refreshOpenRouterAccountsOnStartup,
+	storeOpenRouterAccountMetadata,
 } from "./openrouter-account-metadata";
 
 const tmp = tempDbTracker("openrouter-metadata");
@@ -102,9 +103,9 @@ describe("OpenRouter metadata lifecycle", () => {
 		expect(await snapshot(id)).toBe(updated);
 	});
 	it("does not fail account creation when metadata is unavailable and retries existing accounts at startup", async () => {
-		fetchSpy.mockImplementation(
-			async () => new Response("offline", { status: 503 }),
-		);
+		// A 200 the key check accepts but whose body is not metadata. Any
+		// non-2xx now refuses the add outright.
+		fetchSpy.mockImplementation(async () => new Response("maintenance page"));
 		const id = await add();
 		expect(await snapshot(id)).toBeNull();
 		fetchSpy.mockImplementation(async () =>
@@ -115,6 +116,8 @@ describe("OpenRouter metadata lifecycle", () => {
 	});
 	it("skips other providers and custom endpoints", async () => {
 		const id = await add();
+		const stored = await snapshot(id);
+		const metadata = JSON.parse(stored as string);
 		fetchSpy.mockClear();
 		for (const account of [
 			{ id, provider: "codex", api_key: "key" },
@@ -126,7 +129,33 @@ describe("OpenRouter metadata lifecycle", () => {
 			},
 		]) {
 			expect(await refreshOpenRouterAccountMetadata(dbOps, account)).toBeNull();
+			expect(
+				await storeOpenRouterAccountMetadata(dbOps, account, {
+					...metadata,
+					label: "overwritten",
+				}),
+			).toBeNull();
 		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(await snapshot(id)).toBe(stored);
+	});
+	it("stores already-read metadata without fetching, and drops anything that is not a snapshot", async () => {
+		const id = await add();
+		const stored = await snapshot(id);
+		const metadata = JSON.parse(stored as string);
+		fetchSpy.mockClear();
+		const account = { id, provider: "openrouter", api_key: "test-secret" };
+		for (const junk of [null, undefined, "text", { label: 7 }]) {
+			expect(
+				await storeOpenRouterAccountMetadata(dbOps, account, junk),
+			).toBeNull();
+		}
+		expect(await snapshot(id)).toBe(stored);
+		const next = { ...metadata, label: "stored" };
+		expect(await storeOpenRouterAccountMetadata(dbOps, account, next)).toEqual(
+			next,
+		);
+		expect(JSON.parse((await snapshot(id)) as string)).toEqual(next);
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 	it("adds the snapshot column to an existing database idempotently", () => {

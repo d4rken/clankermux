@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
+import { GROK_MODELS_ENDPOINT } from "@clankermux/providers";
 import { registerPollingRestarter } from "@clankermux/proxy";
 import { mockFetch, tempDbTracker } from "@clankermux/test-support";
 import {
@@ -10,6 +11,22 @@ import {
 } from "../api-key-account-add";
 
 const tmpDb = tempDbTracker("test-api-key-account-add");
+
+const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
+
+/** The URLs the three adopting providers' credential checks dial. */
+function isCredentialProbe(url: string): boolean {
+	const { hostname, pathname } = new URL(url);
+	return (
+		(hostname.endsWith(".xiaomimimo.com") && pathname === "/v1/models") ||
+		url === GROK_MODELS_ENDPOINT ||
+		url === OPENROUTER_KEY_URL
+	);
+}
+
+function requestUrl(input: URL | RequestInfo): string {
+	return input instanceof Request ? input.url : input.toString();
+}
 
 function post(body: unknown): Request {
 	return new Request("http://localhost/api/accounts/x", {
@@ -24,8 +41,15 @@ describe("createApiKeyAccountAddHandler", () => {
 	let fetchSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
+		// Credential probes are accepted so adopting providers can be created;
+		// anything else still gets a 401.
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-			mockFetch(async () => new Response(null, { status: 401 })),
+			mockFetch(
+				async (input) =>
+					new Response(null, {
+						status: isCredentialProbe(requestUrl(input)) ? 200 : 401,
+					}),
+			),
 		);
 		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
@@ -602,6 +626,309 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(
 				(await handler(post({ name: "dup", apiKey: "k" }))).status,
 			).not.toBe(200);
+		});
+	});
+
+	describe("credential check", () => {
+		function accountCount(): number {
+			return (
+				dbOps
+					.getAdapter()
+					.getSQLiteDb()
+					.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM accounts")
+					.get()?.n ?? 0
+			);
+		}
+
+		function answerProbesWith(answer: () => Promise<Response>) {
+			fetchSpy.mockImplementation(
+				mockFetch(async (input) =>
+					isCredentialProbe(requestUrl(input))
+						? answer()
+						: new Response(null, { status: 401 }),
+				),
+			);
+		}
+
+		function probeUrls(): string[] {
+			return fetchSpy.mock.calls
+				.map(([input]: [URL | RequestInfo]) => requestUrl(input))
+				.filter(isCredentialProbe);
+		}
+
+		const mimo = () =>
+			createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.mimo);
+
+		it("is carried by exactly mimo, grok and openrouter", () => {
+			const adopters = Object.entries(API_KEY_PROVIDERS)
+				.filter(([, spec]) => "credentialCheck" in spec)
+				.map(([key]) => key)
+				.sort();
+			expect(adopters).toEqual(["grok", "mimo", "openrouter"]);
+		});
+
+		it.each([
+			["mimo", "https://token-plan-sgp.xiaomimimo.com/v1/models"],
+			["grok", GROK_MODELS_ENDPOINT],
+			["openrouter", OPENROUTER_KEY_URL],
+		] as const)("%s sends the key to %s", async (key, url) => {
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS[key],
+			)(post({ name: `${key}-probe`, apiKey: "probe-key" }));
+
+			expect(res.status).toBe(200);
+			expect(probeUrls()).toEqual([url]);
+			const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+			expect(new Headers(init.headers).get("authorization")).toBe(
+				"Bearer probe-key",
+			);
+		});
+
+		it("creates the account with an unchanged response body when the key is valid", async () => {
+			const res = await mimo()(post({ name: "mimo-ok", apiKey: "tp-key" }));
+
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as {
+				message: string;
+				account: Record<string, unknown>;
+			};
+			expect(body.message).toBe("MiMo account 'mimo-ok' added successfully");
+			expect(Object.keys(body.account).sort()).toEqual(
+				[
+					"id",
+					"name",
+					"provider",
+					"requestCount",
+					"totalRequests",
+					"lastUsed",
+					"created",
+					"paused",
+					"priority",
+					"customEndpoint",
+					"tokenStatus",
+					"tokenExpiresAt",
+					"rateLimitStatus",
+					"rateLimitReset",
+					"rateLimitRemaining",
+					"rateLimitedUntil",
+					"sessionInfo",
+					"hasRefreshToken",
+				].sort(),
+			);
+			expect(body.account).toMatchObject({
+				name: "mimo-ok",
+				provider: "mimo",
+				customEndpoint: null,
+				tokenStatus: "valid",
+			});
+			expect(row("mimo-ok")?.api_key).toBe("tp-key");
+		});
+
+		it("refuses a rejected key and writes nothing", async () => {
+			answerProbesWith(async () => new Response(null, { status: 401 }));
+			const before = accountCount();
+
+			const res = await mimo()(post({ name: "mimo-bad", apiKey: "tp-key" }));
+
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toBe(
+				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created. A Token Plan key is only accepted in the region it was bought in, so check the selected region.",
+			);
+			expect(accountCount()).toBe(before);
+		});
+
+		it("refuses a rejected Grok key without a hint", async () => {
+			answerProbesWith(async () => new Response(null, { status: 401 }));
+
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.grok,
+			)(post({ name: "grok-bad", apiKey: "xai-key" }));
+
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toBe(
+				"xAI model catalogue rejected the API key (HTTP 401); the Grok account was not created",
+			);
+		});
+
+		it.each([
+			[
+				"a 500",
+				async () => new Response("secret-echo tp-key", { status: 500 }),
+				"answered HTTP 500",
+			],
+			[
+				"a network error",
+				async (): Promise<Response> => {
+					throw new TypeError("connect ECONNREFUSED tp-key");
+				},
+				"could not be reached",
+			],
+		] as const)("refuses as unverified on %s and writes nothing", async (_case, answer, detail) => {
+			answerProbesWith(answer);
+			const before = accountCount();
+
+			const res = await mimo()(post({ name: "mimo-down", apiKey: "tp-key" }));
+
+			expect(res.status).toBe(400);
+			const { error } = (await res.json()) as { error: string };
+			expect(error).toBe(
+				`Could not verify the MiMo API key (MiMo model catalogue: ${detail}); the account was not created`,
+			);
+			expect(error).not.toContain("tp-key");
+			expect(accountCount()).toBe(before);
+		});
+
+		it("probes the region the account names", async () => {
+			const res = await mimo()(
+				post({
+					name: "mimo-ams",
+					apiKey: "tp-key",
+					customEndpoint: "https://token-plan-ams.xiaomimimo.com/anthropic",
+				}),
+			);
+
+			expect(res.status).toBe(200);
+			expect(probeUrls()).toEqual([
+				"https://token-plan-ams.xiaomimimo.com/v1/models",
+			]);
+		});
+
+		const nonAdopters = Object.entries(API_KEY_PROVIDERS).filter(
+			([, spec]) => !("credentialCheck" in spec),
+		);
+
+		it("covers nine non-adopting providers", () => {
+			expect(nonAdopters).toHaveLength(9);
+		});
+
+		it.each(
+			nonAdopters.map(([key]) => [key] as const),
+		)("%s sends no request before the row is written", async (key) => {
+			// Post-insert requests such as usage priming are allowed; a credential
+			// probe is by definition one that happens while the row is absent.
+			const name = `${key}-unchecked`;
+			const beforeInsert: string[] = [];
+			fetchSpy.mockImplementation(
+				mockFetch(async (input) => {
+					if (!row(name)) beforeInsert.push(requestUrl(input));
+					return new Response(null, { status: 401 });
+				}),
+			);
+
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS[key as keyof typeof API_KEY_PROVIDERS],
+			)(
+				post({
+					name,
+					apiKey: "k",
+					...(key === "openai"
+						? { customEndpoint: "https://example.test/v1" }
+						: {}),
+				}),
+			);
+
+			expect(res.status).toBe(200);
+			expect(beforeInsert).toEqual([]);
+		});
+
+		it("reads the OpenRouter key endpoint once and stores its metadata", async () => {
+			answerProbesWith(async () =>
+				Response.json({
+					data: { label: "sk-or-...abc", usage: 2, limit: 10 },
+				}),
+			);
+
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.openrouter,
+			)(post({ name: "router", apiKey: "sk-or-secret" }));
+
+			expect(res.status).toBe(200);
+			expect(probeUrls()).toEqual([OPENROUTER_KEY_URL]);
+			const body = (await res.json()) as {
+				account: { openRouterMetadata: Record<string, unknown> | null };
+			};
+			expect(body.account.openRouterMetadata).toMatchObject({
+				label: "sk-or-...abc",
+				usageUsd: 2,
+				limitUsd: 10,
+			});
+			const stored = dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query<{ openrouter_metadata_json: string | null }, [string]>(
+					"SELECT openrouter_metadata_json FROM accounts WHERE name = ?",
+				)
+				.get("router");
+			expect(JSON.parse(stored?.openrouter_metadata_json ?? "null")).toEqual(
+				body.account.openRouterMetadata,
+			);
+		});
+
+		it("creates an OpenRouter account from a 200 whose body does not parse, without asking again", async () => {
+			answerProbesWith(async () => new Response("<html>ok</html>"));
+
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.openrouter,
+			)(post({ name: "router", apiKey: "sk-or-secret" }));
+
+			expect(res.status).toBe(200);
+			expect(probeUrls()).toEqual([OPENROUTER_KEY_URL]);
+			const body = (await res.json()) as {
+				account: { openRouterMetadata: unknown };
+			};
+			expect(body.account.openRouterMetadata).toBeNull();
+			expect(
+				dbOps
+					.getAdapter()
+					.getSQLiteDb()
+					.query("SELECT openrouter_metadata_json FROM accounts WHERE name = ?")
+					.get("router"),
+			).toEqual({ openrouter_metadata_json: null });
+		});
+
+		it("reports the credential error, not the duplicate, for a taken name with a bad key", async () => {
+			expect(
+				(await mimo()(post({ name: "mimo-dup", apiKey: "tp-key" }))).status,
+			).toBe(200);
+			answerProbesWith(async () => new Response(null, { status: 401 }));
+
+			const res = await mimo()(post({ name: "mimo-dup", apiKey: "wrong" }));
+
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toBe(
+				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created. A Token Plan key is only accepted in the region it was bought in, so check the selected region.",
+			);
+			expect(row("mimo-dup")?.api_key).toBe("tp-key");
+		});
+
+		it("refuses as unverified when the request is already aborted", async () => {
+			// Real fetch rejects an aborted signal before sending anything.
+			fetchSpy.mockImplementation(
+				mockFetch(async (_input, init) => {
+					init?.signal?.throwIfAborted();
+					return new Response(null, { status: 200 });
+				}),
+			);
+			const before = accountCount();
+			const req = new Request("http://localhost/api/accounts/mimo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: "mimo-gone", apiKey: "tp-key" }),
+				signal: AbortSignal.abort(),
+			});
+
+			const res = await mimo()(req);
+
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toBe(
+				"Could not verify the MiMo API key (MiMo model catalogue: the check was cancelled); the account was not created",
+			);
+			expect(accountCount()).toBe(before);
 		});
 	});
 

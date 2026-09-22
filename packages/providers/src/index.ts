@@ -12,6 +12,8 @@ import { DevinProvider } from "./providers/devin/provider";
 export * from "./alibaba-coding-plan-usage-fetcher";
 // Export base provider class
 export { BaseProvider } from "./base";
+// Export add-time credential checks
+export * from "./credential-check";
 // Export Kilo usage fetcher
 export * from "./kilo-usage-fetcher";
 export * from "./minimax-usage-fetcher";
@@ -71,5 +73,7 @@ registry.registerProvider(new AnthropicCompatibleProvider());
 
 export {
 	fetchOpenRouterMetadata,
+	type OpenRouterKeyAnswer,
 	parseOpenRouterMetadata,
+	requestOpenRouterKey,
 } from "./providers/openrouter/metadata";

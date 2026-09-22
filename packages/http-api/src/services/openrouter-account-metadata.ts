@@ -2,16 +2,41 @@ import type { DatabaseOperations } from "@clankermux/database";
 import { fetchOpenRouterMetadata } from "@clankermux/providers";
 import type { OpenRouterAccountMetadata } from "@clankermux/types";
 
+interface OpenRouterMetadataTarget {
+	id: string;
+	provider: string;
+	disabled?: boolean;
+	api_key?: string | null;
+	custom_endpoint?: string | null;
+}
+
 /** Keep the last successful snapshot on failure. Never contact custom endpoints. */
 export async function refreshOpenRouterAccountMetadata(
 	dbOps: DatabaseOperations,
-	account: {
-		id: string;
-		provider: string;
-		disabled?: boolean;
-		api_key?: string | null;
-		custom_endpoint?: string | null;
-	},
+	account: OpenRouterMetadataTarget,
+): Promise<OpenRouterAccountMetadata | null> {
+	return writeSnapshot(dbOps, account, fetchOpenRouterMetadata);
+}
+
+/**
+ * Persist metadata that was already read from the key endpoint, under the
+ * same guards as a refresh. Anything that does not validate as a snapshot is
+ * dropped rather than refetched.
+ */
+export async function storeOpenRouterAccountMetadata(
+	dbOps: DatabaseOperations,
+	account: OpenRouterMetadataTarget,
+	metadata: unknown,
+): Promise<OpenRouterAccountMetadata | null> {
+	const snapshot = toOpenRouterAccountMetadata(metadata);
+	if (!snapshot) return null;
+	return writeSnapshot(dbOps, account, async () => snapshot);
+}
+
+async function writeSnapshot(
+	dbOps: DatabaseOperations,
+	account: OpenRouterMetadataTarget,
+	obtain: (apiKey: string) => Promise<OpenRouterAccountMetadata | null>,
 ): Promise<OpenRouterAccountMetadata | null> {
 	if (
 		account.disabled ||
@@ -22,7 +47,7 @@ export async function refreshOpenRouterAccountMetadata(
 		return null;
 	try {
 		if ((await dbOps.getAccount(account.id))?.disabled) return null;
-		const metadata = await fetchOpenRouterMetadata(account.api_key);
+		const metadata = await obtain(account.api_key);
 		if (!metadata) return null;
 		await dbOps
 			.getAdapter()
@@ -57,48 +82,51 @@ export function readOpenRouterAccountMetadata(
 ): OpenRouterAccountMetadata | null {
 	if (!json) return null;
 	try {
-		const value = JSON.parse(json);
-		if (!value || typeof value !== "object" || Array.isArray(value))
-			return null;
-		for (const key of ["label", "creatorUserId", "limitReset", "expiresAt"]) {
-			if (value[key] !== null && typeof value[key] !== "string") return null;
-		}
-		for (const key of [
-			"limitUsd",
-			"limitRemainingUsd",
-			"usageUsd",
-			"usageDailyUsd",
-			"usageWeeklyUsd",
-			"usageMonthlyUsd",
-		]) {
-			if (
-				value[key] !== null &&
-				(typeof value[key] !== "number" || !Number.isFinite(value[key]))
-			)
-				return null;
-		}
-		if (value.isFreeTier !== null && typeof value.isFreeTier !== "boolean")
-			return null;
-		if (
-			typeof value.fetchedAt !== "number" ||
-			!Number.isFinite(value.fetchedAt)
-		)
-			return null;
-		return {
-			label: value.label,
-			creatorUserId: value.creatorUserId,
-			isFreeTier: value.isFreeTier,
-			limitUsd: value.limitUsd,
-			limitRemainingUsd: value.limitRemainingUsd,
-			limitReset: value.limitReset,
-			usageUsd: value.usageUsd,
-			usageDailyUsd: value.usageDailyUsd,
-			usageWeeklyUsd: value.usageWeeklyUsd,
-			usageMonthlyUsd: value.usageMonthlyUsd,
-			expiresAt: value.expiresAt,
-			fetchedAt: value.fetchedAt,
-		};
+		return toOpenRouterAccountMetadata(JSON.parse(json));
 	} catch {
 		return null;
 	}
+}
+
+function toOpenRouterAccountMetadata(
+	candidate: unknown,
+): OpenRouterAccountMetadata | null {
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+		return null;
+	const value = candidate as Record<string, unknown>;
+	for (const key of ["label", "creatorUserId", "limitReset", "expiresAt"]) {
+		if (value[key] !== null && typeof value[key] !== "string") return null;
+	}
+	for (const key of [
+		"limitUsd",
+		"limitRemainingUsd",
+		"usageUsd",
+		"usageDailyUsd",
+		"usageWeeklyUsd",
+		"usageMonthlyUsd",
+	]) {
+		if (
+			value[key] !== null &&
+			(typeof value[key] !== "number" || !Number.isFinite(value[key]))
+		)
+			return null;
+	}
+	if (value.isFreeTier !== null && typeof value.isFreeTier !== "boolean")
+		return null;
+	if (typeof value.fetchedAt !== "number" || !Number.isFinite(value.fetchedAt))
+		return null;
+	return {
+		label: value.label as string | null,
+		creatorUserId: value.creatorUserId as string | null,
+		isFreeTier: value.isFreeTier as boolean | null,
+		limitUsd: value.limitUsd as number | null,
+		limitRemainingUsd: value.limitRemainingUsd as number | null,
+		limitReset: value.limitReset as string | null,
+		usageUsd: value.usageUsd as number | null,
+		usageDailyUsd: value.usageDailyUsd as number | null,
+		usageWeeklyUsd: value.usageWeeklyUsd as number | null,
+		usageMonthlyUsd: value.usageMonthlyUsd as number | null,
+		expiresAt: value.expiresAt as string | null,
+		fetchedAt: value.fetchedAt,
+	};
 }
