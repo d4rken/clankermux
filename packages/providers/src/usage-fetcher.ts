@@ -437,6 +437,31 @@ export function extractWindowResetTime(
 }
 
 /**
+ * How long the usage endpoint is treated as rate-limited after a 429 that
+ * carried no usable `Retry-After`.
+ */
+export const USAGE_RATE_LIMITED_DEFAULT_MS = 5 * 60 * 1000;
+
+/**
+ * The delay a `Retry-After` header asks for, given as delta-seconds or as an
+ * HTTP-date. Null when the header is absent, unparseable, or names no delay in
+ * the future ("0", a past date).
+ */
+export function parseRetryAfterMs(
+	value: string | null,
+	now: number = Date.now(),
+): number | null {
+	if (!value) return null;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds)) {
+		return seconds > 0 ? Math.round(seconds * 1000) : null;
+	}
+	const dateMs = Date.parse(value);
+	if (!Number.isFinite(dateMs)) return null;
+	return dateMs > now ? dateMs - now : null;
+}
+
+/**
  * Fetch usage data from Anthropic's OAuth usage endpoint
  */
 export interface UsageFetchResult {
@@ -494,23 +519,9 @@ export async function fetchUsageData(
 			let retryAfterMs: number | null = null;
 			if (response.status === 429) {
 				const retryAfter = response.headers.get("retry-after");
-				if (retryAfter) {
-					const seconds = Number(retryAfter);
-					if (Number.isFinite(seconds) && seconds > 0) {
-						retryAfterMs = Math.round(seconds * 1000);
-						log.warn(`Usage endpoint rate-limited, retry-after: ${seconds}s`);
-					} else {
-						const retryDateMs = new Date(retryAfter).getTime();
-						if (Number.isFinite(retryDateMs)) {
-							const deltaMs = retryDateMs - Date.now();
-							if (deltaMs > 0) {
-								retryAfterMs = deltaMs;
-								log.warn(
-									`Usage endpoint rate-limited, retry-after date: ${retryAfter}`,
-								);
-							}
-						}
-					}
+				retryAfterMs = parseRetryAfterMs(retryAfter);
+				if (retryAfterMs !== null) {
+					log.warn(`Usage endpoint rate-limited, retry-after: ${retryAfter}`);
 				}
 			}
 
@@ -662,10 +673,12 @@ export function getRepresentativeUtilization(
  *
  * `superseded` is a THIRD state, distinct from success and failure: the fetch
  * belonged to a poll generation (or token provider) that was replaced while it
- * was in flight, so it says nothing at all about the live poller. Callers must
- * drop it rather than fold it into `success === false` — counting it as a
- * failure pushes a healthy replacement poller into exponential backoff and lets
- * its usage data go stale.
+ * was in flight, or it started before a {@link UsageCache.fenceAndRefetch}, so
+ * it says nothing at all about the live poller. Callers must drop it rather
+ * than fold it into `success === false` — counting it as a failure pushes a
+ * healthy replacement poller into exponential backoff and lets its usage data
+ * go stale. A fenced fetch leaves its generation live, so the loop that issued
+ * it must still reschedule.
  */
 interface UsageFetchOutcome {
 	success: boolean;
@@ -1237,9 +1250,14 @@ class UsageCache {
 		string,
 		{
 			generation: number;
+			fence: number;
 			promise: Promise<UsageFetchOutcome>;
 		}
 	>();
+	// Per-account fence counter, advanced by fenceAndRefetch. A fetch records the
+	// value current when it starts and is superseded once the counter moves past
+	// it: its reading predates whatever made the fence necessary.
+	private fences = new Map<string, number>();
 	// Demand-aware polling state (Anthropic only — set when startPolling receives
 	// a PollingPolicy with demandAware:true). See PollingPolicy / noteActivity.
 	private pollingPolicies = new Map<string, PollingPolicy>();
@@ -1448,6 +1466,7 @@ class UsageCache {
 			// it JSON.stringify's a non-Error rejection value, which a circular
 			// object turns into a TypeError.
 			let success = false;
+			let superseded = false;
 			let nextRetryAfterMs: number | null = null;
 			try {
 				const outcome = await this.fetchAndCache(
@@ -1457,12 +1476,12 @@ class UsageCache {
 					provider,
 					customEndpoint,
 				);
-				// A superseded result belongs to a poll generation that no longer
-				// exists. It is NOT a failure of the live one — counting it would push
-				// a perfectly healthy replacement poller into exponential backoff and
-				// let its usage data go stale. Drop it entirely (the reschedule guards
-				// below would bail anyway).
-				if (outcome.superseded) return;
+				// A superseded result is NOT a failure of the live poller — counting
+				// it would push a perfectly healthy poller into exponential backoff
+				// and let its usage data go stale. A replaced generation bails on the
+				// guard below; a fenced fetch leaves the generation live and only
+				// skips the failure accounting.
+				superseded = outcome.superseded === true;
 				success = outcome.success;
 				nextRetryAfterMs = outcome.retryAfterMs;
 			} catch (error) {
@@ -1481,7 +1500,7 @@ class UsageCache {
 			if (!stillCurrent) return;
 			if (success) {
 				this.failureCounts.delete(accountId); // reset streak on success
-			} else {
+			} else if (!superseded) {
 				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
 				this.failureCounts.set(accountId, count);
 			}
@@ -1701,10 +1720,10 @@ class UsageCache {
 				provider,
 				customEndpoint,
 			).then(({ success, retryAfterMs, superseded }) => {
-				// Stale result from a generation that has since been replaced: it says
-				// nothing about THIS poller, so it must not seed a failure streak.
-				if (superseded) return;
-				if (!success) {
+				// A superseded result says nothing about THIS poller, so it must not
+				// seed a failure streak. A fenced one still starts the loop below;
+				// a replaced generation fails the guard.
+				if (!success && !superseded) {
 					this.failureCounts.set(accountId, 1);
 				}
 				// Generation + identity guards: only start the loop if this generation
@@ -1799,6 +1818,34 @@ class UsageCache {
 	}
 
 	/**
+	 * Fence off every usage fetch that is already in flight for the account, then
+	 * fetch afresh. For an event that invalidates the upstream reading, such as a
+	 * claimed reset: a fetch that left before it can land afterwards with the old
+	 * (exhausted) reading, and neither {@link delete} nor {@link refreshNow} stops
+	 * that, since refreshNow joins the in-flight fetch. A fenced fetch writes
+	 * nothing and fires no callback; the poll loop that issued it keeps running.
+	 *
+	 * Resolves to the fresh fetch's success, false when no poller is registered.
+	 */
+	async fenceAndRefetch(accountId: string): Promise<boolean> {
+		if (!this.tokenProviders.has(accountId)) return false;
+		this.fences.set(accountId, (this.fences.get(accountId) ?? 0) + 1);
+		return this.refreshNow(accountId);
+	}
+
+	/**
+	 * Record a 429 from the shared `/oauth/usage` bucket that a caller outside
+	 * the poll observed. A shorter deadline never replaces a longer one already
+	 * recorded.
+	 */
+	noteRateLimited(accountId: string, untilMs: number): void {
+		const existing = this.usageRateLimitedUntil.get(accountId);
+		if (existing === undefined || untilMs > existing) {
+			this.usageRateLimitedUntil.set(accountId, untilMs);
+		}
+	}
+
+	/**
 	 * An on-demand fetch just proved the account healthy. Two consequences:
 	 *
 	 *  1. The consecutive-failure streak is disproven → cleared unconditionally.
@@ -1879,6 +1926,7 @@ class UsageCache {
 			this.usageRateLimitedUntil.delete(accountId);
 			// Clear any in-flight fetch so it doesn't linger after polling stops.
 			this.inFlightFetches.delete(accountId);
+			this.fences.delete(accountId);
 			// Demand-aware polling bookkeeping.
 			this.pollingPolicies.delete(accountId);
 			this.lastActivityAt.delete(accountId);
@@ -1909,8 +1957,13 @@ class UsageCache {
 		// within the same poll generation. A newer generation must issue (and apply)
 		// its own fetch; reusing a superseded generation's promise would give it a
 		// result its own guards reject, i.e. no fetch at all.
+		const fence = this.fences.get(accountId) ?? 0;
 		const inflight = this.inFlightFetches.get(accountId);
-		if (inflight && inflight.generation === generation) {
+		if (
+			inflight &&
+			inflight.generation === generation &&
+			inflight.fence === fence
+		) {
 			log.debug(
 				`Reusing in-flight fetch for account ${accountId} — skipping duplicate request`,
 			);
@@ -1921,10 +1974,11 @@ class UsageCache {
 			accountId,
 			tokenProvider,
 			generation,
+			fence,
 			provider,
 			customEndpoint,
 		);
-		this.inFlightFetches.set(accountId, { generation, promise });
+		this.inFlightFetches.set(accountId, { generation, fence, promise });
 		// Identity-guarded: a restart (stopPolling + startPolling) during this
 		// fetch may have installed a newer in-flight entry for the same account;
 		// only clear our own so we don't wipe the current generation's dedup.
@@ -1964,9 +2018,13 @@ class UsageCache {
 		accountId: string,
 		tokenProvider: AccessTokenProvider,
 		generation: number,
+		fence: number,
 		provider?: string,
 		customEndpoint?: string | null,
 	): Promise<UsageFetchOutcome> {
+		const isCurrent = () =>
+			this.isLiveFetchGeneration(accountId, generation, tokenProvider) &&
+			(this.fences.get(accountId) ?? 0) === fence;
 		/** A superseded fetch reports failure without touching any shared state. */
 		const superseded = {
 			success: false,
@@ -1982,7 +2040,7 @@ class UsageCache {
 				// Generation guard BEFORE the failure handler: a rejection belonging to
 				// a superseded generation must not invoke the current poller's
 				// onTokenRefreshFailure (which can halt polling for the live account).
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider)) {
+				if (!isCurrent()) {
 					return superseded;
 				}
 				// Handle token provider errors that might result in empty objects
@@ -2017,9 +2075,7 @@ class UsageCache {
 					// acting on the stale verdict here would call stopPolling() on the
 					// LIVE generation, tearing down its token provider, callbacks and
 					// cache and leaving the account unpolled until an explicit restart.
-					if (
-						!this.isLiveFetchGeneration(accountId, generation, tokenProvider)
-					) {
+					if (!isCurrent()) {
 						return superseded;
 					}
 					if (shouldStop) {
@@ -2038,7 +2094,7 @@ class UsageCache {
 			}
 
 			// Generation guard after the (awaited) token resolution.
-			if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider)) {
+			if (!isCurrent()) {
 				return superseded;
 			}
 
@@ -2059,46 +2115,32 @@ class UsageCache {
 						await devinClient.getAccount(token, customEndpoint ?? undefined)
 					).usage;
 				} catch (error) {
-					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-						return superseded;
+					if (!isCurrent()) return superseded;
 					if (error instanceof DevinSessionAuthenticationError) {
 						try {
 							await this.devinMetadataCallbacks
 								.get(accountId)
-								?.onAuthenticationFailure?.(token, () =>
-									this.isLiveFetchGeneration(
-										accountId,
-										generation,
-										tokenProvider,
-									),
-								);
+								?.onAuthenticationFailure?.(token, () => isCurrent());
 						} catch {
 							log.warn(
 								`Devin authentication callback failed for account ${accountId}`,
 							);
 						}
-						if (
-							!this.isLiveFetchGeneration(accountId, generation, tokenProvider)
-						)
-							return superseded;
+						if (!isCurrent()) return superseded;
 					}
 					throw error;
 				}
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				const onMetadata =
 					this.devinMetadataCallbacks.get(accountId)?.onMetadata;
 				if (onMetadata) {
 					try {
-						await onMetadata(data, token, () =>
-							this.isLiveFetchGeneration(accountId, generation, tokenProvider),
-						);
+						await onMetadata(data, token, () => isCurrent());
 					} catch {
 						// Identity persistence is best-effort; a successful quota read remains usable.
 						log.warn(`Devin metadata callback failed for account ${accountId}`);
 					}
-					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-						return superseded;
+					if (!isCurrent()) return superseded;
 				}
 				const callback = this.windowResetCallbacks.get(accountId);
 				if (callback)
@@ -2111,8 +2153,7 @@ class UsageCache {
 				// against, so it is captured BEFORE the request goes out.
 				const fetchStartedAt = Date.now();
 				const outcome = await fetchZaiUsage(token);
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				if (outcome.status === "unrecognized") {
 					// The endpoint answered; we could not read its quota rows. Nothing to
 					// cache, but nothing failed — a failure here would back the poller
@@ -2129,8 +2170,7 @@ class UsageCache {
 					} = await import("./zai-usage-fetcher");
 					// The dynamic import is another await boundary — re-check before any
 					// cache write or callback.
-					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-						return superseded;
+					if (!isCurrent()) return superseded;
 
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
@@ -2168,8 +2208,7 @@ class UsageCache {
 			} else if (provider === "kilo") {
 				// Fetch Kilo usage data
 				data = await fetchKiloUsageData(token);
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				if (data) {
 					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeKiloUtilization(
@@ -2186,8 +2225,7 @@ class UsageCache {
 				// quota. Request forwarding still goes through the generic
 				// anthropic-compatible path; this is polling only.
 				data = await fetchMinimaxUsageData(token);
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				if (data) {
 					// BEFORE the cache write: the roll is detected by comparing the new
 					// reset against the CACHED baseline, so replacing the baseline first
@@ -2211,8 +2249,7 @@ class UsageCache {
 			} else if (provider === "alibaba-coding-plan") {
 				// Fetch Alibaba Coding Plan usage data
 				data = await fetchAlibabaCodingPlanUsageData(token);
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				if (data) {
 					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
@@ -2235,8 +2272,7 @@ class UsageCache {
 				// landed.
 				const fetchStartedAt = Date.now();
 				const outcome = await fetchGrokSubscriptionUsage(token, { accountId });
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				if (outcome.status === "unrecognized") {
 					// The endpoint answered in a shape this parser does not know.
 					// Nothing to cache, but nothing failed — a failure here would back
@@ -2304,8 +2340,7 @@ class UsageCache {
 				// flight is temporally ambiguous and must wait for the next poll.
 				const fetchStartedAt = Date.now();
 				const result = await fetchUsageData(token);
-				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
-					return superseded;
+				if (!isCurrent()) return superseded;
 				const observer = this.anthropicUsageObservers.get(accountId);
 				if (observer) {
 					const version =
@@ -2323,11 +2358,8 @@ class UsageCache {
 							result.failureKind === "usage_permission_denied" &&
 							!this.usagePermissionDeniedAccounts.has(accountId),
 						isCurrent: () =>
-							this.isLiveFetchGeneration(
-								accountId,
-								generation,
-								tokenProvider,
-							) && this.anthropicObservationVersions.get(accountId) === version,
+							isCurrent() &&
+							this.anthropicObservationVersions.get(accountId) === version,
 					} satisfies AnthropicUsageObservation;
 					const task = Promise.resolve()
 						.then(() => observer(observation))
@@ -2774,6 +2806,7 @@ class UsageCache {
 		}
 		this.cache.clear();
 		this.usageRateLimitedUntil.clear();
+		this.fences.clear();
 		log.info("Cleared all usage cache and stopped polling");
 	}
 }
