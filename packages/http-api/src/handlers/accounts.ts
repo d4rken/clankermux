@@ -403,7 +403,7 @@ export function presentRateLimitStatus(
  *    that has always owned the Codex reset-credit recovery, and the one entitled
  *    to refresh what the proxy can see.
  *  - `read-only` — every projection that is not that page, the UNAUTHENTICATED
- *    `GET /public/v1/pacing` above all. An anonymous GET must initiate no
+ *    `/public/v1/*` resources above all. An anonymous GET must initiate no
  *    upstream request and must not move the usage cache that ROUTING, throttling
  *    and capacity decisions read.
  */

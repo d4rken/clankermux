@@ -30,9 +30,9 @@ import {
  *
  * The assembly's SIDE EFFECTS are the caller's to choose, and the parameter is
  * threaded rather than inferred here: `GET /api/pacing` is the management page's
- * scan and keeps the management writes, while the unauthenticated
- * `GET /public/v1/pacing` passes `read-only` and gets the same figures with no
- * upstream refresh and no write into the usage cache routing reads.
+ * scan and keeps the management writes, while any unauthenticated caller passes
+ * `read-only` and gets the same figures with no upstream refresh and no write
+ * into the usage cache routing reads.
  */
 export async function computePacingScan(
 	dbOps: DatabaseOperations,

@@ -1,9 +1,10 @@
 import {
 	burnRatioTone,
-	computeBurnRatio,
+	formatBurnCoverage,
 	formatBurnRatio,
 	type PoolUsageResult,
 	type PoolWindow,
+	poolBurnRatio,
 	type ServableClassPool,
 	scopeResultToClass,
 	willRunOutCount,
@@ -73,6 +74,12 @@ export function PoolQuotaCard({
 }: PoolQuotaCardProps) {
 	const pending = loading && !unavailableReason;
 	const resolved = !pending && !unavailableReason;
+	// The quota summary carries no unstarted flag, and an unstarted window's reset
+	// is a placeholder rather than a deadline — so the pace average must be told
+	// which bars those are. The pool knows, by account id.
+	const unstarted = new Set(
+		weekly.accounts.filter((bar) => bar.unstarted).map((bar) => bar.accountId),
+	);
 	const bars: PoolClassBar[] = summary
 		? summary.accounts.map((account) => ({
 				accountId: account.id,
@@ -86,6 +93,7 @@ export function PoolQuotaCard({
 						: "exhausted",
 				reason: account.available ? null : account.status,
 				resetMs: account.resetMs,
+				unstarted: unstarted.has(account.id),
 			}))
 		: [...weekly.accounts].sort(
 				(a, b) =>
@@ -139,13 +147,22 @@ export function PoolQuotaCard({
 					100 - shortWindowRemaining,
 				)}% used · account average`;
 	// Compare each account against its own weekly window before averaging pace.
-	const burns = bars.map((bar) =>
-		bar.pct === null
-			? null
-			: computeBurnRatio(bar.pct, bar.resetMs, "seven_day", now),
+	// PARTIAL, unlike `average` above: an account whose window is too young to
+	// divide by withholds only itself, and the shortfall is printed beside the
+	// figure. Averaging into `null` instead hid a three-account reading behind
+	// one freshly-reset fourth.
+	//
+	// The window reading in preference to the bar, because a bar the pool built
+	// for a spent or cooling account carries `pct: null` — it draws nothing — and
+	// that account burned more of the week than any other. Summary-built bars
+	// have no separate reading and need none: their percentage already ignores
+	// availability.
+	const burn = poolBurnRatio(
+		bars.map((bar) => bar.windowReading ?? bar),
+		"seven_day",
+		now,
 	);
-	const burnRatio = average(burns.map((burn) => burn?.ratio ?? null));
-	const burn = burnRatio == null ? null : { ratio: burnRatio, expectedPct: 0 };
+	const burnCoverage = burn == null ? null : formatBurnCoverage(burn);
 
 	// An UNSTARTED weekly window reports a reset, but it is `now + 7d`
 	// re-stamped on every poll until the first request pins it. Those windows are
@@ -237,6 +254,12 @@ export function PoolQuotaCard({
 						)}
 					>
 						Average pace {formatBurnRatio(burn)}
+						{/* Only when some account is missing from it. A coverage note on
+						    every card would train the reader to skip the one card where
+						    the figure really does describe fewer accounts than it names. */}
+						{burnCoverage ? (
+							<span className="text-muted-foreground"> · {burnCoverage}</span>
+						) : null}
 					</p>
 				)}
 

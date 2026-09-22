@@ -1,5 +1,11 @@
 import type { AccountResponse } from "@clankermux/types";
-import { type BurnRatio, burnRatioTone, computeBurnRatio } from "./burn-ratio";
+import {
+	type BurnRatio,
+	burnRatioTone,
+	computeBurnRatio,
+	type PoolBurnRatio,
+	poolBurnRatio,
+} from "./burn-ratio";
 import { computeFiveHourPacing, type FiveHourPacing } from "./five-hour-pacing";
 import {
 	computePoolUsage,
@@ -15,11 +21,10 @@ import {
  * The pacing scan: how fast the pool is spending its weekly budget, and how
  * hard the 5-hour limit is governing it right now.
  *
- * Lives in core, not in the server, because THREE surfaces consume it: the
- * dashboard renders it, `GET /api/pacing` serves it whole with account names,
- * and `GET /public/v1/pacing` serves a de-identified projection of the same
- * scan. Recomputing it anywhere is how one of them comes to disagree with
- * another about whether a pace is sustainable.
+ * Lives in core, not in the server, because TWO surfaces consume it: the
+ * dashboard renders it, and `GET /api/pacing` serves it whole with account
+ * names. Recomputing it in either is how one comes to disagree with the other
+ * about whether a pace is sustainable.
  *
  * Pure: accounts in, figures out. The database read that feeds it is
  * `computePacingScan` in http-api, which is the only part that cannot live
@@ -67,6 +72,20 @@ export interface ClassBudget {
 	 */
 	burn: BurnRatio | null;
 	burnTone: OutlookTone | null;
+	/**
+	 * The same question asked of the WHOLE class rather than one account, and the
+	 * answer to render when `burn` is null.
+	 *
+	 * `burn` is keyed on the least-used account so it sits beside the percentage
+	 * that names it, and that is the right pairing — but the least-used account is
+	 * also the one most likely to be freshly added, freshly reset or untouched, so
+	 * the class pace went dark precisely when a new account arrived. A class with
+	 * three measured accounts reported nothing.
+	 *
+	 * Carries its own coverage, so a partial average is never read as the pool.
+	 */
+	poolBurn: PoolBurnRatio | null;
+	poolBurnTone: OutlookTone | null;
 	/** The class's own verdict chip, from the shared threshold policy. */
 	outlookLabel: string;
 	outlookTone: OutlookTone;
@@ -126,13 +145,33 @@ function classBudget(
 		"seven_day",
 	);
 	const leastUsed = pool.leastUsed;
+	// An unstarted window's reset is the provider's sliding placeholder, so there
+	// is nothing to divide by — and the least-used account is the likeliest one to
+	// be sitting on it. Left to the expected-percentage floor alone this leaks: a
+	// reading observed a couple of hours ago puts the placeholder window far
+	// enough in to clear the floor, and the class then reports a flattering 0x AND
+	// suppresses the pooled fallback below, which had the real answer.
+	const leastUsedUnstarted = pool.accounts.some(
+		(bar) => bar.accountId === leastUsed?.accountId && bar.unstarted,
+	);
 	// Keyed on the least-used account, matching the percentage above it. A ratio
 	// computed over any other account would sit beside a figure it does not
 	// describe — the dashboard learned that one the hard way.
 	const burn =
-		leastUsed == null
+		leastUsed == null || leastUsedUnstarted
 			? null
 			: computeBurnRatio(leastUsed.pct, leastUsed.resetMs, "seven_day", now);
+	// Over every bar in the class, not just the one the headline names, and from
+	// each bar's WINDOW READING rather than its drawable `pct`: a spent or cooling
+	// account reads null there, and it is the one that burned the most. Paused
+	// accounts never reach here — the scan drops them before the pool is built.
+	const pooledBurn = poolBurnRatio(
+		pool.accounts.map(
+			(bar) => bar.windowReading ?? { pct: null, resetMs: null },
+		),
+		"seven_day",
+		now,
+	);
 	const outlook = poolClassOutlook(pool);
 
 	return {
@@ -143,6 +182,8 @@ function classBudget(
 		leastUsedAccountName: leastUsed?.name ?? null,
 		burn,
 		burnTone: burn == null ? null : burnRatioTone(burn),
+		poolBurn: pooledBurn,
+		poolBurnTone: pooledBurn == null ? null : burnRatioTone(pooledBurn),
 		outlookLabel: outlook.label,
 		outlookTone: outlook.tone,
 		reportingCount: pool.reportingCount,

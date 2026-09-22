@@ -35,10 +35,10 @@ export interface ClassPacing {
 	/**
 	 * The same account as {@link nextLiftAccountName}, by id.
 	 *
-	 * Carried alongside the name because a published surface needs a JOIN KEY:
-	 * `/public/v1/pacing` may not re-serve account names (they live once, on the
-	 * accounts resource), so a consumer resolves this id against that list. The
-	 * name stays for the dashboard, which renders it directly.
+	 * Carried alongside the name as the JOIN KEY. Account names are user-set and
+	 * not unique, so a consumer resolving this row against an account list has to
+	 * match on the id. The name stays for the dashboard, which renders it
+	 * directly.
 	 */
 	nextLiftAccountId: string | null;
 	/**

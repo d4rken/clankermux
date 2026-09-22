@@ -1,5 +1,6 @@
 import {
 	type ClassBudget,
+	formatBurnCoverage,
 	formatBurnRatio,
 	type PacingSnapshot,
 	type PoolUsageResult,
@@ -21,13 +22,31 @@ import { Skeleton } from "../ui/skeleton";
  * Formatting only — the ratio, the tone thresholds and the decision to withhold
  * a ratio at all now come from the server, so the page and the desk widget
  * cannot call the same pace sustainable and unsustainable.
+ *
+ * Two ratios, in preference order, each naming what it describes. The keyed one
+ * reads against the least-used account and belongs beside the percentage that
+ * names the same account. When that account has no honest ratio — freshly added,
+ * freshly reset, or untouched — the class falls back to its pooled average
+ * rather than going dark, and `subject` changes to the coverage so the reader is
+ * never told an average describes one account or a single account describes the
+ * pool.
  */
 function classBurn(budget: ClassBudget) {
-	if (budget.burn == null || budget.burnTone == null) return null;
-	return {
-		text: formatBurnRatio(budget.burn),
-		tone: TONE_FIGURE_CLASS[budget.burnTone],
-	};
+	if (budget.burn != null && budget.burnTone != null) {
+		return {
+			subject: budget.leastUsedAccountName,
+			text: formatBurnRatio(budget.burn),
+			tone: TONE_FIGURE_CLASS[budget.burnTone],
+		};
+	}
+	if (budget.poolBurn != null && budget.poolBurnTone != null) {
+		return {
+			subject: formatBurnCoverage(budget.poolBurn) ?? "all accounts",
+			text: formatBurnRatio(budget.poolBurn),
+			tone: TONE_FIGURE_CLASS[budget.poolBurnTone],
+		};
+	}
+	return null;
 }
 
 interface WeeklyBudgetPanelProps {
@@ -316,7 +335,7 @@ export function WeeklyBudgetPanel({
 													<>
 														{" · "}
 														<span className={burn.tone}>
-															{budget?.leastUsedAccountName}: {burn.text}
+															{burn.subject}: {burn.text}
 														</span>
 													</>
 												)}

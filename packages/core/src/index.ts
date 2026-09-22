@@ -45,9 +45,13 @@ export {
 } from "./bun-runtime-floor";
 export {
 	type BurnRatio,
+	type BurnRatioSource,
 	burnRatioTone,
 	computeBurnRatio,
+	formatBurnCoverage,
 	formatBurnRatio,
+	type PoolBurnRatio,
+	poolBurnRatio,
 } from "./burn-ratio";
 export {
 	ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
