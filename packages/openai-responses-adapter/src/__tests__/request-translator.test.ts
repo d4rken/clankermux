@@ -828,6 +828,39 @@ describe("Responses easy input messages used by Pi and Oh My Pi", () => {
 			},
 		]);
 	});
+	test.each([
+		"minimal",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max",
+	])("carries reasoning effort %s to Anthropic as an adaptive output_config", (effort) => {
+		const result = translateRequestToAnthropic({
+			model: "claude-fable-5-1",
+			input: [{ role: "user", content: "Think about it" }],
+			reasoning: { effort },
+		} as TranslatableRequest);
+		expect(result.thinking).toEqual({ type: "adaptive" });
+		expect(result.output_config).toEqual({ effort });
+	});
+
+	test.each([
+		["no reasoning at all", {}],
+		["a summary but no effort", { reasoning: { summary: "auto" } }],
+		// The wire vocabulary is not the narrow type: an unrecognised effort is
+		// dropped rather than forwarded to the upstream verbatim.
+		["an effort outside the vocabulary", { reasoning: { effort: "ultra" } }],
+	])("sends no thinking controls for %s", (_label, extra) => {
+		const result = translateRequestToAnthropic({
+			model: "claude-fable-5-1",
+			input: [{ role: "user", content: "Think about it" }],
+			...extra,
+		} as TranslatableRequest);
+		expect(result).not.toHaveProperty("thinking");
+		expect(result).not.toHaveProperty("output_config");
+	});
+
 	test("does not reinterpret explicitly typed non-message items", () => {
 		const result = translateRequestToAnthropic({
 			model: "gpt-6-astra",

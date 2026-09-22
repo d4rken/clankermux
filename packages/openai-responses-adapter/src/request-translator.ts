@@ -1,5 +1,9 @@
 import { Logger } from "@clankermux/logger";
 import {
+	ALIAS_REASONING_EFFORTS,
+	type AliasReasoningEffort,
+} from "@clankermux/types";
+import {
 	createToolTranslation,
 	type ToolTranslation,
 } from "./tool-translation";
@@ -116,6 +120,30 @@ function mergeConsecutiveSameRole(
 	return merged;
 }
 
+/**
+ * The Anthropic reasoning controls for a Responses `reasoning.effort`.
+ *
+ * Adaptive thinking carries the effort NAME, so this is a round trip rather
+ * than a conversion: `codex/provider.ts` reads an incoming `output_config.effort`
+ * verbatim in exactly this vocabulary, and only falls back to approximating a
+ * `budget_tokens` by threshold for the older budget form. Emitting a budget here
+ * would invent a number instead, and would have to fit under `max_tokens`, which
+ * defaults to 4096 for a client that sets no ceiling.
+ *
+ * An effort outside the published vocabulary is dropped rather than forwarded:
+ * this is the boundary between a client's body and an upstream account.
+ */
+function anthropicThinkingControls(
+	effort: string | undefined,
+): Pick<AnthropicRequest, "thinking" | "output_config"> {
+	if (!ALIAS_REASONING_EFFORTS.includes(effort as AliasReasoningEffort))
+		return {};
+	return {
+		thinking: { type: "adaptive" },
+		output_config: { effort: effort as AliasReasoningEffort },
+	};
+}
+
 export function translateRequestToAnthropic(
 	req: ResponsesRequest & { input: ResponseItem[] },
 	tools = createToolTranslation(req),
@@ -205,6 +233,7 @@ export function translateRequestToAnthropic(
 		model: req.model,
 		messages: mergedMessages,
 		max_tokens: req.max_output_tokens ?? 4096,
+		...anthropicThinkingControls(req.reasoning?.effort),
 	};
 
 	// Merge instruction messages and req.instructions into the system prompt.
