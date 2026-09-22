@@ -126,17 +126,35 @@ describe("AnthropicBankedResetEventRepository", () => {
 			expect(await repo.findPendingForAccount("acc-1", "auto")).toEqual([]);
 		});
 
-		it("blocks a weekly claim while another auto attempt on the account is pending, but not an expiry claim", async () => {
-			await repo.claimAutoAttempt({ ...AUTO, grantId: "g_other" });
+		it("starts no new attempt, expiry or weekly, while another auto claim on the account is pending", async () => {
+			const other = await repo.claimAutoAttempt({
+				...AUTO,
+				grantId: "g_other",
+				cause: "weekly-limit",
+			});
 			expect(
-				await repo.claimAutoAttempt({
-					...AUTO,
-					cause: "weekly-limit",
-				}),
+				await repo.claimAutoAttempt({ ...AUTO, cause: "weekly-limit" }),
 			).toBeNull();
 			expect(
 				await repo.claimAutoAttempt({ ...AUTO, cause: "expiry" }),
-			).not.toBeNull();
+			).toBeNull();
+			expect(
+				(await repo.findPendingForAccount("acc-1")).map((r) => r.request_id),
+			).toEqual([other?.requestId ?? ""]);
+		});
+
+		it("still hands back a grant's own pending attempt, whatever the cause", async () => {
+			const first = await repo.claimAutoAttempt({
+				...AUTO,
+				cause: "weekly-limit",
+			});
+			const again = await repo.claimAutoAttempt({ ...AUTO, cause: "expiry" });
+			expect(again).toEqual({
+				id: first?.id ?? "",
+				requestId: first?.requestId ?? "",
+				attemptSeq: 1,
+				reused: true,
+			});
 		});
 	});
 
@@ -326,14 +344,53 @@ describe("AnthropicBankedResetEventRepository", () => {
 		});
 	});
 
+	describe("getRearmAt", () => {
+		it("re-arms an hour after not_limited, cooldown or ineligible, or at a later cooldown_until", async () => {
+			expect(await repo.getRearmAt("acc-1")).toBeNull();
+			const resolve = async (
+				requestId: string,
+				status: "not_limited" | "cooldown" | "ineligible" | "reset",
+				now: number,
+				cooldownUntil: number | null = null,
+			) => {
+				const { row } = await repo.beginManualAttempt({
+					...MANUAL,
+					requestId,
+					now,
+				});
+				await repo.resolveAttempt(row.id, { status, now, cooldownUntil });
+				return (await repo.findByRequestId("acc-1", requestId))?.rearm_at;
+			};
+
+			expect(await resolve("r-nl", "not_limited", NOW)).toBe(NOW + HOUR);
+			expect(await resolve("r-in", "ineligible", NOW + 1)).toBe(NOW + 1 + HOUR);
+			expect(await resolve("r-cd", "cooldown", NOW + 2, NOW + 3 * HOUR)).toBe(
+				NOW + 3 * HOUR,
+			);
+			expect(await resolve("r-cd2", "cooldown", NOW + 3, NOW + 60_000)).toBe(
+				NOW + 3 + HOUR,
+			);
+			expect(await resolve("r-ok", "reset", NOW + 4)).toBeNull();
+			expect(await repo.getRearmAt("acc-1")).toBe(NOW + 3 * HOUR);
+			expect(await repo.getRearmAt("acc-2")).toBeNull();
+		});
+
+		it("counts auto rows too", async () => {
+			const claim = await repo.claimAutoAttempt(AUTO);
+			if (!claim) throw new Error("expected a claim");
+			await repo.resolveAttempt(claim.id, { status: "not_limited", now: NOW });
+			expect(await repo.getRearmAt("acc-1")).toBe(NOW + HOUR);
+		});
+	});
+
 	describe("getLatestAutoApplyCooldownAnchorAt", () => {
-		it("anchors on the latest auto reset, already_used or not_limited resolution only", async () => {
+		it("anchors on the latest auto reset or already_used resolution only", async () => {
 			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();
 
 			const statuses = [
 				["reset", NOW + 1],
 				["cooldown", NOW + 50],
-				["not_limited", NOW + 10],
+				["not_limited", NOW + 30],
 				["failed", NOW + 60],
 				["already_used", NOW + 20],
 				["ineligible", NOW + 70],

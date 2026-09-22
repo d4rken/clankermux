@@ -301,6 +301,7 @@ describe("GET /api/accounts/:id/banked-resets/events", () => {
 			error_message: null,
 			grant_ends_at: NOW + 86_400_000,
 			next_attempt_at: null,
+			rearm_at: null,
 			created_at: NOW,
 			resolved_at: NOW + 1_000,
 		};
@@ -346,6 +347,7 @@ describe("GET /api/accounts/:id/banked-resets/events", () => {
 			error_message: "Anthropic answered unavailable",
 			grant_ends_at: null,
 			next_attempt_at: NOW + 60_000,
+			rearm_at: null,
 			created_at: NOW,
 			resolved_at: null,
 		};

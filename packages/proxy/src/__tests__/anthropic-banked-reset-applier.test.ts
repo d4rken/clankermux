@@ -356,6 +356,7 @@ function pendingRow(
 		error_message: null,
 		grant_ends_at: null,
 		next_attempt_at: null,
+		rearm_at: null,
 		created_at: NOW - 60_000,
 		resolved_at: null,
 		...overrides,

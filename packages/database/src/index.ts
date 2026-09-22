@@ -39,6 +39,7 @@ export {
 export { AccountPaymentRepository } from "./repositories/account-payment.repository";
 export {
 	ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS,
+	ANTHROPIC_BANKED_RESET_REARM_MS,
 	type AnthropicBankedResetAutoClaim,
 	AnthropicBankedResetEventRepository,
 	type AnthropicBankedResetEventResolvedStatus,

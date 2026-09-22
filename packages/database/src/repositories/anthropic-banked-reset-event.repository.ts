@@ -25,6 +25,11 @@ export interface AnthropicBankedResetEventRow {
 	grant_ends_at: number | null;
 	/** ms epoch before which a pending row is not replayed. */
 	next_attempt_at: number | null;
+	/**
+	 * ms epoch before which no new auto attempt may start on the account, set
+	 * on a `not_limited`, `cooldown` or `ineligible` resolution.
+	 */
+	rearm_at: number | null;
 	created_at: number;
 	resolved_at: number | null;
 }
@@ -64,11 +69,20 @@ export interface AnthropicBankedResetResolution {
 	cleared?: AnthropicBankedResetWindow[] | null;
 	resetsLeft?: number | null;
 	errorMessage?: string | null;
+	/** The server's `cooldown_until`, ms epoch. */
+	cooldownUntil?: number | null;
 	now: number;
 }
 
 /** How long a claim may stay unconfirmed before it is given up as `failed`. */
 export const ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS = 60 * 60 * 1000;
+
+/**
+ * How long after a `not_limited`, `cooldown` or `ineligible` answer no new
+ * auto attempt starts on the account (longer when the server's
+ * `cooldown_until` is later).
+ */
+export const ANTHROPIC_BANKED_RESET_REARM_MS = 60 * 60 * 1000;
 
 /**
  * Repository for the `anthropic_banked_reset_events` ledger — every attempt to
@@ -83,18 +97,19 @@ export const ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS = 60 * 60 * 1000;
  * (account_id, grant_id, attempt_seq), which makes concurrent auto claims
  * race-safe through INSERT OR IGNORE.
  *
+ * While any claim on an account is pending, no new request id is recorded
+ * for it, manual or auto: that claim may already have spent a reset, and only
+ * a replay under its own request id can find out.
+ *
  * A grant holds several resets, so no outcome ends automation for it: when the
- * next attempt may start is the scheduler's decision, anchored on
- * {@link getLatestAutoApplyCooldownAnchorAt}.
+ * next attempt may start is the scheduler's decision, from
+ * {@link getRearmAt} and {@link getLatestAutoApplyCooldownAnchorAt}.
  */
 export class AnthropicBankedResetEventRepository extends BaseRepository<AnthropicBankedResetEventRow> {
 	/**
-	 * Claim (or reuse) the next auto attempt for a grant. A still-pending
-	 * attempt is returned as-is, cause included. Returns null while a manual
-	 * claim on the account is pending, and when a weekly-limit claim is blocked
-	 * by another pending auto attempt on the account; expiry claims are not
-	 * blocked by auto attempts, so a stuck weekly attempt cannot let a grant
-	 * lapse.
+	 * Claim (or reuse) the next auto attempt for a grant. The grant's own
+	 * still-pending attempt is returned as-is, whatever its cause. Returns null
+	 * while any other claim on the account is pending, manual or auto.
 	 */
 	async claimAutoAttempt(input: {
 		accountId: string;
@@ -119,12 +134,9 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				request_id, status, grant_ends_at, created_at
 			)
 			SELECT ?, ?, ?, ?, 'auto', ?, ?, ?, 'pending', ?, ?
-			WHERE (? = 'expiry' OR NOT EXISTS (
+			WHERE NOT EXISTS (
 				SELECT 1 FROM anthropic_banked_reset_events
-				WHERE account_id = ? AND trigger = 'auto' AND status = 'pending'
-			)) AND NOT EXISTS (
-				SELECT 1 FROM anthropic_banked_reset_events
-				WHERE account_id = ? AND trigger = 'manual' AND status = 'pending'
+				WHERE account_id = ? AND status = 'pending'
 			)
 		`,
 			[
@@ -137,16 +149,13 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				requestId,
 				input.grantEndsAt,
 				input.now,
-				input.cause,
-				input.accountId,
 				input.accountId,
 			],
 		);
 		if (changes > 0) return { id, requestId, attemptSeq, reused: false };
 
-		// A concurrent claim won, or a pending manual claim or (for a weekly
-		// claim) a pending auto attempt blocked it. Reuse only a still-pending
-		// row for THIS grant.
+		// A concurrent claim won, or another pending claim on the account
+		// blocked it. Reuse only a still-pending row for THIS grant.
 		const winner = await this.latestAutoRow(input.accountId, input.grantId);
 		return winner?.status === "pending" ? toAutoClaim(winner) : null;
 	}
@@ -246,7 +255,8 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			`
 			UPDATE anthropic_banked_reset_events
 			SET status = ?, reason = ?, cleared = ?, resets_left = ?,
-				error_message = ?, next_attempt_at = NULL, resolved_at = ?
+				error_message = ?, next_attempt_at = NULL, resolved_at = ?,
+				rearm_at = ?
 			WHERE id = ? AND status = 'pending'
 		`,
 			[
@@ -256,6 +266,12 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				resolution.resetsLeft ?? null,
 				resolution.errorMessage ?? null,
 				resolution.now,
+				REARMING_STATUSES.has(resolution.status)
+					? Math.max(
+							resolution.now + ANTHROPIC_BANKED_RESET_REARM_MS,
+							resolution.cooldownUntil ?? 0,
+						)
+					: null,
 				id,
 			],
 		);
@@ -301,11 +317,25 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 	}
 
 	/**
-	 * When the last cooldown-anchoring auto attempt resolved for an account:
-	 * MAX resolved_at over auto rows that spent a reset (`reset`), found it
-	 * already spent (`already_used`) or were told there was no limit to clear
-	 * (`not_limited`). The last one anchors so a window stuck at its limit
-	 * cannot re-claim every scheduler tick. Null when there is none.
+	 * Before when no new auto attempt may start on the account: the latest
+	 * re-arm deadline over its `not_limited`, `cooldown` and `ineligible`
+	 * resolutions, manual and auto. Null when there is none.
+	 */
+	async getRearmAt(accountId: string): Promise<number | null> {
+		const row = await this.get<{ latest: number | null }>(
+			`SELECT MAX(rearm_at) AS latest FROM anthropic_banked_reset_events
+			 WHERE account_id = ?`,
+			[accountId],
+		);
+		return row?.latest ?? null;
+	}
+
+	/**
+	 * When the last auto attempt that restored the account's windows resolved:
+	 * MAX resolved_at over auto rows that spent a reset (`reset`) or found it
+	 * already spent (`already_used`). Anchors the weekly trigger's cooldown so a
+	 * usage reading that lags the reset cannot spend another. Null when there
+	 * is none.
 	 */
 	async getLatestAutoApplyCooldownAnchorAt(
 		accountId: string,
@@ -314,7 +344,7 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			`
 			SELECT MAX(resolved_at) AS latest FROM anthropic_banked_reset_events
 			WHERE account_id = ? AND trigger = 'auto'
-				AND status IN ('reset','already_used','not_limited')
+				AND status IN ('reset','already_used')
 		`,
 			[accountId],
 		);
@@ -358,6 +388,9 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 		);
 	}
 }
+
+const REARMING_STATUSES: ReadonlySet<AnthropicBankedResetEventResolvedStatus> =
+	new Set(["not_limited", "cooldown", "ineligible"]);
 
 function toAutoClaim(
 	row: AnthropicBankedResetEventRow,

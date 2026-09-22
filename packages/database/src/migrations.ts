@@ -983,7 +983,8 @@ export function ensureSchema(db: Database): void {
 			grant_ends_at INTEGER,
 			next_attempt_at INTEGER,
 			created_at INTEGER NOT NULL,
-			resolved_at INTEGER
+			resolved_at INTEGER,
+			rearm_at INTEGER
 		)
 	`);
 
@@ -1797,6 +1798,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "anthropic_auto_apply_banked_reset_on_weekly_limit_enabled",
 		ddl: "ALTER TABLE accounts ADD COLUMN anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	// ms epoch before which no new automatic banked-reset claim starts on the
+	// account, set when a claim resolves not_limited, cooldown or ineligible.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "rearm_at",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN rearm_at INTEGER",
 	},
 ];
 

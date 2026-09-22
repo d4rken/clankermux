@@ -249,6 +249,7 @@ describe("ensureSchema completeness", () => {
 			"next_attempt_at",
 			"created_at",
 			"resolved_at",
+			"rearm_at",
 		]) {
 			expect(cols.has(col)).toBe(true);
 		}

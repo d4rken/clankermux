@@ -700,11 +700,9 @@ describe("claim", () => {
 		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
 			"not_limited",
 		);
-		expect(
-			await realDbOps.getAnthropicBankedResetAutoApplyCooldownAnchorAt(
-				ACCOUNT_ID,
-			),
-		).toBe(NOW);
+		expect(await realDbOps.getAnthropicBankedResetRearmAt(ACCOUNT_ID)).toBe(
+			NOW + 60 * 60_000,
+		);
 	});
 
 	it("reads the profile once for a missing org uuid and stores the identity", async () => {
