@@ -1,3 +1,5 @@
+import type { AliasReasoningEffort } from "@clankermux/types";
+
 // ============================================================
 // REQUEST TYPES (what codex sends to /v1/responses)
 // ============================================================
@@ -144,7 +146,12 @@ export interface ResponsesToolChoice {
 }
 
 export interface ResponsesReasoning {
-	effort?: "low" | "medium" | "high";
+	/**
+	 * Not narrowed to a union: the wire vocabulary is whatever the client sends,
+	 * and this proxy publishes `minimal`/`xhigh`/`max` as well. Consumers check
+	 * the value against {@link ALIAS_REASONING_EFFORTS} at their own boundary.
+	 */
+	effort?: string;
 	summary?: string;
 }
 
@@ -235,6 +242,13 @@ export interface AnthropicRequest {
 	tool_choice?: AnthropicToolChoice;
 	max_tokens: number;
 	stream?: boolean;
+	/**
+	 * Adaptive thinking only. A `budget_tokens` form exists for older models and
+	 * is deliberately not produced here: `max_tokens` above defaults to 4096 when
+	 * the client sets no ceiling, and a budget has to fit under it.
+	 */
+	thinking?: { type: "adaptive" };
+	output_config?: { effort: AliasReasoningEffort };
 }
 
 export interface AnthropicMessage {
