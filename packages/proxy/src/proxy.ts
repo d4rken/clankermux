@@ -4,6 +4,7 @@ import {
 	isDebugEnabled,
 	ModelNotServedError,
 	ModelSubstitutedError,
+	type RequestIngressEvt,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
@@ -242,7 +243,9 @@ export async function handleProxy(
 			path: requestMeta.path,
 			project: requestMeta.project ?? null,
 			model: requestMeta.requestedModel ?? null,
-		});
+			apiKeyId: apiKeyId || null,
+			apiKeyName: apiKeyName || null,
+		} satisfies RequestIngressEvt);
 	}
 
 	/**
