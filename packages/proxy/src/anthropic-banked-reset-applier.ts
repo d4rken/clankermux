@@ -306,6 +306,8 @@ export function decideBankedResetAction(inputs: {
 export interface BankedResetApplyDeps {
 	/** Anthropic OAuth accounts with either toggle on. */
 	listCandidateAccounts(): Promise<Array<{ id: string; name: string }>>;
+	/** Resolve claims unconfirmed for an hour as `failed`; returns how many. */
+	expireStaleAttempts(now: number): Promise<number>;
 	getAccount(accountId: string): Promise<Account | null>;
 	getCachedStatus(accountId: string): AnthropicBankedResetStatus | null;
 	/** Non-forced is a cache-gated no-op while the status is fresh. */
@@ -377,6 +379,16 @@ export class AnthropicBankedResetApplyScheduler {
 	}
 
 	async tick(): Promise<void> {
+		try {
+			const expired = await this.deps.expireStaleAttempts(this.now());
+			if (expired > 0) {
+				log.info(
+					`Banked-reset applier: gave up ${expired} claim(s) unconfirmed for an hour`,
+				);
+			}
+		} catch (error) {
+			log.warn(`Banked-reset applier: failed to expire stale claims: ${error}`);
+		}
 		let candidates: Array<{ id: string; name: string }>;
 		try {
 			candidates = await this.deps.listCandidateAccounts();
@@ -638,6 +650,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		| "getAllAccounts"
 		| "getAccount"
 		| "getActiveApiKeys"
+		| "expireStaleAnthropicBankedResetAttempts"
 		| "getPendingAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetAutoApplyCooldownAnchorAt"
 		| "claimAnthropicBankedResetAutoAttempt"
@@ -676,6 +689,8 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 							account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled),
 				)
 				.map((account) => ({ id: account.id, name: account.name })),
+		expireStaleAttempts: (now) =>
+			dbOps.expireStaleAnthropicBankedResetAttempts(now),
 		getAccount: (accountId) => dbOps.getAccount(accountId),
 		getCachedStatus: (accountId) =>
 			anthropicBankedResetCache.get(accountId)?.status ?? null,

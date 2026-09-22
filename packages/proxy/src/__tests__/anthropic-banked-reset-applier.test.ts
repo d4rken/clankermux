@@ -318,6 +318,7 @@ interface Harness {
 	dispatched: AnthropicBankedResetClaimRequest[];
 	claims: Array<{ grantId: string; cause: string }>;
 	forcedReads: number;
+	expiredAt: number[];
 }
 
 function completedOutcome(): AnthropicBankedResetClaimDispatchOutcome {
@@ -376,8 +377,13 @@ function harness(
 		dispatched: [],
 		claims: [],
 		forcedReads: 0,
+		expiredAt: [],
 		deps: {
 			listCandidateAccounts: async () => [{ id: "acct-1", name: "claude-one" }],
+			expireStaleAttempts: async (now) => {
+				h.expiredAt.push(now);
+				return 0;
+			},
 			getAccount: async () =>
 				account(reads.length > 1 ? reads.shift() : reads[0]),
 			getCachedStatus: () => options.status ?? status(),
@@ -448,6 +454,12 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		now += 1;
 		await scheduler.tick();
 		expect(h.forcedReads).toBe(2);
+	});
+
+	it("expires stale claims at the start of every tick, before any replay", async () => {
+		const h = harness({ accounts: [weeklyOnly], pending: [pendingRow()] });
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.expiredAt).toEqual([NOW]);
 	});
 
 	it("conserves the grant while another account can serve the scope", async () => {
@@ -600,6 +612,7 @@ function poolScheduler(options: {
 			getAccount: async (id: string) =>
 				[self, ...others].find((candidate) => candidate.id === id) ?? null,
 			getActiveApiKeys: async () => (options.keys ?? []) as ApiKey[],
+			expireStaleAnthropicBankedResetAttempts: async () => 0,
 			getPendingAnthropicBankedResetAttempts: async () => [],
 			getAnthropicBankedResetAutoApplyCooldownAnchorAt: async () => null,
 			claimAnthropicBankedResetAutoAttempt: async (input) => ({
