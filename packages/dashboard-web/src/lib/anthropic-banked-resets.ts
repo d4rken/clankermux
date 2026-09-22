@@ -134,7 +134,10 @@ export function describeBankedResetClaim(
 			return {
 				kind: "done",
 				success: false,
-				message: "Unconfirmed for an hour — gave up",
+				message:
+					response.reason === "not_sent"
+						? (response.errorMessage ?? "Not sent")
+						: "Unconfirmed for an hour — gave up",
 			};
 		default:
 			return {
@@ -182,6 +185,21 @@ const EVENT_STATUS_LABELS: Record<
 	unavailable: "Unavailable",
 	failed: "Failed",
 };
+
+/** The history row's detail line: cleared windows, or why it did not apply. */
+export function bankedResetEventDetail(
+	event: AnthropicBankedResetEventResponse,
+): string | null {
+	const cleared = bankedResetClearsLabels(event.cleared);
+	if (cleared.length > 0) return `cleared ${cleared.join(", ")}`;
+	if (event.status === "ineligible" && event.reason) {
+		return formatBankedResetReason(event.reason);
+	}
+	if (event.status === "failed" && event.reason === "not_sent") {
+		return event.errorMessage ?? "Not sent";
+	}
+	return null;
+}
 
 /** History label; a pending claim whose grant the status no longer lists is "Unconfirmed". */
 export function bankedResetEventStatusLabel(

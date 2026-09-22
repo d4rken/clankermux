@@ -1476,6 +1476,8 @@ export type AnthropicBankedResetClaimDispatchOutcome =
 			/** What this call's request received; null when a resolved row was returned without one. */
 			result: AnthropicBankedResetClaimResult | null;
 			reason: string | null;
+			/** The ledger row's recorded error, when it was answered from the ledger. */
+			errorMessage?: string | null;
 			resetsLeft: number | null;
 			cleared: AnthropicBankedResetWindow[];
 			/** ms epoch before which a still-pending claim should not be retried. */

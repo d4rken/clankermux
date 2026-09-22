@@ -111,7 +111,12 @@ function claimMessage(
 	accountName: string,
 	status: AnthropicBankedResetClaimResponse["status"],
 	result: AnthropicBankedResetClaimResponse["result"],
+	reason: string | null,
+	errorMessage: string | null,
 ): string {
+	if (status === "failed" && reason === "not_sent") {
+		return `The banked-reset claim for account '${accountName}' was never sent (${errorMessage ?? "refused before sending"}); start a new one.`;
+	}
 	switch (status) {
 		case "reset":
 			return `Banked reset applied for account '${accountName}'.`;
@@ -196,11 +201,14 @@ export function createAnthropicBankedResetClaimHandler(
 					dispatched.accountName,
 					dispatched.ledgerStatus,
 					dispatched.result?.result ?? null,
+					dispatched.reason,
+					dispatched.errorMessage ?? null,
 				),
 				eventId: dispatched.eventId,
 				status: dispatched.ledgerStatus,
 				result: dispatched.result?.result ?? null,
 				reason: dispatched.reason,
+				errorMessage: dispatched.errorMessage ?? null,
 				resetsLeft: dispatched.resetsLeft,
 				cleared: dispatched.cleared,
 				cooldownUntil: iso(dispatched.result?.cooldownUntil ?? null),

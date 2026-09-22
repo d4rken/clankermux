@@ -682,6 +682,34 @@ describe("claim", () => {
 		).toEqual([]);
 	});
 
+	it("answers a retry of a never-sent claim with the recorded refusal", async () => {
+		dbOverrides = {
+			beginManualAnthropicBankedResetAttempt: async (input) => {
+				const begun =
+					await realDbOps.beginManualAnthropicBankedResetAttempt(input);
+				baseAccount.disabled = true;
+				return begun;
+			},
+		};
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-not-sent",
+		});
+		baseAccount.disabled = false;
+		dbOverrides = {};
+		const retry = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-not-sent",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		if (retry.status !== "completed") throw new Error("expected completed");
+		expect(retry.ledgerStatus).toBe("failed");
+		expect(retry.reason).toBe("not_sent");
+		expect(retry.errorMessage).toBe(
+			"Not sent: Account 'claude-one' is disabled",
+		);
+	});
+
 	it("keeps a replayed manual row pending when the account is disabled before its POST", async () => {
 		await realDbOps.beginManualAnthropicBankedResetAttempt({
 			accountId: ACCOUNT_ID,

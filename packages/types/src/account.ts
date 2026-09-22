@@ -1027,7 +1027,10 @@ export interface AnthropicBankedResetClaimResponse {
 	status: AnthropicBankedResetEventStatus;
 	/** What the server or transport answered; null when a resolved row was returned without a new request. */
 	result: AnthropicBankedResetClaimResult["result"] | null;
+	/** `not_sent` on a claim refused before its request was ever sent. */
 	reason: string | null;
+	/** The ledger row's recorded error, e.g. why a claim was not sent. */
+	errorMessage?: string | null;
 	resetsLeft: number | null;
 	cleared: AnthropicBankedResetWindow[];
 	cooldownUntil: string | null; // ISO

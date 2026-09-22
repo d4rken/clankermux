@@ -34,6 +34,12 @@ import {
 
 const log = new Logger("AnthropicBankedResets");
 
+/**
+ * `reason` of a manual row resolved `failed` without its POST ever being
+ * sent, as opposed to one given up after an hour unconfirmed.
+ */
+export const BANKED_RESET_NOT_SENT_REASON = "not_sent";
+
 /** First wait before replaying a claim that got no answer. */
 export const BANKED_RESET_CLAIM_RETRY_MIN_MS = 60_000;
 export const BANKED_RESET_CLAIM_RETRY_MAX_MS = 15 * 60_000;
@@ -354,6 +360,7 @@ export class AnthropicBankedResetCoordinator {
 				await this.writeLedger(account.name, target.rowId, (id) =>
 					this.ctx.dbOps.resolveAnthropicBankedResetAttempt(id, {
 						status: "failed",
+						reason: BANKED_RESET_NOT_SENT_REASON,
 						errorMessage: `Not sent: ${gate.message}`,
 						now: this.now(),
 					}),
@@ -649,6 +656,7 @@ export class AnthropicBankedResetCoordinator {
 			ledgerStatus: row.status,
 			result: null,
 			reason: row.reason,
+			errorMessage: row.error_message,
 			resetsLeft: row.resets_left,
 			cleared: parseCleared(row.cleared),
 			nextAttemptAt: row.next_attempt_at,

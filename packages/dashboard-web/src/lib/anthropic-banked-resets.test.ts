@@ -9,6 +9,7 @@ import type {
 import {
 	type AnthropicBankedResetGrantInfo,
 	bankedResetClearsLabels,
+	bankedResetEventDetail,
 	bankedResetEventStatusLabel,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
@@ -175,6 +176,22 @@ describe("describeBankedResetClaim", () => {
 		});
 	});
 
+	it("shows a never-sent claim's recorded refusal instead of 'gave up'", () => {
+		expect(
+			describeBankedResetClaim(
+				response({
+					status: "failed",
+					reason: "not_sent",
+					errorMessage: "Not sent: Account 'claude-one' is disabled",
+				}),
+			),
+		).toEqual({
+			kind: "done",
+			success: false,
+			message: "Not sent: Account 'claude-one' is disabled",
+		});
+	});
+
 	it("names the cooldown end and the ineligible reason", () => {
 		const cooldown = describeBankedResetClaim(
 			response({
@@ -264,6 +281,39 @@ describe("bankedResetEventStatusLabel", () => {
 		expect(
 			bankedResetEventStatusLabel(event({ status: "reset" }), ["g2"]),
 		).toBe("Reset applied");
+	});
+});
+
+describe("bankedResetEventDetail", () => {
+	it("shows a never-sent claim's refusal and nothing for one given up", () => {
+		expect(
+			bankedResetEventDetail(
+				event({
+					status: "failed",
+					reason: "not_sent",
+					errorMessage: "Not sent: Account 'claude-one' is disabled",
+				}),
+			),
+		).toBe("Not sent: Account 'claude-one' is disabled");
+		expect(
+			bankedResetEventDetail(
+				event({
+					status: "failed",
+					errorMessage: "Claim unconfirmed for an hour",
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("names cleared windows and an ineligible reason", () => {
+		expect(
+			bankedResetEventDetail(
+				event({ status: "reset", cleared: ["seven_day"] }),
+			),
+		).toBe("cleared weekly");
+		expect(
+			bankedResetEventDetail(event({ status: "ineligible", reason: "tier" })),
+		).toBe("plan tier");
 	});
 });
 

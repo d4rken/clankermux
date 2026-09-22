@@ -11,6 +11,7 @@ import { type AccountStatus, formatResetTime } from "../../lib/account-status";
 import {
 	type AnthropicBankedResetGrantInfo,
 	bankedResetClearsLabels,
+	bankedResetEventDetail,
 	bankedResetEventStatusLabel,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
@@ -31,15 +32,6 @@ import {
 	ResetEventsPanel,
 	type ResetEventsState,
 } from "./UsageResetPanels";
-
-function eventDetail(event: AnthropicBankedResetEventResponse): string | null {
-	const cleared = bankedResetClearsLabels(event.cleared);
-	if (cleared.length > 0) return `cleared ${cleared.join(", ")}`;
-	if (event.status === "ineligible" && event.reason) {
-		return formatBankedResetReason(event.reason);
-	}
-	return null;
-}
 
 /**
  * Claim rejections the same request can never turn around: bad input, a
@@ -336,7 +328,7 @@ export function AnthropicBankedResetChip({
 						statusLabel={(event) =>
 							bankedResetEventStatusLabel(event, grantIds)
 						}
-						detail={eventDetail}
+						detail={bankedResetEventDetail}
 					/>
 				</div>
 			</PopoverContent>

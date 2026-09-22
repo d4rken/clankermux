@@ -172,6 +172,32 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 		});
 	});
 
+	it("reports a never-sent claim with its recorded refusal, not as given up", async () => {
+		const claim = mock(async () =>
+			completed({
+				ledgerStatus: "failed",
+				result: null,
+				reason: "not_sent",
+				errorMessage: "Not sent: Account 'claude-one' is disabled",
+				cleared: [],
+				windowsRestored: false,
+				statusRefreshed: false,
+			}),
+		);
+		const res = await createAnthropicBankedResetClaimHandler(dbOps({}), claim)(
+			post({ grantId: "g1", requestId: "r1" }),
+			"acct-1",
+		);
+		const body = await res.json();
+		expect(body.status).toBe("failed");
+		expect(body.reason).toBe("not_sent");
+		expect(body.errorMessage).toBe(
+			"Not sent: Account 'claude-one' is disabled",
+		);
+		expect(body.message).toContain("Account 'claude-one' is disabled");
+		expect(body.message).not.toContain("hour");
+	});
+
 	it("maps a refused claim to 409 and a failure to 500", async () => {
 		const refused = mock(async () => ({
 			status: "failed" as const,
