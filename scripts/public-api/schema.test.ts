@@ -47,6 +47,13 @@ describe("published API schemas",()=>{
   p.inputTokens=-1;
   assertPublicSchema("request",p);
  });
+ // Unlike the token counts above, this one is computed here rather than
+ // reported by a provider, so nothing it cannot be is worth admitting.
+ it("constrains the substitution discard count to a whole number", async () => {
+  const p=await example("request");
+  for(const value of [0,3]) {p.modelSubstitutionDiscards=value;assertPublicSchema("request",p);}
+  for(const value of [null,-1,1.5]) {p.modelSubstitutionDiscards=value;expect(()=>assertPublicSchema("request",p)).toThrow();}
+ });
 	it("preserves reference, tuple and dependency validation semantics", () => {
 		const source = {
 			$schema: "http://json-schema.org/draft-07/schema#",

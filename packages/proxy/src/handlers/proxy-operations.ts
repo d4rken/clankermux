@@ -6,6 +6,7 @@ import {
 	isDebugEnabled,
 	isProtectedFamily,
 	isScopedOnlyUnifiedRejection,
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	NETWORK,
 	PAUSE_REASON_NEEDS_REAUTH,
 	PAUSE_REASON_SUBSCRIPTION_EXPIRED,
@@ -113,7 +114,6 @@ import {
 import {
 	isModelSubstitution,
 	isSubstitutionExcepted,
-	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	SERVED_MODEL_SUPPRESSION_MS,
 } from "./model-substitution";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";

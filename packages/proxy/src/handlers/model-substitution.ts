@@ -33,14 +33,6 @@ export const BACKEND_RESOLVED_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Written into `account_model_suppressions.reason`. Distinct from
- * `upstream_model_rejected` so the rollback path can delete exactly the rows
- * this feature created, and so the dashboard can tell the two apart.
- */
-export const MODEL_SUBSTITUTION_SUPPRESSION_REASON =
-	"upstream_model_substituted";
-
-/**
  * Matches the TTL the definitive-rejection path already uses. At the rate
  * substitution has been observed (~87% of one account's sends) this is closer to
  * removal than to backoff, which is the intent: it turns one wasted upstream

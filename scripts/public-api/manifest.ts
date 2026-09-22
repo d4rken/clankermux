@@ -147,5 +147,6 @@ export const countFields = new Set([
 	"learningAccounts",
 	"spentAccounts",
 	"failoverAttempts",
+	"modelSubstitutionDiscards",
 	"totalTokens",
 ]);

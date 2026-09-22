@@ -1,5 +1,8 @@
 import type { Config } from "@clankermux/config";
-import { validateNumber } from "@clankermux/core";
+import {
+	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
+	validateNumber,
+} from "@clankermux/core";
 import {
 	BadRequest,
 	errorResponse,
@@ -12,7 +15,6 @@ import {
 	clampRiskFactor,
 	KEEPALIVE_REFRESH_1H_MS,
 	MAX_BRIDGE_HOURS,
-	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	riskFactorToBridgeHours,
 	unmatchedPathTracker,
 } from "@clankermux/proxy";

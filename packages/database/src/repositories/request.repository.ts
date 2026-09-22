@@ -1,3 +1,4 @@
+import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type {
 	CachePrefixCapture,
@@ -222,13 +223,37 @@ export interface ClientRequestRow {
 	/** Non-null by construction: both queries filter `api_key_id = ?`. */
 	api_key_id: string;
 	correlation_tag: string | null;
+	/**
+	 * Attempts of this request whose answer the proxy threw away because the
+	 * upstream served a different model than it was sent.
+	 *
+	 * Derived per read rather than stored: `routing_attempts` already holds one
+	 * row per attempt and is deleted only with its request, so there is nothing
+	 * a column would add except a second place for the same fact to be wrong.
+	 */
+	model_substitution_discards: number;
 }
+
+/**
+ * Counted rather than stored. `kind` matters as much as the reason: a local
+ * rejection never reached an upstream, so it discarded nothing.
+ *
+ * The reason is interpolated, not bound. Both queries below take POSITIONAL
+ * parameters, so a `?` inside this shared column list would silently shift
+ * every existing binding at both call sites. What makes that safe is a property
+ * of the constant, and it is pinned as a test where the constant is declared.
+ */
+const MODEL_SUBSTITUTION_DISCARDS = `(SELECT COUNT(*) FROM routing_attempts ra
+		WHERE ra.request_id = requests.id
+			AND ra.kind = 'upstream_send'
+			AND ra.error = '${MODEL_SUBSTITUTION_SUPPRESSION_REASON}')`;
 
 const CLIENT_REQUEST_COLUMNS = `id, timestamp, status_code, error_message,
 	model, requested_model, input_tokens, output_tokens,
 	cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
 	usage_finalized_at, usage_source, failover_attempts, project, api_key_id,
-	correlation_tag`;
+	correlation_tag,
+	${MODEL_SUBSTITUTION_DISCARDS} AS model_substitution_discards`;
 
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {

@@ -201,6 +201,22 @@ export function isReauthDueSoon(
 	return refreshTokenExpiresAt - now <= REFRESH_TOKEN_REAUTH_WARNING_MS;
 }
 
+/**
+ * Written whenever the proxy refuses a response because the provider answered
+ * as a model other than the one it was sent: onto the suppression that keeps
+ * that pair out of later routing, and onto the discarded attempt's audit row.
+ *
+ * It lives here because the writer and one of its readers are in packages that
+ * cannot import each other. Distinct from `upstream_model_rejected` so the two
+ * causes stay separable after the fact.
+ *
+ * Interpolated into SQL by the client-request reader, so its SHAPE is load
+ * bearing as well as its value; `__tests__/model-substitution-reason.test.ts`
+ * pins both.
+ */
+export const MODEL_SUBSTITUTION_SUPPRESSION_REASON =
+	"upstream_model_substituted";
+
 // HTTP status codes
 export const HTTP_STATUS = {
 	OK: 200,
