@@ -12,6 +12,14 @@ it("requires matching adapter and model families", () => {
 		"xhigh",
 		"max",
 	]);
+	for (const model of ["gpt-6-sol", "gpt-6-luna"])
+		expect(getAliasReasoningEfforts(model, "codex")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 	expect(getAliasReasoningEfforts("gpt-5.4-mini", "openai-compatible")).toEqual(
 		["low", "medium"],
 	);

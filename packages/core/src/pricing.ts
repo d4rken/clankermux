@@ -425,20 +425,26 @@ BUNDLED_PRICING.openai = {
 				cache_write: 12.5,
 			},
 		},
-		// Priced but NOT routable: nothing here sends it. The Codex backend
-		// answers some `gpt-5.6-luna` sends with it, and `requests.model` takes
-		// the model `response.created` names. An ESTIMATE, not a mirror —
-		// neither models.dev nor OpenAI publishes a rate. It applies the one
-		// observed GPT-6 step to the tier below: astra is 2.5x sol on all four
-		// fields, so this is 2.5x luna.
+		// Seeded from OpenAI's model pages on 2026-09-22, launch day, before
+		// models.dev listed either model.
+		"gpt-6-sol": {
+			id: "gpt-6-sol",
+			name: "GPT-6 Sol",
+			cost: {
+				input: 2,
+				output: 10,
+				cache_read: 0.2,
+				cache_write: 2.5,
+			},
+		},
 		"gpt-6-luna": {
 			id: "gpt-6-luna",
 			name: "GPT-6 Luna",
 			cost: {
-				input: 0.5,
-				output: 3,
-				cache_read: 0.05,
-				cache_write: 0.625,
+				input: 0.1,
+				output: 0.5,
+				cache_read: 0.01,
+				cache_write: 0.125,
 			},
 		},
 		"gpt-5.6-sol": {

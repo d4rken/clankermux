@@ -101,9 +101,9 @@ const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
 // model requires a newer version of Codex." We override the real client's header
 // with this value, so it must track a version new enough for the models we route
 // (gpt-5.6-sol needs >= 0.144; gpt-6-astra carries `minimal_client_version:
-// 0.153.0` in the Codex catalog and shipped in codex-cli 0.153.1). Bump this
-// when a new Codex model 400s on the version gate.
-export const CODEX_VERSION = "0.153.1";
+// 0.153.0` in the Codex catalog, gpt-6-sol and gpt-6-luna carry 0.155.0).
+// Bump this when a new Codex model 400s on the version gate.
+export const CODEX_VERSION = "0.155.1";
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
 
 /**
@@ -1568,7 +1568,8 @@ export class CodexProvider extends BaseProvider {
 		// exactly the backend-only values — `none`, and since GPT-6 `ultra` (the
 		// top of gpt-6-astra's catalog levels, above `max`) — and nothing else.
 		// Both land in the generation-aware clamp below, which raises `none` to
-		// `low` on GPT-6 and lowers `ultra` to `xhigh` on 5.x. Every other value,
+		// `low` on GPT-6 and lowers `ultra` to `xhigh` on 5.x and to `max` on
+		// GPT-6 Luna. Every other value,
 		// `minimal` included, stays on the resolver-then-clamp path, because the
 		// resolver is what raises an effort UP to the target model's documented
 		// minimum (`minimal` → `low` for a profile that floors at `low`, e.g.

@@ -652,24 +652,21 @@ describe("bundled catalogue coverage", () => {
 		expect(getPricingGaps()).toEqual([]);
 	});
 
-	it("prices a model the upstream names but nothing routes to", async () => {
-		// The Codex backend answers some `gpt-5.6-luna` sends with `gpt-6-luna`,
-		// and the recorder stores the name the response carried. So the model has
-		// to be priced although no route can select it, which is why it is absent
-		// from MODEL_CONTEXT_WINDOWS and the loop above never reaches it.
-		expect(MODEL_CONTEXT_WINDOWS["gpt-6-luna"]).toBeUndefined();
-
+	it.each([
+		["gpt-6-sol", 12],
+		["gpt-6-luna", 0.6],
+	])("prices %s at its launch rates offline", async (model, expected) => {
 		globalThis.fetch = (async () => {
 			throw new Error("offline");
 		}) as unknown as typeof fetch;
 
 		const cost = await estimateCostUSD(
-			"gpt-6-luna",
+			model,
 			{ inputTokens: 1_000_000, outputTokens: 1_000_000 },
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBeCloseTo(3.5, 9);
+		expect(cost).toBeCloseTo(expected, 9);
 		expect(getPricingGaps()).toEqual([]);
 	});
 });
