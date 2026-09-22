@@ -4,7 +4,7 @@ import {
 } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type { Account } from "@clankermux/types";
+import { type Account, transferChatContext } from "@clankermux/types";
 import type { TokenRefreshResult } from "../../types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 import {
@@ -191,6 +191,47 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 			prepared.set(name, value);
 		}
 		return prepared;
+	}
+
+	/**
+	 * The proxy's schema validator rejects a tool whose `input_schema` has no
+	 * top-level `required` (400 `/required: null is not of type "array"`), which
+	 * Anthropic accepts and Claude Code sends for tools without mandatory
+	 * arguments. `required: []` means the same thing and passes.
+	 */
+	override async transformRequestBody(
+		request: Request,
+		_account?: Account,
+	): Promise<Request> {
+		if (request.method !== "POST") return request;
+		let body: { tools?: unknown };
+		try {
+			body = await request.clone().json();
+		} catch {
+			return request;
+		}
+		if (!body || !Array.isArray(body.tools)) return request;
+		let patched = 0;
+		for (const tool of body.tools) {
+			const schema = (tool as { input_schema?: unknown })?.input_schema;
+			if (
+				!schema ||
+				typeof schema !== "object" ||
+				Array.isArray((schema as { required?: unknown }).required)
+			)
+				continue;
+			(schema as { required: unknown[] }).required = [];
+			patched++;
+		}
+		if (!patched) return request;
+		const headers = new Headers(request.headers);
+		headers.delete("content-length");
+		const rebuilt = new Request(request, {
+			headers,
+			body: JSON.stringify(body),
+		});
+		transferChatContext(request, rebuilt);
+		return rebuilt;
 	}
 
 	/**
