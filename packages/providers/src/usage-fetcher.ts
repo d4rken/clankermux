@@ -461,6 +461,19 @@ export function parseRetryAfterMs(
 	return dateMs > now ? dateMs - now : null;
 }
 
+/** Claude Code's headers for the Anthropic OAuth usage endpoint. */
+export function anthropicOAuthUsageHeaders(
+	accessToken: string,
+): Record<string, string> {
+	return {
+		Authorization: `Bearer ${accessToken}`,
+		"anthropic-beta": "oauth-2025-04-20",
+		"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
+		Accept: "application/json",
+		"Content-Type": "application/json",
+	};
+}
+
 /**
  * Fetch usage data from Anthropic's OAuth usage endpoint
  */
@@ -501,13 +514,7 @@ export async function fetchUsageData(
 	try {
 		const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
 			method: "GET",
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-				"anthropic-beta": "oauth-2025-04-20",
-				"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
-				Accept: "application/json",
-				"Content-Type": "application/json",
-			},
+			headers: anthropicOAuthUsageHeaders(accessToken),
 			signal: controller.signal,
 		});
 

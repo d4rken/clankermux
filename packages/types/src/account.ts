@@ -826,6 +826,133 @@ export interface CodexResetCreditEventResponse {
 	resolvedAt: string | null; // ISO
 }
 
+/**
+ * Limit windows an Anthropic banked-reset grant can clear or report on, as
+ * Claude Code's `cedar_ember` program names them. Anything else on the wire is
+ * filtered out.
+ */
+export const ANTHROPIC_BANKED_RESET_WINDOWS = [
+	"five_hour",
+	"seven_day",
+	"seven_day_overage_included",
+	"seven_day_opus",
+	"seven_day_sonnet",
+	"seven_day_cowork",
+	"seven_day_omelette",
+	"seven_day_oauth_apps",
+] as const;
+
+export type AnthropicBankedResetWindow =
+	(typeof ANTHROPIC_BANKED_RESET_WINDOWS)[number];
+
+/** Why an account cannot use banked resets. An unrecognised value reads as `unknown`. */
+export const ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS = [
+	"config_off",
+	"tier",
+	"seat",
+	"mobile",
+	"surface",
+	"cli_version",
+	"no_grant",
+	"tenure",
+	"other_experiment",
+	"unavailable",
+	"unknown",
+] as const;
+
+export type AnthropicBankedResetIneligibleReason =
+	(typeof ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS)[number];
+
+/** `reason` on a claim response. An unrecognised value reads as `unknown`. */
+export const ANTHROPIC_BANKED_RESET_CLAIM_REASONS = [
+	...ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS,
+	"paused",
+	"expired",
+	"unknown_grant",
+	"not_next_grant",
+	"grant_id_required",
+	"not_limited",
+	"already_used",
+	"cooldown",
+	"stamp_indeterminate",
+	"reset_unconfirmed",
+] as const;
+
+export type AnthropicBankedResetClaimReason =
+	(typeof ANTHROPIC_BANKED_RESET_CLAIM_REASONS)[number];
+
+/** One banked-reset grant: N resets, a use-by date, and the windows it refills. */
+export interface AnthropicBankedResetGrant {
+	id: string;
+	label: string | null;
+	resetsTotal: number;
+	resetsLeft: number;
+	/** ms epoch; null when unreported. */
+	startsAt: number | null;
+	/** ms epoch use-by date; null when unreported. */
+	endsAt: number | null;
+	clears: AnthropicBankedResetWindow[];
+	paused: boolean;
+	usableNow: boolean;
+	/** Claimable only while a window in `clears` is exhausted (`not_limited` otherwise). */
+	useRequiresLimit: boolean;
+	/** Integer 0..100 per known window; windows the server omitted are absent. */
+	percentUsed: Partial<Record<AnthropicBankedResetWindow, number>>;
+	blocking: AnthropicBankedResetWindow[];
+}
+
+/** The `cedar_ember` block of the OAuth usage response. */
+export interface AnthropicBankedResetStatus {
+	eligible: boolean;
+	ineligibleReason: AnthropicBankedResetIneligibleReason | null;
+	atLimit: boolean | null;
+	exhausted: AnthropicBankedResetWindow[];
+	grants: AnthropicBankedResetGrant[];
+	/** The only claimable grant; null unless it names a grant in `grants`. */
+	nextGrantId: string | null;
+	/** ms epoch */
+	weeklyResetsAt: number | null;
+	/** ms epoch before which the server refuses a claim with `cooldown`. */
+	cooldownUntil: number | null;
+}
+
+/** What the server answered to a claim. An unrecognised `result` reads as `unavailable`. */
+export type AnthropicBankedResetClaimServerResult =
+	| "reset"
+	| "already_used"
+	| "not_limited"
+	| "cooldown"
+	| "ineligible"
+	| "unavailable";
+
+/**
+ * A claim that got no usable answer: a 429, a 401/403, or any other non-2xx,
+ * network failure, timeout or unparseable body (`error`).
+ */
+export type AnthropicBankedResetClaimTransportResult =
+	| "rate_limited"
+	| "auth_error"
+	| "error";
+
+export interface AnthropicBankedResetClaimResult {
+	result:
+		| AnthropicBankedResetClaimServerResult
+		| AnthropicBankedResetClaimTransportResult;
+	reason: AnthropicBankedResetClaimReason | null;
+	resetsLeft: number | null;
+	cleared: AnthropicBankedResetWindow[];
+	/** ms epoch */
+	weeklyResetsAt: number | null;
+	/** ms epoch */
+	cooldownUntil: number | null;
+	/** HTTP status received; null when no response arrived or no request was made. */
+	httpStatus: number | null;
+	/** From `Retry-After` on a 429; null otherwise. */
+	retryAfterMs: number | null;
+	/** Set on transport results. */
+	errorMessage: string | null;
+}
+
 // UI display type - used in CLI and web dashboard
 export interface AccountDisplay {
 	id: string;
