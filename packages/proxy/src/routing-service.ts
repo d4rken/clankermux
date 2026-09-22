@@ -12,7 +12,10 @@ import type {
 	RoutingRule,
 } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
-import { AccountModelPermissionService } from "./account-model-permissions";
+import {
+	AccountIdentityChangedError,
+	AccountModelPermissionService,
+} from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 
 /**
@@ -56,6 +59,46 @@ import {
 } from "./resolved-route";
 
 const services = new WeakMap<object, AccountModelPermissionService>();
+
+/**
+ * Read each account's permissions into `into`. An account whose stored row
+ * changed after `accounts` was read (an identity write landing just after
+ * sign-in) is recorded in `stale` instead of failing the whole request.
+ */
+async function readPermissions(
+	service: AccountModelPermissionService,
+	accounts: readonly Account[],
+	into: Map<string, AccountModelPermissions>,
+	stale: Set<string>,
+): Promise<void> {
+	await Promise.all(
+		accounts.map(async (a) => {
+			try {
+				into.set(a.id, await service.permissions(a));
+			} catch (err) {
+				if (!(err instanceof AccountIdentityChangedError)) throw err;
+				stale.add(a.id);
+			}
+		}),
+	);
+}
+
+/** Drop stale accounts for this request only; the next one reads the fresh row. */
+function withoutStale(
+	accounts: Account[],
+	stale: ReadonlySet<string>,
+	priorExclusions: Map<string, string>,
+): Account[] {
+	if (!stale.size) return accounts;
+	return accounts.filter((a) => {
+		if (!stale.has(a.id)) return true;
+		priorExclusions.set(
+			a.id,
+			`${routeAccountLabel(a)}: account changed while this request was being routed`,
+		);
+		return false;
+	});
+}
 export function getModelPermissionService(
 	ctx: ProxyContext,
 ): AccountModelPermissionService {
@@ -165,13 +208,11 @@ export async function initializeRequestRoute(
 				target_model: destination.model,
 			};
 			const permissions = new Map<string, AccountModelPermissions>();
-			await Promise.all(
-				stagePool.map(async (a) =>
-					permissions.set(a.id, await service.permissions(a)),
-				),
-			);
+			const stale = new Set<string>();
+			await readPermissions(service, stagePool, permissions, stale);
 			const missing = stagePool.filter(
 				(a) =>
+					!stale.has(a.id) &&
 					!isModelPermitted(
 						permissions.get(a.id) ?? null,
 						a.id,
@@ -181,16 +222,13 @@ export async function initializeRequestRoute(
 			);
 			if (missing.length) {
 				await service.refreshMisses(missing);
-				await Promise.all(
-					missing.map(async (a) =>
-						permissions.set(a.id, await service.permissions(a)),
-					),
-				);
+				await readPermissions(service, missing, permissions, stale);
 			}
+			const routedStage = withoutStale(stagePool, stale, priorExclusions);
 			const suppressedPairs = new Set<string>();
 			const substitutedPairs = new Set<string>();
 			await Promise.all(
-				stagePool.map(async (a) => {
+				routedStage.map(async (a) => {
 					const p = permissions.get(a.id);
 					if (!p) return;
 					// Same reason-bearing read as the non-alias branch below. Without
@@ -213,7 +251,7 @@ export async function initializeRequestRoute(
 			stages.push(
 				buildResolvedRoute({
 					...restrictions,
-					accounts: stagePool,
+					accounts: routedStage,
 					rules: [stageRule],
 					requestedModel: model,
 					apiKeyId,
@@ -231,17 +269,13 @@ export async function initializeRequestRoute(
 	}
 	const service = getModelPermissionService(ctx);
 	const permissions = new Map<string, AccountModelPermissions>();
-	const read = async () => {
-		await Promise.all(
-			pool.map(async (a) =>
-				permissions.set(a.id, await service.permissions(a)),
-			),
-		);
-	};
+	const stale = new Set<string>();
+	const read = () => readPermissions(service, pool, permissions, stale);
 	if (!maintenance) {
 		await read();
 		const missing = pool.filter(
 			(a) =>
+				!stale.has(a.id) &&
 				!isModelPermitted(permissions.get(a.id) ?? null, a.id, target, winning),
 		);
 		if (missing.length) {
@@ -249,10 +283,11 @@ export async function initializeRequestRoute(
 			await read();
 		}
 	}
+	const routed = withoutStale(pool, stale, priorExclusions);
 	const suppressedPairs = new Set<string>();
 	const substitutedPairs = new Set<string>();
 	await Promise.all(
-		pool.map(async (a) => {
+		routed.map(async (a) => {
 			const p = permissions.get(a.id);
 			if (!p) return;
 			// The REASON, not just the fact: a route emptied by substitution
@@ -269,7 +304,7 @@ export async function initializeRequestRoute(
 		meta,
 		buildResolvedRoute({
 			...restrictions,
-			accounts: pool,
+			accounts: routed,
 			rules,
 			requestedModel: model,
 			apiKeyId,
@@ -296,7 +331,13 @@ export async function eligibleRouteAccounts(
 			const target = route.target(account);
 			if (!target) return null;
 			if (!route.maintenance) {
-				const permissions = await service.permissions(account);
+				let permissions: AccountModelPermissions;
+				try {
+					permissions = await service.permissions(account);
+				} catch (err) {
+					if (err instanceof AccountIdentityChangedError) return null;
+					throw err;
+				}
 				if (!route.permits(account, permissions)) return null;
 				// Checked alongside the persisted row, not instead of it: a pair this
 				// request already saw definitively rejected may not have reached the

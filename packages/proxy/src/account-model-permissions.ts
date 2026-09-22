@@ -81,6 +81,18 @@ export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
  */
 const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai", "mimo"]);
 
+/**
+ * The caller's copy of the account no longer matches the stored row: a write
+ * (typically identity captured just after sign-in) landed between the caller's
+ * account read and this permission read.
+ */
+export class AccountIdentityChangedError extends Error {
+	constructor() {
+		super("Account identity changed");
+		this.name = "AccountIdentityChangedError";
+	}
+}
+
 /** Permission discovery never borrows a provider-wide or pin-wide catalogue. */
 export class AccountModelPermissionService {
 	private readonly inFlight = new Map<string, Promise<void>>();
@@ -104,13 +116,13 @@ export class AccountModelPermissionService {
 			(a) => a.id === account.id,
 		);
 		if (!current || modelPermissionScope(current) !== scope)
-			throw new Error("Account identity changed");
+			throw new AccountIdentityChangedError();
 		const next = await this.deps.repository.ensurePermissionScope(
 			account.id,
 			scope,
 			previous?.generation ?? 0,
 		);
-		if (next.scope !== scope) throw new Error("Account identity changed");
+		if (next.scope !== scope) throw new AccountIdentityChangedError();
 		return next;
 	}
 	/** Read the account's committed discovery snapshot without issuing upstream requests. */
