@@ -8,6 +8,7 @@ import {
 	getChatContext,
 	readReasoningEffortAdaptation,
 } from "@clankermux/types";
+import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
 import { isModelExcludedForRequest } from "./request-model-exclusions";
@@ -144,8 +145,15 @@ export async function sendAuthorizedRequest(
 				throw new RoutingPolicyError(
 					"Destination already rejected the resolved model for this request",
 				);
-			const permissions =
-				await getModelPermissionService(ctx).permissions(current);
+			const permissions = await getModelPermissionService(ctx)
+				.permissions(current)
+				.catch((err: unknown) => {
+					if (err instanceof AccountIdentityChangedError)
+						throw new RoutingPolicyError(
+							"Destination identity changed before dispatch",
+						);
+					throw err;
+				});
 			if (
 				!route.permits(current, permissions) ||
 				(await ctx.dbOps.routing.isModelSuppressed(
