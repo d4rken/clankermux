@@ -136,14 +136,18 @@ export function parseGrokSubscriptionBilling(
 		return UNRECOGNIZED;
 	}
 
-	// ABSENT is UNKNOWN, never 0. Proto3 omits zero-valued scalars, which is how
-	// a real zero COULD vanish from this projection — but that does not
-	// establish the endpoint ever populates the field for this billing mode, and
-	// a fabricated 0% reads downstream as actionable headroom that could release
-	// a cooldown on an account that is in fact exhausted.
+	const periodStartAt = msFrom(config.currentPeriod?.start);
 	const percent = config.creditUsagePercent;
 	let weeklyUtilization: number | null = null;
-	if (percent !== undefined && percent !== null) {
+	if (percent === undefined) {
+		// ABSENT is 0 inside a period that is running now. grok.com's billing
+		// schema declares `credit_usage_percent` an implicit-presence float, so
+		// proto3 drops it from the wire exactly when it is 0, and both of xAI's
+		// own clients (the Grok Build pager and the grok.com usage page) render
+		// the missing field as 0%. Without a current period the absence could
+		// belong to one this reading does not describe, so it stays UNKNOWN.
+		if (periodStartAt !== null && periodStartAt <= now) weeklyUtilization = 0;
+	} else if (percent !== null) {
 		// Present but unusable is a different thing from absent: reporting no
 		// reading at all beats clamping, which invents a number in the most
 		// damaging direction available (a negative becomes 100% and benches a
@@ -168,7 +172,7 @@ export function parseGrokSubscriptionBilling(
 			kind: "grok-subscription",
 			weeklyUtilization,
 			weeklyResetAt: resetAt,
-			weeklyPeriodStartAt: msFrom(config.currentPeriod?.start),
+			weeklyPeriodStartAt: periodStartAt,
 			onDemandCapCents: centsFrom(config.onDemandCap),
 			onDemandUsedCents: centsFrom(config.onDemandUsed),
 			prepaidBalanceCents: centsFrom(config.prepaidBalance),

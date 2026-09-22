@@ -293,10 +293,27 @@ describe("a grok-subscription poll releases a quota-derived cooldown early", () 
 		expect(h.clearCalls).toEqual([]);
 	});
 
+	it("reports an absent percentage in the current period as 0% evidence", async () => {
+		// The billing schema drops `creditUsagePercent` exactly when it is 0, so a
+		// running week with the field absent is a measured, untouched pool.
+		const account = lockedAccount(
+			"weekly_exhausted_429",
+			Date.now() + 5 * DAY,
+			Date.now() - 5_000,
+		);
+		const h = makeHarness(account);
+		const evidence = await pollThroughDispatch(
+			() => billingResponse({}),
+			account,
+			h,
+		);
+		expect(evidence?.utilization).toBe(0);
+		expect(h.clearCalls).toHaveLength(1);
+	});
+
 	it("reports nothing when the percentage is UNKNOWN", async () => {
-		// An absent `creditUsagePercent` is UNKNOWN, never 0. Reported as 0% it
-		// would read as full headroom and release the lock on an account nobody
-		// measured; reported as 100 headroom it would do the same.
+		// An explicit null is not the wire's zero. Reported as 0% it would read as
+		// full headroom and release the lock on an account nobody measured.
 		const account = lockedAccount(
 			"weekly_exhausted_429",
 			Date.now() + 5 * DAY,
@@ -304,7 +321,11 @@ describe("a grok-subscription poll releases a quota-derived cooldown early", () 
 		);
 		const h = makeHarness(account);
 		expect(
-			await pollThroughDispatch(() => billingResponse({}), account, h),
+			await pollThroughDispatch(
+				() => billingResponse({ creditUsagePercent: null }),
+				account,
+				h,
+			),
 		).toBeNull();
 		expect(h.clearCalls).toEqual([]);
 		// The reading itself is still cached — it carries a real weekly reset —

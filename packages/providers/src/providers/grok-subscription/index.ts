@@ -24,6 +24,13 @@ export {
 } from "./identity";
 export { GrokSubscriptionProvider } from "./provider";
 export {
+	fetchGrokSubscription,
+	GROK_SUBSCRIPTIONS_ENDPOINT,
+	type GrokSubscriptionFetchOutcome,
+	type GrokSubscriptionSnapshot,
+	parseGrokSubscriptions,
+} from "./subscription";
+export {
 	describeGrokUpgradeRequired,
 	isGrokUpgradeRequired,
 	parseRequiredGrokCliVersion,

@@ -13,8 +13,8 @@ const NOW = Date.UTC(2026, 8, 22, 12, 0, 0);
 
 /**
  * The live payload, as the billing endpoint served it on 2026-09-22. Cents are
- * wrapped as `{val}`; `creditUsagePercent` is ABSENT, which is the case the
- * whole fetcher is built around.
+ * wrapped as `{val}`; `creditUsagePercent` is ABSENT, which is how the endpoint
+ * reports a pool nothing has drawn on yet.
  */
 function billingBody(
 	patch: Record<string, unknown> = {},
@@ -55,22 +55,54 @@ describe("parseGrokSubscriptionBilling", () => {
 		});
 	});
 
-	it("reports an ABSENT creditUsagePercent as unknown, never as 0", () => {
-		// The field was missing from the live probe. Proto3 omits zero-valued
-		// scalars, which explains how a zero COULD vanish — it does not establish
-		// that this endpoint ever populates the field for this billing mode. A
-		// fabricated 0% is actionable headroom evidence and could release a
-		// cooldown on an account that is in fact exhausted.
+	it("reads an ABSENT creditUsagePercent inside the current period as 0%", () => {
+		// grok.com declares the field implicit-presence, so proto3 drops it from
+		// the wire exactly when it is 0, and xAI's own clients render it as 0%.
 		const outcome = parseGrokSubscriptionBilling(billingBody(), NOW);
 		expect(outcome.status).toBe("ok");
 		if (outcome.status !== "ok") return;
-		expect(outcome.data.weeklyUtilization).toBeNull();
-		expect(outcome.data.weeklyUtilization).not.toBe(0);
-		// The rest of the reading still stands: the reset is what the tile needs.
+		expect(outcome.data.weeklyUtilization).toBe(0);
 		expect(outcome.data.weeklyResetAt).toBe(NOW + 6 * 24 * HOUR);
 	});
 
-	it("treats an explicit null percentage as unknown too", () => {
+	it.each([
+		[
+			"has no start",
+			{
+				type: "USAGE_PERIOD_TYPE_WEEKLY",
+				end: new Date(NOW + 6 * 24 * HOUR).toISOString(),
+			},
+		],
+		[
+			"has an unreadable start",
+			{
+				type: "USAGE_PERIOD_TYPE_WEEKLY",
+				start: "yesterday",
+				end: new Date(NOW + 6 * 24 * HOUR).toISOString(),
+			},
+		],
+		[
+			"has not started yet",
+			{
+				type: "USAGE_PERIOD_TYPE_WEEKLY",
+				start: new Date(NOW + HOUR).toISOString(),
+				end: new Date(NOW + 7 * 24 * HOUR).toISOString(),
+			},
+		],
+	])("keeps an ABSENT percentage unknown when the period %s", (_label, currentPeriod) => {
+		// Only a period that is running now pins the absence to this week's pool.
+		const outcome = parseGrokSubscriptionBilling(
+			billingBody({ currentPeriod }),
+			NOW,
+		);
+		expect(outcome.status).toBe("ok");
+		if (outcome.status !== "ok") return;
+		expect(outcome.data.weeklyUtilization).toBeNull();
+		expect(outcome.data.weeklyResetAt).toBe(Date.parse(currentPeriod.end));
+	});
+
+	it("treats an explicit null percentage as unknown", () => {
+		// Proto3 JSON never writes a null scalar, so this is not the zero case.
 		const outcome = parseGrokSubscriptionBilling(
 			billingBody({ creditUsagePercent: null }),
 			NOW,
