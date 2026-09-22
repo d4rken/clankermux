@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { ONE_HOUR_CACHE_WRITE_MULT } from "@clankermux/core";
 import {
 	FALLBACK_BRIDGE_HOURS,
 	FALLBACK_HOURS_PER_RISK_UNIT,
@@ -29,6 +30,7 @@ import {
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
+	ONE_HOUR_WRITE_MULT,
 	PREMIUM_CACHE_PROVIDERS,
 	PROMOTE_AFTER_TURNS,
 	RISK_FACTOR,
@@ -259,6 +261,13 @@ describe("isEligibleByTokens", () => {
 });
 
 describe("bridge-horizon conversion", () => {
+	it("charges a 1-hour slot's writes at the rate recorded cost uses", () => {
+		// This module stays dependency-free, so it keeps its own copy of the
+		// multiplier; a keepalive budget and the request's recorded cost must
+		// agree on what a 1-hour write costs.
+		expect(ONE_HOUR_WRITE_MULT).toBe(ONE_HOUR_CACHE_WRITE_MULT);
+	});
+
 	it("BRIDGE_HOURS_PER_RISK_UNIT matches the derived rate-ratio × cadence", () => {
 		const expected =
 			((FIVE_MINUTE_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *

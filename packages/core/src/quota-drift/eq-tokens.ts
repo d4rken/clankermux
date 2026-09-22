@@ -1,3 +1,4 @@
+import { ONE_HOUR_CACHE_WRITE_MULT } from "../constants";
 import type { TokenCounts } from "./types";
 
 /**
@@ -140,9 +141,17 @@ export function eqTokens(
 	const w = Object.hasOwn(MODEL_EQ_WEIGHT_OVERRIDES, modelKey)
 		? (MODEL_EQ_WEIGHT_OVERRIDES[modelKey] ?? EQ_WEIGHTS[provider])
 		: EQ_WEIGHTS[provider];
+	// `cacheCreate` is the 5-minute write ratio; the 1-hour share of the writes
+	// is billed at a fixed multiple of input instead.
+	const writes = safe(counts.cacheCreationInputTokens);
+	const oneHourWrites = Math.min(
+		writes,
+		safe(counts.cacheCreation1hInputTokens),
+	);
 	return (
 		safe(counts.inputTokens) * w.input +
-		safe(counts.cacheCreationInputTokens) * w.cacheCreate +
+		(writes - oneHourWrites) * w.cacheCreate +
+		oneHourWrites * w.input * ONE_HOUR_CACHE_WRITE_MULT +
 		safe(counts.cacheReadInputTokens) * w.cacheRead +
 		safe(counts.outputTokens) * w.output
 	);

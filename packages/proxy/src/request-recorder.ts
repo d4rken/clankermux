@@ -161,6 +161,8 @@ export interface SlimUsageSummary {
 		outputTokens?: number;
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
+		/** The 1-hour-TTL part of `cacheCreationInputTokens`, when reported. */
+		cacheCreation1hInputTokens?: number;
 		totalTokens?: number;
 		/**
 		 * The best available cost for this request, ABSENT when it could not
@@ -1711,6 +1713,7 @@ export class RequestRecorder {
 			outputTokens: u.outputTokens,
 			cacheReadInputTokens: u.cacheReadInputTokens,
 			cacheCreationInputTokens: u.cacheCreationInputTokens,
+			cacheCreation1hInputTokens: u.cacheCreation1hInputTokens,
 			tokensPerSecond: summary.tokensPerSecond,
 			tokensPerSecondApproximate:
 				summary.tokensPerSecondApproximate || undefined,

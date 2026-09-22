@@ -7,7 +7,7 @@ import {
 	type PricingGap,
 	type PricingGapReason,
 } from "@clankermux/types";
-import { TIME_CONSTANTS } from "./constants";
+import { ONE_HOUR_CACHE_WRITE_MULT, TIME_CONSTANTS } from "./constants";
 import {
 	CLAUDE_MODEL_IDS,
 	MODEL_DISPLAY_NAMES,
@@ -19,6 +19,13 @@ export interface TokenBreakdown {
 	outputTokens?: number;
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
+	/**
+	 * The part of `cacheCreationInputTokens` written with a 1-hour TTL
+	 * (Anthropic's `usage.cache_creation.ephemeral_1h_input_tokens`). A subset,
+	 * not an addition: 1,000 writes of which 400 are 1-hour are priced as 600 at
+	 * `cache_write` and 400 at {@link ONE_HOUR_CACHE_WRITE_MULT} × input.
+	 */
+	cacheCreation1hInputTokens?: number;
 }
 
 interface ModelCost {
@@ -2047,6 +2054,16 @@ function entryCovers(
 	return needed.every((kind) => cost[kind] !== undefined);
 }
 
+/** Divide a request's cache writes by TTL, clamping the 1-hour part to the total. */
+function splitCacheWrites(tokens: TokenBreakdown): {
+	fiveMinute: number;
+	oneHour: number;
+} {
+	const total = tokens.cacheCreationInputTokens ?? 0;
+	const oneHour = Math.min(total, tokens.cacheCreation1hInputTokens ?? 0);
+	return { fiveMinute: total - oneHour, oneHour };
+}
+
 /**
  * Read one rate off the selected entry, in dollars per token (NOT per million).
  * @throws PricingLookupError when the entry does not define it.
@@ -2211,7 +2228,9 @@ export async function estimateCostUSD(
 		if (tokens.inputTokens) needed.push("input");
 		if (tokens.outputTokens) needed.push("output");
 		if (tokens.cacheReadInputTokens) needed.push("cache_read");
-		if (tokens.cacheCreationInputTokens) needed.push("cache_write");
+		const writes = splitCacheWrites(tokens);
+		if (writes.oneHour && !needed.includes("input")) needed.push("input");
+		if (writes.fiveMinute) needed.push("cache_write");
 		// No metered tokens: nothing to charge, and nothing to look up — an
 		// unknown model on an empty request is not a pricing gap.
 		if (needed.length === 0) return 0;
@@ -2288,10 +2307,16 @@ export async function estimateCostUSD(
 				rateFromEntry(entry, modelId, "cache_read");
 		}
 
-		if (tokens.cacheCreationInputTokens) {
+		if (writes.fiveMinute) {
 			totalCost +=
-				tokens.cacheCreationInputTokens *
-				rateFromEntry(entry, modelId, "cache_write");
+				writes.fiveMinute * rateFromEntry(entry, modelId, "cache_write");
+		}
+
+		if (writes.oneHour) {
+			totalCost +=
+				writes.oneHour *
+				rateFromEntry(entry, modelId, "input") *
+				ONE_HOUR_CACHE_WRITE_MULT;
 		}
 
 		return totalCost;

@@ -229,6 +229,27 @@ describe("eqTokens", () => {
 		);
 	});
 
+	it("weights the 1-hour share of the cache writes at 2x input", () => {
+		// 400 writes, 100 of them 1-hour: 300 at 1.25 and 100 at 2.
+		expect(
+			eqTokens(
+				{ ...counts, cacheCreation1hInputTokens: 100 },
+				"anthropic",
+				"claude-opus-5",
+			),
+		).toBeCloseTo(1000 + 300 * 1.25 + 100 * 2 + 10_000 * 0.1 + 100 * 5, 9);
+	});
+
+	it("never weights more 1-hour writes than were written", () => {
+		expect(
+			eqTokens(
+				{ cacheCreationInputTokens: 400, cacheCreation1hInputTokens: 900 },
+				"anthropic",
+				"claude-opus-5",
+			),
+		).toBeCloseTo(400 * 2, 9);
+	});
+
 	it("treats missing, negative and non-finite counts as zero", () => {
 		expect(eqTokens({}, "anthropic", "claude-opus-5")).toBe(0);
 		expect(

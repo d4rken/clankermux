@@ -176,6 +176,13 @@ export function isPlausibleSpeed(tps: number): boolean {
 }
 
 /**
+ * A 1-hour prompt-cache write costs 2x the model's input rate, where a
+ * catalogue's `cache_write` carries the 5-minute rate (1.25x). Catalogues list
+ * only the latter.
+ */
+export const ONE_HOUR_CACHE_WRITE_MULT = 2;
+
+/**
  * How far ahead of an OAuth refresh token's expiry the account is flagged as
  * needing re-authentication.
  *
