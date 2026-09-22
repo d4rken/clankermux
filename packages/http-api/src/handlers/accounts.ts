@@ -36,6 +36,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
+	anthropicBankedResetCache,
 	type CodexCreditsInfo,
 	clearGrokSubscriptionUserIdCache,
 	codexRateLimitResetCreditsCache,
@@ -71,6 +72,7 @@ import {
 	getUsageRevisionAnchor,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
+	refreshAnthropicBankedResetsForAccount,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
@@ -114,6 +116,10 @@ import { getCachedOrPersistedCodexUsage } from "../services/resolve-codex-usage"
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
+import {
+	isAnthropicOAuthAccount,
+	toAnthropicBankedResetsInfo,
+} from "./anthropic-banked-resets";
 import {
 	API_KEY_PROVIDERS,
 	createApiKeyAccountAddHandler,
@@ -749,6 +755,27 @@ export async function listAccountResponses(
 			}
 		}
 
+		// Anthropic banked resets, the same way: snapshot always, refresh from
+		// the management page only. The coordinator skips the read while the
+		// shared /oauth/usage bucket is rate-limited.
+		const anthropicBankedResetsByAccount = new Map(
+			accounts
+				.filter(isAnthropicOAuthAccount)
+				.map((a) => [a.id, anthropicBankedResetCache.get(a.id)]),
+		);
+		if (sideEffects === "management") {
+			for (const account of accounts) {
+				if (
+					!account.disabled &&
+					isAnthropicOAuthAccount(account) &&
+					account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
+					anthropicBankedResetCache.needsRefresh(account.id, now)
+				) {
+					void refreshAnthropicBankedResetsForAccount(account.id);
+				}
+			}
+		}
+
 		// Last-known usage fallback: for Anthropic and Zai accounts whose live
 		// usage cache is empty (e.g. polling fails after the subscription
 		// lapsed), serve the most recent persisted usage snapshot so the
@@ -1266,6 +1293,12 @@ export async function listAccountResponses(
 					usageData: fullUsageData, // Full usage data for UI
 					codexCredits, // Codex-only credits state (null otherwise)
 					codexRateLimitResetCredits,
+					anthropicBankedResets: isAnthropicOAuthAccount(account)
+						? (() => {
+								const entry = anthropicBankedResetsByAccount.get(account.id);
+								return entry ? toAnthropicBankedResetsInfo(entry) : null;
+							})()
+						: null,
 					staleUsage,
 					// When the reading in `usageData` was OBSERVED. Two honest sources:
 					// the live cache entry's own observation time, and — for a Codex
@@ -1705,6 +1738,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// usage-refresh paths already call.
 			clearAccountRefreshCache(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
+			anthropicBankedResetCache.delete(accountId);
 			// The Grok billing read's memoised user id is only replaced on a token
 			// change, never expired.
 			clearGrokSubscriptionUserIdCache(accountId);
@@ -1772,6 +1806,7 @@ export function createAccountDisabledHandler(
 				usageCache.stopPolling(accountId);
 				usageCache.delete(accountId);
 				codexRateLimitResetCreditsCache.delete(accountId);
+				anthropicBankedResetCache.delete(accountId);
 				clearWeeklyBurnSlopes(accountId);
 				clearUsageRevisionAnchors(accountId);
 				sessionCacheStore.evictAccount(accountId);
