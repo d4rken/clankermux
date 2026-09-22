@@ -1,5 +1,7 @@
 import { getModelShortName } from "@clankermux/core";
+import type { ClientApplication, ClientView } from "@clankermux/types";
 import { formatNumber, formatTokens } from "@clankermux/ui-common";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CHART_TOKENS, PINNED_MARK_COLORS } from "../../constants";
 import {
@@ -11,6 +13,7 @@ import {
 	hitTest,
 	LANE_HEIGHT,
 	type Lane,
+	type LaneDimension,
 	type LiveEvent,
 	type LiveStatus,
 	MARK_OPACITY,
@@ -20,6 +23,11 @@ import {
 	NOW_INSET,
 	rankModels,
 } from "../../lib/live-activity";
+import {
+	LANE_DIMENSION_OPTIONS,
+	loadLaneDimension,
+	saveLaneDimension,
+} from "../../lib/live-activity-grouping";
 import type { Outage } from "../../lib/live-activity-store";
 import { LIVE_WINDOW_OPTIONS } from "../../lib/live-activity-window";
 import {
@@ -27,6 +35,8 @@ import {
 	requestDetailsHref,
 	resolveMarkHref,
 } from "../../lib/requests-link";
+import { clientRequest } from "../clients/api";
+import { ApplicationMarkIcon } from "../clients/application-marks";
 import { useLiveActivity, useLiveWindow } from "../RequestEventProvider";
 import {
 	Card,
@@ -37,8 +47,8 @@ import {
 } from "../ui/card";
 
 /**
- * Live per-project request activity: a rolling window in which every request is
- * one mark placed at its own arrival time.
+ * Live request activity: a rolling window in which every request is one mark
+ * placed at its own arrival time, in a lane per project or per API key.
  *
  * Density reads as load, gaps read as stalls, failures pop out — which is what
  * the Overview's aggregates cannot show. The card answers "who is working right
@@ -51,9 +61,10 @@ import {
 
 const AXIS_HEIGHT = 20;
 /**
- * How many NAMED project lanes the card draws. `(no project)` and the `Other`
- * overflow lane are extra rows outside this quota (see `buildLanes`), so the
- * card is at most 10 rows. Exported for the lane tests.
+ * How many NAMED lanes the card draws. The empty bucket — `(no project)` or
+ * `(no API key)` — and the `Other` overflow lane are extra rows outside this
+ * quota (see `buildLanes`), so the card is at most 10 rows. Exported for the
+ * lane tests.
  */
 export const MAX_LANES = 8;
 const DEFAULT_PLOT_WIDTH = 720;
@@ -129,6 +140,89 @@ function markColor(
 		: otherColor(palette);
 }
 
+/**
+ * The dimension in prose. Exhaustive over the union, so a third grouping has
+ * to name itself here rather than quietly reading as one of these two.
+ */
+const DIMENSION_NOUN: Record<LaneDimension, string> = {
+	project: "project",
+	client: "client",
+};
+
+/** What the clients list knows about one API key right now. */
+export interface ClientLaneInfo {
+	name: string;
+	application: ClientApplication;
+}
+
+/** Current metadata for a key; null when the clients list has none for it. */
+export type ResolveClient = (apiKeyId: string) => ClientLaneInfo | null;
+
+/** No clients list to consult — every key falls back to its recorded name. */
+const NO_CLIENT_INFO: ResolveClient = () => null;
+
+/**
+ * What to call the client behind one API key.
+ *
+ * The key's CURRENT name wins, because that is what the operator sees on the
+ * Clients page and in the header they set. `recorded` — the newest name the
+ * events themselves carry — covers a key the list no longer holds, and the
+ * bare id is marked as one so an opaque string does not read as a client
+ * called that.
+ */
+function clientName(
+	apiKeyId: string,
+	recorded: string | null,
+	resolve: ResolveClient,
+): string {
+	return resolve(apiKeyId)?.name ?? recorded ?? `Key ${apiKeyId}`;
+}
+
+/** The client behind one event, or null when it carried no key at all. */
+function eventClientName(
+	event: LiveEvent,
+	resolve: ResolveClient,
+): string | null {
+	if (event.apiKeyId === null) return null;
+	return clientName(event.apiKeyId, event.apiKeyName, resolve);
+}
+
+/** A lane and what the client dimension adds to it. */
+interface LaneRow {
+	lane: Lane;
+	/** Set only for a client lane the clients list still carries. */
+	client: ClientLaneInfo | null;
+	/** What the gutter and the description call this lane. */
+	label: string;
+}
+
+/**
+ * Resolve each lane's label against the clients list.
+ *
+ * Only a client lane can change: `buildLanes` labels one with the newest name
+ * its events recorded, falling back to the id, and a rename since then shows
+ * up here. An unresolved key keeps its own row rather than joining the keyless
+ * bucket — it did present a key, we just cannot name it.
+ */
+function laneRows(lanes: Lane[], resolve: ResolveClient): LaneRow[] {
+	return lanes.map((lane) => {
+		if (lane.scope.kind !== "client") {
+			return { lane, client: null, label: lane.label };
+		}
+		const { apiKeyId } = lane.scope;
+		return {
+			lane,
+			client: resolve(apiKeyId),
+			// An unnamed key is the one whose lane label IS its id.
+			label: clientName(
+				apiKeyId,
+				lane.label === apiKeyId ? null : lane.label,
+				resolve,
+			),
+		};
+	});
+}
+
 const STATUS_LABEL: Record<LiveStatus, string> = {
 	pending: "waiting for upstream",
 	streaming: "streaming",
@@ -140,6 +234,8 @@ const STATUS_LABEL: Record<LiveStatus, string> = {
 
 export interface LiveActivityLanesViewProps {
 	lanes: Lane[];
+	/** What `lanes` were grouped by — what a row stands for, in words. */
+	dimension?: LaneDimension;
 	/** Right edge of the time axis. */
 	now: number;
 	windowMs: number;
@@ -166,6 +262,20 @@ export interface LiveActivityLanesViewProps {
 		value: number;
 		onChange: (ms: number) => void;
 	};
+	/**
+	 * Grouping selector wiring. Optional on the same terms as `windowControl`;
+	 * omitted, the card simply draws the lanes it was handed.
+	 */
+	groupControl?: {
+		value: LaneDimension;
+		onChange: (dimension: LaneDimension) => void;
+	};
+	/**
+	 * Client metadata for the API keys on screen. A PROP, and one with a
+	 * default that knows nothing, so the view needs no query client — the
+	 * lane labels fall back to the names the events themselves recorded.
+	 */
+	resolveClient?: ResolveClient;
 	/**
 	 * Interaction wiring. Optional so the view stays a pure function of props
 	 * and can be rendered on the server.
@@ -205,6 +315,7 @@ export interface LiveActivityLanesViewProps {
 /** Pure renderer. No refs, no timers — safe to render on the server. */
 export function LiveActivityLanesView({
 	lanes,
+	dimension = "project",
 	now,
 	windowMs,
 	plotWidth,
@@ -216,7 +327,11 @@ export function LiveActivityLanesView({
 	selected = null,
 	plot,
 	windowControl,
+	groupControl,
+	resolveClient = NO_CLIENT_INFO,
 }: LiveActivityLanesViewProps) {
+	const rows = laneRows(lanes, resolveClient);
+	const description = describeLanes(rows, windowMs, dimension);
 	const usable = Math.max(plotWidth - NOW_INSET, 1);
 	const pxPerMs = usable / windowMs;
 	const xOf = (ts: number) => usable - (now - ts) * pxPerMs;
@@ -235,27 +350,38 @@ export function LiveActivityLanesView({
 	return (
 		<Card>
 			<CardHeader className="p-4 pb-item">
-				{/* The selector is anchored to the card's top-right corner rather than
-				    trailing the readouts: `active` and `req/min` change width every
-				    tick, and a control at the end of that row would shift under the
-				    pointer between clicks. Pinning it to a corner nothing else shares
-				    keeps it still. `items-start` so it stays on the title's line
-				    however far the description wraps. */}
+				{/* The selectors are anchored to the card's top-right corner rather
+				    than trailing the readouts: `active` and `req/min` change width
+				    every tick, and a control at the end of that row would shift under
+				    the pointer between clicks. Pinning them to a corner nothing else
+				    shares keeps them still. `items-start` so they stay on the title's
+				    line however far the description wraps. The two wrap onto separate
+				    lines rather than overflowing: together they are wider than a
+				    phone-width card's interior. */}
 				<div className="flex items-start justify-between gap-x-group">
 					<div className="min-w-0">
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
 							Every request in the last {Math.round(windowMs / 60_000)} minutes,
-							by project. Colour shows the model, shape shows the outcome, size
-							follows token count. Click a mark to open its request.
+							by {DIMENSION_NOUN[dimension]}. Colour shows the model, shape
+							shows the outcome, size follows token count. Click a mark to open
+							its request.
 						</CardDescription>
 					</div>
-					{windowControl && (
-						<WindowSelector
-							value={windowControl.value}
-							onChange={windowControl.onChange}
-						/>
-					)}
+					<div className="flex shrink-0 flex-wrap items-center justify-end gap-item">
+						{groupControl && (
+							<GroupSelector
+								value={groupControl.value}
+								onChange={groupControl.onChange}
+							/>
+						)}
+						{windowControl && (
+							<WindowSelector
+								value={windowControl.value}
+								onChange={windowControl.onChange}
+							/>
+						)}
+					</div>
 				</div>
 				{/* Wraps rather than overflowing: on a phone-width card the three
 				    readouts are wider than the interior, and a non-wrapping row
@@ -332,7 +458,10 @@ export function LiveActivityLanesView({
 						            − 96 (this gutter) − 12 (gap)  =  178px of plot,
 
 						    so the card cannot push the document sideways however narrow the
-						    screen gets.
+						    screen gets. The brand mark the client dimension adds sits
+						    INSIDE that budget — it does not shrink and the name truncates
+						    beside it, exactly as a long project name already does — so
+						    neither dimension moves this gutter's edge.
 
 						    `data-testid` so a test can name this list rather than
 						    reaching for "the first <ul>", which the legend below would
@@ -341,29 +470,39 @@ export function LiveActivityLanesView({
 								data-testid="live-lane-labels"
 								className="w-24 shrink-0 space-y-0 pt-0 max-sm:pl-item sm:w-32"
 							>
-								{lanes.map((lane) => {
+								{rows.map(({ lane, client, label }) => {
 									const href = laneRequestsHref(lane.scope);
 									return (
 										<li
 											key={lane.key}
-											className="flex items-center truncate text-sm text-muted-foreground"
+											className="flex items-center gap-item truncate text-sm text-muted-foreground"
 											style={{ height: LANE_HEIGHT }}
-											title={lane.label}
+											title={label}
 										>
-											{/* The overflow lane aggregates several projects, so no
-										    single project filter expresses it — it stays text
-										    rather than linking to a subset of what it shows. */}
+											{/* Every row in this dimension gets a mark, including the
+										    keyless and overflow rows: a column of icons with a
+										    hole in it reads as a rendering failure, and a client
+										    the list cannot name still ran under some harness. */}
+											{dimension === "client" && (
+												<ApplicationMarkIcon
+													application={client?.application ?? "generic"}
+													className="h-3.5 w-3.5 shrink-0"
+												/>
+											)}
+											{/* The overflow lane aggregates several lanes, so no
+										    single filter expresses it — it stays text rather than
+										    linking to a subset of what it shows. */}
 											{href === null ? (
-												lane.label
+												label
 											) : (
 												<a
 													href={href}
 													target="_blank"
 													rel="noopener noreferrer"
-													aria-label={`Show ${lane.label} requests`}
+													aria-label={`Show ${label} requests`}
 													className="truncate hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 												>
-													{lane.label}
+													{label}
 												</a>
 											)}
 										</li>
@@ -388,7 +527,7 @@ export function LiveActivityLanesView({
 									height={height}
 									viewBox={`0 0 ${plotWidth} ${height}`}
 									role="img"
-									aria-label={describeLanes(lanes, windowMs)}
+									aria-label={description}
 									className={`overflow-visible focus:outline-none focus-visible:ring-1 focus-visible:ring-ring${
 										plot?.onClick ? " cursor-pointer" : ""
 									}`}
@@ -406,7 +545,7 @@ export function LiveActivityLanesView({
 									onClick={plot?.onClick}
 									onFocus={plot?.onFocus}
 								>
-									<title>{describeLanes(lanes, windowMs)}</title>
+									<title>{description}</title>
 									<defs>
 										<clipPath id="live-activity-plot">
 											<rect x={0} y={0} width={plotWidth} height={height} />
@@ -484,6 +623,7 @@ export function LiveActivityLanesView({
 														<Mark
 															key={event.id}
 															event={event}
+															client={eventClientName(event, resolveClient)}
 															palette={palette}
 															colored={colored}
 															cx={markCenterX(
@@ -740,9 +880,54 @@ function WindowSelector({
 	);
 }
 
+/**
+ * Which identity a lane row stands for.
+ *
+ * A request carries two, and neither derives from the other: one project is
+ * worked from several harnesses, and one key serves every project on the
+ * machine it is installed on.
+ */
+function GroupSelector({
+	value,
+	onChange,
+}: {
+	value: LaneDimension;
+	onChange: (dimension: LaneDimension) => void;
+}) {
+	return (
+		<fieldset
+			// Shaped like the window selector beside it: `min-w-0` undoes the
+			// UA's min-inline-size and `shrink-0` keeps both options at full
+			// width, so the description column absorbs any narrowing.
+			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-tight"
+			aria-label="Live activity grouping"
+		>
+			{LANE_DIMENSION_OPTIONS.map((option) => {
+				const active = option.value === value;
+				return (
+					<button
+						key={option.value}
+						type="button"
+						onClick={() => onChange(option.value)}
+						aria-pressed={active}
+						className={`rounded px-item py-tight text-xs transition-colors ${
+							active
+								? "bg-primary text-primary-foreground"
+								: "text-muted-foreground hover:bg-muted"
+						}`}
+					>
+						{option.label}
+					</button>
+				);
+			})}
+		</fieldset>
+	);
+}
+
 /** One request. Shape carries the status; colour carries the model. */
 function Mark({
 	event,
+	client,
 	palette,
 	colored,
 	cx,
@@ -751,6 +936,8 @@ function Mark({
 	selected,
 }: {
 	event: LiveEvent;
+	/** Resolved client name, or null for a request that carried no key. */
+	client: string | null;
 	palette: SeriesPalette;
 	colored: ReadonlySet<string>;
 	cx: number;
@@ -769,8 +956,14 @@ function Mark({
 	// The model is named here as well as coloured. Hue identifies it only once
 	// you have read the legend, and there are more models than anyone keeps in
 	// their head — the tooltip is what makes a mark self-describing.
+	//
+	// This is the mark's accessible name, so it carries the client whichever
+	// dimension is on screen: grouped by client the lane label is the only
+	// other place it appears, and a screen-reader user never reaches that from
+	// here.
 	const label = [
 		event.project ?? "no project",
+		client,
 		event.model ? getModelShortName(event.model) : null,
 		STATUS_LABEL[event.status],
 	]
@@ -954,15 +1147,21 @@ export function unknownRegions({
 	return regions;
 }
 
-function describeLanes(lanes: Lane[], windowMs: number): string {
+function describeLanes(
+	rows: LaneRow[],
+	windowMs: number,
+	dimension: LaneDimension,
+): string {
 	const minutes = Math.round(windowMs / 60_000);
-	const parts = lanes.map(
-		(lane) =>
-			`${lane.label}: ${lane.requests} requests, ${formatTokens(lane.tokens)}${
+	const parts = rows.map(
+		({ lane, label }) =>
+			`${label}: ${lane.requests} requests, ${formatTokens(lane.tokens)}${
 				lane.rateLimited > 0 ? `, ${lane.rateLimited} rate limited` : ""
 			}${lane.errors > 0 ? `, ${lane.errors} failed` : ""}`,
 	);
-	return `Request activity over the last ${minutes} minutes by project. ${parts.join(". ")}`;
+	// The grouping is named because the rows alone do not disclose it: a
+	// screen-reader user has no view of the selector's pressed state.
+	return `Request activity over the last ${minutes} minutes by ${DIMENSION_NOUN[dimension]}. ${parts.join(". ")}`;
 }
 
 /**
@@ -973,6 +1172,42 @@ export function LiveActivityLanes() {
 	const { events, connected, outages, coverageFrom, primed } =
 		useLiveActivity();
 	const { windowMs, setWindowMs } = useLiveWindow();
+
+	/**
+	 * The grouping, owned here rather than by `RequestEventProvider`.
+	 *
+	 * The window lives on the provider because it decides how much history to
+	 * fetch and how much to retain. This decides neither: the store holds every
+	 * event whatever the grouping, and lanes are bucketed at render, so
+	 * switching must not (and does not) touch the EventSource.
+	 */
+	const [dimension, setDimensionState] = useState(loadLaneDimension);
+	const setDimension = useCallback((next: LaneDimension) => {
+		setDimensionState(next);
+		saveLaneDimension(next);
+	}, []);
+
+	/**
+	 * Client metadata for the keys on the plot.
+	 *
+	 * The same query the Clients page runs, so the two share one cache entry
+	 * and one refetch. Fetched in both dimensions: the mark tooltip names the
+	 * client whether or not the lanes are grouped by it.
+	 */
+	const { data: clients } = useQuery({
+		queryKey: ["clients"],
+		queryFn: () => clientRequest<ClientView[]>(""),
+	});
+	const resolveClient = useMemo<ResolveClient>(() => {
+		const byKeyId = new Map(
+			(clients ?? []).map((client) => [client.apiKeyId, client]),
+		);
+		return (apiKeyId) => {
+			const client = byKeyId.get(apiKeyId);
+			if (!client) return null;
+			return { name: client.key.name, application: client.application };
+		};
+	}, [clients]);
 
 	const plotAreaRef = useRef<HTMLDivElement>(null);
 	const [plotWidth, setPlotWidth] = useState(DEFAULT_PLOT_WIDTH);
@@ -996,21 +1231,30 @@ export function LiveActivityLanes() {
 	 * idempotent in this argument: feeding its own output back with the same
 	 * events reproduces that order exactly (everything is "surviving", nothing
 	 * is an entrant), so a double invocation cannot drift.
+	 *
+	 * One order PER DIMENSION. `buildLanes` drops from the order every key it
+	 * no longer has a bucket for, and the two dimensions share no keys, so a
+	 * single order would be emptied of projects the first time the card was
+	 * read by client — and the layout someone had been watching would be gone
+	 * when they switched back.
 	 */
-	const orderRef = useRef<string[]>([]);
+	const orderRef = useRef<Record<LaneDimension, string[]>>({
+		project: [],
+		client: [],
+	});
 	const { lanes, order } = useMemo(
 		() =>
 			buildLanes(
 				events,
-				"project",
+				dimension,
 				renderNow,
 				windowMs,
 				MAX_LANES,
-				orderRef.current,
+				orderRef.current[dimension],
 			),
-		[events, renderNow, windowMs],
+		[dimension, events, renderNow, windowMs],
 	);
-	orderRef.current = order;
+	orderRef.current[dimension] = order;
 
 	useEffect(() => {
 		const id = setInterval(() => setRenderNow(Date.now()), 1000);
@@ -1041,6 +1285,9 @@ export function LiveActivityLanes() {
 			<ScrollingLanes
 				plotAreaRef={plotAreaRef}
 				lanes={lanes}
+				dimension={dimension}
+				setDimension={setDimension}
+				resolveClient={resolveClient}
 				renderNow={renderNow}
 				windowMs={windowMs}
 				setWindowMs={setWindowMs}
@@ -1070,6 +1317,9 @@ export function LiveActivityLanes() {
 export function ScrollingLanes({
 	plotAreaRef,
 	lanes,
+	dimension,
+	setDimension,
+	resolveClient,
 	renderNow,
 	windowMs,
 	setWindowMs,
@@ -1082,6 +1332,9 @@ export function ScrollingLanes({
 }: {
 	plotAreaRef: React.Ref<HTMLDivElement>;
 	lanes: Lane[];
+	dimension: LaneDimension;
+	setDimension: (dimension: LaneDimension) => void;
+	resolveClient?: ResolveClient;
 	renderNow: number;
 	windowMs: number;
 	setWindowMs: (ms: number) => void;
@@ -1313,6 +1566,7 @@ export function ScrollingLanes({
 			<div>
 				<LiveActivityLanesView
 					lanes={lanes}
+					dimension={dimension}
 					now={renderNow}
 					windowMs={windowMs}
 					plotWidth={plotWidth}
@@ -1322,7 +1576,9 @@ export function ScrollingLanes({
 					primed={primed}
 					palette={palette}
 					selected={selected}
+					resolveClient={resolveClient}
 					windowControl={{ value: windowMs, onChange: setWindowMs }}
+					groupControl={{ value: dimension, onChange: setDimension }}
 					plot={{
 						ref: svgRef,
 						areaRef: plotAreaRef,
@@ -1336,7 +1592,9 @@ export function ScrollingLanes({
 					}}
 				/>
 			</div>
-			{selected && <MarkTooltip event={selected} />}
+			{selected && (
+				<MarkTooltip event={selected} resolveClient={resolveClient} />
+			)}
 		</div>
 	);
 }
@@ -1353,7 +1611,14 @@ function clamp(value: number, min: number, max: number): number {
  * without hovering: the lane readouts carry the totals and the Requests tab is
  * the full table view.
  */
-function MarkTooltip({ event }: { event: LiveEvent }) {
+function MarkTooltip({
+	event,
+	resolveClient = NO_CLIENT_INFO,
+}: {
+	event: LiveEvent;
+	resolveClient?: ResolveClient;
+}) {
+	const client = eventClientName(event, resolveClient);
 	return (
 		<div
 			role="status"
@@ -1377,6 +1642,9 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				{event.model && <Row label="Model" value={event.model} />}
 				{event.account && <Row label="Account" value={event.account} />}
 				<Row label="Project" value={event.project ?? "(no project)"} />
+				{/* Shown in both dimensions: the request's client is not otherwise
+				    readable from the plot while it is grouped by project. */}
+				{client && <Row label="Client" value={client} />}
 				<Row label="At" value={new Date(event.ts).toLocaleTimeString()} />
 			</dl>
 			<p className="mt-tight text-muted-foreground">Click to open details</p>
@@ -1388,8 +1656,9 @@ function Row({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="flex gap-row">
 			<dt className="w-16 shrink-0">{label}</dt>
-			{/* Project, model and account names come from request bodies and
-			    upstream responses — rendered as text nodes, never as markup. */}
+			{/* Project, model, account and client names come from request bodies,
+			    upstream responses and operator-set key names — rendered as text
+			    nodes, never as markup. */}
 			<dd className="truncate text-foreground">{value}</dd>
 		</div>
 	);

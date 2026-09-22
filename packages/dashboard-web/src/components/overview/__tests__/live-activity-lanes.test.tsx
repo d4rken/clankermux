@@ -5,7 +5,11 @@ import type { SeriesPalette } from "../../../hooks/useSeriesPalette";
 import type { Lane, LiveEvent, LiveStatus } from "../../../lib/live-activity";
 import { buildLanes, hitTest } from "../../../lib/live-activity";
 import { getModelColor } from "../../../lib/model-colors";
-import { LiveActivityLanesView, unknownRegions } from "../LiveActivityLanes";
+import {
+	LiveActivityLanesView,
+	type ResolveClient,
+	unknownRegions,
+} from "../LiveActivityLanes";
 
 const WINDOW = 180_000;
 const T0 = 1_700_000_000_000;
@@ -471,6 +475,163 @@ describe("LiveActivityLanesView", () => {
 		// assistive tech via aria-pressed, not just tinted.
 		expect(html).toMatch(/aria-pressed="true"[^>]*>10m|10m<\/button>/);
 		expect(html).toContain('aria-pressed="true"');
+	});
+
+	it("offers the grouping control only when wired", () => {
+		expect(
+			render({ groupControl: { value: "project", onChange: () => {} } }),
+		).toContain("Live activity grouping");
+		expect(render()).not.toContain("Live activity grouping");
+	});
+});
+
+describe("LiveActivityLanesView client dimension", () => {
+	/** One request from `apiKeyId`, recorded under `apiKeyName`. */
+	function fromKey(
+		id: string,
+		apiKeyId: string | null,
+		apiKeyName: string | null,
+		ts = T0 - 10_000,
+	): LiveEvent {
+		return event({ id, apiKeyId, apiKeyName, ts });
+	}
+
+	function clientLanes(events: LiveEvent[], maxLanes = 6): Lane[] {
+		return buildLanes(events, "client", T0, WINDOW, maxLanes).lanes;
+	}
+
+	const laptop: ResolveClient = (apiKeyId) =>
+		apiKeyId === "key-1"
+			? { name: "Laptop", application: "claude-code" }
+			: null;
+
+	it("prefers the key's current name over the one the events recorded", () => {
+		// The events carry the name held when each request arrived; the clients
+		// list carries what the key is called now. A rename has to show.
+		const html = render({
+			dimension: "client",
+			lanes: clientLanes([fromKey("a", "key-1", "old-laptop")]),
+			resolveClient: laptop,
+		});
+		const labels = listOf(html, "live-lane-labels");
+
+		expect(labels).toContain("Laptop");
+		expect(labels).not.toContain("old-laptop");
+	});
+
+	it("falls back to the newest recorded name when the list cannot resolve", () => {
+		// A key the clients list no longer carries still ran requests, and those
+		// requests remember what it was called.
+		const html = render({
+			dimension: "client",
+			lanes: clientLanes([
+				fromKey("a", "key-9", "workstation", T0 - 20_000),
+				fromKey("b", "key-9", "workstation-2", T0 - 10_000),
+			]),
+		});
+
+		expect(listOf(html, "live-lane-labels")).toContain("workstation-2");
+	});
+
+	it("keeps a client it cannot name at all out of the keyless bucket", () => {
+		// Its own lane, its own id-keyed link and a generic mark: the request
+		// did present a key, so folding it into `(no API key)` would report the
+		// opposite of what happened.
+		const html = render({
+			dimension: "client",
+			lanes: clientLanes([fromKey("a", "key-9", null)]),
+		});
+		const labels = listOf(html, "live-lane-labels");
+
+		expect(labels).toContain("Key key-9");
+		expect(labels).not.toContain("(no API key)");
+		expect(labels).toContain('href="/requests?apiKeyId=key-9"');
+		// The lucide fallback glyph; a brand mark opens its class list with a
+		// fill utility instead.
+		expect(labels).toContain("lucide-terminal");
+	});
+
+	it("draws the harness brand mark for a client it can resolve", () => {
+		const html = render({
+			dimension: "client",
+			lanes: clientLanes([fromKey("a", "key-1", null)]),
+			resolveClient: laptop,
+		});
+
+		expect(listOf(html, "live-lane-labels")).toContain('class="fill-');
+	});
+
+	it("links the keyless lane to the requests that carried no key", () => {
+		const html = render({
+			dimension: "client",
+			lanes: clientLanes([fromKey("a", null, null)]),
+		});
+
+		expect(html).toContain('href="/requests?noApiKey=1"');
+	});
+
+	it("keeps the label gutter the same width in both dimensions", () => {
+		// The card budgets 96px of gutter down to a 320px viewport. The mark
+		// sits inside that budget; growing it for clients would move the plot
+		// in the project dimension too.
+		const widths = (markup: string) =>
+			listOf(markup, "live-lane-labels").match(/class="([^"]*)"/)?.[1];
+
+		expect(
+			widths(
+				render({
+					dimension: "client",
+					lanes: clientLanes([fromKey("a", "key-1", "laptop")]),
+					resolveClient: laptop,
+				}),
+			),
+		).toBe(widths(render()));
+	});
+
+	it("names the client on the mark itself, not only in the gutter", () => {
+		// The mark's accessible name: grouped by client the lane label is the
+		// only other place the client appears, and it is not reachable from a
+		// mark.
+		const plot = plotOf(
+			render({
+				dimension: "client",
+				lanes: clientLanes([fromKey("a", "key-1", "old-laptop")]),
+				resolveClient: laptop,
+			}),
+		);
+
+		expect(plot).toContain("Laptop");
+	});
+
+	it("names the client on the mark while grouped by project too", () => {
+		const plot = plotOf(
+			render({
+				lanes: buildLanes(
+					[fromKey("a", "key-1", "old-laptop")],
+					"project",
+					T0,
+					WINDOW,
+					6,
+				).lanes,
+				resolveClient: laptop,
+			}),
+		);
+
+		expect(plot).toContain("Laptop");
+	});
+
+	it("says which dimension it is grouping by", () => {
+		// The selector's pressed state is not available to a screen reader
+		// reading the plot.
+		expect(
+			render({
+				dimension: "client",
+				lanes: clientLanes([fromKey("a", "key-1", "laptop")]),
+			}),
+		).toContain("Request activity over the last 3 minutes by client");
+		expect(render()).toContain(
+			"Request activity over the last 3 minutes by project",
+		);
 	});
 });
 
