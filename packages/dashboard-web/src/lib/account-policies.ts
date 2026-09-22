@@ -73,6 +73,26 @@ const EXTRA_SPEND_ANTHROPIC: AccountPolicyDescriptor = {
 		"Allow this account to incur overage charges past its plan limit. When OFF (default), the account auto-pauses when overage usage is detected and resumes when the usage window resets. Note: detection relies on Anthropic reporting overage, so some overage may occur before pausing.",
 };
 
+/**
+ * Anthropic's banked resets (Claude Code grants) reuse the Codex reset-credit
+ * keys: same two automations, each provider's own claim rules.
+ */
+const AUTO_APPLY_EXPIRY_ANTHROPIC: AccountPolicyDescriptor = {
+	key: "autoApplyExpiry",
+	chipLabel: "Apply: expiry",
+	menuLabel: "Auto-apply expiring banked resets",
+	description:
+		"Automatically claim the next banked reset shortly (~10 min) before its grant expires so it isn't wasted. Only grants that clear a weekly limit are claimed, and a grant usable only at a limit is claimed only while one is reached. Applies even while paused, unless the account needs re-authentication.",
+};
+
+const AUTO_APPLY_WEEKLY_ANTHROPIC: AccountPolicyDescriptor = {
+	key: "autoApplyWeekly",
+	chipLabel: "Apply: weekly",
+	menuLabel: "Auto-apply banked reset at weekly limit",
+	description:
+		"Automatically claim the next banked reset when this account reaches a weekly limit the grant clears and no other Anthropic account can serve the same models, or when the grant would expire before that limit resets. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+};
+
 const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
 	Exclude<AccountPolicyKey, "extraSpend">,
 	AccountPolicyDescriptor
@@ -121,8 +141,8 @@ const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
 };
 
 /**
- * Copy for one flag on one provider. The only provider-dependent key is
- * `extraSpend`; everything else ignores `provider`.
+ * Copy for one flag on one provider. `extraSpend` and the two auto-apply keys
+ * depend on the provider; everything else ignores `provider`.
  */
 export function describeAccountPolicy(
 	key: AccountPolicyKey,
@@ -136,6 +156,10 @@ export function describeAccountPolicy(
 			description:
 				"Use account metadata to pause when protected included quota is exhausted or unknown, and resume quota-paused accounts when capacity returns. Applies to new or unpinned requests; keeps manual and reconnect-required pauses. Does not send inference requests.",
 		};
+	if (provider === PROVIDER_NAMES.ANTHROPIC) {
+		if (key === "autoApplyExpiry") return AUTO_APPLY_EXPIRY_ANTHROPIC;
+		if (key === "autoApplyWeekly") return AUTO_APPLY_WEEKLY_ANTHROPIC;
+	}
 	if (key === "extraSpend") {
 		if (provider === PROVIDER_NAMES.DEVIN) return EXTRA_SPEND_DEVIN;
 		return provider === PROVIDER_NAMES.CODEX
@@ -201,6 +225,15 @@ export function deriveAccountPolicies(
 	if (provider === PROVIDER_NAMES.CODEX) {
 		add("autoApplyExpiry", account.autoApplyResetCreditsEnabled === true);
 		add("autoApplyWeekly", account.autoApplyResetOnWeeklyLimitEnabled === true);
+	}
+	// Banked resets are claimed with the account's OAuth token; an API-key
+	// Anthropic account has none.
+	if (provider === PROVIDER_NAMES.ANTHROPIC && account.hasRefreshToken) {
+		add("autoApplyExpiry", account.autoApplyBankedResetsEnabled === true);
+		add(
+			"autoApplyWeekly",
+			account.autoApplyBankedResetOnWeeklyLimitEnabled === true,
+		);
 	}
 	if (provider === PROVIDER_NAMES.ZAI) {
 		add("peakHoursPause", account.peakHoursPauseEnabled === true);

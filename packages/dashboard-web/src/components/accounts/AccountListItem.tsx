@@ -96,6 +96,8 @@ interface AccountListItemProps {
 	onPeakHoursPauseToggle?: (account: Account) => void;
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
+	onAutoApplyBankedResetsToggle?: (account: Account) => void;
+	onAutoApplyBankedResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelPermissionsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
@@ -150,6 +152,8 @@ export function AccountListItem({
 	onPeakHoursPauseToggle,
 	onAutoApplyResetCreditsToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
+	onAutoApplyBankedResetsToggle,
+	onAutoApplyBankedResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
 	onModelPermissionsChange,
 	onReauth,
@@ -221,6 +225,10 @@ export function AccountListItem({
 	const policyCopy = (key: AccountPolicyKey) =>
 		describeAccountPolicy(key, account.provider);
 
+	// Banked resets are claimed with the account's OAuth token.
+	const hasBankedResets =
+		account.provider === "anthropic" && account.hasRefreshToken;
+
 	// Whether the overflow menu should show the "Automation" toggle group.
 	const hasAutomationToggles =
 		providerSupportsAutoFallback(account.provider) ||
@@ -232,7 +240,10 @@ export function AccountListItem({
 		(account.provider === "zai" && !!onPeakHoursPauseToggle) ||
 		(account.provider === "codex" &&
 			(!!onAutoApplyResetCreditsToggle ||
-				!!onAutoApplyResetOnWeeklyLimitToggle));
+				!!onAutoApplyResetOnWeeklyLimitToggle)) ||
+		(hasBankedResets &&
+			(!!onAutoApplyBankedResetsToggle ||
+				!!onAutoApplyBankedResetOnWeeklyLimitToggle));
 
 	// Three groups, and the rhythm has to say so: identity, status, quota.
 	// `space-y-row` between them, tighter steps inside each. A single
@@ -437,6 +448,34 @@ export function AccountListItem({
 												}
 												onCheckedChange={() =>
 													onAutoApplyResetOnWeeklyLimitToggle(account)
+												}
+												onSelect={(e) => e.preventDefault()}
+												title={policyCopy("autoApplyWeekly").description}
+											>
+												{policyCopy("autoApplyWeekly").menuLabel}
+											</DropdownMenuCheckboxItem>
+										)}
+									{hasBankedResets && onAutoApplyBankedResetsToggle && (
+										<DropdownMenuCheckboxItem
+											checked={account.autoApplyBankedResetsEnabled ?? false}
+											onCheckedChange={() =>
+												onAutoApplyBankedResetsToggle(account)
+											}
+											onSelect={(e) => e.preventDefault()}
+											title={policyCopy("autoApplyExpiry").description}
+										>
+											{policyCopy("autoApplyExpiry").menuLabel}
+										</DropdownMenuCheckboxItem>
+									)}
+									{hasBankedResets &&
+										onAutoApplyBankedResetOnWeeklyLimitToggle && (
+											<DropdownMenuCheckboxItem
+												checked={
+													account.autoApplyBankedResetOnWeeklyLimitEnabled ??
+													false
+												}
+												onCheckedChange={() =>
+													onAutoApplyBankedResetOnWeeklyLimitToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
 												title={policyCopy("autoApplyWeekly").description}

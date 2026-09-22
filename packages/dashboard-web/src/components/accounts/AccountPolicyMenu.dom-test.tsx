@@ -80,6 +80,7 @@ afterEach(async () => {
 async function mountAccountItem(
 	account: Account,
 	onRefreshUsage: (account: Account) => Promise<void> = async () => {},
+	handlers: Partial<Parameters<typeof AccountListItem>[0]> = {},
 ): Promise<void> {
 	await mount(
 		<AccountListItem
@@ -100,12 +101,18 @@ async function mountAccountItem(
 			onPeakHoursPauseToggle={noop}
 			onAutoApplyResetCreditsToggle={noop}
 			onAutoApplyResetOnWeeklyLimitToggle={noop}
+			onAutoApplyBankedResetsToggle={noop}
+			onAutoApplyBankedResetOnWeeklyLimitToggle={noop}
+			{...handlers}
 		/>,
 	);
 }
 
-async function openAutomationMenu(account: Account): Promise<void> {
-	await mountAccountItem(account);
+async function openAutomationMenu(
+	account: Account,
+	handlers: Partial<Parameters<typeof AccountListItem>[0]> = {},
+): Promise<void> {
+	await mountAccountItem(account, undefined, handlers);
 	const trigger = document.querySelector<HTMLButtonElement>(
 		'button[title="More actions"]',
 	);
@@ -213,6 +220,50 @@ describe("AccountListItem — automation menu copy", () => {
 				checked: true,
 			},
 		]);
+	});
+
+	it("adds the two banked-reset items on an anthropic OAuth account and toggles each", async () => {
+		const toggled: string[] = [];
+		await openAutomationMenu(
+			makeAccount({
+				provider: "anthropic",
+				hasRefreshToken: true,
+				autoApplyBankedResetsEnabled: false,
+				autoApplyBankedResetOnWeeklyLimitEnabled: true,
+			}),
+			{
+				onAutoApplyBankedResetsToggle: () => toggled.push("expiry"),
+				onAutoApplyBankedResetOnWeeklyLimitToggle: () => toggled.push("weekly"),
+			},
+		);
+
+		const items = automationItems();
+		expect(items.map((item) => item.label)).toEqual([
+			"Auto-fallback",
+			"Auto-refresh",
+			"Allow overage spend",
+			"Auto-apply expiring banked resets",
+			"Auto-apply banked reset at weekly limit",
+		]);
+		expect(items[3]).toEqual({
+			label: "Auto-apply expiring banked resets",
+			title:
+				"Automatically claim the next banked reset shortly (~10 min) before its grant expires so it isn't wasted. Only grants that clear a weekly limit are claimed, and a grant usable only at a limit is claimed only while one is reached. Applies even while paused, unless the account needs re-authentication.",
+			checked: false,
+		});
+		expect(items[4]).toEqual({
+			label: "Auto-apply banked reset at weekly limit",
+			title:
+				"Automatically claim the next banked reset when this account reaches a weekly limit the grant clears and no other Anthropic account can serve the same models, or when the grant would expire before that limit resets. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+			checked: true,
+		});
+
+		const checkboxes = Array.from(
+			document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+		);
+		await act(async () => checkboxes[3]?.click());
+		await act(async () => checkboxes[4]?.click());
+		expect(toggled).toEqual(["expiry", "weekly"]);
 	});
 
 	it("labels and explains the zai peak-hours item", async () => {
