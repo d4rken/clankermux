@@ -11,10 +11,12 @@ import { type AccountStatus, formatResetTime } from "../../lib/account-status";
 import {
 	type AnthropicBankedResetGrantInfo,
 	bankedResetClearsLabels,
+	bankedResetEventStatusLabel,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
 	findResumableBankedResetClaim,
 	formatBankedResetReason,
+	pendingBankedResetClaimOf,
 	showsAnthropicBankedResetChip,
 	unconfirmedBankedResetMessage,
 } from "../../lib/anthropic-banked-resets";
@@ -28,20 +30,6 @@ import {
 	ResetEventsPanel,
 	type ResetEventsState,
 } from "./UsageResetPanels";
-
-const EVENT_STATUS_LABELS: Record<
-	AnthropicBankedResetEventResponse["status"],
-	string
-> = {
-	pending: "Pending",
-	reset: "Reset applied",
-	already_used: "Already used",
-	not_limited: "Not at a limit",
-	cooldown: "Cooldown",
-	ineligible: "Not eligible",
-	unavailable: "Unavailable",
-	failed: "Failed",
-};
 
 function eventDetail(event: AnthropicBankedResetEventResponse): string | null {
 	const cleared = bankedResetClearsLabels(event.cleared);
@@ -167,7 +155,7 @@ export function AnthropicBankedResetChip({
 	const info = account.anthropicBankedResets;
 	if (!info || !showsAnthropicBankedResetChip(account)) return null;
 
-	const nextGrantId = info.nextGrantId;
+	const grantIds = info.grants.map((grant) => grant.id);
 	const loadEvents = () => {
 		setEventsState({ kind: "loading" });
 		api
@@ -175,11 +163,9 @@ export function AnthropicBankedResetChip({
 			.then((events) => {
 				setEventsState({ kind: "loaded", events });
 				// After a reload the only copy of an unconfirmed manual claim's
-				// request id is its ledger row; retrying under a new one would
-				// spend a second reset if the first POST had landed.
-				const pending = nextGrantId
-					? findResumableBankedResetClaim(events, nextGrantId)
-					: null;
+				// request id is its ledger row; the server refuses any other
+				// claim on the account until it is retried or expires.
+				const pending = findResumableBankedResetClaim(events, grantIds);
 				if (!pending) return;
 				setAttempt((prev) =>
 					prev.state.kind === "idle"
@@ -217,6 +203,19 @@ export function AnthropicBankedResetChip({
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
+				const pending = pendingBankedResetClaimOf(error);
+				if (pending) {
+					setAttempt({
+						state: {
+							kind: "retry",
+							message: "Earlier claim unconfirmed — retry it",
+							detail: message,
+						},
+						requestId: pending.requestId,
+						grantId: pending.grantId,
+					});
+					return;
+				}
 				if (
 					error instanceof HttpError &&
 					TERMINAL_CLAIM_HTTP_STATUSES.has(error.status)
@@ -321,7 +320,9 @@ export function AnthropicBankedResetChip({
 					<p className="text-xs font-medium mb-item">Usage-reset history</p>
 					<ResetEventsPanel
 						state={eventsState}
-						statusLabel={(event) => EVENT_STATUS_LABELS[event.status]}
+						statusLabel={(event) =>
+							bankedResetEventStatusLabel(event, grantIds)
+						}
 						detail={eventDetail}
 					/>
 				</div>

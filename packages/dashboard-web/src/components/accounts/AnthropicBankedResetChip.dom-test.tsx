@@ -247,3 +247,84 @@ it("retries a claim left pending before a reload with its own request id", async
 	});
 	expect(document.body.textContent).toContain("Already used");
 });
+
+it("retries the pending claim a 409 names after Cancel and a fresh Apply now", async () => {
+	const pending: AnthropicBankedResetEventResponse = {
+		id: "row-1",
+		grantId: "grant-1",
+		trigger: "manual",
+		cause: null,
+		attemptSeq: null,
+		status: "pending",
+		reason: null,
+		cleared: [],
+		resetsLeft: null,
+		errorMessage: null,
+		grantEndsAt: null,
+		nextAttemptAt: null,
+		createdAt: new Date().toISOString(),
+		resolvedAt: null,
+		requestId: "earlier-request",
+	};
+	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([pending]);
+	const claim = spyOn(api, "claimAccountBankedReset")
+		.mockRejectedValueOnce(
+			new HttpError(409, "An earlier claim is unconfirmed", {
+				message: "An earlier claim is unconfirmed",
+				pendingRequestId: "earlier-request",
+				pendingGrantId: "grant-0",
+			}),
+		)
+		.mockResolvedValue(claimResponse({ success: true, status: "reset" }));
+
+	await openPopover();
+	expect(document.body.textContent).toContain("Couldn't confirm — retry");
+	await clickButton("Cancel");
+	await clickButton("Apply now");
+	await clickButton("Confirm");
+	const fresh = claim.mock.calls[0]?.[1];
+	expect(fresh?.requestId).not.toBe("earlier-request");
+	expect(document.body.textContent).toContain("Earlier claim unconfirmed");
+
+	await clickButton("Retry");
+	// The refused claim's grant need not be the next one.
+	expect(claim.mock.calls[1]).toEqual([
+		"claude-account",
+		{ grantId: "grant-0", requestId: "earlier-request" },
+	]);
+	expect(document.body.textContent).toContain("Limits reset");
+});
+
+it("shows a pending claim for a grant no longer listed as Unconfirmed, with no Retry", async () => {
+	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([
+		{
+			id: "row-1",
+			grantId: "grant-gone",
+			trigger: "manual",
+			cause: null,
+			attemptSeq: null,
+			status: "pending",
+			reason: null,
+			cleared: [],
+			resetsLeft: null,
+			errorMessage: null,
+			grantEndsAt: null,
+			nextAttemptAt: null,
+			createdAt: new Date().toISOString(),
+			resolvedAt: null,
+			requestId: "gone-request",
+		},
+	]);
+	await openPopover();
+	expect(document.body.textContent).toContain("Unconfirmed");
+	expect(
+		Array.from(document.querySelectorAll("button")).some(
+			(button) => button.textContent === "Retry",
+		),
+	).toBe(false);
+	expect(
+		Array.from(document.querySelectorAll("button")).some(
+			(button) => button.textContent === "Apply now",
+		),
+	).toBe(true);
+});

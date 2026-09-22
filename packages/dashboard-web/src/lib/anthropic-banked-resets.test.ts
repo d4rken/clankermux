@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	AnthropicBankedResetClaimResponse,
@@ -8,10 +9,12 @@ import type {
 import {
 	type AnthropicBankedResetGrantInfo,
 	bankedResetClearsLabels,
+	bankedResetEventStatusLabel,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
 	findResumableBankedResetClaim,
 	formatBankedResetReason,
+	pendingBankedResetClaimOf,
 	showsAnthropicBankedResetChip,
 } from "./anthropic-banked-resets";
 
@@ -209,56 +212,77 @@ describe("describeBankedResetClaim", () => {
 	});
 });
 
-describe("findResumableBankedResetClaim", () => {
-	function event(
-		overrides: Partial<AnthropicBankedResetEventResponse>,
-	): AnthropicBankedResetEventResponse {
-		return {
-			id: "e",
-			grantId: "g1",
-			trigger: "manual",
-			cause: null,
-			attemptSeq: null,
-			status: "pending",
-			reason: null,
-			cleared: [],
-			resetsLeft: null,
-			errorMessage: null,
-			grantEndsAt: null,
-			nextAttemptAt: null,
-			createdAt: "2030-01-01T00:00:00.000Z",
-			resolvedAt: null,
-			...overrides,
-		};
-	}
+function event(
+	overrides: Partial<AnthropicBankedResetEventResponse>,
+): AnthropicBankedResetEventResponse {
+	return {
+		id: "e",
+		grantId: "g1",
+		trigger: "manual",
+		cause: null,
+		attemptSeq: null,
+		status: "pending",
+		reason: null,
+		cleared: [],
+		resetsLeft: null,
+		errorMessage: null,
+		grantEndsAt: null,
+		nextAttemptAt: null,
+		createdAt: "2030-01-01T00:00:00.000Z",
+		resolvedAt: null,
+		...overrides,
+	};
+}
 
-	it("returns the newest manual claim of the grant while it is pending", () => {
-		const pending = event({ id: "p", requestId: "req-1" });
-		expect(
-			findResumableBankedResetClaim(
-				[
-					event({ id: "a", trigger: "auto", requestId: undefined }),
-					event({ id: "other", grantId: "g2", requestId: "req-2" }),
-					pending,
-				],
-				"g1",
-			)?.requestId,
-		).toBe("req-1");
+describe("findResumableBankedResetClaim", () => {
+	it("returns a pending manual claim whose grant the status still lists, next or not", () => {
+		const events = [
+			event({ id: "a", trigger: "auto" }),
+			event({ id: "done", grantId: "g2", status: "reset" }),
+			event({ id: "p", grantId: "g2", requestId: "req-1" }),
+		];
+		expect(findResumableBankedResetClaim(events, ["g1", "g2"])?.requestId).toBe(
+			"req-1",
+		);
 	});
 
-	it("ignores a pending claim superseded by a newer manual one, or without a request id", () => {
+	it("ignores a claim whose grant is gone, and one without a request id", () => {
 		expect(
-			findResumableBankedResetClaim(
-				[
-					event({ id: "new", status: "reset" }),
-					event({ id: "old", requestId: "req-1" }),
-				],
-				"g1",
+			findResumableBankedResetClaim([event({ requestId: "req-1" })], ["g2"]),
+		).toBeNull();
+		expect(findResumableBankedResetClaim([event({})], ["g1"])).toBeNull();
+	});
+});
+
+describe("bankedResetEventStatusLabel", () => {
+	it("calls a pending claim for a grant no longer listed unconfirmed", () => {
+		expect(bankedResetEventStatusLabel(event({}), ["g1"])).toBe("Pending");
+		expect(bankedResetEventStatusLabel(event({}), ["g2"])).toBe("Unconfirmed");
+		expect(
+			bankedResetEventStatusLabel(event({ status: "reset" }), ["g2"]),
+		).toBe("Reset applied");
+	});
+});
+
+describe("pendingBankedResetClaimOf", () => {
+	it("reads the pending claim out of a 409 refusal and nothing else", () => {
+		expect(
+			pendingBankedResetClaimOf(
+				new HttpError(409, "An earlier claim is unconfirmed", {
+					message: "An earlier claim is unconfirmed",
+					pendingRequestId: "req-pending",
+					pendingGrantId: "g0",
+				}),
+			),
+		).toEqual({ requestId: "req-pending", grantId: "g0" });
+		expect(
+			pendingBankedResetClaimOf(new HttpError(409, "busy", "busy")),
+		).toBeNull();
+		expect(
+			pendingBankedResetClaimOf(
+				new HttpError(500, "x", { pendingRequestId: "r", pendingGrantId: "g" }),
 			),
 		).toBeNull();
-		expect(findResumableBankedResetClaim([event({})], "g1")).toBeNull();
-		expect(
-			findResumableBankedResetClaim([event({ requestId: "req-1" })], "g2"),
-		).toBeNull();
+		expect(pendingBankedResetClaimOf(new Error("x"))).toBeNull();
 	});
 });

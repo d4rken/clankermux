@@ -1,3 +1,4 @@
+import { HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
 	AnthropicBankedResetClaimResponse,
@@ -138,17 +139,70 @@ export function describeBankedResetClaim(
 }
 
 /**
- * A manual claim of `grantId` whose outcome was never confirmed, recovered
- * from the ledger so a reloaded page retries it with its own request id.
- * Only the newest manual claim of that grant counts: a later one supersedes it.
+ * A manual claim whose outcome was never confirmed, recovered from the ledger
+ * so a reloaded page retries it with its own request id. The server refuses
+ * every new claim on the account while it is pending, so it is offered for
+ * any grant the status still lists; a claim for a grant that is gone has
+ * nothing left to retry against.
  */
 export function findResumableBankedResetClaim(
 	events: ReadonlyArray<AnthropicBankedResetEventResponse>,
-	grantId: string,
+	grantIds: ReadonlyArray<string>,
 ): (AnthropicBankedResetEventResponse & { requestId: string }) | null {
-	const newest = events.find(
-		(event) => event.trigger === "manual" && event.grantId === grantId,
-	);
-	if (!newest || newest.status !== "pending" || !newest.requestId) return null;
-	return { ...newest, requestId: newest.requestId };
+	for (const event of events) {
+		if (
+			event.trigger === "manual" &&
+			event.status === "pending" &&
+			event.requestId &&
+			grantIds.includes(event.grantId)
+		) {
+			return { ...event, requestId: event.requestId };
+		}
+	}
+	return null;
+}
+
+const EVENT_STATUS_LABELS: Record<
+	AnthropicBankedResetEventResponse["status"],
+	string
+> = {
+	pending: "Pending",
+	reset: "Reset applied",
+	already_used: "Already used",
+	not_limited: "Not at a limit",
+	cooldown: "Cooldown",
+	ineligible: "Not eligible",
+	unavailable: "Unavailable",
+	failed: "Failed",
+};
+
+/** History label; a pending claim whose grant the status no longer lists is "Unconfirmed". */
+export function bankedResetEventStatusLabel(
+	event: AnthropicBankedResetEventResponse,
+	grantIds: ReadonlyArray<string>,
+): string {
+	if (event.status === "pending" && !grantIds.includes(event.grantId)) {
+		return "Unconfirmed";
+	}
+	return EVENT_STATUS_LABELS[event.status];
+}
+
+/**
+ * The unconfirmed claim a 409 names when the server refused a new claim
+ * because of it; null for any other error.
+ */
+export function pendingBankedResetClaimOf(
+	error: unknown,
+): { requestId: string; grantId: string } | null {
+	if (!(error instanceof HttpError) || error.status !== 409) return null;
+	const details = error.details;
+	if (!details || typeof details !== "object") return null;
+	const { pendingRequestId, pendingGrantId } = details as Record<
+		string,
+		unknown
+	>;
+	return typeof pendingRequestId === "string" &&
+		typeof pendingGrantId === "string"
+		? { requestId: pendingRequestId, grantId: pendingGrantId }
+		: null;
 }
