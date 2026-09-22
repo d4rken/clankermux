@@ -184,6 +184,14 @@ describe("catalogueCheck status classification", () => {
 		expect(mimo.surface).toBe("MiMo model catalogue");
 		expect(openRouterKeyCheck.surface).toBeString();
 	});
+
+	it("exposes the rejected hint it was given, and none when given none", () => {
+		const hinted = catalogueCheck("MiMo model catalogue", mimoCatalogueUrl, {
+			rejectedHint: "Check the selected region.",
+		});
+		expect(hinted.rejectedHint).toBe("Check the selected region.");
+		expect("rejectedHint" in grok).toBe(false);
+	});
 });
 
 describe("api.anthropic.com guard", () => {

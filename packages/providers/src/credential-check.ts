@@ -21,6 +21,11 @@ export interface CredentialCheck {
 	/** Names what was probed, for the operator-facing refusal message. */
 	readonly surface: string;
 	/**
+	 * A fixed operator-facing sentence appended to a `rejected` refusal, naming
+	 * this provider's likely cause. Never upstream text.
+	 */
+	readonly rejectedHint?: string;
+	/**
 	 * Never throws. `signal` is the caller's (normally the inbound request's),
 	 * so a disconnect ends the probe instead of running out the timeout.
 	 */
@@ -91,9 +96,11 @@ function isAnthropicHost(url: URL): boolean {
 export function catalogueCheck(
 	surface: string,
 	url: string | ((customEndpoint: string | null) => URL),
+	options?: { rejectedHint?: string },
 ): CredentialCheck {
 	return {
 		surface,
+		...(options?.rejectedHint ? { rejectedHint: options.rejectedHint } : {}),
 		async run({ apiKey, customEndpoint }, signal) {
 			let target: URL;
 			try {

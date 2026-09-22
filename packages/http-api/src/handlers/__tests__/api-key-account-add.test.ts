@@ -733,9 +733,23 @@ describe("createApiKeyAccountAddHandler", () => {
 
 			expect(res.status).toBe(400);
 			expect(((await res.json()) as { error: string }).error).toBe(
-				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created",
+				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created. A Token Plan key is only accepted in the region it was bought in, so check the selected region.",
 			);
 			expect(accountCount()).toBe(before);
+		});
+
+		it("refuses a rejected Grok key without a hint", async () => {
+			answerProbesWith(async () => new Response(null, { status: 401 }));
+
+			const res = await createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.grok,
+			)(post({ name: "grok-bad", apiKey: "xai-key" }));
+
+			expect(res.status).toBe(400);
+			expect(((await res.json()) as { error: string }).error).toBe(
+				"xAI model catalogue rejected the API key (HTTP 401); the Grok account was not created",
+			);
 		});
 
 		it.each([
@@ -887,7 +901,7 @@ describe("createApiKeyAccountAddHandler", () => {
 
 			expect(res.status).toBe(400);
 			expect(((await res.json()) as { error: string }).error).toBe(
-				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created",
+				"MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created. A Token Plan key is only accepted in the region it was bought in, so check the selected region.",
 			);
 			expect(row("mimo-dup")?.api_key).toBe("tp-key");
 		});

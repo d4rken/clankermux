@@ -210,7 +210,10 @@ export const API_KEY_PROVIDERS = {
 		// and query to whatever is stored here.
 		endpoint: { from: "body", required: false, baseUrlOnly: true },
 		mirrorKeyToTokens: true,
-		credentialCheck: catalogueCheck("MiMo model catalogue", mimoCatalogueUrl),
+		credentialCheck: catalogueCheck("MiMo model catalogue", mimoCatalogueUrl, {
+			rejectedHint:
+				"A Token Plan key is only accepted in the region it was bought in, so check the selected region.",
+		}),
 	},
 } as const satisfies Record<string, ApiKeyProviderSpec>;
 
@@ -271,22 +274,25 @@ function readEndpoint(
  * null to proceed. Rejected and unverified read differently so a wrong key
  * is not mistaken for an unreachable provider:
  *
- *   MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created
+ *   xAI model catalogue rejected the API key (HTTP 401); the Grok account was not created
+ *   MiMo model catalogue rejected the API key (HTTP 401); the MiMo account was not created. A Token Plan key is only accepted in the region it was bought in, so check the selected region.
  *   Could not verify the MiMo API key (MiMo model catalogue: could not be reached); the account was not created
  */
 function credentialRefusal(
 	label: string,
-	surface: string,
+	check: CredentialCheck,
 	outcome: CredentialCheckOutcome,
 ): string | null {
 	switch (outcome.status) {
 		case "valid":
 		case "skipped":
 			return null;
-		case "rejected":
-			return `${surface} ${outcome.detail}; the ${label} account was not created`;
+		case "rejected": {
+			const refusal = `${check.surface} ${outcome.detail}; the ${label} account was not created`;
+			return check.rejectedHint ? `${refusal}. ${check.rejectedHint}` : refusal;
+		}
 		case "unverified":
-			return `Could not verify the ${label} API key (${surface}: ${outcome.detail}); the account was not created`;
+			return `Could not verify the ${label} API key (${check.surface}: ${outcome.detail}); the account was not created`;
 	}
 }
 
@@ -380,7 +386,7 @@ export function createApiKeyAccountAddHandler(
 				);
 				const refusal = credentialRefusal(
 					spec.label,
-					spec.credentialCheck.surface,
+					spec.credentialCheck,
 					verified,
 				);
 				if (refusal) return errorResponse(BadRequest(refusal));
