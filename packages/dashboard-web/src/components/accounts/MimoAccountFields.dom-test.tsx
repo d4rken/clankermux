@@ -15,6 +15,7 @@ interface MimoAccountParams {
 }
 
 const MODE_OPTION = "MiMo Token Plan (API Key)";
+const REGION_REQUIRED = "Region is required for MiMo Token Plan accounts";
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -182,21 +183,24 @@ describe("MiMo Token Plan account fields", () => {
 		]);
 	});
 
-	it("omits the endpoint entirely when no region is picked", async () => {
+	it("refuses to submit until a region is picked", async () => {
+		// Nothing is preselected, and submitting anyway must not reach the API: an
+		// account with no region of its own would take MiMo's Singapore base and
+		// 401 on its first request for every subscriber who bought elsewhere.
 		await startMimoAccount();
 		await submit();
-		expect(errors).toEqual([]);
-		expect(saved).toHaveLength(1);
-		expect(saved[0]).not.toHaveProperty("customEndpoint");
+		expect(saved).toEqual([]);
+		expect(errors).toEqual([REGION_REQUIRED]);
 	});
 
-	it("omits the endpoint when the override is chosen but left blank", async () => {
+	it("refuses to submit when the override is chosen but left blank", async () => {
+		// Same silent-Singapore outcome by a different route, so it is refused the
+		// same way.
 		await startMimoAccount();
 		await pick("mimo-region", "Other (enter a base URL)");
 		await submit();
-		expect(errors).toEqual([]);
-		expect(saved).toHaveLength(1);
-		expect(saved[0]).not.toHaveProperty("customEndpoint");
+		expect(saved).toEqual([]);
+		expect(errors).toEqual([REGION_REQUIRED]);
 	});
 
 	it("submits a base URL typed into the override field", async () => {
@@ -219,6 +223,8 @@ describe("MiMo Token Plan account fields", () => {
 	});
 
 	it("drops a region picked before the mode changed away from MiMo", async () => {
+		// The refusal is the evidence: had the China endpoint survived the round
+		// trip through Grok, this would have submitted it.
 		await startMimoAccount();
 		await pick("mimo-region", "China (token-plan-cn)");
 		await pick("mode", "Grok (API Key)");
@@ -226,8 +232,7 @@ describe("MiMo Token Plan account fields", () => {
 		await pick("mode", MODE_OPTION);
 		await edit("apiKey", "tp-secret");
 		await submit();
-		expect(errors).toEqual([]);
-		expect(saved).toHaveLength(1);
-		expect(saved[0]).not.toHaveProperty("customEndpoint");
+		expect(saved).toEqual([]);
+		expect(errors).toEqual([REGION_REQUIRED]);
 	});
 });

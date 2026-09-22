@@ -312,9 +312,10 @@ BUNDLED_PRICING.minimax = {
 	},
 };
 
-// Xiaomi MiMo, priced from the published pay-as-you-go rate card (dollars per
-// 1M tokens). A Token Plan subscription meters plan credits rather than
-// dollars, so these read as what the traffic would have cost off-plan.
+// Xiaomi MiMo, in dollars per 1M tokens: the published pay-as-you-go rate card
+// except where an entry says otherwise. A Token Plan subscription meters plan
+// credits rather than dollars, so these read as what the traffic would have
+// cost off-plan.
 BUNDLED_PRICING.mimo = {
 	models: {
 		"mimo-v2.6-pro": {
@@ -324,16 +325,6 @@ BUNDLED_PRICING.mimo = {
 				input: 0.435,
 				output: 0.87,
 				cache_read: 0.0036,
-				cache_write: 0,
-			},
-		},
-		"mimo-v2.6-pro-ultraspeed": {
-			id: "mimo-v2.6-pro-ultraspeed",
-			name: "MiMo V2.6 Pro UltraSpeed",
-			cost: {
-				input: 4.35,
-				output: 8.7,
-				cache_read: 0.036,
 				cache_write: 0,
 			},
 		},
@@ -362,18 +353,6 @@ BUNDLED_PRICING.mimo = {
 		"mimo-v2.5": {
 			id: "mimo-v2.5",
 			name: "MiMo V2.5",
-			cost: {
-				input: 0.435,
-				output: 0.87,
-				cache_read: 0.0036,
-				cache_write: 0,
-			},
-		},
-		// Rate INFERRED from the Pro tier, which MiMo has priced identically
-		// across generations; nothing is published for this id.
-		"mimo-v2-pro": {
-			id: "mimo-v2-pro",
-			name: "MiMo V2 Pro",
 			cost: {
 				input: 0.435,
 				output: 0.87,

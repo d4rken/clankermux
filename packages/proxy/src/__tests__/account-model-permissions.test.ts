@@ -742,11 +742,13 @@ describe("zai model discovery", () => {
 });
 
 /**
- * MiMo Token Plan discovery. Like Z.ai the catalogue path is INFERRED from
- * Anthropic Messages compatibility rather than published, so these pin the
- * request and every way it is allowed to fail. Unlike Z.ai the base comes from
- * the account, because the Token Plan region lives in `custom_endpoint` and the
- * provider dials requests there — so the region is what these check hardest.
+ * MiMo Token Plan discovery. The catalogue is NOT the Messages base with
+ * `/v1/models` appended: Token Plan serves requests under `/anthropic` and its
+ * catalogue on the host root, OpenAI-shaped and Bearer-authenticated, so these
+ * pin the derivation and every way it is allowed to fail. The base comes from
+ * the account rather than being pinned like Z.ai's, because the Token Plan
+ * region lives in `custom_endpoint` and a key is accepted by its own region
+ * alone — so the region is what these check hardest.
  */
 describe("mimo model discovery", () => {
 	const mimo = (id = "mimo", patch: Partial<Account> = {}) =>
@@ -755,6 +757,26 @@ describe("mimo model discovery", () => {
 			api_key: "tp-key",
 			custom_endpoint: null,
 			...patch,
+		});
+	/** Verbatim from a live Token Plan subscription's catalogue read. */
+	const CATALOGUE = [
+		"mimo-v2.5",
+		"mimo-v2.5-asr",
+		"mimo-v2.5-pro",
+		"mimo-v2.5-tts",
+		"mimo-v2.5-tts-voiceclone",
+		"mimo-v2.5-tts-voicedesign",
+		"mimo-v2.6-flash",
+		"mimo-v2.6-pro",
+	];
+	const catalogueBody = () =>
+		Response.json({
+			object: "list",
+			data: CATALOGUE.map((id) => ({
+				id,
+				object: "model",
+				owned_by: "xiaomi",
+			})),
 		});
 
 	it("reads the default region's catalogue with the account's Token Plan key", async () => {
@@ -766,67 +788,54 @@ describe("mimo model discovery", () => {
 				headers: new Headers(init?.headers),
 				redirect: init?.redirect,
 			});
-			return Response.json({ data: [{ id: "MiMo-VL-7B-RL" }] });
+			return catalogueBody();
 		});
 		await service.refresh(a);
 		expect(seen).toHaveLength(1);
-		// The default base already carries `/anthropic`; `/v1/models` extends it.
-		expect(seen[0].url).toBe(
-			"https://token-plan-sgp.xiaomimimo.com/anthropic/v1/models?limit=1000",
-		);
-		expect(seen[0].headers.get("x-api-key")).toBe("tp-key");
-		expect(seen[0].headers.get("anthropic-version")).toBe("2023-06-01");
-		// An Anthropic OAuth bearer on a MiMo request would be a credential leak.
-		expect(seen[0].headers.get("authorization")).toBeNull();
+		// The `/anthropic` the default base carries is the MESSAGES path; the
+		// catalogue lives on the root, so it is stripped rather than extended.
+		expect(seen[0].url).toBe("https://token-plan-sgp.xiaomimimo.com/v1/models");
+		expect(seen[0].headers.get("authorization")).toBe("Bearer tp-key");
+		// The root catalogue is OpenAI-shaped: the Anthropic key header and version
+		// are not what it authenticates with.
+		expect(seen[0].headers.get("x-api-key")).toBeNull();
+		expect(seen[0].headers.get("anthropic-version")).toBeNull();
 		expect(seen[0].headers.get("anthropic-beta")).toBeNull();
 		expect(seen[0].redirect).toBe("error");
-		expect((await service.permissions(a)).discovered_ids).toEqual([
-			"MiMo-VL-7B-RL",
-		]);
+		expect((await service.permissions(a)).discovered_ids).toEqual(CATALOGUE);
 	});
 
 	it("discovers against the account's own region instead of the default", async () => {
 		// honoursCustomEndpoint is true for mimo: inference goes to the stored
-		// region, so a catalogue read from Singapore would describe a different
-		// backend than the one this account actually talks to.
+		// region, and a Token Plan key is 401 anywhere else — so a catalogue read
+		// from Singapore would describe a backend this account cannot talk to.
 		const a = mimo("mimo-region", {
 			custom_endpoint: "https://token-plan-ams.xiaomimimo.com/anthropic",
 		});
 		const urls: string[] = [];
 		const { service } = setup([a], async (input) => {
 			urls.push(String(input));
-			return Response.json({ data: [{ id: "mimo-region-model" }] });
+			return catalogueBody();
 		});
 		await service.refresh(a);
-		expect(urls).toEqual([
-			"https://token-plan-ams.xiaomimimo.com/anthropic/v1/models?limit=1000",
-		]);
-		expect((await service.permissions(a)).discovered_ids).toEqual([
-			"mimo-region-model",
-		]);
+		expect(urls).toEqual(["https://token-plan-ams.xiaomimimo.com/v1/models"]);
+		expect((await service.permissions(a)).discovered_ids).toEqual(CATALOGUE);
 	});
 
-	it("pages with after_id and commits only the complete list", async () => {
-		const a = mimo("mimo-pages");
+	it("commits the whole list from the single request it arrives in", async () => {
+		// The OpenAI list shape carries no cursor and no `has_more`, so there is no
+		// second page to ask for: one request either yields the catalogue or yields
+		// nothing. A cursor parameter left on the URL would re-request page one.
+		const a = mimo("mimo-single-request");
 		const urls: string[] = [];
 		const { repo, service } = setup([a], async (input) => {
-			const url = String(input);
-			urls.push(url);
-			return url.includes("after_id=mimo-one")
-				? Response.json({ data: [{ id: "mimo-two" }], has_more: false })
-				: Response.json({
-						data: [{ id: "mimo-one" }],
-						has_more: true,
-						last_id: "mimo-one",
-					});
+			urls.push(String(input));
+			return catalogueBody();
 		});
 		await service.refresh(a);
-		expect(urls).toHaveLength(2);
-		// `after`, the OpenAI-style cursor, would silently re-request page one.
-		expect(urls[1]).toContain("after_id=mimo-one");
-		expect(new URL(urls[1]).hostname).toBe("token-plan-sgp.xiaomimimo.com");
+		expect(urls).toEqual(["https://token-plan-sgp.xiaomimimo.com/v1/models"]);
 		expect(await repo.getPermissions(a.id)).toMatchObject({
-			discovered_ids: ["mimo-one", "mimo-two"],
+			discovered_ids: CATALOGUE,
 			completeness: "known-complete",
 		});
 	});
@@ -839,7 +848,7 @@ describe("mimo model discovery", () => {
 			[a],
 			async () => {
 				fetches++;
-				return Response.json({ data: [{ id: "never-reached" }] });
+				return catalogueBody();
 			},
 			// Token Plan has no OAuth path at all. The stub RECORDS and returns a
 			// usable token rather than throwing: `discover` swallows everything, so
@@ -864,7 +873,7 @@ describe("mimo model discovery", () => {
 		let fetches = 0;
 		const { repo, service } = setup([a], async () => {
 			fetches++;
-			return Response.json({ data: [{ id: "never-reached" }] });
+			return catalogueBody();
 		});
 		await service.refresh(a);
 		expect(fetches).toBe(0);
@@ -874,7 +883,7 @@ describe("mimo model discovery", () => {
 		expect((await repo.getPermissions(a.id))?.last_error).not.toBeNull();
 	});
 
-	it("leaves manual models intact when the guessed catalogue does not exist", async () => {
+	it("leaves manual models intact when the catalogue read fails", async () => {
 		const a = mimo("mimo-404");
 		const { repo, service } = setup(
 			[a],
@@ -882,9 +891,9 @@ describe("mimo model discovery", () => {
 		);
 		await repo.setManualModels(a.id, modelPermissionScope(a), ["mimo-manual"]);
 		await service.refresh(a, true);
-		// The degradation argument the whole branch rests on: an inferred path that
-		// turns out to be wrong costs an error string, never the models the account
-		// was already allowed to serve.
+		// The degradation argument the whole branch rests on: a catalogue MiMo has
+		// moved costs an error string, never the models the account was already
+		// allowed to serve.
 		expect(await repo.getPermissions(a.id)).toMatchObject({
 			manual_ids: ["mimo-manual"],
 			discovered_ids: [],

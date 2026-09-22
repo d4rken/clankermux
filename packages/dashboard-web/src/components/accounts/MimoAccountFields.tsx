@@ -26,12 +26,7 @@ const MIMO_REGIONS = [
 	},
 ] as const;
 
-/**
- * Sentinels rather than URLs, because Radix rejects an empty `SelectItem`
- * value. Both submit an empty endpoint: picking the default must leave the
- * account without a region of its own, not pin it to the Singapore URL.
- */
-const DEFAULT_REGION = "default";
+/** A sentinel rather than a URL, because Radix rejects an empty `SelectItem` value. */
 const CUSTOM_REGION = "custom";
 
 export function MimoAccountFields({
@@ -45,7 +40,12 @@ export function MimoAccountFields({
 	onApiKeyChange: (value: string) => void;
 	onCustomEndpointChange: (value: string) => void;
 }) {
-	const [region, setRegion] = useState<string>(DEFAULT_REGION);
+	// Empty, so Radix shows the placeholder and no region is chosen by default.
+	// There is nothing sensible to preselect: a Token Plan key is accepted by the
+	// region it was bought in and 401s everywhere else, so a guess here would be
+	// wrong for two subscribers in three and would only surface on the first
+	// request.
+	const [region, setRegion] = useState<string>("");
 	return (
 		<div className="flex flex-col gap-group">
 			<AccountSetupSection title="Connect to MiMo Token Plan">
@@ -71,16 +71,13 @@ export function MimoAccountFields({
 					value={region}
 					onValueChange={(value: string) => {
 						setRegion(value);
-						onCustomEndpointChange(
-							value === DEFAULT_REGION || value === CUSTOM_REGION ? "" : value,
-						);
+						onCustomEndpointChange(value === CUSTOM_REGION ? "" : value);
 					}}
 				>
 					<SelectTrigger id="mimo-region">
-						<SelectValue />
+						<SelectValue placeholder="Select a region" />
 					</SelectTrigger>
 					<SelectContent>
-						<SelectItem value={DEFAULT_REGION}>Default (Singapore)</SelectItem>
 						{MIMO_REGIONS.map((entry) => (
 							<SelectItem key={entry.value} value={entry.value}>
 								{entry.label}
@@ -105,13 +102,11 @@ export function MimoAccountFields({
 							credentials, query string or fragment.
 						</p>
 					</>
-				) : (
+				) : region ? (
 					<p className="text-xs leading-relaxed text-muted-foreground">
-						{region === DEFAULT_REGION
-							? "Leave as Default to send requests to MiMo's Singapore base."
-							: "Requests for this account go to the selected regional base."}
+						Requests for this account go to the selected regional base.
 					</p>
-				)}
+				) : null}
 			</div>
 		</div>
 	);

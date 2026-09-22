@@ -762,16 +762,19 @@ export function AccountAddForm({
 				onError("API key is required for MiMo Token Plan accounts");
 				return;
 			}
+			// A Token Plan key is accepted by the region it was bought in and 401s
+			// in every other, so an account added without one would fail its first
+			// request with nothing here having said why.
+			if (!newAccount.customEndpoint.trim()) {
+				onError("Region is required for MiMo Token Plan accounts");
+				return;
+			}
 
 			await onAddMimoAccount({
 				name: newAccount.name,
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
-				// Omitted, never blank: an account with no endpoint of its own takes
-				// MiMo's default region.
-				...(newAccount.customEndpoint && {
-					customEndpoint: newAccount.customEndpoint.trim(),
-				}),
+				customEndpoint: newAccount.customEndpoint.trim(),
 			});
 			setNewAccount({
 				name: "",

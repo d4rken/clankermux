@@ -513,8 +513,9 @@ describe("routing table through the real proxy", () => {
 			}),
 		});
 		await ctx.modelPermissions.refresh(account, true);
+		// The catalogue sits on the host root; `/anthropic` is the Messages path.
 		expect(catalogue).toEqual([
-			"https://token-plan-ams.xiaomimimo.com/anthropic/v1/models?limit=1000",
+			"https://token-plan-ams.xiaomimimo.com/v1/models",
 		]);
 		expect(await routing.getPermissions(account.id)).toMatchObject({
 			completeness: "known-complete",

@@ -691,8 +691,7 @@ describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
 describe("bundled MiMo pricing (offline fallback)", () => {
 	// MiMo Token Plan is metered in plan credits, so the bundled figures are the
 	// pay-as-you-go rate card: $0.435/M input, $0.87/M output and $0.0036/M cache
-	// read across the Pro tier, ten times that on UltraSpeed, and cache writes
-	// free.
+	// read across the Pro tier, and cache writes free.
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -720,25 +719,28 @@ describe("bundled MiMo pricing (offline fallback)", () => {
 		).toBeCloseTo(0.0036, 9);
 	});
 
-	it("prices mimo-v2.6-pro-ultraspeed at its own tier", async () => {
-		expect(
-			await estimateCostUSD("mimo-v2.6-pro-ultraspeed", ioTokens, {
-				provider: "mimo",
-			}),
-		).toBeCloseTo(13.05, 6);
-	});
-
 	it("prices mimo-v2.6-flash input/output from bundled data", async () => {
 		expect(
 			await estimateCostUSD("mimo-v2.6-flash", ioTokens, { provider: "mimo" }),
 		).toBeCloseTo(0.42, 6);
 	});
 
-	it("prices the v2.5 family and v2-pro at the shared Pro rate", async () => {
-		for (const id of ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro"]) {
+	it("prices the v2.5 family at the shared Pro rate", async () => {
+		for (const id of ["mimo-v2.5-pro", "mimo-v2.5"]) {
 			expect(
 				await estimateCostUSD(id, ioTokens, { provider: "mimo" }),
 			).toBeCloseTo(1.305, 6);
+		}
+	});
+
+	it("leaves ids a Token Plan subscription cannot reach unpriced", async () => {
+		// The live Token Plan catalogue serves neither: UltraSpeed is API-billing
+		// only and v2-pro is gone. An entry for either would put a number on
+		// traffic this integration can never send.
+		for (const id of ["mimo-v2.6-pro-ultraspeed", "mimo-v2-pro"]) {
+			expect(
+				await estimateCostUSD(id, ioTokens, { provider: "mimo" }),
+			).toBeNull();
 		}
 	});
 
