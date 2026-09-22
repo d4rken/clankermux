@@ -1,4 +1,5 @@
 import { HttpError } from "@clankermux/http-common";
+import type { ClientApplication } from "@clankermux/types";
 import {
 	formatBytes,
 	formatCost,
@@ -59,6 +60,7 @@ import { isRowActivationClick } from "../lib/row-activation";
 import { cn } from "../lib/utils";
 import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
+import { ClientLabel } from "./clients/ClientLabel";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 import { Alert } from "./ui/alert";
 import { Badge, badgeVariants } from "./ui/badge";
@@ -187,6 +189,14 @@ const SELECT_ALL = "all";
 const SELECT_NONE = "none";
 const SELECT_NAME_PREFIX = "v:";
 
+/** A client the API-key filter can select. Identity is `id`, never `name`. */
+interface SelectableClient {
+	id: string;
+	name: string;
+	/** `null` for a key the configured list does not know (a deleted one). */
+	application: ClientApplication | null;
+}
+
 /** What a name-valued filter is currently selecting. */
 interface NameSelection {
 	/** Literal name, or null when no name is selected. */
@@ -280,7 +290,14 @@ export function RequestsTab() {
 
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string | null>(null);
-	const [apiKeyFilter, setApiKeyFilter] = useState<string | null>(null);
+	// The whole selected client, not just its id. Only the id is sent to the
+	// server, but the chip has to name the selection, and the name is not
+	// recoverable from the id alone: a deleted key's name lives on the request
+	// rows, so narrowing the range to rows it does not appear in would leave
+	// the chip describing a filter that is still applied as "Unknown client".
+	const [apiKeyFilter, setApiKeyFilter] = useState<SelectableClient | null>(
+		null,
+	);
 	const [noApiKeyFilter, setNoApiKeyFilter] = useState(false);
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
@@ -297,7 +314,7 @@ export function RequestsTab() {
 			status: statusCategory,
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
-			apiKey: apiKeyFilter,
+			apiKeyId: apiKeyFilter?.id ?? null,
 			noApiKey: noApiKeyFilter,
 			project: projectFilter,
 			noProject: noProjectFilter,
@@ -459,15 +476,43 @@ export function RequestsTab() {
 	// API key filter: union of all configured keys (from /api/api-keys) and any
 	// keys observed in the loaded request slice (covers historical keys that
 	// were deleted but still appear on past requests).
+	//
+	// Keyed on the ID. `api_keys.name` is UNIQUE, so two LIVE keys cannot
+	// collide — but a hard-deleted key keeps its stamped snapshot name on old
+	// rows, and a new key is then free to take that name. A name-keyed list
+	// merges those two into one option that selects both.
+	//
+	// Configured keys win the label, so a rename shows up here before the
+	// stamped snapshots catch up. A deleted key keeps its snapshot name and no
+	// application, and still filters by its dangling id — `requests.api_key_id`
+	// has no foreign key, so deletion does not clear it.
 	const uniqueApiKeys = useMemo(() => {
-		const fromConfig = (configuredApiKeys ?? []).map((k) => k.name);
-		const fromRequests = data
-			? Array.from(data.summaries.values())
-					.map((s) => s.apiKeyName)
-					.filter((v): v is string => Boolean(v))
-			: [];
-		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
-	}, [configuredApiKeys, data]);
+		const byId = new Map<string, SelectableClient>();
+		if (data) {
+			for (const summary of data.summaries.values()) {
+				if (!summary.apiKeyId || !summary.apiKeyName) continue;
+				byId.set(summary.apiKeyId, {
+					id: summary.apiKeyId,
+					name: summary.apiKeyName,
+					application: null,
+				});
+			}
+		}
+		for (const key of configuredApiKeys ?? []) {
+			byId.set(key.id, {
+				id: key.id,
+				name: key.name,
+				application: key.application,
+			});
+		}
+		// The current selection stays listed even when nothing in range carries
+		// it, so the dropdown cannot drop the option it is showing as selected.
+		if (apiKeyFilter && !byId.has(apiKeyFilter.id))
+			byId.set(apiKeyFilter.id, apiKeyFilter);
+		return Array.from(byId.values()).sort(
+			(a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+		);
+	}, [configuredApiKeys, data, apiKeyFilter]);
 
 	// Project filter: union of every project seen across recorded requests (from
 	// /api/requests/projects) and any projects observed in the loaded slice
@@ -638,7 +683,19 @@ export function RequestsTab() {
 							{(noApiKeyFilter || apiKeyFilter !== null) && (
 								<FilterChip
 									icon={<Hash className="h-3 w-3" />}
-									label={noApiKeyFilter ? "No API Key" : apiKeyFilter}
+									label={
+										// The bucket wins, exactly as it does in the query params:
+										// `noApiKey` and a selected client are never both sent.
+										noApiKeyFilter || !apiKeyFilter ? (
+											"No API Key"
+										) : (
+											<ClientLabel
+												apiKeyId={apiKeyFilter.id}
+												name={apiKeyFilter.name}
+												application={apiKeyFilter.application}
+											/>
+										)
+									}
 									onClear={() => {
 										setApiKeyFilter(null);
 										setNoApiKeyFilter(false);
@@ -924,13 +981,16 @@ export function RequestsTab() {
 										API Key
 									</Label>
 									<Select
+										// The option value is the key's ID, not its name.
 										value={nameSelectValue({
-											name: apiKeyFilter,
+											name: apiKeyFilter?.id ?? null,
 											none: noApiKeyFilter,
 										})}
 										onValueChange={(value) => {
 											const next = decodeNameSelectValue(value);
-											setApiKeyFilter(next.name);
+											setApiKeyFilter(
+												uniqueApiKeys.find((k) => k.id === next.name) ?? null,
+											);
 											setNoApiKeyFilter(next.none);
 										}}
 									>
@@ -942,10 +1002,14 @@ export function RequestsTab() {
 											<SelectItem value={SELECT_NONE}>No API Key</SelectItem>
 											{uniqueApiKeys.map((key) => (
 												<SelectItem
-													key={key}
-													value={nameSelectValue({ name: key, none: false })}
+													key={key.id}
+													value={nameSelectValue({ name: key.id, none: false })}
 												>
-													{key}
+													<ClientLabel
+														apiKeyId={key.id}
+														name={key.name}
+														application={key.application}
+													/>
 												</SelectItem>
 											))}
 										</SelectContent>
@@ -1035,6 +1099,7 @@ export function RequestsTab() {
 							// Hoisted as consts so the click-to-filter chips below capture a
 							// narrowed string in their onClick closures.
 							const apiKeyName = summary?.apiKeyName;
+							const apiKeyId = summary?.apiKeyId;
 							const project = summary?.project;
 							// Provenance of `project`. An ambiguous row has NO project, so this
 							// must also gate the attribution row below — otherwise an anonymous
@@ -1240,7 +1305,7 @@ export function RequestsTab() {
 										source: attributionSource,
 									}) && (
 										<div className="flex flex-wrap items-center gap-item px-row pb-1.5 text-xs">
-											{apiKeyName && (
+											{apiKeyName && apiKeyId && (
 												<button
 													type="button"
 													className={cn(
@@ -1248,13 +1313,26 @@ export function RequestsTab() {
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
 													onClick={() => {
-														setApiKeyFilter(apiKeyName);
+														// This row's own id and name, so filtering from a
+														// deleted key's request still names it.
+														setApiKeyFilter({
+															id: apiKeyId,
+															name: apiKeyName,
+															application:
+																configuredApiKeys?.find(
+																	(k) => k.id === apiKeyId,
+																)?.application ?? null,
+														});
 														setNoApiKeyFilter(false);
 													}}
 													title={`Filter by API key ${apiKeyName}`}
 												>
+													{/* The key glyph says "this chip filters by client";
+													    the mark inside says which harness. Dropping it
+													    would leave this indistinguishable from the
+													    project chip beside it. */}
 													<Key className="h-3 w-3 mr-tight" />
-													{apiKeyName}
+													<ClientLabel apiKeyId={apiKeyId} name={apiKeyName} />
 												</button>
 											)}
 											{project && (

@@ -89,6 +89,38 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["my-key"]);
 	});
 
+	it("matches an API key by id against the stamped column", () => {
+		const { sql, params } = buildRequestFilterClause({ apiKeyId: "key-1" });
+		expect(sql).toBe("WHERE r.api_key_id = ?");
+		expect(params).toEqual(["key-1"]);
+	});
+
+	it("separates two keys a name filter would merge (a deleted key's name, retaken)", () => {
+		const byName = buildRequestFilterClause({ apiKey: "splurge" });
+		const first = buildRequestFilterClause({ apiKeyId: "key-pi" });
+		const second = buildRequestFilterClause({ apiKeyId: "key-codex" });
+		expect(byName.params).toEqual(["splurge"]);
+		expect(first.params).not.toEqual(second.params);
+	});
+
+	it("prefers the id over a name when a caller somehow sends both", () => {
+		const { sql, params } = buildRequestFilterClause({
+			apiKeyId: "key-1",
+			apiKey: "splurge",
+		});
+		expect(sql).toBe("WHERE r.api_key_id = ?");
+		expect(params).toEqual(["key-1"]);
+	});
+
+	it("lets the no-key bucket win over an id", () => {
+		const { sql, params } = buildRequestFilterClause({
+			noApiKey: true,
+			apiKeyId: "key-1",
+		});
+		expect(sql).toBe("WHERE r.api_key_name IS NULL");
+		expect(params).toEqual([]);
+	});
+
 	it("matches the no-project bucket with IS NULL and no param", () => {
 		const { sql, params } = buildRequestFilterClause({ noProject: true });
 		expect(sql).toBe("WHERE r.project IS NULL");
@@ -216,6 +248,24 @@ describe("parseRequestFilters", () => {
 		expect(parse("noApiKey=1")).toEqual({ noApiKey: true });
 		// A key literally called "no-api-key" stays a name.
 		expect(parse("apiKey=no-api-key")).toEqual({ apiKey: "no-api-key" });
+	});
+
+	it("parses an API key id", () => {
+		expect(parse("apiKeyId=key-1")).toEqual({ apiKeyId: "key-1" });
+		expect(parse("apiKeyId=")).toEqual({});
+	});
+
+	it("keeps only the id when both id and name are sent", () => {
+		// Keeping both would leave the clause builder's precedence as the only
+		// thing deciding, and a reader of the parsed filters could not tell which
+		// one actually ran.
+		expect(parse("apiKeyId=key-1&apiKey=splurge")).toEqual({
+			apiKeyId: "key-1",
+		});
+	});
+
+	it("lets the no-key flag win over an id", () => {
+		expect(parse("noApiKey=1&apiKeyId=key-1")).toEqual({ noApiKey: true });
 	});
 
 	it("parses the no-project bucket from its own flag", () => {
