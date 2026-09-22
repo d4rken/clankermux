@@ -66,10 +66,10 @@ const log = new Logger("AnthropicBankedResetApplier");
 export const BANKED_RESET_AUTO_APPLY_LEAD_MS = 10 * 60 * 1_000;
 export const BANKED_RESET_AUTO_APPLY_TICK_MS = 60_000;
 /**
- * Weekly-limit trigger: quiet for an hour after an auto claim resolved
- * `reset`, `already_used` or `not_limited`, so a usage reading that lags the
- * reset cannot spend a second one and a window stuck at its limit cannot
- * re-claim every tick.
+ * Weekly-limit trigger: quiet for an hour after an auto claim resolved `reset`
+ * or `already_used`, so a usage reading that lags the reset cannot spend a
+ * second one. `not_limited`, `cooldown` and `ineligible` answers hold both
+ * triggers through the ledger's re-arm deadline instead.
  */
 export const BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS = 60 * 60 * 1_000;
 /**
@@ -113,6 +113,7 @@ export type BankedResetApplyDecision =
 				| "grant-paused"
 				| "grant-expired"
 				| "server-cooldown"
+				| "rearm"
 				| "no-weekly-window"
 				| "not-near-expiry"
 				| "not-at-limit"
@@ -201,14 +202,25 @@ export function decideBankedResetAction(inputs: {
 		| "refresh_token"
 	>;
 	status: AnthropicBankedResetStatus | null;
-	/** MAX resolved_at of auto reset/already_used/not_limited rows; null = never. */
+	/** MAX resolved_at of auto reset/already_used rows; weekly trigger only. */
 	autoApplyCooldownAnchorAt: number | null;
+	/**
+	 * The ledger's re-arm deadline after a not_limited, cooldown or ineligible
+	 * answer; holds both triggers. Null when none.
+	 */
+	rearmAt: number | null;
 	/** When each window resets, from the usage cache; absent = unknown. */
 	windowResetsAt: Partial<Record<AnthropicBankedResetWindow, number>>;
 	now: number;
 }): BankedResetApplyDecision {
-	const { account, status, autoApplyCooldownAnchorAt, windowResetsAt, now } =
-		inputs;
+	const {
+		account,
+		status,
+		autoApplyCooldownAnchorAt,
+		rearmAt,
+		windowResetsAt,
+		now,
+	} = inputs;
 	if (account.disabled) return { action: "skip", reason: "account-disabled" };
 	const expiryEnabled = account.anthropic_auto_apply_banked_resets_enabled;
 	const weeklyEnabled =
@@ -235,6 +247,9 @@ export function decideBankedResetAction(inputs: {
 	}
 	if (status.cooldownUntil !== null && status.cooldownUntil > now) {
 		return { action: "skip", reason: "server-cooldown" };
+	}
+	if (rearmAt !== null && rearmAt > now) {
+		return { action: "skip", reason: "rearm" };
 	}
 	if (!grant.clears.some(isWeeklyWindow)) {
 		return { action: "skip", reason: "no-weekly-window" };
@@ -318,6 +333,9 @@ export interface BankedResetApplyDeps {
 		accountId: string,
 	): Promise<AnthropicBankedResetEventRow[]>;
 	getAutoApplyCooldownAnchorAt(accountId: string): Promise<number | null>;
+	getRearmAt(accountId: string): Promise<number | null>;
+	/** The status cache's own TTL rules: whether a read is due. */
+	statusNeedsRefresh(accountId: string): boolean;
 	/** Pure usage-cache read; never a network call. */
 	getUsage(accountId: string): UsageData | null;
 	/** Whether the family-weekly memo holds any entry for the account. */
@@ -448,15 +466,14 @@ export class AnthropicBankedResetApplyScheduler {
 				});
 				return;
 			}
-			// The rest stay dormant until their toggle is back on or they expire,
-			// and must not block expiry protection meanwhile.
 		}
 
-		// An unconfirmed manual claim may already have spent a reset; a new
-		// attempt waits until it resolves or expires.
-		if (allPending.some((row) => row.trigger === "manual")) {
+		// Any unconfirmed claim may already have spent a reset; a new attempt
+		// waits until it resolves or expires. A dormant auto row (its toggle off
+		// or its pause not liftable) holds expiry protection too.
+		if (allPending.length > 0) {
 			log.debug(
-				`Banked-reset applier: '${name}' has an unconfirmed manual claim; no new attempt`,
+				`Banked-reset applier: '${name}' has an unconfirmed claim; no new attempt`,
 			);
 			return;
 		}
@@ -465,6 +482,13 @@ export class AnthropicBankedResetApplyScheduler {
 			await this.deps.refreshStatus(id, false);
 		}
 		if (!this.discover(account)) return;
+
+		// An ineligible account stays ineligible until the cache's own TTL (6 h
+		// for a stable reason) says to look again.
+		const cached = this.deps.getCachedStatus(id);
+		if (cached && !cached.eligible && !this.deps.statusNeedsRefresh(id)) {
+			return;
+		}
 
 		// A claim only ever follows a forced read in the same tick.
 		const lastRead = this.confirmReadAt.get(id);
@@ -582,6 +606,7 @@ export class AnthropicBankedResetApplyScheduler {
 			status: this.deps.getCachedStatus(accountId),
 			autoApplyCooldownAnchorAt:
 				await this.deps.getAutoApplyCooldownAnchorAt(accountId),
+			rearmAt: await this.deps.getRearmAt(accountId),
 			windowResetsAt,
 			now,
 		});
@@ -625,9 +650,9 @@ export class AnthropicBankedResetApplyScheduler {
 
 /**
  * Whether `usage` shows an account able to serve `window`: the account-wide
- * weekly window below its limit and, for another window, that window below its
- * limit too (a scoped window the reading omits is not a limit). Null when the
- * reading is missing or stale.
+ * 5-hour and weekly windows below their limits and, for another window, that
+ * window below its limit too (a scoped window the reading omits is not a
+ * limit). Null when either account-wide window is missing or stale.
  */
 function servesWindow(
 	accountId: string,
@@ -635,11 +660,12 @@ function servesWindow(
 	window: AnthropicBankedResetWindow,
 	now: number,
 ): boolean | null {
+	const session = readUsageWindow(usage, "five_hour", now);
 	const weekly = readUsageWindow(usage, "seven_day", now);
-	if (!weekly || (weekly.resetMs !== null && weekly.resetMs <= now)) {
-		return null;
-	}
-	if (weekly.utilization >= 100) return false;
+	const stale = (reading: { resetMs: number | null }) =>
+		reading.resetMs !== null && reading.resetMs <= now;
+	if (!session || !weekly || stale(session) || stale(weekly)) return null;
+	if (session.utilization >= 100 || weekly.utilization >= 100) return false;
 	if (window === "seven_day") return true;
 	const family = bankedResetWindowFamily(window);
 	if (
@@ -665,6 +691,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		| "expireStaleAnthropicBankedResetAttempts"
 		| "getPendingAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetAutoApplyCooldownAnchorAt"
+		| "getAnthropicBankedResetRearmAt"
 		| "claimAnthropicBankedResetAutoAttempt"
 	>;
 	coordinator: {
@@ -712,6 +739,9 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 			dbOps.getPendingAnthropicBankedResetAttempts(accountId),
 		getAutoApplyCooldownAnchorAt: (accountId) =>
 			dbOps.getAnthropicBankedResetAutoApplyCooldownAnchorAt(accountId),
+		getRearmAt: (accountId) => dbOps.getAnthropicBankedResetRearmAt(accountId),
+		statusNeedsRefresh: (accountId) =>
+			anthropicBankedResetCache.needsRefresh(accountId, nowMs()),
 		getUsage: readUsage,
 		hasFamilyWeeklyMemo: (accountId) => {
 			const now = nowMs();

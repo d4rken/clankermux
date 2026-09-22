@@ -91,6 +91,7 @@ function decide(
 		account?: Partial<Account>;
 		status?: AnthropicBankedResetStatus | null;
 		anchor?: number | null;
+		rearmAt?: number | null;
 		windowResetsAt?: Parameters<
 			typeof decideBankedResetAction
 		>[0]["windowResetsAt"];
@@ -100,6 +101,7 @@ function decide(
 		account: account(inputs.account),
 		status: inputs.status === undefined ? status() : inputs.status,
 		autoApplyCooldownAnchorAt: inputs.anchor ?? null,
+		rearmAt: inputs.rearmAt ?? null,
 		windowResetsAt: inputs.windowResetsAt ?? {},
 		now: NOW,
 	});
@@ -223,6 +225,24 @@ describe("decideBankedResetAction", () => {
 			expect(decision).toEqual({ action: "skip", reason: "not-near-expiry" });
 		});
 
+		it("holds the re-arm deadline too", () => {
+			const decision = decide({
+				account: expiryOnly,
+				rearmAt: NOW + 60_000,
+				status: status({ grants: [grant({ endsAt: near })] }),
+			});
+			expect(decision).toEqual({ action: "skip", reason: "rearm" });
+		});
+
+		it("ignores the weekly cooldown after a reset: the next grant is another one", () => {
+			const decision = decide({
+				account: expiryOnly,
+				anchor: NOW - 1,
+				status: status({ grants: [grant({ endsAt: near })] }),
+			});
+			expect(decision.action).toBe("claim");
+		});
+
 		it("protects a manually paused account", () => {
 			const decision = decide({
 				account: { ...expiryOnly, paused: true, pause_reason: "manual" },
@@ -285,6 +305,16 @@ describe("decideBankedResetAction", () => {
 					anchor: NOW - BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS,
 				}).action,
 			).toBe("claim");
+		});
+
+		it("holds a re-arm deadline after not_limited, cooldown or ineligible", () => {
+			expect(decide({ account: weeklyOnly, rearmAt: NOW + 1 })).toEqual({
+				action: "skip",
+				reason: "rearm",
+			});
+			expect(decide({ account: weeklyOnly, rearmAt: NOW }).action).toBe(
+				"claim",
+			);
 		});
 
 		it("marks the last chance when the grant expires before the window resets", () => {
@@ -371,6 +401,9 @@ function harness(
 		pending?: AnthropicBankedResetEventRow[];
 		otherAvailable?: boolean;
 		memo?: boolean;
+		rearmAt?: number | null;
+		/** Whether the status cache's own TTL rules call for a read. */
+		statusNeedsRefresh?: boolean;
 	} = {},
 ): Harness {
 	const reads = [...(options.accounts ?? [])];
@@ -394,6 +427,8 @@ function harness(
 			},
 			getPendingAttempts: async () => options.pending ?? [],
 			getAutoApplyCooldownAnchorAt: async () => null,
+			getRearmAt: async () => options.rearmAt ?? null,
+			statusNeedsRefresh: () => options.statusNeedsRefresh ?? true,
 			getUsage: () =>
 				options.usage === undefined
 					? ({
@@ -595,6 +630,52 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		]);
 	});
 
+	it("starts no new claim, expiry included, beside a dormant pending auto row", async () => {
+		const near = NOW + BANKED_RESET_AUTO_APPLY_LEAD_MS - 1;
+		const h = harness({
+			accounts: [expiryOnly],
+			pending: [pendingRow({ grant_id: "g_old" })],
+			status: status({
+				grants: [grant({ endsAt: near, useRequiresLimit: false })],
+			}),
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(0);
+		expect(h.claims).toEqual([]);
+		expect(h.dispatched).toEqual([]);
+	});
+
+	it("forces no status read while the cache holds an unexpired ineligible status", async () => {
+		const h = harness({
+			accounts: [weeklyOnly],
+			status: status({
+				eligible: false,
+				ineligibleReason: "config_off",
+				grants: [],
+				nextGrantId: null,
+			}),
+			statusNeedsRefresh: false,
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(0);
+	});
+
+	it("reads again once the ineligible status is due by the cache's rules", async () => {
+		const h = harness({
+			accounts: [weeklyOnly],
+			status: status({ eligible: false, ineligibleReason: "config_off" }),
+			statusNeedsRefresh: true,
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(1);
+	});
+
+	it("claims nothing while the account's re-arm deadline stands", async () => {
+		const h = harness({ accounts: [weeklyOnly], rearmAt: NOW + 60_000 });
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.claims).toEqual([]);
+	});
+
 	it("leaves a pending row dormant while its toggle is off", async () => {
 		const h = harness({
 			accounts: [expiryOnly],
@@ -655,6 +736,7 @@ function poolScheduler(options: {
 			expireStaleAnthropicBankedResetAttempts: async () => 0,
 			getPendingAnthropicBankedResetAttempts: async () => [],
 			getAnthropicBankedResetAutoApplyCooldownAnchorAt: async () => null,
+			getAnthropicBankedResetRearmAt: async () => null,
 			claimAnthropicBankedResetAutoAttempt: async (input) => ({
 				id: `acct-1:${input.grantId}:1`,
 				requestId: "req",
@@ -746,6 +828,31 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 			exhausted: ["seven_day"],
 			clears: ["seven_day"],
 			others: [{ account: {}, usage: null }],
+		});
+		await scheduler.tick();
+		expect(refreshNow).toHaveBeenCalledTimes(1);
+		expect(dispatched).toHaveLength(1);
+	});
+
+	it("does not count an alternative whose 5-hour window is at its limit", async () => {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [
+				{ account: {}, usage: usageWith({ seven_day: 10, five_hour: 100 }) },
+			],
+		});
+		await scheduler.tick();
+		expect(dispatched).toHaveLength(1);
+	});
+
+	it("reads an alternative lacking the 5-hour window once, then counts it unavailable", async () => {
+		const reading = usageWith({ seven_day: 10 }) as Record<string, unknown>;
+		delete reading.five_hour;
+		const { scheduler, dispatched, refreshNow } = poolScheduler({
+			exhausted: ["seven_day_opus"],
+			clears: ["seven_day_opus"],
+			others: [{ account: {}, usage: reading as UsageData }],
 		});
 		await scheduler.tick();
 		expect(refreshNow).toHaveBeenCalledTimes(1);
