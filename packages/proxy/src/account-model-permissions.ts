@@ -5,6 +5,7 @@ import {
 	DevinClient,
 	devinClient,
 	fetchCodexModelCatalog,
+	mimoCatalogueUrl,
 	readChatgptAccountId,
 } from "@clankermux/providers";
 import type {
@@ -12,7 +13,6 @@ import type {
 	AccountModelPermissions,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
-import { getDefaultEndpoint, PROVIDER_NAMES } from "@clankermux/types";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
 export function modelPermissionScope(account: Account): string {
@@ -342,37 +342,23 @@ export class AccountModelPermissionService {
 			url.searchParams.set("limit", "1000");
 			cursorParam = "after_id";
 		} else if (account.provider === "mimo") {
-			// One Token Plan host, two surfaces. The stored endpoint is the REQUEST
-			// base and normally ends in `/anthropic` — that is where the provider
-			// dials `/anthropic/v1/messages` — but the catalogue is OpenAI-shaped and
-			// sits on the host ROOT, so the segments the request path supplies for
-			// itself come off here instead of being extended: one terminal `/v1` (a
-			// stored base may already carry it), then one terminal `/anthropic`. Any
-			// deployment prefix ahead of them survives, so `/anthropic`,
-			// `/anthropic/v1` and a bare host all land on `<host>/v1/models`.
-			// The strip is not a typo: on a live Token Plan subscription
-			// `/anthropic/v1/models` 404s, while the root `/v1/models` answers 200
-			// with `{object:"list",data:[{id,…}]}` to a Bearer token and no cursor —
-			// hence one request, not a paged loop. If MiMo moves it the fetch fails
-			// and failDiscovery records it, leaving previously discovered and manual
-			// ids untouched: the account stays exactly as routable as it was.
-			//
 			// The base is READ FROM THE ACCOUNT where zai's is pinned, because MiMo's
 			// honoursCustomEndpoint is true — the region (cn / sgp / ams) is what
 			// custom_endpoint holds, and a Token Plan key is accepted by its own
 			// region alone. Discovering against a different region would describe a
 			// backend other than the one that serves the account's traffic, and would
 			// answer 401 anyway.
-			url = new URL(endpoint || getDefaultEndpoint(PROVIDER_NAMES.MIMO));
+			//
+			// The catalogue answers `{object:"list",data:[{id,…}]}` with no cursor, so
+			// this is one request, not a paged loop. If MiMo moves it the fetch fails
+			// and failDiscovery records it, leaving previously discovered and manual
+			// ids untouched: the account stays exactly as routable as it was.
+			url = mimoCatalogueUrl(endpoint ?? null);
 			// Operator-supplied, so it earns the same base-shape guard the
-			// *-compatible branches use rather than a second derivation of it: a base
-			// carrying a query or credentials cannot have a path appended to it.
+			// *-compatible branches use: a base carrying a query, credentials, a
+			// fragment or a non-http(s) scheme is refused rather than dialled.
 			if (baseUrlShapeProblem(url))
 				throw new Error("Invalid discovery endpoint");
-			url.pathname = `${url.pathname
-				.replace(/\/+$/, "")
-				.replace(/\/v1$/, "")
-				.replace(/\/anthropic$/, "")}/v1/models`;
 			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
 			headers.set("authorization", `Bearer ${token}`);
 		} else if (account.provider === "openrouter") {
