@@ -55,6 +55,8 @@ let claimImpl: (
 let profileImpl: () => Promise<AccountIdentity | null>;
 let canFetchProfile = true;
 let rateLimitedUntil: number | null = null;
+/** Ledger methods replaced on the coordinator's dbOps, e.g. to make one throw. */
+let dbOverrides: Partial<DatabaseOperations>;
 
 const fetchStatus = mock(() => statusImpl());
 const claim = mock(
@@ -140,6 +142,7 @@ function coordinator(): AnthropicBankedResetCoordinator {
 		dbCalls.push("forceResetAccountRateLimit");
 		return true;
 	};
+	Object.assign(dbOps, dbOverrides);
 	return new AnthropicBankedResetCoordinator(
 		{ dbOps } as unknown as ProxyContext,
 		{
@@ -178,6 +181,7 @@ beforeEach(() => {
 	profileImpl = async () => null;
 	canFetchProfile = true;
 	rateLimitedUntil = null;
+	dbOverrides = {};
 	for (const fn of [
 		fetchStatus,
 		claim,
@@ -486,6 +490,73 @@ describe("claim", () => {
 		expect(claim.mock.calls.map((call) => call[2].requestId)).toEqual([
 			auto.requestId,
 		]);
+	});
+
+	it("sends no manual POST when the pending ledger row cannot be written", async () => {
+		dbOverrides.beginManualAnthropicBankedResetAttempt = async () => {
+			throw new Error("database is locked");
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-no-ledger",
+		});
+		expect(outcome).toMatchObject({ status: "failed", code: "error" });
+		expect(outcome.status === "failed" && outcome.message).toContain(
+			"database is locked",
+		);
+		expect(claim).not.toHaveBeenCalled();
+	});
+
+	it("sends no auto POST when its ledger row cannot be read back", async () => {
+		const auto = await realDbOps.claimAnthropicBankedResetAutoAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			grantEndsAt: null,
+			cause: "expiry",
+			now: NOW,
+		});
+		if (!auto) throw new Error("expected an auto claim");
+		dbOverrides.getAnthropicBankedResetEventByRequestId = async () => {
+			throw new Error("disk I/O error");
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: auto.requestId,
+			autoApply: { ledgerRowId: auto.id, cause: "expiry", replay: false },
+		});
+		expect(outcome).toMatchObject({ status: "failed", code: "error" });
+		expect(claim).not.toHaveBeenCalled();
+	});
+
+	it("still returns the outcome when resolving the row after the POST fails", async () => {
+		dbOverrides.resolveAnthropicBankedResetAttempt = async () => {
+			throw new Error("database is locked");
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-resolve-fails",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"reset",
+		);
+	});
+
+	it("still returns a pending outcome when its retry time cannot be stored", async () => {
+		dbOverrides.setAnthropicBankedResetNextAttemptAt = async () => {
+			throw new Error("database is locked");
+		};
+		claimImpl = async () =>
+			claimResult({ result: "unavailable", resetsLeft: null, cleared: [] });
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-schedule-fails",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"pending",
+		);
 	});
 
 	it("answers a resolved request id from the ledger without a POST", async () => {

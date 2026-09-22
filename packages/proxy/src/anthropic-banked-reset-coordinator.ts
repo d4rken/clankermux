@@ -103,7 +103,7 @@ export interface AnthropicBankedResetCoordinatorDeps {
 type LedgerTarget =
 	| {
 			kind: "post";
-			rowId: string | null;
+			rowId: string;
 			createdAt: number;
 			/** The row was pending before this call, so an earlier POST may have landed. */
 			replay: boolean;
@@ -435,7 +435,7 @@ export class AnthropicBankedResetCoordinator {
 		return {
 			status: "completed",
 			accountName: account.name,
-			eventId: target.rowId ?? "",
+			eventId: target.rowId,
 			ledgerStatus,
 			result,
 			reason: result.reason,
@@ -452,7 +452,8 @@ export class AnthropicBankedResetCoordinator {
 	 * a replayed request id is reconciled onto its existing row, one bound to
 	 * another grant is refused, and so is a new one while another claim on the
 	 * account is pending. An auto claim's row was written by the
-	 * scheduler. A ledger failure never stops the claim.
+	 * scheduler. The pending row is what makes a replay reuse the request id
+	 * and what blocks a second claim, so a ledger failure here sends nothing.
 	 */
 	private async openLedgerRow(
 		account: Account,
@@ -535,14 +536,16 @@ export class AnthropicBankedResetCoordinator {
 			};
 		} catch (error) {
 			log.error(
-				`Banked-reset ledger could not record the claim for '${account.name}'; claiming anyway:`,
+				`Banked-reset ledger could not record the claim for '${account.name}'; no claim was sent:`,
 				error,
 			);
 			return {
-				kind: "post",
-				rowId: request.autoApply?.ledgerRowId ?? null,
-				createdAt: now,
-				replay: request.autoApply?.replay ?? false,
+				kind: "refused",
+				outcome: {
+					status: "failed",
+					code: "error",
+					message: `The banked-reset claim for '${account.name}' could not be recorded, so it was not sent: ${errorMessage(error)}`,
+				},
 			};
 		}
 	}
@@ -568,10 +571,9 @@ export class AnthropicBankedResetCoordinator {
 
 	private async writeLedger(
 		accountName: string,
-		rowId: string | null,
+		rowId: string,
 		write: (rowId: string) => Promise<boolean>,
 	): Promise<void> {
-		if (rowId === null) return;
 		try {
 			if (!(await write(rowId))) {
 				log.warn(
