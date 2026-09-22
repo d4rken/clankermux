@@ -52,6 +52,7 @@ import {
 	getRepresentativeWindow,
 	type MinimaxUsageData,
 	USAGE_CACHE_TTL_MS,
+	USAGE_RATE_LIMITED_DEFAULT_MS,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -2816,15 +2817,27 @@ export function createAccountForceResetRateLimitHandler(
 			// other providers (e.g. Zai) use different endpoints handled by their own fetchers.
 			// This bypasses token refresh, but is acceptable since this path only runs when
 			// no active polling exists and the token is likely fresh from recent proxy requests.
+			// refreshNow also answers false while the shared /oauth/usage deadline
+			// stands, and that deadline holds this read too.
 			if (
 				!usagePollTriggered &&
 				provider === "anthropic" &&
-				account.access_token
+				account.access_token &&
+				usageCache.getRateLimitedUntil(accountId) === null
 			) {
-				const { data: usageData } = await fetchUsageData(account.access_token);
+				const {
+					data: usageData,
+					rateLimited,
+					retryAfterMs,
+				} = await fetchUsageData(account.access_token);
 				if (usageData) {
 					usageCache.set(account.id, usageData);
 					usagePollTriggered = true;
+				} else if (rateLimited) {
+					usageCache.noteRateLimited(
+						accountId,
+						Date.now() + (retryAfterMs ?? USAGE_RATE_LIMITED_DEFAULT_MS),
+					);
 				}
 			}
 

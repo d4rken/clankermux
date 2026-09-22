@@ -160,17 +160,44 @@ describe("the shared usage rate-limit deadline", () => {
 		expect(usageCache.getRateLimitedUntil(id)).toBe(deadline);
 	});
 
-	it("a successful fetch clears the deadline", async () => {
-		const id = freshId("clear");
+	it("a successful fetch that left before a newer deadline keeps it", async () => {
+		const id = freshId("older-success");
 		const parked = deferred<Response>();
 		stubFetch(() => parked.promise);
 		startIdle(id);
 		const pending = usageCache.refreshNow(id);
 		await new Promise((r) => setTimeout(r, 5));
-		usageCache.noteRateLimited(id, Date.now() + 10 * 60_000);
+		const deadline = Date.now() + 10 * 60_000;
+		usageCache.noteRateLimited(id, deadline);
 		parked.resolve(usageResponse(10));
 		expect(await pending).toBe(true);
-		expect(usageCache.getRateLimitedUntil(id)).toBeNull();
+		expect(usageCache.getRateLimitedUntil(id)).toBe(deadline);
+	});
+
+	it("sends no request when the deadline is recorded while the token is fetched", async () => {
+		const id = freshId("token-await");
+		const calls = stubFetch(() => usageResponse(10));
+		const deadline = Date.now() + 10 * 60_000;
+		usageCache.startPolling(
+			id,
+			async () => {
+				usageCache.noteRateLimited(id, deadline);
+				return "token";
+			},
+			"anthropic",
+			HOUR,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: HOUR },
+		);
+		expect(await usageCache.refreshNow(id)).toBe(false);
+		expect(calls()).toBe(0);
+		expect(internals.failureCounts.get(id)).toBeUndefined();
+		expect(usageCache.getRateLimitedUntil(id)).toBe(deadline);
 	});
 
 	it("without a deadline, a failed poll still counts toward backoff as before", async () => {

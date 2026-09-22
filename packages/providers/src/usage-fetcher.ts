@@ -1216,7 +1216,12 @@ class UsageCache {
 	private customEndpoints = new Map<string, string | null>(); // Track custom endpoints
 	private windowResetCallbacks = new Map<string, (accountId: string) => void>();
 	private devinMetadataCallbacks = new Map<string, DevinPollingCallbacks>();
-	private usageRateLimitedUntil = new Map<string, number>(); // Tracks when usage API 429 clears
+	// When the usage API's 429 clears, and when that deadline was recorded: only
+	// a fetch that started after it may clear it.
+	private usageRateLimitedUntil = new Map<
+		string,
+		{ until: number; recordedAt: number }
+	>();
 	private capacityRestoredCallbacks = new Map<
 		string,
 		(evidence: CapacityRestoredEvidence) => void
@@ -1854,8 +1859,11 @@ class UsageCache {
 	 */
 	noteRateLimited(accountId: string, untilMs: number): void {
 		const existing = this.usageRateLimitedUntil.get(accountId);
-		if (existing === undefined || untilMs > existing) {
-			this.usageRateLimitedUntil.set(accountId, untilMs);
+		if (existing === undefined || untilMs > existing.until) {
+			this.usageRateLimitedUntil.set(accountId, {
+				until: untilMs,
+				recordedAt: Date.now(),
+			});
 		}
 	}
 
@@ -2362,6 +2370,16 @@ class UsageCache {
 				// boundary reported with capacity-restored evidence: FETCH START, not
 				// response completion — a cooldown written while this request was in
 				// flight is temporally ambiguous and must wait for the next poll.
+				// Checked again here: a deadline can be recorded while the token
+				// provider is awaited.
+				const limitedUntil = this.getRateLimitedUntil(accountId);
+				if (limitedUntil !== null) {
+					return {
+						success: false,
+						retryAfterMs: Math.max(0, limitedUntil - Date.now()),
+						deferred: true,
+					};
+				}
 				const fetchStartedAt = Date.now();
 				const result = await fetchUsageData(token);
 				if (!isCurrent()) return superseded;
@@ -2410,9 +2428,13 @@ class UsageCache {
 						if (recoveredCallback) recoveredCallback(accountId);
 					}
 					// The usage endpoint answered, so its own 429 throttle (a per-IP limit
-					// on /oauth/usage, unrelated to the account's quota) is over. Four
-					// live consumers read this map; it is NOT the capacity-restored gate.
-					this.usageRateLimitedUntil.delete(accountId);
+					// on /oauth/usage, unrelated to the account's quota) is over — unless
+					// the deadline was recorded after this request left. Four live
+					// consumers read this map; it is NOT the capacity-restored gate.
+					const deadline = this.usageRateLimitedUntil.get(accountId);
+					if (deadline && fetchStartedAt > deadline.recordedAt) {
+						this.usageRateLimitedUntil.delete(accountId);
+					}
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(
@@ -2749,13 +2771,13 @@ class UsageCache {
 	 * for this account, or null if not currently rate-limited.
 	 */
 	getRateLimitedUntil(accountId: string): number | null {
-		const until = this.usageRateLimitedUntil.get(accountId);
-		if (until === undefined) return null;
-		if (Date.now() >= until) {
+		const entry = this.usageRateLimitedUntil.get(accountId);
+		if (entry === undefined) return null;
+		if (Date.now() >= entry.until) {
 			this.usageRateLimitedUntil.delete(accountId);
 			return null;
 		}
-		return until;
+		return entry.until;
 	}
 
 	/**
