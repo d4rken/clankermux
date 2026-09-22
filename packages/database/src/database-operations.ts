@@ -2547,6 +2547,11 @@ OAuth tokens will need to be re-authenticated.
 		return this.apiKeys.findAll();
 	}
 
+	/** `api_key_id -> application` for every key that has a client profile. */
+	async getClientApplications() {
+		return this.clients.getApplications();
+	}
+
 	async getActiveApiKeys() {
 		return this.apiKeys.findActive();
 	}

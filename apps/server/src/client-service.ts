@@ -350,8 +350,8 @@ export class ClientService {
 	}
 	private async view(key: ApiKey, rules: RoutingRule[]): Promise<ClientView> {
 		const { dbOps } = this.deps;
-		const profile =
-			(await dbOps.clients.getProfile(key.id)) ?? this.missingProfile(key.id);
+		const stored = await dbOps.clients.getProfile(key.id);
+		const profile = stored ?? this.missingProfile(key.id);
 		const owned = await dbOps.clients.ownedRuleIds(key.id);
 		const notices = [...profile.notices];
 		for (const model of Object.values(profile.catalogues).flatMap(
@@ -375,7 +375,12 @@ export class ClientService {
 		return {
 			...profile,
 			notices: [...new Set(notices)],
-			key: toApiKeyResponse(key),
+			// The STORED profile's application, never `missingProfile`'s synthetic
+			// "generic": a key with no profile has no harness, and claiming one
+			// here would disagree with the null `/api/api-keys` reports for the
+			// same key. `application` above keeps the synthetic value, which is
+			// what the wizard opens on.
+			key: toApiKeyResponse(key, stored?.application ?? null),
 			aliasRules: rules.filter((r) => owned.includes(r.id)),
 		};
 	}

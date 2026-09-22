@@ -29,6 +29,20 @@ export class ClientRepository extends BaseRepository<ClientProfile> {
 				}
 			: null;
 	}
+	/**
+	 * Every key that has a profile, as `api_key_id -> application`.
+	 *
+	 * Deliberately narrow: this backs the dashboard's client labels, which need
+	 * the harness and nothing else. Reading whole profiles would drag each
+	 * client's full published catalogue along for one enum.
+	 */
+	async getApplications(): Promise<Map<string, ClientProfile["application"]>> {
+		const rows = await this.query<
+			Pick<ProfileRow, "api_key_id" | "application">
+		>("SELECT api_key_id, application FROM client_profiles");
+		return new Map(rows.map((row) => [row.api_key_id, row.application]));
+	}
+
 	async isBootstrapped(): Promise<boolean> {
 		return !!(await this.get("SELECT 1 FROM strategies WHERE name=?", [
 			MARKER,

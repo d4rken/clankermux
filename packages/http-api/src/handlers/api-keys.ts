@@ -302,7 +302,13 @@ export function createApiKeyPinHandler(dbOps: DatabaseOperations) {
 			// Wrap in the { success, data } envelope used by the sibling api-keys
 			// handlers (list/generate/regenerate) for response-shape consistency.
 			return new Response(
-				JSON.stringify({ success: true, data: toApiKeyResponse(updated) }),
+				JSON.stringify({
+					success: true,
+					data: toApiKeyResponse(
+						updated,
+						(await dbOps.getClientApplications()).get(updated.id) ?? null,
+					),
+				}),
 				{
 					status: 200,
 					headers: { "Content-Type": "application/json" },
