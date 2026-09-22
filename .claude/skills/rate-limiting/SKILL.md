@@ -81,6 +81,7 @@ breaker, context-window fit, and API-key account/class pinning.
 | Usage snapshots | 2 min | Limits-tab history |
 | Integrity | quick 6h / full 24h | — |
 | Codex spend coordinator | on traffic | Codex windows/credits |
+| Anthropic banked-reset applier | 60s tick | claims only with a toggle on; replays pending claims |
 
 ## Invariants — do not break these
 
@@ -106,6 +107,12 @@ breaker, context-window fit, and API-key account/class pinning.
    (`references/routing-gates.md`).
 10. Never add a 5h term to HARVEST ranking — unused 5h capacity is not lost
     budget (`references/routing-gates.md` § The 5h window is nested).
+11. After an Anthropic banked reset lands, recover through
+    `usageCache.fenceAndRefetch` and the capacity-restored path, never
+    `clearRateLimitState`/`forceResetAccountRateLimit`. Those NULL
+    `rate_limit_reset`, and a NULL there permanently disqualifies a paused
+    account from auto-unpause. `delete()` alone is not a fence either: an
+    in-flight pre-claim poll re-stores the exhausted reading.
 
 ## References
 
