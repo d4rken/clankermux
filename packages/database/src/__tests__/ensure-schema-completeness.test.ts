@@ -98,6 +98,7 @@ describe("ensureSchema completeness", () => {
 			"renewal_auto_start_date",
 			"notes",
 			"refresh_token_expires_at",
+			"identity_organization_uuid",
 		];
 		for (const col of expected) {
 			expect(cols.has(col)).toBe(true);

@@ -332,6 +332,11 @@ export interface AccountIdentity {
 	externalAccountId: string | null;
 	email: string | null;
 	organizationName: string | null;
+	/**
+	 * Anthropic `organization.uuid`, the path segment of the banked-reset claim
+	 * URL. OPTIONAL because only Anthropic payloads carry it.
+	 */
+	organizationUuid?: string | null;
 	planTier: string | null;
 	/**
 	 * Anthropic rate-limit multiplier token (e.g. "20x", "5x", "1x") derived from
@@ -420,6 +425,7 @@ export interface AccountRow {
 	identity_external_id?: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email?: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name?: string | null; // Organization/workspace name captured from profile
+	identity_organization_uuid?: string | null; // Anthropic organization.uuid; path segment of the banked-reset claim URL
 	identity_plan_tier?: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier?: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_subscription_status?: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
@@ -479,6 +485,7 @@ export interface Account {
 	identity_external_id: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name: string | null; // Organization/workspace name captured from profile
+	identity_organization_uuid: string | null; // Anthropic organization.uuid; path segment of the banked-reset claim URL
 	identity_plan_tier: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_subscription_status: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
@@ -973,6 +980,7 @@ export function toAccount(row: AccountRow): Account {
 		identity_external_id: row.identity_external_id ?? null,
 		identity_email: row.identity_email ?? null,
 		identity_organization_name: row.identity_organization_name ?? null,
+		identity_organization_uuid: row.identity_organization_uuid ?? null,
 		identity_plan_tier: row.identity_plan_tier ?? null,
 		identity_rate_limit_tier: row.identity_rate_limit_tier ?? null,
 		identity_subscription_status: row.identity_subscription_status ?? null,

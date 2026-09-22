@@ -72,6 +72,7 @@ export function ensureSchema(db: Database): void {
 			identity_external_id TEXT,
 			identity_email TEXT,
 			identity_organization_name TEXT,
+			identity_organization_uuid TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
 			identity_subscription_status TEXT,
@@ -1725,6 +1726,14 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "cache_creation_1h_input_tokens",
 		ddl: "ALTER TABLE requests ADD COLUMN cache_creation_1h_input_tokens INTEGER",
+	},
+	// Anthropic `organization.uuid`, the path segment of the banked-reset claim
+	// URL. Carried by the code exchange, every refresh envelope and the profile;
+	// NULL until one of them has been seen for the account.
+	{
+		table: "accounts",
+		column: "identity_organization_uuid",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_organization_uuid TEXT",
 	},
 ];
 

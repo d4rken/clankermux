@@ -756,6 +756,7 @@ export class AutoRefreshScheduler {
 				identity_external_id: null,
 				identity_email: null,
 				identity_organization_name: null,
+				identity_organization_uuid: null,
 				identity_plan_tier: null,
 				identity_rate_limit_tier: null,
 				identity_subscription_status: null,

@@ -71,6 +71,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_external_id TEXT,
 			identity_email TEXT,
 			identity_organization_name TEXT,
+			identity_organization_uuid TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
 			identity_subscription_status TEXT,

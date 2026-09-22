@@ -70,6 +70,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_external_id TEXT,
 			identity_email TEXT,
 			identity_organization_name TEXT,
+			identity_organization_uuid TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
 			identity_subscription_status TEXT,
@@ -303,6 +304,79 @@ describe("AccountRepository — setAccountIdentityFromProfile", () => {
 		expect(after?.identity_plan_tier).toBe("max");
 		expect(after?.identity_rate_limit_tier).toBe("20x");
 		expect(after?.identity_profile_fetched_at).not.toBeNull();
+	});
+});
+
+describe("AccountRepository — organization uuid", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	const BASE: AccountIdentity = {
+		externalAccountId: null,
+		email: null,
+		organizationName: null,
+		planTier: null,
+		rateLimitTier: null,
+	};
+
+	it("round-trips through findById and findAll", async () => {
+		insertAccount(db, "acc-1");
+		await repo.updateTokens("acc-1", "tok-1", 1_000, "refresh-1", {
+			...BASE,
+			organizationUuid: "org-uuid-1",
+		});
+		expect((await repo.findById("acc-1"))?.identity_organization_uuid).toBe(
+			"org-uuid-1",
+		);
+		expect((await repo.findAll())[0]?.identity_organization_uuid).toBe(
+			"org-uuid-1",
+		);
+	});
+
+	it("is never cleared by a later payload that lacks it, on every writer", async () => {
+		insertAccount(db, "acc-2");
+		await repo.setAccountIdentityFromProfile("acc-2", {
+			...BASE,
+			organizationUuid: "org-uuid-keep",
+		});
+
+		await repo.updateTokens("acc-2", "tok-2", 2_000, "refresh-2", {
+			...BASE,
+			email: "e@example.com",
+		});
+		await repo.updateTokens("acc-2", "tok-3", 3_000, undefined, {
+			...BASE,
+			organizationUuid: null,
+		});
+		await repo.setAccountIdentityFromProfile("acc-2", BASE);
+		await repo.setAccountIdentity("acc-2", BASE);
+
+		const account = await repo.findById("acc-2");
+		expect(account?.identity_organization_uuid).toBe("org-uuid-keep");
+		expect(account?.identity_email).toBe("e@example.com");
+	});
+
+	it("is replaced when a payload reports a different one", async () => {
+		insertAccount(db, "acc-3");
+		await repo.setAccountIdentity("acc-3", {
+			...BASE,
+			organizationUuid: "org-old",
+		});
+		await repo.updateTokens("acc-3", "tok", 1_000, "refresh", {
+			...BASE,
+			organizationUuid: "org-new",
+		});
+		expect((await repo.findById("acc-3"))?.identity_organization_uuid).toBe(
+			"org-new",
+		);
 	});
 });
 

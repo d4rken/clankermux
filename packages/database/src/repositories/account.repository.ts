@@ -17,7 +17,8 @@ const IDENTITY_FIELDS_SET = `identity_external_id = COALESCE(?, identity_externa
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
 				identity_plan_tier = COALESCE(?, identity_plan_tier),
-				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier)`;
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
+				identity_organization_uuid = COALESCE(?, identity_organization_uuid)`;
 
 const IDENTITY_COALESCE_SET = `${IDENTITY_FIELDS_SET},
 				identity_subscription_status = COALESCE(?, identity_subscription_status),
@@ -33,6 +34,7 @@ function identityBindParams(
 		identity.organizationName,
 		identity.planTier,
 		identity.rateLimitTier,
+		identity.organizationUuid ?? null,
 		identity.subscriptionStatus ?? null,
 		identity.subscriptionStartedAt ?? null,
 	];
@@ -396,6 +398,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_external_id,
 				identity_email,
 				identity_organization_name,
+				identity_organization_uuid,
 				identity_plan_tier,
 				identity_rate_limit_tier,
 				identity_subscription_status,
@@ -446,6 +449,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_external_id,
 				identity_email,
 				identity_organization_name,
+				identity_organization_uuid,
 				identity_plan_tier,
 				identity_rate_limit_tier,
 				identity_subscription_status,
