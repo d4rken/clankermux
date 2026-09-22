@@ -41,8 +41,9 @@ const STABLE_INELIGIBLE_REASONS: ReadonlySet<AnthropicBankedResetIneligibleReaso
 	new Set(["tier", "seat", "surface", "tenure", "config_off", "no_grant"]);
 
 // Claude Code's own validation of the ids it sends.
-const GRANT_ID_PATTERN = /^[a-z0-9_-]{1,40}$/;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const ANTHROPIC_BANKED_RESET_GRANT_ID_PATTERN = /^[a-z0-9_-]{1,40}$/;
+export const ANTHROPIC_BANKED_RESET_REQUEST_ID_PATTERN =
+	/^[A-Za-z0-9_-]{1,64}$/;
 // Only has to keep the value a single path segment.
 const ORG_UUID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -121,7 +122,7 @@ function parseGrant(value: unknown): AnthropicBankedResetGrant | null {
 	const resetsLeft = nonNegativeInteger(row.resets_left);
 	if (
 		id === null ||
-		!GRANT_ID_PATTERN.test(id) ||
+		!ANTHROPIC_BANKED_RESET_GRANT_ID_PATTERN.test(id) ||
 		resetsTotal === null ||
 		resetsLeft === null ||
 		!Array.isArray(row.clears)
@@ -304,10 +305,10 @@ export async function claimAnthropicBankedReset(
 	if (!ORG_UUID_PATTERN.test(orgUuid)) {
 		return transportFailure("error", "Invalid organization uuid");
 	}
-	if (!GRANT_ID_PATTERN.test(request.grantId)) {
+	if (!ANTHROPIC_BANKED_RESET_GRANT_ID_PATTERN.test(request.grantId)) {
 		return transportFailure("error", "Invalid grant id");
 	}
-	if (!REQUEST_ID_PATTERN.test(request.requestId)) {
+	if (!ANTHROPIC_BANKED_RESET_REQUEST_ID_PATTERN.test(request.requestId)) {
 		return transportFailure("error", "Invalid request id");
 	}
 

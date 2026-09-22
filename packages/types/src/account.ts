@@ -635,6 +635,8 @@ export interface AccountResponse {
 		}> | null;
 		fetchedAt: string;
 	} | null;
+	/** Anthropic-OAuth-only banked-reset grants; null when never read. */
+	anthropicBankedResets?: AnthropicBankedResetsInfo | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	/**
 	 * When the LIVE reading in `usageData` was sampled (ISO). Null when
@@ -967,6 +969,92 @@ export type AnthropicBankedResetEventStatus =
 	| "ineligible"
 	| "unavailable"
 	| "failed";
+
+/**
+ * One logical claim of an Anthropic banked reset. Retries of the same claim
+ * must reuse `requestId`; a request id already bound to another grant is
+ * rejected.
+ */
+export interface AnthropicBankedResetClaimRequest {
+	grantId: string;
+	requestId: string;
+	/**
+	 * Set only by the auto-apply scheduler: resolve this pre-claimed ledger row
+	 * (`anthropic_banked_reset_events.id`). `replay` marks a row that was
+	 * already pending before this dispatch, so an earlier POST may have landed.
+	 */
+	autoApply?: {
+		ledgerRowId: string;
+		cause: "expiry" | "weekly-limit";
+		replay: boolean;
+	};
+}
+
+/** An account's banked-reset status as served in the accounts list. */
+export interface AnthropicBankedResetsInfo {
+	eligible: boolean;
+	ineligibleReason: AnthropicBankedResetIneligibleReason | null;
+	/** Windows the server reports at their limit. */
+	exhausted: AnthropicBankedResetWindow[];
+	cooldownUntil: string | null; // ISO
+	weeklyResetsAt: string | null; // ISO
+	nextGrantId: string | null;
+	grants: Array<{
+		id: string;
+		label: string | null;
+		resetsLeft: number;
+		resetsTotal: number;
+		endsAt: string | null; // ISO
+		startsAt: string | null; // ISO
+		clears: AnthropicBankedResetWindow[];
+		paused: boolean;
+		usableNow: boolean;
+		useRequiresLimit: boolean;
+		/** The only grant a claim may name. */
+		isNext: boolean;
+	}>;
+	resetsLeftTotal: number;
+	fetchedAt: string; // ISO
+}
+
+/** Response of POST /api/accounts/:id/banked-resets/claim. */
+export interface AnthropicBankedResetClaimResponse {
+	/** True when the ledger row resolved `reset` or `already_used`. */
+	success: boolean;
+	message: string;
+	eventId: string;
+	/** The ledger row's status after this call; `pending` means retry with the same requestId. */
+	status: AnthropicBankedResetEventStatus;
+	/** What the server or transport answered; null when a resolved row was returned without a new request. */
+	result: AnthropicBankedResetClaimResult["result"] | null;
+	reason: string | null;
+	resetsLeft: number | null;
+	cleared: AnthropicBankedResetWindow[];
+	cooldownUntil: string | null; // ISO
+	/** When a pending claim may be retried; null once resolved. */
+	nextAttemptAt: string | null; // ISO
+	/** Whether the banked-reset status was re-read after a restoring claim. */
+	statusRefreshed: boolean;
+}
+
+/** One banked-reset ledger event as served over the API boundary. */
+export interface AnthropicBankedResetEventResponse {
+	id: string;
+	grantId: string;
+	trigger: "manual" | "auto";
+	/** Why an auto attempt was claimed; null on manual rows. */
+	cause: "expiry" | "weekly-limit" | null;
+	attemptSeq: number | null;
+	status: AnthropicBankedResetEventStatus;
+	reason: string | null;
+	cleared: AnthropicBankedResetWindow[];
+	resetsLeft: number | null;
+	errorMessage: string | null;
+	grantEndsAt: string | null; // ISO
+	nextAttemptAt: string | null; // ISO
+	createdAt: string; // ISO
+	resolvedAt: string | null; // ISO
+}
 
 // UI display type - used in CLI and web dashboard
 export interface AccountDisplay {
