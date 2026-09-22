@@ -3205,6 +3205,23 @@ OAuth tokens will need to be re-authenticated.
 		return this.anthropicBankedResetEvents.expireStalePending(now);
 	}
 
+	async markAnthropicBankedResetRecoveryPending(
+		id: string,
+		until: number,
+	): Promise<boolean> {
+		return this.anthropicBankedResetEvents.markRecoveryPending(id, until);
+	}
+
+	async getAnthropicBankedResetRecoveryPending(): Promise<
+		AnthropicBankedResetEventRow[]
+	> {
+		return this.anthropicBankedResetEvents.findRecoveryPending();
+	}
+
+	async clearAnthropicBankedResetRecoveryPending(id: string): Promise<boolean> {
+		return this.anthropicBankedResetEvents.clearRecoveryPending(id);
+	}
+
 	async getAnthropicBankedResetRearmAt(
 		accountId: string,
 	): Promise<number | null> {

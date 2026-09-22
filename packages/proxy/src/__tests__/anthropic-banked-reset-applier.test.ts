@@ -349,6 +349,9 @@ interface Harness {
 	claims: Array<{ grantId: string; cause: string }>;
 	forcedReads: number;
 	expiredAt: number[];
+	resumed: string[];
+	cleared: string[];
+	usageRefreshes: string[];
 }
 
 function completedOutcome(): AnthropicBankedResetClaimDispatchOutcome {
@@ -387,6 +390,7 @@ function pendingRow(
 		grant_ends_at: null,
 		next_attempt_at: null,
 		rearm_at: null,
+		recovery_pending_until: null,
 		created_at: NOW - 60_000,
 		resolved_at: null,
 		...overrides,
@@ -404,16 +408,48 @@ function harness(
 		rearmAt?: number | null;
 		/** Whether the status cache's own TTL rules call for a read. */
 		statusNeedsRefresh?: boolean;
+		/** Rows owing an overage-pause verdict. */
+		recovery?: AnthropicBankedResetEventRow[];
+		/** The cached reading the recovery pass sees, before and after a refresh. */
+		observation?: { data: UsageData; observedAtMs: number | null } | null;
+		observationAfterRefresh?: {
+			data: UsageData;
+			observedAtMs: number | null;
+		} | null;
+		candidates?: Array<{ id: string; name: string }>;
 	} = {},
 ): Harness {
+	let observation = options.observation ?? null;
 	const reads = [...(options.accounts ?? [])];
 	const h: Harness = {
 		dispatched: [],
 		claims: [],
 		forcedReads: 0,
 		expiredAt: [],
+		resumed: [],
+		cleared: [],
+		usageRefreshes: [],
 		deps: {
-			listCandidateAccounts: async () => [{ id: "acct-1", name: "claude-one" }],
+			listCandidateAccounts: async () =>
+				options.candidates ?? [{ id: "acct-1", name: "claude-one" }],
+			getRecoveryPending: async () =>
+				(options.recovery ?? []).filter((row) => !h.cleared.includes(row.id)),
+			clearRecoveryPending: async (rowId) => {
+				h.cleared.push(rowId);
+				return true;
+			},
+			resumeIfOveragePaused: async (accountId) => {
+				h.resumed.push(accountId);
+				return true;
+			},
+			peekUsageObservation: () => observation,
+			refreshUsage: async (accountId) => {
+				h.usageRefreshes.push(accountId);
+				if (options.observationAfterRefresh !== undefined) {
+					observation = options.observationAfterRefresh;
+				}
+				return true;
+			},
 			expireStaleAttempts: async (now) => {
 				h.expiredAt.push(now);
 				return 0;
@@ -737,6 +773,9 @@ function poolScheduler(options: {
 			getPendingAnthropicBankedResetAttempts: async () => [],
 			getAnthropicBankedResetAutoApplyCooldownAnchorAt: async () => null,
 			getAnthropicBankedResetRearmAt: async () => null,
+			getAnthropicBankedResetRecoveryPending: async () => [],
+			clearAnthropicBankedResetRecoveryPending: async () => true,
+			resumeAccountIfOveragePaused: async () => false,
 			claimAnthropicBankedResetAutoAttempt: async (input) => ({
 				id: `acct-1:${input.grantId}:1`,
 				requestId: "req",
@@ -747,6 +786,7 @@ function poolScheduler(options: {
 		coordinator: { refreshStatus: async () => ({ success: true }) },
 		usage: {
 			get: (id: string) => usageById.get(id) ?? null,
+			peekWithAge: () => null,
 			refreshNow,
 		},
 		overrides: {
@@ -868,5 +908,93 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 		});
 		await scheduler.tick();
 		expect(dispatched).toHaveLength(1);
+	});
+});
+
+describe("owed overage-pause verdicts", () => {
+	const HOUR = 60 * 60_000;
+	function owed(
+		overrides: Partial<AnthropicBankedResetEventRow> = {},
+	): AnthropicBankedResetEventRow {
+		return pendingRow({
+			id: "owed-row",
+			account_id: "acct-owed",
+			status: "reset",
+			resolved_at: NOW - 60_000,
+			recovery_pending_until: NOW - 60_000 + HOUR,
+			...overrides,
+		});
+	}
+	const headroom = {
+		five_hour: { utilization: 10, resets_at: null },
+		seven_day: {
+			utilization: 20,
+			resets_at: new Date(NOW + DAY).toISOString(),
+		},
+	} as UsageData;
+	const atLimit = {
+		five_hour: { utilization: 10, resets_at: null },
+		seven_day: {
+			utilization: 100,
+			resets_at: new Date(NOW + DAY).toISOString(),
+		},
+	} as UsageData;
+
+	async function run(options: Parameters<typeof harness>[0]) {
+		const h = harness({ candidates: [], ...options });
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		return h;
+	}
+
+	it("lifts the pause from a post-claim reading with headroom, for an account with no toggle on", async () => {
+		const h = await run({
+			recovery: [owed()],
+			observation: { data: headroom, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual(["acct-owed"]);
+		expect(h.cleared).toEqual(["owed-row"]);
+		expect(h.usageRefreshes).toEqual([]);
+		expect(h.dispatched).toEqual([]);
+	});
+
+	it("keeps the pause but settles the verdict when the reading is at a limit", async () => {
+		const h = await run({
+			recovery: [owed()],
+			observation: { data: atLimit, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
+	});
+
+	it("ignores a reading from before the claim and reads once, leaving the mark without one", async () => {
+		const h = await run({
+			recovery: [owed(), owed({ id: "owed-row-2" })],
+			observation: { data: headroom, observedAtMs: NOW - 120_000 },
+		});
+		expect(h.usageRefreshes).toEqual(["acct-owed"]);
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual([]);
+		expect(h.dispatched).toEqual([]);
+	});
+
+	it("uses the reading its one refresh produced", async () => {
+		const h = await run({
+			recovery: [owed()],
+			observation: null,
+			observationAfterRefresh: { data: headroom, observedAtMs: NOW },
+		});
+		expect(h.usageRefreshes).toEqual(["acct-owed"]);
+		expect(h.resumed).toEqual(["acct-owed"]);
+		expect(h.cleared).toEqual(["owed-row"]);
+	});
+
+	it("gives up once the recovery window has passed", async () => {
+		const h = await run({
+			recovery: [owed({ recovery_pending_until: NOW })],
+			observation: { data: headroom, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
+		expect(h.usageRefreshes).toEqual([]);
 	});
 });

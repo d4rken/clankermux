@@ -30,6 +30,12 @@ export interface AnthropicBankedResetEventRow {
 	 * on a `not_limited`, `cooldown` or `ineligible` resolution.
 	 */
 	rearm_at: number | null;
+	/**
+	 * ms epoch until which a spent reset still owes the account's overage
+	 * pause a verdict: set when the post-claim usage read was unavailable,
+	 * cleared once a later reading decides it, or when this passes.
+	 */
+	recovery_pending_until: number | null;
 	created_at: number;
 	resolved_at: number | null;
 }
@@ -349,6 +355,35 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			[accountId],
 		);
 		return row?.latest ?? null;
+	}
+
+	/** Owe the account's overage pause a verdict on this row until `until`. */
+	async markRecoveryPending(id: string, until: number): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE anthropic_banked_reset_events SET recovery_pending_until = ?
+			 WHERE id = ?`,
+			[until, id],
+		);
+		return changes > 0;
+	}
+
+	/** Rows still owing a verdict, every account, oldest first. */
+	async findRecoveryPending(): Promise<AnthropicBankedResetEventRow[]> {
+		return this.query<AnthropicBankedResetEventRow>(
+			`SELECT * FROM anthropic_banked_reset_events
+			 WHERE recovery_pending_until IS NOT NULL
+			 ORDER BY created_at ASC, id ASC`,
+			[],
+		);
+	}
+
+	async clearRecoveryPending(id: string): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE anthropic_banked_reset_events SET recovery_pending_until = NULL
+			 WHERE id = ? AND recovery_pending_until IS NOT NULL`,
+			[id],
+		);
+		return changes > 0;
 	}
 
 	async nextAttemptSeq(accountId: string, grantId: string): Promise<number> {

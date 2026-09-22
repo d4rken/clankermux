@@ -984,7 +984,8 @@ export function ensureSchema(db: Database): void {
 			next_attempt_at INTEGER,
 			created_at INTEGER NOT NULL,
 			resolved_at INTEGER,
-			rearm_at INTEGER
+			rearm_at INTEGER,
+			recovery_pending_until INTEGER
 		)
 	`);
 
@@ -1805,6 +1806,14 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "anthropic_banked_reset_events",
 		column: "rearm_at",
 		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN rearm_at INTEGER",
+	},
+	// ms epoch until which a spent banked reset still owes the account's
+	// overage pause a verdict, because the post-claim usage read was
+	// unavailable. The applier settles it from a later reading.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pending_until",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pending_until INTEGER",
 	},
 ];
 

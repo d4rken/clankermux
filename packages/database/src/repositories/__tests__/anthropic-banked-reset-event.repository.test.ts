@@ -383,6 +383,37 @@ describe("AnthropicBankedResetEventRepository", () => {
 		});
 	});
 
+	describe("overage-pause recovery marks", () => {
+		it("marks, lists across accounts, and clears a resolved row", async () => {
+			const one = await repo.beginManualAttempt(MANUAL);
+			await repo.resolveAttempt(one.row.id, { status: "reset", now: NOW });
+			const two = await repo.beginManualAttempt({
+				...MANUAL,
+				accountId: "acc-2",
+				now: NOW + 1,
+			});
+			await repo.resolveAttempt(two.row.id, { status: "reset", now: NOW });
+			expect(await repo.findRecoveryPending()).toEqual([]);
+
+			expect(await repo.markRecoveryPending(one.row.id, NOW + HOUR)).toBe(true);
+			expect(await repo.markRecoveryPending(two.row.id, NOW + HOUR)).toBe(true);
+			expect(
+				(await repo.findRecoveryPending()).map((r) => [
+					r.account_id,
+					r.recovery_pending_until,
+				]),
+			).toEqual([
+				["acc-1", NOW + HOUR],
+				["acc-2", NOW + HOUR],
+			]);
+
+			expect(await repo.clearRecoveryPending(one.row.id)).toBe(true);
+			expect(
+				(await repo.findRecoveryPending()).map((r) => r.account_id),
+			).toEqual(["acc-2"]);
+		});
+	});
+
 	describe("getLatestAutoApplyCooldownAnchorAt", () => {
 		it("anchors on the latest auto reset or already_used resolution only", async () => {
 			expect(await repo.getLatestAutoApplyCooldownAnchorAt("acc-1")).toBeNull();

@@ -12,6 +12,7 @@ import {
 	fetchAnthropicBankedResetStatus,
 	fetchAnthropicProfile,
 	USAGE_RATE_LIMITED_DEFAULT_MS,
+	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
 import type {
@@ -39,6 +40,41 @@ const log = new Logger("AnthropicBankedResets");
  * sent, as opposed to one given up after an hour unconfirmed.
  */
 export const BANKED_RESET_NOT_SENT_REASON = "not_sent";
+
+/**
+ * How long a spent reset whose post-claim usage read was unavailable keeps
+ * owing the account's overage pause a verdict.
+ */
+export const BANKED_RESET_RECOVERY_WINDOW_MS = 60 * 60_000;
+
+/**
+ * What a usage reading says about lifting an overage pause after a reset:
+ * both the 5-hour and weekly windows known and below their limit (`lift`),
+ * either at its limit (`exhausted`), or either missing (`unknown`).
+ */
+export function overagePauseVerdict(
+	usage: UsageData | null,
+	now: number,
+):
+	| { kind: "lift" }
+	| { kind: "exhausted"; detail: string }
+	| { kind: "unknown" } {
+	const normalized = normalizeAnthropicUsage(
+		usage as unknown as AnthropicUsageData | null,
+		now,
+	);
+	if (!normalized.session || !normalized.weeklyAll) return { kind: "unknown" };
+	if (
+		normalized.session.utilization >= 100 ||
+		normalized.weeklyAll.utilization >= 100
+	) {
+		return {
+			kind: "exhausted",
+			detail: `5h ${normalized.session.utilization}%, weekly ${normalized.weeklyAll.utilization}%`,
+		};
+	}
+	return { kind: "lift" };
+}
 
 /** First wait before replaying a claim that got no answer. */
 export const BANKED_RESET_CLAIM_RETRY_MIN_MS = 60_000;
@@ -461,8 +497,18 @@ export class AnthropicBankedResetCoordinator {
 			try {
 				if (keepPause) {
 					log.info(
-						`Overage pause of '${account.name}' kept after a banked reset: ${keepPause}`,
+						`Overage pause of '${account.name}' kept after a banked reset: ${keepPause.reason}`,
 					);
+					if (keepPause.verificationUnavailable && account.paused) {
+						// The reset is spent and its row settled, so the verdict is owed
+						// separately: the applier decides it from a later reading.
+						await this.writeLedger(account.name, target.rowId, (id) =>
+							this.ctx.dbOps.markAnthropicBankedResetRecoveryPending(
+								id,
+								now + BANKED_RESET_RECOVERY_WINDOW_MS,
+							),
+						);
+					}
 				} else if (
 					await this.ctx.dbOps.resumeAccountIfOveragePaused(accountId)
 				) {
@@ -500,35 +546,49 @@ export class AnthropicBankedResetCoordinator {
 	}
 
 	/**
-	 * Why a fresh reset must not lift the overage pause, or null when it may.
-	 * The pause stands for spending past a spent window; only a reset that
+	 * Why a fresh reset must not lift the overage pause yet, or null when it
+	 * may. The pause stands for spending past a spent window; only a reset that
 	 * cleared the weekly window, confirmed by a post-claim reading with headroom
 	 * in both the 5-hour and weekly windows, removes its reason.
+	 * `verificationUnavailable` marks the one case a later reading can still
+	 * decide.
 	 */
 	private async overagePauseKeptBy(
 		accountId: string,
 		result: AnthropicBankedResetClaimResult,
 		refetch: Promise<boolean>,
-	): Promise<string | null> {
+	): Promise<{ reason: string; verificationUnavailable: boolean } | null> {
 		if (
 			!result.cleared.includes("seven_day") &&
 			!result.cleared.includes("seven_day_overage_included")
 		) {
-			return `the reset cleared ${result.cleared.join(", ") || "no window"}, not the weekly window`;
+			return {
+				reason: `the reset cleared ${result.cleared.join(", ") || "no window"}, not the weekly window`,
+				verificationUnavailable: false,
+			};
 		}
-		if (!(await refetch)) return "the post-claim usage read failed";
-		const normalized = normalizeAnthropicUsage(
-			this.usage.get(accountId) as AnthropicUsageData | null,
+		if (!(await refetch)) {
+			return {
+				reason: "the post-claim usage read failed or was deferred",
+				verificationUnavailable: true,
+			};
+		}
+		const verdict = overagePauseVerdict(
+			this.usage.get(accountId) as UsageData | null,
 			this.now(),
 		);
-		if (!normalized.session || !normalized.weeklyAll) {
-			return "the post-claim usage reading lacks the 5-hour or weekly window";
+		if (verdict.kind === "unknown") {
+			return {
+				reason:
+					"the post-claim usage reading lacks the 5-hour or weekly window",
+				verificationUnavailable: true,
+			};
 		}
-		if (
-			normalized.session.utilization >= 100 ||
-			normalized.weeklyAll.utilization >= 100
-		) {
-			return `the post-claim reading is still at a limit (5h ${normalized.session.utilization}%, weekly ${normalized.weeklyAll.utilization}%)`;
+		if (verdict.kind === "exhausted") {
+			return {
+				reason: `the post-claim reading is still at a limit (${verdict.detail})`,
+				verificationUnavailable: false,
+			};
 		}
 		return null;
 	}

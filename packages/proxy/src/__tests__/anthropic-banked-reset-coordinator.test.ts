@@ -965,3 +965,51 @@ describe("the overage pause after a reset", () => {
 		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
 	});
 });
+
+describe("owed overage-pause verdicts", () => {
+	const HOUR = 60 * 60_000;
+	const overagePaused = {
+		paused: true,
+		pause_reason: "overage",
+		auto_pause_on_overage_enabled: true,
+	} as const;
+	async function claimAndReadMark(requestId: string) {
+		await coordinator().claim(ACCOUNT_ID, { grantId: "g1", requestId });
+		return (
+			await realDbOps.getAnthropicBankedResetEventByRequestId(
+				ACCOUNT_ID,
+				requestId,
+			)
+		)?.recovery_pending_until;
+	}
+
+	it("marks a paused account's reset when the post-claim usage read failed", async () => {
+		Object.assign(baseAccount, overagePaused);
+		refetchSucceeds = false;
+		expect(await claimAndReadMark("req-owed-fail")).toBe(NOW + HOUR);
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+	});
+
+	it("marks it when the post-claim reading lacks a window", async () => {
+		Object.assign(baseAccount, overagePaused);
+		usageReading = { five_hour: { utilization: 10, resets_at: null } };
+		expect(await claimAndReadMark("req-owed-partial-reading")).toBe(NOW + HOUR);
+	});
+
+	it("does not mark a partial reset, a reading at a limit, an unpaused account or a lifted pause", async () => {
+		Object.assign(baseAccount, overagePaused);
+		claimImpl = async () => claimResult({ cleared: ["five_hour"] });
+		expect(await claimAndReadMark("req-partial")).toBeNull();
+
+		claimImpl = async () => claimResult();
+		usageReading = reading(20, 100);
+		expect(await claimAndReadMark("req-exhausted")).toBeNull();
+
+		usageReading = reading(10, 10);
+		expect(await claimAndReadMark("req-lifted")).toBeNull();
+
+		baseAccount.paused = false;
+		refetchSucceeds = false;
+		expect(await claimAndReadMark("req-unpaused")).toBeNull();
+	});
+});

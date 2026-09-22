@@ -53,6 +53,7 @@ import {
 	type AnthropicBankedResetWindow,
 	type AnthropicUsageData,
 } from "@clankermux/types";
+import { overagePauseVerdict } from "./anthropic-banked-reset-coordinator";
 import { weeklyResetCanLiftPause } from "./codex-reset-credit-applier";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
@@ -324,6 +325,16 @@ export interface BankedResetApplyDeps {
 	listCandidateAccounts(): Promise<Array<{ id: string; name: string }>>;
 	/** Resolve claims unconfirmed for an hour as `failed`; returns how many. */
 	expireStaleAttempts(now: number): Promise<number>;
+	/** Rows owing an overage-pause verdict, every account. */
+	getRecoveryPending(): Promise<AnthropicBankedResetEventRow[]>;
+	clearRecoveryPending(rowId: string): Promise<boolean>;
+	resumeIfOveragePaused(accountId: string): Promise<boolean>;
+	/** The cached usage reading and when it was observed; never a network call. */
+	peekUsageObservation(
+		accountId: string,
+	): { data: UsageData; observedAtMs: number | null } | null;
+	/** One free usage read; false when it failed or the shared deadline held it. */
+	refreshUsage(accountId: string): Promise<boolean>;
 	getAccount(accountId: string): Promise<Account | null>;
 	getCachedStatus(accountId: string): AnthropicBankedResetStatus | null;
 	/** Non-forced is a cache-gated no-op while the status is fresh. */
@@ -409,6 +420,7 @@ export class AnthropicBankedResetApplyScheduler {
 		} catch (error) {
 			log.warn(`Banked-reset applier: failed to expire stale claims: ${error}`);
 		}
+		await this.settleOwedOveragePauses();
 		let candidates: Array<{ id: string; name: string }>;
 		try {
 			candidates = await this.deps.listCandidateAccounts();
@@ -430,6 +442,79 @@ export class AnthropicBankedResetApplyScheduler {
 
 	private now(): number {
 		return (this.deps.now ?? Date.now)();
+	}
+
+	/**
+	 * Settle the overage-pause verdicts that spent resets still owe, for every
+	 * account whatever its toggles: a reset whose post-claim usage read was
+	 * unavailable left the pause standing, and nothing else lifts it when
+	 * auto-fallback and auto-refresh are off. Only a reading observed after the
+	 * claim resolved decides; this path never claims.
+	 */
+	private async settleOwedOveragePauses(): Promise<void> {
+		let rows: AnthropicBankedResetEventRow[];
+		try {
+			rows = await this.deps.getRecoveryPending();
+		} catch (error) {
+			log.warn(`Banked-reset applier: failed to list owed verdicts: ${error}`);
+			return;
+		}
+		const refreshed = new Set<string>();
+		for (const row of rows) {
+			try {
+				await this.settleOwedOveragePause(row, refreshed);
+			} catch (error) {
+				log.error(
+					`Banked-reset applier: failed to settle the overage pause owed by ${row.id}:`,
+					error,
+				);
+			}
+		}
+	}
+
+	private async settleOwedOveragePause(
+		row: AnthropicBankedResetEventRow,
+		refreshed: Set<string>,
+	): Promise<void> {
+		const until = row.recovery_pending_until;
+		if (until === null) return;
+		const name = row.account_name;
+		if (this.now() >= until) {
+			await this.deps.clearRecoveryPending(row.id);
+			log.warn(
+				`Banked-reset applier: no usage reading confirmed the reset of '${name}' within the hour; its overage pause stays`,
+			);
+			return;
+		}
+		const resolvedAt = row.resolved_at ?? row.created_at;
+		const postClaimReading = () => {
+			const observation = this.deps.peekUsageObservation(row.account_id);
+			return observation?.observedAtMs != null &&
+				observation.observedAtMs > resolvedAt
+				? observation.data
+				: null;
+		};
+		let reading = postClaimReading();
+		if (!reading && !refreshed.has(row.account_id)) {
+			refreshed.add(row.account_id);
+			await this.deps.refreshUsage(row.account_id).catch(() => false);
+			reading = postClaimReading();
+		}
+		if (!reading) return;
+		const verdict = overagePauseVerdict(reading, this.now());
+		if (verdict.kind === "unknown") return;
+		if (verdict.kind === "lift") {
+			if (await this.deps.resumeIfOveragePaused(row.account_id)) {
+				log.info(
+					`Resumed '${name}' from its overage pause: a later usage reading confirmed its banked reset`,
+				);
+			}
+		} else {
+			log.info(
+				`Overage pause of '${name}' kept: the reading after its banked reset is at a limit (${verdict.detail})`,
+			);
+		}
+		await this.deps.clearRecoveryPending(row.id);
 	}
 
 	private async processAccount(candidate: {
@@ -689,6 +774,9 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		| "getAccount"
 		| "getActiveApiKeys"
 		| "expireStaleAnthropicBankedResetAttempts"
+		| "getAnthropicBankedResetRecoveryPending"
+		| "clearAnthropicBankedResetRecoveryPending"
+		| "resumeAccountIfOveragePaused"
 		| "getPendingAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetAutoApplyCooldownAnchorAt"
 		| "getAnthropicBankedResetRearmAt"
@@ -700,7 +788,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 			force?: boolean,
 		): Promise<{ success: boolean }>;
 	};
-	usage?: Pick<typeof usageCache, "get" | "refreshNow">;
+	usage?: Pick<typeof usageCache, "get" | "peekWithAge" | "refreshNow">;
 	overrides?: Partial<BankedResetApplyDeps>;
 }): AnthropicBankedResetApplyScheduler {
 	const { dbOps, coordinator, overrides } = wiring;
@@ -730,6 +818,19 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 				.map((account) => ({ id: account.id, name: account.name })),
 		expireStaleAttempts: (now) =>
 			dbOps.expireStaleAnthropicBankedResetAttempts(now),
+		getRecoveryPending: () => dbOps.getAnthropicBankedResetRecoveryPending(),
+		clearRecoveryPending: (rowId) =>
+			dbOps.clearAnthropicBankedResetRecoveryPending(rowId),
+		resumeIfOveragePaused: (accountId) =>
+			dbOps.resumeAccountIfOveragePaused(accountId),
+		peekUsageObservation: (accountId) => {
+			const entry = usage.peekWithAge(accountId);
+			return entry
+				? { data: entry.data as UsageData, observedAtMs: entry.observedAtMs }
+				: null;
+		},
+		// refreshNow sends nothing while the shared usage deadline stands.
+		refreshUsage: (accountId) => usage.refreshNow(accountId),
 		getAccount: (accountId) => dbOps.getAccount(accountId),
 		getCachedStatus: (accountId) =>
 			anthropicBankedResetCache.get(accountId)?.status ?? null,
