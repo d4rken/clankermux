@@ -224,9 +224,9 @@ export function decodeNameSelectValue(value: string): NameSelection {
 
 export function RequestsTab() {
 	// ── URL-addressable state ─────────────────────────────────────────────────
-	// Only the project filter and the open request live in the URL: they are the
-	// two things Live Activity links to. Every setter clones the current params
-	// first, so none of them can drop a parameter it does not own.
+	// The project filter, the API key filter and the open request live in the
+	// URL: they are what Live Activity links to. Every setter clones the current
+	// params first, so none of them can drop a parameter it does not own.
 	const [searchParams, setSearchParams] = useSearchParams();
 
 	// Presence, not value. Reading "all" as "no filter" is exactly the bug this
@@ -242,6 +242,14 @@ export function RequestsTab() {
 		? null
 		: searchParams.get("project") || null;
 
+	// The client filter is id-valued, never name-valued: two clients can carry
+	// the same name, and a name would select both of them. The empty bucket wins
+	// over an id, so a link carrying both still resolves to one filter.
+	const noApiKeyFilter = searchParams.get("noApiKey") === "1";
+	const apiKeyIdFilter = noApiKeyFilter
+		? null
+		: searchParams.get("apiKeyId") || null;
+
 	const setProjectSelection = useCallback(
 		(selection: NameSelection) => {
 			setSearchParams(
@@ -256,6 +264,26 @@ export function RequestsTab() {
 					return next;
 				},
 				// Fiddling with the dropdown must not fill the history stack.
+				{ replace: true },
+			);
+		},
+		[setSearchParams],
+	);
+
+	// `selection.name` carries the key's ID here — the dropdown's option values
+	// are ids, and `NameSelection` is the shape both selects speak.
+	const setApiKeySelection = useCallback(
+		(selection: NameSelection) => {
+			setSearchParams(
+				(prev) => {
+					const next = new URLSearchParams(prev);
+					next.delete("apiKeyId");
+					next.delete("noApiKey");
+					if (selection.none) next.set("noApiKey", "1");
+					else if (selection.name !== null)
+						next.set("apiKeyId", selection.name);
+					return next;
+				},
 				{ replace: true },
 			);
 		},
@@ -290,15 +318,6 @@ export function RequestsTab() {
 
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string | null>(null);
-	// The whole selected client, not just its id. Only the id is sent to the
-	// server, but the chip has to name the selection, and the name is not
-	// recoverable from the id alone: a deleted key's name lives on the request
-	// rows, so narrowing the range to rows it does not appear in would leave
-	// the chip describing a filter that is still applied as "Unknown client".
-	const [apiKeyFilter, setApiKeyFilter] = useState<SelectableClient | null>(
-		null,
-	);
-	const [noApiKeyFilter, setNoApiKeyFilter] = useState(false);
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -314,7 +333,7 @@ export function RequestsTab() {
 			status: statusCategory,
 			codes: Array.from(statusCodeFilters),
 			account: accountFilter,
-			apiKeyId: apiKeyFilter?.id ?? null,
+			apiKeyId: apiKeyIdFilter,
 			noApiKey: noApiKeyFilter,
 			project: projectFilter,
 			noProject: noProjectFilter,
@@ -325,7 +344,7 @@ export function RequestsTab() {
 			statusCategory,
 			statusCodeFilters,
 			accountFilter,
-			apiKeyFilter,
+			apiKeyIdFilter,
 			noApiKeyFilter,
 			projectFilter,
 			noProjectFilter,
@@ -486,7 +505,7 @@ export function RequestsTab() {
 	// stamped snapshots catch up. A deleted key keeps its snapshot name and no
 	// application, and still filters by its dangling id — `requests.api_key_id`
 	// has no foreign key, so deletion does not clear it.
-	const uniqueApiKeys = useMemo(() => {
+	const apiKeysById = useMemo(() => {
 		const byId = new Map<string, SelectableClient>();
 		if (data) {
 			for (const summary of data.summaries.values()) {
@@ -505,14 +524,35 @@ export function RequestsTab() {
 				application: key.application,
 			});
 		}
+		return byId;
+	}, [configuredApiKeys, data]);
+
+	// The URL carries the id alone, so the chip and the dropdown resolve their
+	// label here. An id nothing accounts for renders as itself: a hard-deleted
+	// key whose rows have all scrolled out of range has no name left anywhere,
+	// and a stand-in would describe a filter that is still applied as some other
+	// client.
+	const selectedApiKey = useMemo((): SelectableClient | null => {
+		if (apiKeyIdFilter === null) return null;
+		return (
+			apiKeysById.get(apiKeyIdFilter) ?? {
+				id: apiKeyIdFilter,
+				name: apiKeyIdFilter,
+				application: null,
+			}
+		);
+	}, [apiKeysById, apiKeyIdFilter]);
+
+	const uniqueApiKeys = useMemo(() => {
+		const options = Array.from(apiKeysById.values());
 		// The current selection stays listed even when nothing in range carries
 		// it, so the dropdown cannot drop the option it is showing as selected.
-		if (apiKeyFilter && !byId.has(apiKeyFilter.id))
-			byId.set(apiKeyFilter.id, apiKeyFilter);
-		return Array.from(byId.values()).sort(
+		if (selectedApiKey && !apiKeysById.has(selectedApiKey.id))
+			options.push(selectedApiKey);
+		return options.sort(
 			(a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
 		);
-	}, [configuredApiKeys, data, apiKeyFilter]);
+	}, [apiKeysById, selectedApiKey]);
 
 	// Project filter: union of every project seen across recorded requests (from
 	// /api/requests/projects) and any projects observed in the loaded slice
@@ -558,9 +598,24 @@ export function RequestsTab() {
 	const clearAllFilters = () => {
 		setStatusCategory("all");
 		setAccountFilter(null);
-		setApiKeyFilter(null);
-		setNoApiKeyFilter(false);
-		setProjectSelection({ name: null, none: false });
+		// One callback for both URL filters, not `setApiKeySelection` followed by
+		// `setProjectSelection`: each callback is handed the params captured for
+		// the render it was created in, so the second would clone a query string
+		// that still carries what the first deleted, and navigate it back. The
+		// four keys are the only ones deleted — `request` survives, so clearing
+		// filters cannot close an open details modal. Both halves are held by the
+		// Clear-all test in RequestsTab.url.dom-test.tsx.
+		setSearchParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				next.delete("apiKeyId");
+				next.delete("noApiKey");
+				next.delete("project");
+				next.delete("noProject");
+				return next;
+			},
+			{ replace: true },
+		);
 		setDateFrom("");
 		setDateTo("");
 		setStatusCodeFilters(new Set());
@@ -680,26 +735,25 @@ export function RequestsTab() {
 									onClear={() => setAccountFilter(null)}
 								/>
 							)}
-							{(noApiKeyFilter || apiKeyFilter !== null) && (
+							{(noApiKeyFilter || selectedApiKey !== null) && (
 								<FilterChip
 									icon={<Hash className="h-3 w-3" />}
 									label={
 										// The bucket wins, exactly as it does in the query params:
 										// `noApiKey` and a selected client are never both sent.
-										noApiKeyFilter || !apiKeyFilter ? (
+										noApiKeyFilter || !selectedApiKey ? (
 											"No API Key"
 										) : (
 											<ClientLabel
-												apiKeyId={apiKeyFilter.id}
-												name={apiKeyFilter.name}
-												application={apiKeyFilter.application}
+												apiKeyId={selectedApiKey.id}
+												name={selectedApiKey.name}
+												application={selectedApiKey.application}
 											/>
 										)
 									}
-									onClear={() => {
-										setApiKeyFilter(null);
-										setNoApiKeyFilter(false);
-									}}
+									onClear={() =>
+										setApiKeySelection({ name: null, none: false })
+									}
 								/>
 							)}
 							{(noProjectFilter || projectFilter !== null) && (
@@ -983,16 +1037,12 @@ export function RequestsTab() {
 									<Select
 										// The option value is the key's ID, not its name.
 										value={nameSelectValue({
-											name: apiKeyFilter?.id ?? null,
+											name: apiKeyIdFilter,
 											none: noApiKeyFilter,
 										})}
-										onValueChange={(value) => {
-											const next = decodeNameSelectValue(value);
-											setApiKeyFilter(
-												uniqueApiKeys.find((k) => k.id === next.name) ?? null,
-											);
-											setNoApiKeyFilter(next.none);
-										}}
+										onValueChange={(value) =>
+											setApiKeySelection(decodeNameSelectValue(value))
+										}
 									>
 										<SelectTrigger className="h-9">
 											<SelectValue placeholder="All API keys" />
@@ -1313,17 +1363,7 @@ export function RequestsTab() {
 														"text-xs cursor-pointer hover:bg-accent",
 													)}
 													onClick={() => {
-														// This row's own id and name, so filtering from a
-														// deleted key's request still names it.
-														setApiKeyFilter({
-															id: apiKeyId,
-															name: apiKeyName,
-															application:
-																configuredApiKeys?.find(
-																	(k) => k.id === apiKeyId,
-																)?.application ?? null,
-														});
-														setNoApiKeyFilter(false);
+														setApiKeySelection({ name: apiKeyId, none: false });
 													}}
 													title={`Filter by API key ${apiKeyName}`}
 												>

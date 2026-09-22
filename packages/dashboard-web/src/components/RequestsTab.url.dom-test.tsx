@@ -11,7 +11,7 @@ import { HttpError } from "@clankermux/http-common";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useLocation } from "react-router";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { API_LIMITS } from "../constants";
 import { queryKeys } from "../lib/query-keys";
@@ -20,11 +20,11 @@ import { RequestsTab } from "./RequestsTab";
 /**
  * The Requests tab's URL-addressable state, mounted for real.
  *
- * `?request=<id>` and `?project=<name>` are what the Live Activity card links
- * to, so their resolution has to hold up against a real router and a real query
- * client: the modal is a portalled Radix dialog that `renderToStaticMarkup`
- * cannot see at all, and the four states of the by-id lookup only exist once
- * the query has actually run.
+ * `?request=<id>`, `?project=<name>` and `?apiKeyId=<id>` are what the Live
+ * Activity card links to, so their resolution has to hold up against a real
+ * router and a real query client: the modal is a portalled Radix dialog that
+ * `renderToStaticMarkup` cannot see at all, and the four states of the by-id
+ * lookup only exist once the query has actually run.
  *
  * API access is stubbed with `spyOn` on the `api` object, never `mock.module` —
  * a partial `mock.module` return leaks into later files in this suite.
@@ -36,6 +36,8 @@ import { RequestsTab } from "./RequestsTab";
 
 const LOADED_ID = "loaded-request";
 const REMOTE_ID = "remote-request";
+const KEY_ID = "key-9";
+const KEY_NAME = "workstation";
 
 function summary(over: Partial<RequestSummary> = {}): RequestSummary {
 	return {
@@ -60,10 +62,18 @@ let root: Root | null = null;
 let host: HTMLElement | null = null;
 let queryClient: QueryClient | null = null;
 let currentSearch = "";
+let goBack: (() => void) | null = null;
 
-/** Reports the router's live query string so URL effects can be asserted. */
+/**
+ * Reports the router's live query string so URL effects can be asserted, and
+ * hands out a Back. Memory history clamps `go(-1)` at index 0, so pressing Back
+ * after a replacing navigation returns the same entry, and after a pushing one
+ * returns the entry before it — which is how a test tells the two apart.
+ */
 function SearchProbe() {
 	currentSearch = useLocation().search;
+	const navigate = useNavigate();
+	goBack = () => navigate(-1);
 	return null;
 }
 
@@ -139,6 +149,39 @@ function modalIsOpen(): boolean {
 	return pageText().includes("Request Details");
 }
 
+/** A button named by its own text or, for the icon-led chips, by its title. */
+function findButton(label: string): HTMLButtonElement | undefined {
+	return Array.from(document.querySelectorAll("button")).find(
+		(b) => b.textContent?.trim() === label || b.getAttribute("title") === label,
+	);
+}
+
+async function clickButton(label: string): Promise<void> {
+	const button = findButton(label);
+	expect(button).toBeDefined();
+	await act(async () => {
+		button?.click();
+	});
+	await settle();
+}
+
+/**
+ * The text of every chip in the active-filters bar, which only renders while
+ * some filter is applied.
+ *
+ * Walks up from the Clear-all button instead of matching chip classes: the
+ * chips are the bar's children apart from the group that holds the counter and
+ * that button, and the classes are shared with the filter chips on the rows.
+ */
+function activeFilterLabels(): string[] {
+	const group = findButton("Clear all")?.parentElement;
+	const bar = group?.parentElement;
+	if (!group || !bar) return [];
+	return Array.from(bar.children)
+		.filter((child) => child !== group)
+		.map((child) => child.textContent?.trim() ?? "");
+}
+
 afterEach(async () => {
 	if (root) {
 		const current = root;
@@ -151,6 +194,7 @@ afterEach(async () => {
 	host = null;
 	queryClient = null;
 	currentSearch = "";
+	goBack = null;
 	// spyOn call counters live on the shared `api` object, so without this a
 	// "was never called" assertion would read the previous test's calls.
 	mock.restore();
@@ -311,6 +355,103 @@ describe("RequestsTab — ?project=", () => {
 			expect.any(Number),
 			expect.anything(),
 		);
+	});
+});
+
+describe("RequestsTab — ?apiKeyId=", () => {
+	it("preselects a client by key id and filters on it", async () => {
+		await mount(`/requests?apiKeyId=${KEY_ID}`, {
+			loaded: [summary({ apiKeyId: KEY_ID, apiKeyName: KEY_NAME })],
+		});
+
+		// The URL carries the id; the chip has to name the client behind it.
+		expect(activeFilterLabels()).toContain(KEY_NAME);
+		expect(pageText()).toContain("live updates paused");
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ apiKeyId: KEY_ID }),
+		);
+	});
+
+	it("preselects the empty bucket from noApiKey=1", async () => {
+		await mount("/requests?noApiKey=1", { loaded: [summary()] });
+
+		expect(activeFilterLabels()).toContain("No API Key");
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ noApiKey: true }),
+		);
+	});
+
+	it("lets the empty bucket win when a link carries both", async () => {
+		// The two are mutually exclusive, and only one of them can reach the
+		// server: leaving the id active as well would send a filter the chip is
+		// not showing.
+		await mount(`/requests?apiKeyId=${KEY_ID}&noApiKey=1`, {
+			loaded: [summary({ apiKeyId: KEY_ID, apiKeyName: KEY_NAME })],
+		});
+
+		expect(activeFilterLabels()).toContain("No API Key");
+		expect(activeFilterLabels()).not.toContain(KEY_NAME);
+		expect(api.getRequestsSummary).not.toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ apiKeyId: KEY_ID }),
+		);
+	});
+
+	it("renders an id nothing accounts for as itself", async () => {
+		// A hard-deleted key whose rows have all scrolled out of range: nothing
+		// left holds its name, and a stand-in would describe the filter that is
+		// still applied as some other client.
+		await mount("/requests?apiKeyId=ghost-key", { loaded: [summary()] });
+
+		expect(activeFilterLabels()).toContain("ghost-key");
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ apiKeyId: "ghost-key" }),
+		);
+	});
+
+	it("applies the row's client chip without stacking a history entry", async () => {
+		await mount("/requests", {
+			loaded: [summary({ apiKeyId: KEY_ID, apiKeyName: KEY_NAME })],
+		});
+
+		await clickButton(`Filter by API key ${KEY_NAME}`);
+		expect(new URLSearchParams(currentSearch).get("apiKeyId")).toBe(KEY_ID);
+
+		// Fiddling with a filter must not fill the history stack: a pushed entry
+		// would put the unfiltered URL one Back away from the filtered one.
+		await act(async () => {
+			goBack?.();
+		});
+		await settle();
+
+		expect(new URLSearchParams(currentSearch).get("apiKeyId")).toBe(KEY_ID);
+	});
+});
+
+describe("RequestsTab — Clear all", () => {
+	it("clears both URL filters at once and keeps the open request", async () => {
+		// Both filters go in ONE setSearchParams callback. Each callback is handed
+		// the params captured for the render it was created in, so a second one
+		// would clone a query string that still carries what the first deleted and
+		// navigate it back — leaving one of these two chips standing.
+		await mount(
+			`/requests?apiKeyId=${KEY_ID}&project=clankermux&request=${LOADED_ID}`,
+			{ loaded: [summary({ apiKeyId: KEY_ID, apiKeyName: KEY_NAME })] },
+		);
+
+		expect(activeFilterLabels()).toContain(KEY_NAME);
+		expect(activeFilterLabels()).toContain("clankermux");
+
+		await clickButton("Clear all");
+
+		const params = new URLSearchParams(currentSearch);
+		expect(params.get("apiKeyId")).toBeNull();
+		expect(params.get("project")).toBeNull();
+		// Clearing filters must not close an open details modal.
+		expect(params.get("request")).toBe(LOADED_ID);
 	});
 });
 

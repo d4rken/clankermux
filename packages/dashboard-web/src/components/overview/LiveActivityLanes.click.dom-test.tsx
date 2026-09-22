@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Lane, LiveEvent } from "../../lib/live-activity";
+import type { Lane, LaneDimension, LiveEvent } from "../../lib/live-activity";
 import {
 	buildLanes,
 	LANE_HEIGHT,
 	markCenterX,
 	NOW_INSET,
 } from "../../lib/live-activity";
-import { ScrollingLanes } from "./LiveActivityLanes";
+import { type ResolveClient, ScrollingLanes } from "./LiveActivityLanes";
 
 /**
- * The click and keyboard paths of the Live Activity plot, mounted for real.
+ * The click and keyboard paths of the Live Activity card, mounted for real —
+ * the plot's pointer, keyboard and focus handling, and the header controls
+ * that only do anything when something clicks them.
  *
  * `renderToStaticMarkup` cannot reach any of this: resolving a click to a mark
  * reads the SVG's live bounding rect, and the "Open selected request" link only
@@ -44,6 +46,8 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		durationMs: 1200,
 		tokensPerSecond: null,
 		account: "backup2-darken",
+		apiKeyId: null,
+		apiKeyName: null,
 		...over,
 	};
 }
@@ -53,6 +57,7 @@ const lanes: Lane[] = buildLanes(
 		event({ id: "recent", ts: T0 - 5_000 }),
 		event({ id: "older", ts: T0 - 150_000 }),
 	],
+	"project",
 	T0,
 	WINDOW,
 	6,
@@ -73,6 +78,7 @@ function xOfTs(ts: number): number {
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 let opened: string[] = [];
+let grouped: LaneDimension[] = [];
 let realOpen: typeof window.open;
 const realDateNow = Date.now;
 
@@ -116,7 +122,10 @@ function selectedLink(): HTMLAnchorElement | null {
 		null) as HTMLAnchorElement | null;
 }
 
-async function mount(reducedMotion = true) {
+async function mount(
+	reducedMotion = true,
+	over: { lanes?: Lane[]; resolveClient?: ResolveClient } = {},
+) {
 	host = document.createElement("div");
 	document.body.appendChild(host);
 	root = createRoot(host);
@@ -124,7 +133,10 @@ async function mount(reducedMotion = true) {
 		root?.render(
 			<ScrollingLanes
 				plotAreaRef={createRef<HTMLDivElement>()}
-				lanes={lanes}
+				lanes={over.lanes ?? lanes}
+				resolveClient={over.resolveClient}
+				dimension="project"
+				setDimension={(next) => grouped.push(next)}
 				renderNow={T0}
 				windowMs={WINDOW}
 				setWindowMs={() => {}}
@@ -149,6 +161,7 @@ async function focusPlot() {
 
 beforeEach(() => {
 	opened = [];
+	grouped = [];
 	realOpen = window.open;
 	window.open = ((url?: string | URL) => {
 		opened.push(String(url));
@@ -228,6 +241,84 @@ describe("Live Activity plot — clicking a mark", () => {
 		opened = [];
 		await clickPlot(xOfTs(T0 - 5_000), LANE_HEIGHT / 2);
 		expect(opened).toEqual([]);
+	});
+});
+
+describe("Live Activity plot — mark tooltip", () => {
+	function tooltip(): string {
+		return host?.querySelector('[role="status"]')?.textContent ?? "";
+	}
+
+	/** One lane holding a single request from `apiKeyId`. */
+	function laneFor(apiKeyId: string | null, apiKeyName: string | null) {
+		return buildLanes(
+			[event({ id: "recent", ts: T0 - 5_000, apiKeyId, apiKeyName })],
+			"project",
+			T0,
+			WINDOW,
+			6,
+		).lanes;
+	}
+
+	it("names the client behind the selected request", async () => {
+		// Grouped by project, so the lane gutter says nothing about the client:
+		// this row is the only place the pointer can learn it.
+		await mount(true, {
+			lanes: laneFor("key-1", "old-laptop"),
+			resolveClient: (apiKeyId) =>
+				apiKeyId === "key-1"
+					? { name: "Laptop", application: "claude-code" }
+					: null,
+		});
+		await focusPlot();
+
+		expect(tooltip()).toContain("Client");
+		expect(tooltip()).toContain("Laptop");
+	});
+
+	it("falls back to the name the request recorded", async () => {
+		await mount(true, { lanes: laneFor("key-9", "workstation") });
+		await focusPlot();
+
+		expect(tooltip()).toContain("workstation");
+	});
+
+	it("says nothing about a client for a request that carried no key", async () => {
+		await mount(true, { lanes: laneFor(null, null) });
+		await focusPlot();
+
+		expect(tooltip()).not.toContain("Client");
+	});
+});
+
+describe("Live Activity card — grouping control", () => {
+	/** A button inside the grouping fieldset, by its visible label. */
+	function groupButton(label: string): HTMLButtonElement {
+		const fieldset = host?.querySelector(
+			'fieldset[aria-label="Live activity grouping"]',
+		);
+		const button = Array.from(fieldset?.querySelectorAll("button") ?? []).find(
+			(candidate) => candidate.textContent === label,
+		);
+		if (!button) throw new Error(`no ${label} option`);
+		return button as HTMLButtonElement;
+	}
+
+	it("reports the dimension the operator picked", async () => {
+		await mount();
+
+		await act(async () => {
+			groupButton("Client").click();
+		});
+
+		expect(grouped).toEqual(["client"]);
+	});
+
+	it("marks the dimension on screen as pressed", async () => {
+		await mount();
+
+		expect(groupButton("Project").getAttribute("aria-pressed")).toBe("true");
+		expect(groupButton("Client").getAttribute("aria-pressed")).toBe("false");
 	});
 });
 

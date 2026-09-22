@@ -5,6 +5,7 @@ import {
 	buildCodexWeeklyRewrite,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
+	type RequestStartEvt,
 	requestEvents,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
@@ -949,10 +950,10 @@ async function forwardToClientInner(
 		ctx.requestRecorder.begin(recordMeta);
 	}
 
-	// Emit request start event for real-time dashboard. `project` and
-	// `requestedModel` ride along so a client that connected after this
-	// request's ingress event — or that never saw one, e.g. an internal
-	// dispatch — can still attribute it to a project lane.
+	// Emit request start event for real-time dashboard. `project`,
+	// `requestedModel` and the API key identity ride along so a client that
+	// connected after this request's ingress event — or that never saw one,
+	// e.g. an internal dispatch — can still attribute it to a lane.
 	if (shouldProcessRequest) {
 		requestEvents.emit("event", {
 			type: "start",
@@ -964,7 +965,9 @@ async function forwardToClientInner(
 			statusCode: response.status,
 			project: project ?? null,
 			model: requestedModel ?? null,
-		});
+			apiKeyId: apiKeyId || null,
+			apiKeyName: apiKeyName || null,
+		} satisfies RequestStartEvt);
 	}
 
 	/*********************************************************************

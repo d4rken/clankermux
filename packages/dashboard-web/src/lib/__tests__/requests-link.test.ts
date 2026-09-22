@@ -23,6 +23,8 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		durationMs: 1200,
 		tokensPerSecond: null,
 		account: "backup2-darken",
+		apiKeyId: null,
+		apiKeyName: null,
 		...over,
 	};
 }
@@ -58,9 +60,27 @@ describe("laneRequestsHref", () => {
 	});
 
 	it("has no link for the overflow lane", () => {
-		// It aggregates several projects, so no single project filter expresses
-		// it — a link would silently show a subset.
+		// It aggregates several lanes, so no single filter expresses it — a link
+		// would silently show a subset.
 		expect(laneRequestsHref({ kind: "other" })).toBeNull();
+	});
+
+	it("filters to a client by key id", () => {
+		expect(laneRequestsHref({ kind: "client", apiKeyId: "key-1" })).toBe(
+			"/requests?apiKeyId=key-1",
+		);
+	});
+
+	it("selects the keyless bucket with its own flag", () => {
+		expect(laneRequestsHref({ kind: "no-client" })).toBe(
+			"/requests?noApiKey=1",
+		);
+	});
+
+	it("encodes a key id that carries query syntax", () => {
+		expect(laneRequestsHref({ kind: "client", apiKeyId: "a&b" })).toBe(
+			"/requests?apiKeyId=a%26b",
+		);
 	});
 
 	it("encodes names that carry query, fragment or path syntax", () => {
@@ -106,6 +126,7 @@ describe("resolveMarkHref", () => {
 			event({ id: "older", ts: T0 - 20_000 }),
 			event({ id: "other-lane", ts: T0 - 5_000, project: "herdr" }),
 		],
+		"project",
 		T0,
 		WINDOW,
 		6,
@@ -175,12 +196,14 @@ describe("resolveMarkHref", () => {
 		// distance that still counts as hitting it is wider too.
 		const big = buildLanes(
 			[event({ id: "big", ts: T0 - 5_000, tokens: 200_000 })],
+			"project",
 			T0,
 			WINDOW,
 			6,
 		).lanes;
 		const small = buildLanes(
 			[event({ id: "small", ts: T0 - 5_000, tokens: 1 })],
+			"project",
 			T0,
 			WINDOW,
 			6,

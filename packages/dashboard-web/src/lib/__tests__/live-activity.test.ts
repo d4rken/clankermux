@@ -7,6 +7,7 @@ import {
 	applyHistoryRows,
 	applyStreamEvent,
 	buildLanes,
+	type LiveEvent,
 	type LiveStore,
 	LOST_AFTER_MS,
 	laneKeyOf,
@@ -54,6 +55,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")).toMatchObject({
@@ -75,6 +78,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, {
 			type: "start",
@@ -88,6 +93,8 @@ describe("applyStreamEvent — phases", () => {
 			statusCode: 200,
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")?.status).toBe("streaming");
@@ -106,6 +113,8 @@ describe("applyStreamEvent — phases", () => {
 			statusCode: 200,
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "summary", payload: summaryPayload() });
 
@@ -127,6 +136,8 @@ describe("applyStreamEvent — phases", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: "claude-opus-5",
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		expect(s.get("r1")?.status).toBe("ok");
@@ -166,6 +177,8 @@ describe("applyStreamEvent — retraction", () => {
 			path: "/v1/messages",
 			project: null,
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "ingress-end", id: "r1", statusCode: 400 });
 
@@ -194,6 +207,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 					path: "/v1/messages",
 					project: "herdr",
 					model: "claude-opus-5",
+					apiKeyId: null,
+					apiKeyName: null,
 					phase: "streaming",
 					accountId: "acct-1",
 					statusCode: 200,
@@ -220,6 +235,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "snapshot", active: [] });
 
@@ -246,6 +263,8 @@ describe("applyStreamEvent — snapshot reconciliation", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 		applyStreamEvent(s, { type: "snapshot", active: [] });
 		expect(s.get("r1")?.status).toBe("lost");
@@ -333,6 +352,157 @@ describe("normalization", () => {
 	});
 });
 
+describe("client identity", () => {
+	it("carries the key through an ingress", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "ingress",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+
+		expect(s.get("r1")).toMatchObject({
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("carries the key through a start", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "start",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			accountId: "acct-1",
+			statusCode: 200,
+			project: "clankermux",
+			model: "claude-opus-5",
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+
+		expect(s.get("r1")).toMatchObject({
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("carries the key through a snapshot entry", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "snapshot",
+			active: [
+				{
+					id: "r9",
+					timestamp: T0,
+					method: "POST",
+					path: "/v1/messages",
+					project: "herdr",
+					model: "claude-opus-5",
+					apiKeyId: "key-1",
+					apiKeyName: "laptop",
+					phase: "streaming",
+					accountId: "acct-1",
+					statusCode: 200,
+				},
+			],
+		});
+
+		expect(s.get("r9")).toMatchObject({
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("carries the key through a live summary", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "summary",
+			payload: summaryPayload({ apiKeyId: "key-1", apiKeyName: "laptop" }),
+		});
+
+		expect(s.get("r1")).toMatchObject({
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("carries the key through a history row", () => {
+		const s = store();
+		applyHistoryRows(s, [
+			summaryPayload({ apiKeyId: "key-1", apiKeyName: "laptop" }),
+		]);
+
+		expect(s.get("r1")).toMatchObject({
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("reads a request that carried no key as null, not as a gap", () => {
+		const s = store();
+		applyHistoryRows(s, [summaryPayload()]);
+
+		expect(s.get("r1")).toMatchObject({ apiKeyId: null, apiKeyName: null });
+	});
+
+	it("keeps the key an update omits", () => {
+		// The live path knows the key from ingress onwards; a summary that
+		// arrives without one must not blank it.
+		const s = store();
+		applyStreamEvent(s, {
+			type: "ingress",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+		applyStreamEvent(s, { type: "summary", payload: summaryPayload() });
+
+		expect(s.get("r1")).toMatchObject({
+			status: "ok",
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+	});
+
+	it("lets one key be seen under two recorded names", () => {
+		// A live event carries the name held when the request arrived; a history
+		// row carries the key's current name. Neither is corrected here — the id
+		// is the identity, and the display name is resolved by the view.
+		const s = store();
+		applyStreamEvent(s, {
+			type: "ingress",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			project: "clankermux",
+			model: "claude-opus-5",
+			apiKeyId: "key-1",
+			apiKeyName: "laptop",
+		});
+		applyHistoryRows(s, [
+			summaryPayload({ id: "r2", apiKeyId: "key-1", apiKeyName: "desktop" }),
+		]);
+
+		expect(s.get("r1")?.apiKeyName).toBe("laptop");
+		expect(s.get("r2")?.apiKeyName).toBe("desktop");
+	});
+});
+
 describe("pruneLiveStore", () => {
 	const ingressAt = (s: LiveStore, id: string, ts: number) =>
 		applyStreamEvent(s, {
@@ -343,6 +513,8 @@ describe("pruneLiveStore", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 	it("drops completed events that fall out of the window", () => {
@@ -403,6 +575,8 @@ describe("sweepLostEvents", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		sweepLostEvents(s, T0 + LOST_AFTER_MS + 1);
@@ -419,6 +593,8 @@ describe("sweepLostEvents", () => {
 			path: "/v1/messages",
 			project: "clankermux",
 			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		});
 
 		sweepLostEvents(s, T0 + 60_000);
@@ -428,13 +604,31 @@ describe("sweepLostEvents", () => {
 
 describe("laneKeyOf", () => {
 	it("cannot collide a real project with the no-project bucket", () => {
-		expect(laneKeyOf("(no project)")).not.toBe(laneKeyOf(null));
+		expect(laneKeyOf("project", "(no project)")).not.toBe(
+			laneKeyOf("project", null),
+		);
 	});
 
 	it("cannot collide a real project with the overflow bucket", () => {
 		// A project literally named "Other (3 projects)" must not merge into the
 		// synthetic overflow lane.
-		expect(laneKeyOf("Other (3 projects)")).not.toBe("other");
+		expect(laneKeyOf("project", "Other (3 projects)")).not.toBe("other");
+	});
+
+	it("cannot collide the two dimensions with each other", () => {
+		// A project and a key id are unrelated namespaces that can carry the same
+		// string, and the two empty buckets are different buckets.
+		expect(laneKeyOf("client", "shared")).not.toBe(
+			laneKeyOf("project", "shared"),
+		);
+		expect(laneKeyOf("client", null)).not.toBe(laneKeyOf("project", null));
+	});
+
+	it("cannot collide a key id with either synthetic bucket", () => {
+		expect(laneKeyOf("client", "no-client")).not.toBe(
+			laneKeyOf("client", null),
+		);
+		expect(laneKeyOf("client", "other")).not.toBe("other");
 	});
 });
 
@@ -443,8 +637,8 @@ describe("buildLanes", () => {
 		id: string,
 		project: string | null,
 		ts: number,
-		over = {},
-	) {
+		over: Partial<LiveEvent> = {},
+	): LiveEvent {
 		return {
 			id,
 			ts,
@@ -455,6 +649,8 @@ describe("buildLanes", () => {
 			durationMs: 100,
 			tokensPerSecond: null,
 			account: null,
+			apiKeyId: null,
+			apiKeyName: null,
 			...over,
 		};
 	}
@@ -466,6 +662,7 @@ describe("buildLanes", () => {
 				completed("b", "clankermux", T0 + 1),
 				completed("c", "herdr", T0),
 			],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -486,6 +683,7 @@ describe("buildLanes", () => {
 				completed("b", "clankermux", T0, { status: "error" }),
 				completed("c", "clankermux", T0),
 			],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -498,13 +696,14 @@ describe("buildLanes", () => {
 	it("labels the null-project bucket without claiming a project name", () => {
 		const { lanes } = buildLanes(
 			[completed("a", null, T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
 		);
 
 		expect(lanes[0].label).toBe("(no project)");
-		expect(lanes[0].key).toBe(laneKeyOf(null));
+		expect(lanes[0].key).toBe(laneKeyOf("project", null));
 	});
 
 	it("carries each lane's scope as data, not as an encoded key", () => {
@@ -517,6 +716,7 @@ describe("buildLanes", () => {
 		);
 		const { lanes } = buildLanes(
 			[...events, completed("anon", null, T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			// One named lane, so p2/p3 fold into the overflow row.
@@ -539,6 +739,7 @@ describe("buildLanes", () => {
 		// The label collides with the empty bucket's; the scope must not.
 		const { lanes } = buildLanes(
 			[completed("a", "(no project)", T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -558,7 +759,7 @@ describe("buildLanes", () => {
 			),
 		);
 
-		const { lanes } = buildLanes(events, T0 + 1000, WINDOW, 6);
+		const { lanes } = buildLanes(events, "project", T0 + 1000, WINDOW, 6);
 
 		// `maxLanes` bounds the NAMED lanes; Other is an extra row rather than one
 		// carved out of that quota, so six projects keep a direct row and only the
@@ -576,6 +777,7 @@ describe("buildLanes", () => {
 		// focus, and shuffle projects in and out of Other mid-inspection.
 		const first = buildLanes(
 			[completed("a", "alpha", T0), completed("b", "beta", T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -590,6 +792,7 @@ describe("buildLanes", () => {
 				completed("c", "beta", T0),
 				completed("d", "beta", T0),
 			],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -602,6 +805,7 @@ describe("buildLanes", () => {
 	it("drops a lane once it has no events left in the window", () => {
 		const first = buildLanes(
 			[completed("a", "alpha", T0), completed("b", "beta", T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -609,6 +813,7 @@ describe("buildLanes", () => {
 
 		const second = buildLanes(
 			[completed("b", "beta", T0)],
+			"project",
 			T0 + 1000,
 			WINDOW,
 			6,
@@ -616,7 +821,7 @@ describe("buildLanes", () => {
 		);
 
 		expect(second.lanes.map((l) => l.label)).toEqual(["beta"]);
-		expect(second.order).toEqual([laneKeyOf("beta")]);
+		expect(second.order).toEqual([laneKeyOf("project", "beta")]);
 	});
 
 	it("keeps an out-of-window active request in its lane", () => {
@@ -626,6 +831,7 @@ describe("buildLanes", () => {
 					status: "streaming",
 				}),
 			],
+			"project",
 			T0,
 			WINDOW,
 			6,
@@ -646,6 +852,7 @@ describe("buildLanes", () => {
 					tokens: 9_000,
 				}),
 			],
+			"project",
 			T0,
 			WINDOW,
 			6,
@@ -659,6 +866,7 @@ describe("buildLanes", () => {
 	it("counts an in-window active request as both", () => {
 		const { lanes } = buildLanes(
 			[completed("now", "clankermux", T0 - 1_000, { status: "streaming" })],
+			"project",
 			T0,
 			WINDOW,
 			6,
@@ -692,6 +900,7 @@ describe("buildLanes", () => {
 		it("gives maxLanes rows to named projects and folds only the named tail", () => {
 			const { lanes } = buildLanes(
 				namedProjects(10),
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -720,8 +929,10 @@ describe("buildLanes", () => {
 		 */
 		function namedThenUntaggedOrder(count: number): string[] {
 			return [
-				...Array.from({ length: count }, (_, i) => laneKeyOf(`p${i + 1}`)),
-				laneKeyOf(null),
+				...Array.from({ length: count }, (_, i) =>
+					laneKeyOf("project", `p${i + 1}`),
+				),
+				laneKeyOf("project", null),
 			];
 		}
 
@@ -732,6 +943,7 @@ describe("buildLanes", () => {
 					completed("u1", null, T0),
 					completed("u2", null, T0 + 1),
 				],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -763,6 +975,7 @@ describe("buildLanes", () => {
 		it("adds no overflow row when only the no-project bucket is extra", () => {
 			const { lanes } = buildLanes(
 				[...namedProjects(8), completed("u1", null, T0)],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -786,6 +999,7 @@ describe("buildLanes", () => {
 		it("renders untagged-only traffic as a single no-project lane", () => {
 			const { lanes } = buildLanes(
 				[completed("u1", null, T0), completed("u2", null, T0 + 1)],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -793,7 +1007,7 @@ describe("buildLanes", () => {
 
 			expect(lanes).toHaveLength(1);
 			expect(lanes[0].label).toBe("(no project)");
-			expect(lanes[0].key).toBe(laneKeyOf(null));
+			expect(lanes[0].key).toBe(laneKeyOf("project", null));
 			expect(lanes[0].requests).toBe(2);
 		});
 
@@ -805,11 +1019,18 @@ describe("buildLanes", () => {
 				completed("u1", null, T0),
 				completed("u2", null, T0 + 1),
 			];
-			const first = buildLanes(untagged, T0 + 1000, WINDOW, MAX_LANES);
+			const first = buildLanes(
+				untagged,
+				"project",
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
 			expect(first.lanes.map((l) => l.label)).toEqual(["(no project)"]);
 
 			const second = buildLanes(
 				[...untagged, ...namedProjects(2)],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -823,6 +1044,7 @@ describe("buildLanes", () => {
 
 			const third = buildLanes(
 				[...untagged, ...namedProjects(3)],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -840,10 +1062,17 @@ describe("buildLanes", () => {
 			// It arrived first, so it stays row 0 even once the named projects
 			// overflow — and the overflow label still counts named projects only.
 			const untagged = [completed("u1", null, T0)];
-			const first = buildLanes(untagged, T0 + 1000, WINDOW, MAX_LANES);
+			const first = buildLanes(
+				untagged,
+				"project",
+				T0 + 1000,
+				WINDOW,
+				MAX_LANES,
+			);
 
 			const { lanes } = buildLanes(
 				[...untagged, ...namedProjects(10)],
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -872,9 +1101,10 @@ describe("buildLanes", () => {
 				completed("u1", null, T0),
 				completed("u2", null, T0 + 1),
 			];
-			const first = buildLanes(events, T0 + 1000, WINDOW, MAX_LANES);
+			const first = buildLanes(events, "project", T0 + 1000, WINDOW, MAX_LANES);
 			const second = buildLanes(
 				events,
+				"project",
 				T0 + 1000,
 				WINDOW,
 				MAX_LANES,
@@ -885,6 +1115,161 @@ describe("buildLanes", () => {
 			expect(second.lanes.map((l) => l.label)).toEqual(
 				first.lanes.map((l) => l.label),
 			);
+		});
+	});
+
+	describe("client dimension", () => {
+		/** One request from `apiKeyId`, recorded under `apiKeyName`. */
+		function fromKey(
+			id: string,
+			apiKeyId: string | null,
+			apiKeyName: string | null,
+			ts: number,
+		) {
+			return completed(id, "clankermux", ts, { apiKeyId, apiKeyName });
+		}
+
+		it("groups by key and totals each lane", () => {
+			const { lanes } = buildLanes(
+				[
+					fromKey("a", "key-1", "laptop", T0),
+					fromKey("b", "key-1", "laptop", T0 + 1),
+					fromKey("c", "key-2", "ci", T0),
+				],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			const laptop = lanes.find((l) => l.label === "laptop");
+			expect(laptop?.requests).toBe(2);
+			expect(laptop?.tokens).toBe(2000);
+			expect(lanes.find((l) => l.label === "ci")?.requests).toBe(1);
+		});
+
+		it("keeps one key in one lane when its recorded names differ", () => {
+			// A rename mid-window, or a live event and a history row disagreeing
+			// about the name, must not split the key across two rows.
+			const { lanes } = buildLanes(
+				[
+					fromKey("a", "key-1", "laptop", T0),
+					fromKey("b", "key-1", "workstation", T0 + 1),
+				],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes).toHaveLength(1);
+			expect(lanes[0].requests).toBe(2);
+			expect(lanes[0].key).toBe(laneKeyOf("client", "key-1"));
+			expect(lanes[0].scope).toEqual({ kind: "client", apiKeyId: "key-1" });
+		});
+
+		it("labels a renamed key by the name recorded most recently", () => {
+			// Fed in the order the store holds them, newest name first, so a
+			// first-seen-wins label would come out "workstation". The live path
+			// records the name held at arrival and the history path the name the
+			// key has now; only the latest reading tracks the rename.
+			const { lanes } = buildLanes(
+				[
+					fromKey("b", "key-1", "workstation", T0),
+					fromKey("a", "key-1", "laptop", T0 + 1),
+				],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes[0].label).toBe("laptop");
+		});
+
+		it("does not merge two keys that share a name", () => {
+			const { lanes } = buildLanes(
+				[
+					fromKey("a", "key-1", "laptop", T0),
+					fromKey("b", "key-2", "laptop", T0 + 1),
+				],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes).toHaveLength(2);
+			expect(lanes.map((l) => l.scope)).toEqual([
+				{ kind: "client", apiKeyId: "key-1" },
+				{ kind: "client", apiKeyId: "key-2" },
+			]);
+		});
+
+		it("labels a key with no recorded name by its id", () => {
+			const { lanes } = buildLanes(
+				[fromKey("a", "key-1", null, T0)],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes[0].label).toBe("key-1");
+		});
+
+		it("gives the keyless bucket its own row and scope", () => {
+			const { lanes } = buildLanes(
+				[fromKey("a", null, null, T0)],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				6,
+			);
+
+			expect(lanes[0].label).toBe("(no API key)");
+			expect(lanes[0].key).toBe(laneKeyOf("client", null));
+			expect(lanes[0].scope).toEqual({ kind: "no-client" });
+		});
+
+		/** `count` keys with strictly descending volume, so folding is total. */
+		function keys(count: number) {
+			return Array.from({ length: count }, (_, i) => `key-${i + 1}`).flatMap(
+				(key, i) =>
+					Array.from({ length: (count + 1 - i) * 2 }, (_, n) =>
+						fromKey(`${key}-${n}`, key, key, T0 + n),
+					),
+			);
+		}
+
+		it("holds the keyless bucket outside the quota and outside the overflow", () => {
+			const { lanes } = buildLanes(
+				[...keys(3), fromKey("u1", null, null, T0)],
+				"client",
+				T0 + 1000,
+				WINDOW,
+				1,
+				[
+					laneKeyOf("client", "key-1"),
+					laneKeyOf("client", "key-2"),
+					laneKeyOf("client", "key-3"),
+					laneKeyOf("client", null),
+				],
+			);
+
+			expect(lanes.map((l) => l.label)).toEqual([
+				"key-1",
+				"(no API key)",
+				"Other (2 clients)",
+			]);
+			// key-2: 6 requests, key-3: 4. The keyless request is not among them.
+			expect(lanes[2].requests).toBe(6 + 4);
+		});
+
+		it("counts a single folded key in the singular", () => {
+			const { lanes } = buildLanes(keys(2), "client", T0 + 1000, WINDOW, 1);
+
+			expect(lanes[lanes.length - 1].label).toBe("Other (1 client)");
 		});
 	});
 });
@@ -919,6 +1304,8 @@ describe("rankModels", () => {
 			durationMs: 1,
 			tokensPerSecond: null,
 			account: null,
+			apiKeyId: null,
+			apiKeyName: null,
 		})),
 	});
 

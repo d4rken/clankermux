@@ -23,13 +23,14 @@ import {
 	mock,
 } from "bun:test";
 import {
+	getActiveRequests,
 	type RequestEvt,
 	requestEvents,
 	resetRequestEventRegistry,
 } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
-import type { Account } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
@@ -40,15 +41,26 @@ import { sessionPromotionTracker } from "../session-promotion";
 
 const ACCOUNT_ID = "acc-ingress-evt";
 const MODEL = "claude-sonnet-4-5";
+const API_KEY_ID = "key-desk-widget";
+const API_KEY_NAME = "Desk widget";
+/** A key that exists and names no destination of its own. */
+const UNPINNED_KEY = {
+	pinnedAccountId: null,
+	pinnedProviders: null,
+	excludedProviders: null,
+	malformed: false,
+};
 
 async function callHandleProxy(
 	req: Request,
 	url: URL,
 	ctx: ProxyContext,
 	isInternal = false,
+	apiKeyId: string | null = null,
+	apiKeyName: string | null = null,
 ) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
-	return handleProxy(req, url, ctx, null, null, isInternal);
+	return handleProxy(req, url, ctx, apiKeyId, apiKeyName, isInternal);
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
@@ -88,7 +100,22 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 	} as Account;
 }
 
-function makeContext(accounts: Account[]): ProxyContext {
+/**
+ * `apiKeyPin` is what the key's row says about its destinations. Routing is
+ * fail-closed on it: a request that presents a key whose row is missing is
+ * refused with a 403 before an account is picked, so a test that exercises
+ * keyed traffic has to hand over an (unpinned) row for the request to reach
+ * the upstream at all.
+ */
+function makeContext(
+	accounts: Account[],
+	apiKeyPin: {
+		pinnedAccountId: string | null;
+		pinnedProviders: string[] | null;
+		excludedProviders: string[] | null;
+		malformed: boolean;
+	} | null = null,
+): ProxyContext {
 	return {
 		strategy: {
 			select: (accs: Account[]) => {
@@ -114,7 +141,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			resetConsecutiveRateLimits: mock(async () => {}),
 			updateRequestUsage: mock(async () => {}),
 			saveInternalDispatchSpend: mock(async () => {}),
-			getApiKeyPin: mock(async () => null),
+			getApiKeyPin: mock(async () => apiKeyPin),
 			getAdapter: mock(() => ({
 				run: mock(async () => {}),
 				get: mock(async () => null),
@@ -409,5 +436,178 @@ describe("handleProxy live-dashboard ingress events", () => {
 		).catch(() => undefined);
 
 		expect(ofType("ingress")).toHaveLength(0);
+	});
+
+	/**
+	 * Client identity on the IN-FLIGHT events.
+	 *
+	 * The summary event has always named the API key, but it only fires once a
+	 * request is over — so a client lane fed from it alone stays empty for exactly
+	 * the period the live view exists to show. These tests drive the real
+	 * `handleProxy`/`forwardToClient` producers rather than hand-built events: a
+	 * fixture round-tripped through the registry would pass unchanged if a
+	 * producer stopped populating the field, which is the only failure worth
+	 * catching here.
+	 */
+	describe("client identity on the live-dashboard events", () => {
+		async function waitFor(predicate: () => boolean): Promise<void> {
+			const deadline = Date.now() + 5_000;
+			while (!predicate()) {
+				if (Date.now() > deadline) throw new Error("timed out waiting");
+				await Bun.sleep(1);
+			}
+		}
+
+		it("names the client while the request is still PENDING", async () => {
+			// Hold the upstream open so the assertions run in the window between
+			// ingress and response headers — the window that has no `start` event and
+			// therefore nothing but the ingress event to attribute the request with.
+			let release = () => {};
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			globalThis.fetch = upstreamOnlyFetch(async () => {
+				await gate;
+				return ok200();
+			});
+
+			const inFlight = callHandleProxy(
+				messagesRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				makeContext([makeAccount()], UNPINNED_KEY),
+				false,
+				API_KEY_ID,
+				API_KEY_NAME,
+			);
+			await waitFor(() => ofType("ingress").length === 1);
+
+			const [ingress] = ofType("ingress");
+			expect(ingress.apiKeyId).toBe(API_KEY_ID);
+			expect(ingress.apiKeyName).toBe(API_KEY_NAME);
+			expect(ofType("start")).toHaveLength(0);
+
+			const [entry] = getActiveRequests();
+			expect(entry.phase).toBe("pending");
+			expect(entry.apiKeyId).toBe(API_KEY_ID);
+			expect(entry.apiKeyName).toBe(API_KEY_NAME);
+
+			release();
+			await inFlight;
+		});
+
+		it("repeats the client on start, for a dashboard that missed the ingress", async () => {
+			globalThis.fetch = upstreamOnlyFetch(() => ok200());
+
+			await callHandleProxy(
+				messagesRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				makeContext([makeAccount()], UNPINNED_KEY),
+				false,
+				API_KEY_ID,
+				API_KEY_NAME,
+			);
+
+			const [start] = ofType("start");
+			expect(start.apiKeyId).toBe(API_KEY_ID);
+			expect(start.apiKeyName).toBe(API_KEY_NAME);
+
+			const [entry] = getActiveRequests();
+			expect(entry.phase).toBe("streaming");
+			expect(entry.apiKeyId).toBe(API_KEY_ID);
+			expect(entry.apiKeyName).toBe(API_KEY_NAME);
+		});
+
+		it("names the client on a start that had no ingress to establish it", async () => {
+			globalThis.fetch = upstreamOnlyFetch(() => ok200());
+
+			// An attempt dispatched in-process goes straight at an account, so the
+			// announcement `handleProxy` makes never happens and the start event is
+			// the only thing that can attribute the request. The registry has to
+			// take the identity from it rather than only from an ingress.
+			const { proxyWithAccount } = await import("./fixtures/routing-harness");
+			const account = makeAccount();
+			const req = messagesRequest();
+			const meta: RequestMeta = {
+				id: "start-without-ingress",
+				method: "POST",
+				path: "/v1/messages",
+				timestamp: Date.now(),
+				requestedModel: MODEL,
+				headers: req.headers,
+			};
+
+			await proxyWithAccount(
+				req,
+				new URL(req.url),
+				account,
+				meta,
+				await req.clone().arrayBuffer(),
+				() => undefined,
+				0,
+				makeContext([account], UNPINNED_KEY),
+				null,
+				API_KEY_ID,
+				API_KEY_NAME,
+			);
+
+			expect(ofType("ingress")).toHaveLength(0);
+			const [start] = ofType("start");
+			expect(start).toBeDefined();
+			expect(start.apiKeyId).toBe(API_KEY_ID);
+			expect(start.apiKeyName).toBe(API_KEY_NAME);
+
+			const [entry] = getActiveRequests();
+			expect(entry.phase).toBe("streaming");
+			expect(entry.apiKeyId).toBe(API_KEY_ID);
+			expect(entry.apiKeyName).toBe(API_KEY_NAME);
+		});
+
+		it("reports null for keyless traffic", async () => {
+			globalThis.fetch = upstreamOnlyFetch(() => ok200());
+
+			// Unprotected mode admits requests that carry no key. `toBeNull` rather
+			// than a falsy check: an unpopulated field arrives as `undefined`, and
+			// "no key" has to stay distinguishable from "never plumbed".
+			await callHandleProxy(
+				messagesRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				makeContext([makeAccount()]),
+			);
+
+			const [ingress] = ofType("ingress");
+			expect(ingress.apiKeyId).toBeNull();
+			expect(ingress.apiKeyName).toBeNull();
+
+			const [start] = ofType("start");
+			expect(start.apiKeyId).toBeNull();
+			expect(start.apiKeyName).toBeNull();
+
+			const [entry] = getActiveRequests();
+			expect(entry.apiKeyId).toBeNull();
+			expect(entry.apiKeyName).toBeNull();
+		});
+
+		it("normalizes a blank key to null so no lane keys on an empty string", async () => {
+			globalThis.fetch = upstreamOnlyFetch(() => ok200());
+
+			await callHandleProxy(
+				messagesRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				makeContext([makeAccount()], UNPINNED_KEY),
+				false,
+				"",
+				"",
+			);
+
+			const [ingress] = ofType("ingress");
+			expect(ingress.apiKeyId).toBeNull();
+			expect(ingress.apiKeyName).toBeNull();
+			const [start] = ofType("start");
+			expect(start.apiKeyId).toBeNull();
+			expect(start.apiKeyName).toBeNull();
+			const [entry] = getActiveRequests();
+			expect(entry.apiKeyId).toBeNull();
+			expect(entry.apiKeyName).toBeNull();
+		});
 	});
 });

@@ -27,6 +27,8 @@ function ingress(id: string, over: Record<string, unknown> = {}) {
 		path: "/v1/messages",
 		project: "clankermux",
 		model: "claude-opus-5",
+		apiKeyId: "key-1",
+		apiKeyName: "Desk widget",
 		...over,
 	});
 }
@@ -42,6 +44,8 @@ function start(id: string, over: Record<string, unknown> = {}) {
 		statusCode: 200,
 		project: "clankermux",
 		model: "claude-opus-5",
+		apiKeyId: "key-1",
+		apiKeyName: "Desk widget",
 		...over,
 	});
 }
@@ -64,7 +68,7 @@ describe("active-request registry", () => {
 		resetRequestEventRegistry();
 	});
 
-	it("records an ingress as a pending request carrying project and model", () => {
+	it("records an ingress as a pending request carrying project, model and client", () => {
 		ingress("req-1");
 
 		expect(getActiveRequests()).toEqual([
@@ -75,6 +79,8 @@ describe("active-request registry", () => {
 				path: "/v1/messages",
 				project: "clankermux",
 				model: "claude-opus-5",
+				apiKeyId: "key-1",
+				apiKeyName: "Desk widget",
 				phase: "pending",
 				accountId: null,
 				statusCode: null,
