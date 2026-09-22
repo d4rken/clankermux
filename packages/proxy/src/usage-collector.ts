@@ -299,6 +299,26 @@ function oneHourCacheWrites(usage: CacheCreationSplit): number | undefined {
 		: undefined;
 }
 
+/**
+ * Apply a streamed usage object's cache-write total and its 1-hour split. A new
+ * total that arrives without a split of its own makes the previous split
+ * describe a different number, so it is dropped; the same total repeated
+ * keeps it.
+ */
+function applyCacheWrites(
+	state: UsageState,
+	usage: CacheCreationSplit & { cache_creation_input_tokens?: number },
+): void {
+	const total = usage.cache_creation_input_tokens;
+	const oneHour = oneHourCacheWrites(usage);
+	if (total !== undefined) {
+		if (oneHour === undefined && total !== state.cacheCreationInputTokens)
+			state.cacheCreation1hInputTokens = undefined;
+		state.cacheCreationInputTokens = total;
+	}
+	if (oneHour !== undefined) state.cacheCreation1hInputTokens = oneHour;
+}
+
 interface SseParsed {
 	type?: string;
 	code?: unknown;
@@ -461,10 +481,7 @@ function applySseData(
 				state.inputTokens = usage.input_tokens;
 			if (usage.cache_read_input_tokens !== undefined)
 				state.cacheReadInputTokens = usage.cache_read_input_tokens;
-			if (usage.cache_creation_input_tokens !== undefined)
-				state.cacheCreationInputTokens = usage.cache_creation_input_tokens;
-			const oneHour = oneHourCacheWrites(usage);
-			if (oneHour !== undefined) state.cacheCreation1hInputTokens = oneHour;
+			applyCacheWrites(state, usage);
 			// NOTE: message_start's output_tokens is a placeholder (0/1). It does
 			// NOT set providerReportedOutput — only message_delta does.
 		}
@@ -484,10 +501,7 @@ function applySseData(
 			if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
 			if (u.cache_read_input_tokens !== undefined)
 				state.cacheReadInputTokens = u.cache_read_input_tokens;
-			if (u.cache_creation_input_tokens !== undefined)
-				state.cacheCreationInputTokens = u.cache_creation_input_tokens;
-			const oneHour = oneHourCacheWrites(u);
-			if (oneHour !== undefined) state.cacheCreation1hInputTokens = oneHour;
+			applyCacheWrites(state, u);
 		}
 		// Independent of usage: a refusal's message_delta carries the terminal
 		// reason whether or not it also reports tokens.
@@ -1213,6 +1227,15 @@ export async function finalizeUsage(
 		(state.cacheCreationInputTokens ?? 0) +
 		finalOutput;
 
+	// A split larger than its own total is a malformed report; the total wins.
+	const cacheCreation1hInputTokens =
+		state.cacheCreation1hInputTokens === undefined
+			? undefined
+			: Math.min(
+					state.cacheCreation1hInputTokens,
+					state.cacheCreationInputTokens ?? 0,
+				);
+
 	const model = state.model;
 	// The ONLY pricing call on the request path, and the only one that opts into
 	// pricing-gap reporting. It supplies the fallback cost and comparison estimate
@@ -1232,7 +1255,7 @@ export async function finalizeUsage(
 						outputTokens: finalOutput,
 						cacheReadInputTokens: state.cacheReadInputTokens ?? 0,
 						cacheCreationInputTokens: state.cacheCreationInputTokens ?? 0,
-						cacheCreation1hInputTokens: state.cacheCreation1hInputTokens,
+						cacheCreation1hInputTokens,
 					},
 					{
 						provider: opts.accountProvider ?? opts.providerName,
@@ -1269,7 +1292,7 @@ export async function finalizeUsage(
 			outputTokens: finalOutput,
 			cacheReadInputTokens: state.cacheReadInputTokens,
 			cacheCreationInputTokens: state.cacheCreationInputTokens,
-			cacheCreation1hInputTokens: state.cacheCreation1hInputTokens,
+			cacheCreation1hInputTokens,
 			totalTokens,
 			costUsd,
 			estimatedCostUsd: estimated ?? undefined,

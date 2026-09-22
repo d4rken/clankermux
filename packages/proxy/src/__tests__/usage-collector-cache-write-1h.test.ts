@@ -110,6 +110,84 @@ describe("usage collector — 1-hour cache writes", () => {
 		expect(summary.usage.cacheCreation1hInputTokens).toBe(1_000);
 	});
 
+	it("drops message_start's split when a delta reports a different total without one", async () => {
+		const state = createUsageState();
+		feedChunk(
+			state,
+			sse("message_start", {
+				type: "message_start",
+				message: { model: "claude-opus-5", usage: SPLIT_USAGE },
+			}),
+			1000,
+		);
+		feedChunk(
+			state,
+			sse("message_delta", {
+				type: "message_delta",
+				usage: { output_tokens: 50, cache_creation_input_tokens: 500 },
+			}),
+			1100,
+		);
+
+		const summary = await finalizeUsage(
+			state,
+			{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+			{ estimateCostUSD: recordingCost().fn },
+		);
+		expect(summary.usage.cacheCreationInputTokens).toBe(500);
+		expect(summary.usage.cacheCreation1hInputTokens).toBeUndefined();
+	});
+
+	it("keeps message_start's split when a delta repeats the same total without one", async () => {
+		const state = createUsageState();
+		feedChunk(
+			state,
+			sse("message_start", {
+				type: "message_start",
+				message: { model: "claude-opus-5", usage: SPLIT_USAGE },
+			}),
+			1000,
+		);
+		feedChunk(
+			state,
+			sse("message_delta", {
+				type: "message_delta",
+				usage: { output_tokens: 50, cache_creation_input_tokens: 1_000 },
+			}),
+			1100,
+		);
+
+		const summary = await finalizeUsage(
+			state,
+			{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+			{ estimateCostUSD: recordingCost().fn },
+		);
+		expect(summary.usage.cacheCreation1hInputTokens).toBe(400);
+	});
+
+	it("never records more 1-hour writes than the total", async () => {
+		const state = createUsageState();
+		feedNonStreamBody(
+			state,
+			JSON.stringify({
+				model: "claude-opus-5",
+				usage: {
+					...SPLIT_USAGE,
+					cache_creation: { ephemeral_1h_input_tokens: 5_000 },
+				},
+			}),
+		);
+
+		const cost = recordingCost();
+		const summary = await finalizeUsage(
+			state,
+			{ responseTimeMs: 1000, providerName: "anthropic", isStream: false },
+			{ estimateCostUSD: cost.fn },
+		);
+		expect(cost.calls[0]?.cacheCreation1hInputTokens).toBe(1_000);
+		expect(summary.usage.cacheCreation1hInputTokens).toBe(1_000);
+	});
+
 	it("reads the split from a non-stream body", async () => {
 		const state = createUsageState();
 		feedNonStreamBody(

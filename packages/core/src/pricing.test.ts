@@ -266,6 +266,36 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		}
 	}
 
+	it("prices writes that are all 1-hour from an entry with no cache_write", async () => {
+		// A 1-hour write is priced off input, so a missing 5-minute rate is not a
+		// gap for it.
+		await withRemoteCatalogue(
+			{
+				anthropic: {
+					models: {
+						"no-write-rate": {
+							id: "no-write-rate",
+							name: "No write rate",
+							cost: { input: 4, output: 20 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"no-write-rate",
+						{
+							cacheCreationInputTokens: 1_000_000,
+							cacheCreation1hInputTokens: 1_000_000,
+						},
+						{ provider: "anthropic" },
+					),
+				).toBeCloseTo(8, 6);
+			},
+		);
+	});
+
 	it("prices Codex from OpenAI even when an incomplete reseller comes first", async () => {
 		await withRemoteCatalogue(
 			{
