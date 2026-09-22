@@ -27,6 +27,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	qwen: "Qwen",
 	ollama: "Ollama",
 	"ollama-cloud": "Ollama Cloud",
+	mimo: "MiMo",
 };
 
 /**

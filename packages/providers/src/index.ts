@@ -42,6 +42,7 @@ import { AnthropicCompatibleProvider } from "./providers/anthropic-compatible/pr
 import { CodexProvider } from "./providers/codex/provider";
 import { GrokProvider } from "./providers/grok/provider";
 import { KiloProvider } from "./providers/kilo/provider";
+import { MimoProvider } from "./providers/mimo/provider";
 import { MinimaxProvider } from "./providers/minimax/provider";
 import { OllamaCloudProvider } from "./providers/ollama/ollama-cloud-provider";
 import { OllamaProvider } from "./providers/ollama/provider";
@@ -61,6 +62,7 @@ registry.registerProvider(new KiloProvider());
 registry.registerProvider(new OpenRouterProvider());
 registry.registerProvider(new QwenProvider());
 registry.registerProvider(new MinimaxProvider());
+registry.registerProvider(new MimoProvider());
 registry.registerProvider(new ZaiProvider());
 registry.registerProvider(new OpenAICompatibleProvider());
 registry.registerProvider(new OllamaProvider());

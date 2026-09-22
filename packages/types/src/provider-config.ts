@@ -17,6 +17,7 @@ export const PROVIDER_NAMES = {
 	OLLAMA: "ollama",
 	OLLAMA_CLOUD: "ollama-cloud",
 	GROK: "grok",
+	MIMO: "mimo",
 } as const;
 
 export type ProviderName = (typeof PROVIDER_NAMES)[keyof typeof PROVIDER_NAMES];
@@ -214,6 +215,14 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		supportsOAuth: false,
 		honoursCustomEndpoint: false,
 		defaultEndpoint: "https://api.x.ai",
+	},
+	[PROVIDER_NAMES.MIMO]: {
+		requiresSessionTracking: false, // Token Plan meters tokens, not session windows
+		supportsUsageTracking: false, // MiMo publishes no usage endpoint
+		supportsUsagePolling: false, // nothing to poll
+		supportsOAuth: false, // Token Plan uses a tp- API key
+		honoursCustomEndpoint: true, // the region is stored per account in custom_endpoint
+		defaultEndpoint: "https://token-plan-sgp.xiaomimimo.com/anthropic",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
 
