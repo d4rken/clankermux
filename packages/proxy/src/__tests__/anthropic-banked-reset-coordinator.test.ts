@@ -1293,10 +1293,40 @@ describe("the replay window", () => {
 				errorMessage: "401",
 			});
 		};
-		await coordinator().claim(ACCOUNT_ID, {
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
 			grantId: "g1",
 			requestId: "req-401-late",
 		});
 		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
+	it("records a new manual claim whose window closes before its POST as not sent", async () => {
+		dbOverrides = {
+			getAccountPauseMarker: async () => {
+				clock = NOW + WINDOW;
+				return {
+					paused: false,
+					pauseReason: null,
+					autoPauseOnOverageEnabled: false,
+					pauseEpoch: PAUSE_EPOCH,
+					pauseChangedAt: null,
+				};
+			},
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-never-left",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "not_sent",
+		});
 	});
 });

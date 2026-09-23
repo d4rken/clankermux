@@ -453,7 +453,7 @@ export class AnthropicBankedResetCoordinator {
 		const replayUntil =
 			target.createdAt + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
 		if (this.now() >= replayUntil) {
-			return this.giveUpUnsent(account, request);
+			return this.giveUpAtWindow(account, request, target);
 		}
 		const claimStartedAt = this.now();
 		const ids = { grantId: request.grantId, requestId: request.requestId };
@@ -472,6 +472,10 @@ export class AnthropicBankedResetCoordinator {
 				log.warn(
 					`Banked-reset claim for '${account.name}' not retried after an auth error: its replay window closed`,
 				);
+				return this.giveUpAtWindow(account, request, {
+					...target,
+					createdHere: false,
+				});
 			} else if (refreshed) {
 				result = await this.claimReset(refreshed, orgUuid, ids);
 			}
@@ -789,15 +793,29 @@ export class AnthropicBankedResetCoordinator {
 	}
 
 	/**
-	 * A claim whose replay window closed before its POST could leave: give its
-	 * row up as the ledger sweep would, and answer with the settled row.
+	 * A claim whose replay window closed before its next POST could leave. A
+	 * manual row written by this call never had a POST, so it is `not_sent`;
+	 * any other row may have, so it is given up as the ledger sweep would.
+	 * Answers with the settled row.
 	 */
-	private async giveUpUnsent(
+	private async giveUpAtWindow(
 		account: Account,
 		request: AnthropicBankedResetClaimRequest,
+		target: { rowId: string; createdHere: boolean },
 	): Promise<AnthropicBankedResetClaimDispatchOutcome> {
 		try {
-			await this.ctx.dbOps.expireStaleAnthropicBankedResetAttempts(this.now());
+			if (target.createdHere) {
+				await this.ctx.dbOps.resolveAnthropicBankedResetAttempt(target.rowId, {
+					status: "failed",
+					reason: BANKED_RESET_NOT_SENT_REASON,
+					errorMessage: `Not sent: the claim for '${account.name}' reached the end of its replay window before its request left`,
+					now: this.now(),
+				});
+			} else {
+				await this.ctx.dbOps.expireStaleAnthropicBankedResetAttempts(
+					this.now(),
+				);
+			}
 			const row = await this.ctx.dbOps.getAnthropicBankedResetEventByRequestId(
 				account.id,
 				request.requestId,
