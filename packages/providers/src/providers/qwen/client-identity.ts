@@ -57,7 +57,7 @@ export function qwenInferenceHeaders(
 		"X-DashScope-AuthType": DASHSCOPE_AUTH_TYPE,
 		...QWEN_STAINLESS_HEADERS,
 		"Accept-Language": "*",
-		"Accept-Encoding": "gzip, deflate",
+		"Accept-Encoding": "br, gzip, deflate",
 		"Sec-Fetch-Mode": "cors",
 		Connection: "keep-alive",
 	};

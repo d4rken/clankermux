@@ -17,7 +17,7 @@ import { QwenProvider } from "../provider";
 
 const INFERENCE_HEADERS: Array<[string, string]> = [
 	["accept", "application/json"],
-	["accept-encoding", "gzip, deflate"],
+	["accept-encoding", "br, gzip, deflate"],
 	["accept-language", "*"],
 	["connection", "keep-alive"],
 	["content-type", "application/json"],
