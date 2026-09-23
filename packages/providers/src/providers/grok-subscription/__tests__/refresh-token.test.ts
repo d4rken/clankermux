@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { OAuthRefreshTokenError } from "@clankermux/core";
 import type { Account } from "@clankermux/types";
+import { GROK_CLI_USER_AGENT } from "../client-identity";
 import { XAI_CLIENT_ID, XAI_TOKEN_ENDPOINT } from "../device-oauth";
 import { GrokSubscriptionProvider } from "../provider";
 
@@ -53,6 +54,20 @@ describe("GrokSubscriptionProvider.refreshToken", () => {
 		expect(form.get("refresh_token")).toBe("rt-old");
 		expect(result.accessToken).toBe("at-new");
 		expect(result.expiresAt).toBeGreaterThanOrEqual(before + 21600 * 1000);
+	});
+
+	it("identifies as the Grok CLI rather than the runtime's default agent", async () => {
+		const fetchMock = mockToken(
+			{ access_token: "at-new", refresh_token: "rt-new", expires_in: 21600 },
+			200,
+		);
+
+		await new GrokSubscriptionProvider().refreshToken(account(), "cid");
+
+		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(new Headers(init.headers).get("user-agent")).toBe(
+			GROK_CLI_USER_AGENT,
+		);
 	});
 
 	it("persists the rotated refresh token xAI returns", async () => {

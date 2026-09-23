@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { GROK_CLI_USER_AGENT } from "../client-identity";
 import {
 	initiateGrokSubscriptionDeviceFlow,
 	pollGrokSubscriptionForToken,
@@ -36,6 +37,7 @@ function json(body: unknown, status = 200): Response {
 interface Recorded {
 	url: string;
 	body: URLSearchParams;
+	userAgent: string | null;
 }
 
 /**
@@ -59,6 +61,7 @@ function harness(
 		calls.push({
 			url: String(input),
 			body: new URLSearchParams(String(init?.body ?? "")),
+			userAgent: new Headers(init?.headers).get("user-agent"),
 		});
 		clock += step.elapsedMs ?? 0;
 		return step.response;
@@ -84,6 +87,7 @@ describe("initiateGrokSubscriptionDeviceFlow", () => {
 			recorded = {
 				url: String(input),
 				body: new URLSearchParams(String(init?.body ?? "")),
+				userAgent: new Headers(init?.headers).get("user-agent"),
 			};
 			return json(DEVICE_AUTHORIZATION);
 		}) as unknown as typeof fetch;
@@ -95,6 +99,7 @@ describe("initiateGrokSubscriptionDeviceFlow", () => {
 		expect(call.url).toBe(XAI_DEVICE_CODE_ENDPOINT);
 		expect(call.body.get("client_id")).toBe(XAI_CLIENT_ID);
 		expect(call.body.get("scope")).toBe(XAI_DEVICE_SCOPE);
+		expect(call.userAgent).toBe(GROK_CLI_USER_AGENT);
 		expect(flow).toEqual({
 			deviceCode: "dc-opaque",
 			userCode: "SG8J-NWQ3",
@@ -163,6 +168,11 @@ describe("pollGrokSubscriptionForToken", () => {
 		);
 		expect(h.calls[0]?.body.get("device_code")).toBe("dc");
 		expect(h.calls[0]?.body.get("client_id")).toBe(XAI_CLIENT_ID);
+		expect(h.calls.map((call) => call.userAgent)).toEqual([
+			GROK_CLI_USER_AGENT,
+			GROK_CLI_USER_AGENT,
+			GROK_CLI_USER_AGENT,
+		]);
 	});
 
 	it("adds five seconds to the interval on EVERY slow_down, cumulatively", async () => {

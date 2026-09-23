@@ -95,6 +95,53 @@ describe("GrokSubscriptionProvider", () => {
 			);
 			expect(headers.get("x-grok-client-version")).toBe(GROK_CLI_VERSION);
 		});
+
+		it("sends the Grok CLI identity alone, never Claude Code's alongside it", () => {
+			const inbound = new Headers({
+				// Claude Code 2.x on /v1/messages, as it reaches the proxy.
+				"x-stainless-arch": "x64",
+				"x-stainless-lang": "js",
+				"x-stainless-os": "Linux",
+				"x-stainless-package-version": "0.70.0",
+				"x-stainless-retry-count": "0",
+				"x-stainless-runtime": "node",
+				"x-stainless-runtime-version": "v24.3.0",
+				"x-stainless-timeout": "600",
+				"anthropic-version": "2023-06-01",
+				"anthropic-beta":
+					"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
+				"anthropic-dangerous-direct-browser-access": "true",
+				"x-app": "cli",
+				"x-claude-code-session-id": "3f1c9a52-7d2e-4b8a-9c61-0e5f2a7b4d19",
+				"x-claude-code-request-class": "main",
+				"x-client-request-id": "8a0c7e1f-2b3d-4c5e-9f60-718293a4b5c6",
+				"user-agent": "claude-cli/2.1.240 (external, cli)",
+				authorization: "Bearer client-token",
+				host: "proxy.local",
+				"accept-encoding": "gzip, br",
+				accept: "application/json",
+				"content-type": "application/json",
+				"x-grok-conv-id": "client-conversation",
+			});
+
+			const sent = Object.fromEntries(
+				provider.prepareHeaders(inbound, "account-token").entries(),
+			);
+
+			expect(sent).toEqual({
+				accept: "application/json",
+				"anthropic-version": "2023-06-01",
+				authorization: "Bearer account-token",
+				"content-type": "application/json",
+				"user-agent": GROK_CLI_USER_AGENT,
+				"x-authenticateresponse": "authenticate-response",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-mode": "interactive",
+				"x-grok-client-version": GROK_CLI_VERSION,
+				"x-grok-conv-id": "client-conversation",
+				"x-xai-token-auth": "xai-grok-cli",
+			});
+		});
 	});
 
 	describe("applyConversationId", () => {
