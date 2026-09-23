@@ -10,11 +10,16 @@ import type {
 } from "@clankermux/types";
 import { decodeJwtPayloadSafe } from "../../oauth/jwt";
 import type { DevinFetch } from "./auth";
+import {
+	DEVIN_SESSION_TOKEN_PREFIX,
+	devinChatMetadata,
+	devinDiscoveryMetadata,
+	devinRpcHeaders,
+} from "./client-identity";
 import { DevinRpcError } from "./connect";
 import {
 	BillingStrategy,
 	type ClientModelConfig,
-	type DisplayOption,
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
 	GetUserJwtRequestSchema,
@@ -23,7 +28,6 @@ import {
 	type GetUserStatusResponse,
 	GetUserStatusResponseSchema,
 	GracePeriodStatus,
-	MetadataSchema,
 	TeamsTier,
 	type Timestamp,
 } from "./vendor/devin-proto";
@@ -57,39 +61,13 @@ export class DevinSessionAuthenticationError extends DevinRpcError {
 
 /** JWT expiry is display/cache evidence only; opaque sessions have no known expiry. */
 export function devinSessionExpiresAt(token: string): number | null {
-	const raw = token.startsWith("devin-session-token$")
-		? token.slice("devin-session-token$".length)
+	const raw = token.startsWith(DEVIN_SESSION_TOKEN_PREFIX)
+		? token.slice(DEVIN_SESSION_TOKEN_PREFIX.length)
 		: token;
 	const exp = decodeJwtPayloadSafe(raw)?.exp;
 	if (typeof exp !== "number" || !Number.isFinite(exp) || exp <= 0) return null;
 	const ms = exp * 1000;
 	return Number.isFinite(ms) && ms <= 8.64e15 ? ms : null;
-}
-
-export function devinMetadata(token: string, userJwt = "", discovery = false) {
-	return create(MetadataSchema, {
-		apiKey: token.startsWith("devin-session-token$")
-			? token
-			: `devin-session-token$${token}`,
-		userJwt,
-		ideName: discovery ? "chisel" : "devin-cli",
-		ideType: "chisel",
-		// Pinned to the official CLI release manifest, inspected 2026-09-11.
-		ideVersion: discovery ? "0.0.0-dev" : "3000.10.21",
-		extensionName: "chisel",
-		extensionVersion: discovery ? "0.0.0-dev" : "3000.10.21",
-		locale: "en",
-		os:
-			process.platform === "darwin"
-				? "darwin"
-				: process.platform === "win32"
-					? "windows"
-					: "linux",
-		// Discovery slots 6/7/8 are present in the upstream request but not its older enum.
-		supportedModelDisplays: discovery
-			? ([3, 4, 6, 7, 8] as DisplayOption[])
-			: [],
-	});
 }
 
 export function validateDevinEndpoint(value = DEVIN_ENDPOINT): string {
@@ -378,11 +356,7 @@ export class DevinClient {
 			`${validateDevinEndpoint(endpoint)}${path}`,
 			{
 				method: "POST",
-				headers: {
-					"content-type": "application/proto",
-					"connect-protocol-version": "1",
-					accept: "application/proto",
-				},
+				headers: devinRpcHeaders(),
 				body: new Uint8Array(toBinary(schema, request)),
 				signal: combined,
 				redirect: "error",
@@ -550,7 +524,7 @@ export class DevinClient {
 		token: string,
 		endpoint: string,
 	): Promise<DevinAccountInfo> {
-		const metadata = devinMetadata(token);
+		const metadata = devinChatMetadata(token);
 		const auth = await this.unary(
 			endpoint,
 			"/exa.auth_pb.AuthService/GetUserJwt",
@@ -588,7 +562,7 @@ export class DevinClient {
 				"/exa.api_server_pb.ApiServerService/GetCliModelConfigs",
 				GetCliModelConfigsRequestSchema,
 				create(GetCliModelConfigsRequestSchema, {
-					metadata: devinMetadata(token, "", true),
+					metadata: devinDiscoveryMetadata(token),
 				}),
 				GetCliModelConfigsResponseSchema,
 			),

@@ -13,9 +13,13 @@ import {
 	type DevinClient,
 	DevinSessionAuthenticationError,
 	devinClient,
-	devinMetadata,
 	validateDevinEndpoint,
 } from "./client";
+import {
+	devinChatHeaders,
+	devinChatMetadata,
+	devinProxyBaseHeaders,
+} from "./client-identity";
 import { DevinRpcError, encodeConnect } from "./connect";
 import {
 	convertDevinResponse,
@@ -282,7 +286,7 @@ export class DevinProvider extends BaseProvider {
 		return `${validateDevinEndpoint(account?.custom_endpoint || DEVIN_ENDPOINT)}${DEVIN_CHAT_PATH}`;
 	}
 	prepareHeaders(_headers: Headers): Headers {
-		return new Headers({ "content-type": "application/json" });
+		return new Headers(devinProxyBaseHeaders());
 	}
 	async refreshToken(_account: Account): Promise<never> {
 		throw new Error("Devin session tokens cannot be refreshed; sign in again");
@@ -399,7 +403,7 @@ export class DevinProvider extends BaseProvider {
 					"Selected Devin model does not support images",
 				);
 			const wire = create(GetChatMessageRequestSchema, {
-				metadata: devinMetadata(account.api_key, info.userJwt),
+				metadata: devinChatMetadata(account.api_key, info.userJwt),
 				prompt: body.system == null ? "" : content(body.system).prompt,
 				chatMessagePrompts: history,
 				chatModelUid: model.id,
@@ -450,11 +454,7 @@ export class DevinProvider extends BaseProvider {
 				method: "POST",
 				signal: request.signal,
 				headers: {
-					"content-type": "application/connect+proto",
-					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
-					"connect-accept-encoding": "gzip",
-					"accept-encoding": "identity",
+					...devinChatHeaders(),
 					"x-clankermux-request-stream": String(body.stream === true),
 					[DEVIN_UPSTREAM_MODEL]: model.id,
 				},
