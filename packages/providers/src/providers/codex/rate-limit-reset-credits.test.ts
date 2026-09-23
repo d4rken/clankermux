@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import { mockFetch } from "@clankermux/test-support";
 import {
 	CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
@@ -163,6 +164,29 @@ describe("fetchCodexRateLimitResetCredits", () => {
 			summary: null,
 			status: 404,
 		});
+	});
+
+	it("logs a 404 as an error naming the endpoint path", async () => {
+		globalThis.fetch = mockFetch(
+			async () => new Response("nope", { status: 404 }),
+		);
+		const error = spyOn(Logger.prototype, "error").mockImplementation(() => {});
+		const warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+		try {
+			await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
+				summary: null,
+				status: 404,
+			});
+			expect(error).toHaveBeenCalledTimes(1);
+			expect(String(error.mock.calls[0][0])).toContain(
+				"/backend-api/wham/rate-limit-reset-credits",
+			);
+			expect(String(error.mock.calls[0][0])).toContain("404");
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			error.mockRestore();
+			warn.mockRestore();
+		}
 	});
 
 	// The 401 status is what lets the coordinator distinguish "this token was

@@ -229,6 +229,12 @@ export async function fetchCodexRateLimitResetCredits(
 		});
 		status = response.status;
 
+		if (response.status === 404) {
+			log.error(
+				`Reset-credit list endpoint ${new URL(CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT).pathname} returned 404; the route may have moved`,
+			);
+			return { summary: null, status };
+		}
 		if (!response.ok) {
 			log.warn(
 				`Reset-credit endpoint returned ${response.status} ${response.statusText}`,
