@@ -1,15 +1,19 @@
 // Nothing here reaches the network: every test stubs global fetch.
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { CLAUDE_CLI_VERSION } from "@clankermux/core";
 import { mockFetch } from "@clankermux/test-support";
 import type { AnthropicBankedResetStatus } from "@clankermux/types";
+import { anthropicOAuthUsageHeaders } from "../../../usage-fetcher";
 import {
 	ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS,
 	ANTHROPIC_BANKED_RESET_REFRESH_MS,
 	ANTHROPIC_BANKED_RESET_RETRY_MS,
 	ANTHROPIC_BANKED_RESET_STATUS_ENDPOINT,
 	anthropicBankedResetCache,
+	anthropicBankedResetHeaders,
 	claimAnthropicBankedReset,
 	fetchAnthropicBankedResetStatus,
+	newerClaudeCliVersion,
 	parseAnthropicBankedResetClaimResponse,
 	parseCedarEmberBlock,
 } from "../banked-resets";
@@ -229,8 +233,51 @@ function stubFetch(
 	return fetchSpy;
 }
 
+describe("anthropicBankedResetHeaders", () => {
+	it("sends Claude Code's CLI user agent and nothing else", () => {
+		expect(anthropicBankedResetHeaders("tok", "9.0.0")).toEqual({
+			Authorization: "Bearer tok",
+			"anthropic-beta": "oauth-2025-04-20",
+			"Content-Type": "application/json",
+			"User-Agent": "claude-cli/9.0.0 (external, cli)",
+		});
+	});
+
+	it("names the pinned version when the last client seen is older", () => {
+		expect(anthropicBankedResetHeaders("tok", "2.1.63")["User-Agent"]).toBe(
+			`claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`,
+		);
+	});
+
+	it("names the last client seen when it is newer than the pinned version", () => {
+		expect(anthropicBankedResetHeaders("tok", "2.1.999")["User-Agent"]).toBe(
+			"claude-cli/2.1.999 (external, cli)",
+		);
+	});
+
+	it("leaves the usage poller's headers alone", () => {
+		expect(anthropicOAuthUsageHeaders("tok")).toEqual({
+			Authorization: "Bearer tok",
+			"anthropic-beta": "oauth-2025-04-20",
+			"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		});
+	});
+});
+
+describe("newerClaudeCliVersion", () => {
+	it("compares each segment numerically", () => {
+		expect(newerClaudeCliVersion("2.1.63", "2.1.280")).toBe("2.1.280");
+		expect(newerClaudeCliVersion("2.1.280", "2.1.63")).toBe("2.1.280");
+		expect(newerClaudeCliVersion("2.10.0", "2.9.99")).toBe("2.10.0");
+		expect(newerClaudeCliVersion("3.0.0", "2.99.999")).toBe("3.0.0");
+		expect(newerClaudeCliVersion("2.1.280", "2.1.280")).toBe("2.1.280");
+	});
+});
+
 describe("fetchAnthropicBankedResetStatus", () => {
-	it("reads the cedar_ember block with the usage-endpoint headers", async () => {
+	it("reads the cedar_ember block with the banked-reset headers", async () => {
 		const spy = stubFetch(async () =>
 			Response.json({
 				five_hour: { utilization: 10 },
@@ -248,12 +295,7 @@ describe("fetchAnthropicBankedResetStatus", () => {
 			"https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
 		);
 		expect(init.method).toBe("GET");
-		const headers = new Headers(init.headers);
-		expect(headers.get("Authorization")).toBe("Bearer tok");
-		expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-		expect(headers.get("User-Agent")).toMatch(/^claude-code\//);
-		expect(headers.get("Accept")).toBe("application/json");
-		expect(headers.get("Content-Type")).toBe("application/json");
+		expect(init.headers).toEqual(anthropicBankedResetHeaders("tok"));
 		expect(init.signal).toBeInstanceOf(AbortSignal);
 	});
 
@@ -344,10 +386,7 @@ describe("claimAnthropicBankedReset", () => {
 			grant_id: "g_week_1",
 			request_id: "req_ABC-123",
 		});
-		const headers = new Headers(init.headers);
-		expect(headers.get("Authorization")).toBe("Bearer tok");
-		expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-		expect(headers.get("Content-Type")).toBe("application/json");
+		expect(init.headers).toEqual(anthropicBankedResetHeaders("tok"));
 	});
 
 	it("makes no request for an invalid grant id, request id or org uuid", async () => {
