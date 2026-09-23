@@ -2283,10 +2283,12 @@ export function getProtocol(): string {
 	return tlsEnabled ? "https" : "http";
 }
 
-// Run server if this is the main entry point
-if (import.meta.main) {
+/**
+ * Start the server from command-line arguments (`--port`, `--ssl-key`,
+ * `--ssl-cert`), falling back to PORT, SSL_KEY_PATH and SSL_CERT_PATH.
+ */
+export function runServerFromArgv(args: string[]): void {
 	// Parse command line arguments
-	const args = process.argv.slice(2);
 	let port: number | undefined;
 	let sslKeyPath: string | undefined;
 	let sslCertPath: string | undefined;
@@ -2339,4 +2341,9 @@ if (import.meta.main) {
 		console.error("❌ Server failed to start:", error);
 		process.exit(1);
 	});
+}
+
+// Run server if this is the main entry point
+if (import.meta.main) {
+	runServerFromArgv(process.argv.slice(2));
 }
