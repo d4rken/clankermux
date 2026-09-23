@@ -45,17 +45,42 @@ afterEach(() => {
 });
 
 describe("Claude identity at the fetch boundary", () => {
-	it("usage poll", async () => {
+	const olderClient: Array<[string, string]> = [
+		["accept", "application/json, text/plain, */*"],
+		["accept-encoding", "gzip, compress, deflate, br"],
+		["anthropic-beta", "oauth-2025-04-20"],
+		["authorization", "Bearer tok"],
+		["content-type", "application/json"],
+		["user-agent", "claude-cli/2.1.280 (external, cli)"],
+	];
+	const newerClient: Array<[string, string]> = [
+		["accept", "application/json, text/plain, */*"],
+		["accept-encoding", "gzip, compress, deflate, br"],
+		["anthropic-beta", "oauth-2025-04-20"],
+		["authorization", "Bearer tok"],
+		["content-type", "application/json"],
+		["user-agent", "claude-cli/2.1.999 (external, cli)"],
+	];
+	const axiosDefaults: Array<[string, string]> = [
+		["accept", "application/json, text/plain, */*"],
+		["accept-encoding", "gzip, compress, deflate, br"],
+		["content-type", "application/json"],
+		["user-agent", "axios/1.15.2"],
+	];
+
+	it("usage poll names the pinned version over an older client", async () => {
+		trackClientVersion("claude-cli/2.1.63 (external, cli)");
 		stubFetch({});
 		await fetchUsageData("tok");
 		expect(calls[0]?.[0]).toBe("https://api.anthropic.com/api/oauth/usage");
-		expect(wireHeaders()).toEqual([
-			["accept", "application/json"],
-			["anthropic-beta", "oauth-2025-04-20"],
-			["authorization", "Bearer tok"],
-			["content-type", "application/json"],
-			["user-agent", "claude-code/2.1.280"],
-		]);
+		expect(wireHeaders()).toEqual(olderClient);
+	});
+
+	it("usage poll names a newer client over the pinned version", async () => {
+		trackClientVersion("claude-cli/2.1.999 (external, cli)");
+		stubFetch({});
+		await fetchUsageData("tok");
+		expect(wireHeaders()).toEqual(newerClient);
 	});
 
 	it("profile read", async () => {
@@ -63,27 +88,16 @@ describe("Claude identity at the fetch boundary", () => {
 		await fetchAnthropicProfile("tok");
 		expect(calls[0]?.[0]).toBe("https://api.anthropic.com/api/oauth/profile");
 		expect(wireHeaders()).toEqual([
-			["anthropic-beta", "oauth-2025-04-20"],
+			["accept", "application/json, text/plain, */*"],
+			["accept-encoding", "gzip, compress, deflate, br"],
 			["authorization", "Bearer tok"],
+			["cache-control", "no-cache"],
 			["content-type", "application/json"],
-			["user-agent", "claude-code/2.1.280"],
+			["user-agent", "axios/1.15.2"],
 		]);
 	});
 
 	describe("banked resets", () => {
-		const olderClient: Array<[string, string]> = [
-			["anthropic-beta", "oauth-2025-04-20"],
-			["authorization", "Bearer tok"],
-			["content-type", "application/json"],
-			["user-agent", "claude-cli/2.1.280 (external, cli)"],
-		];
-		const newerClient: Array<[string, string]> = [
-			["anthropic-beta", "oauth-2025-04-20"],
-			["authorization", "Bearer tok"],
-			["content-type", "application/json"],
-			["user-agent", "claude-cli/2.1.999 (external, cli)"],
-		];
-
 		it("status read names the pinned version over an older client", async () => {
 			trackClientVersion("claude-cli/2.1.63 (external, cli)");
 			stubFetch({});
@@ -126,7 +140,7 @@ describe("Claude identity at the fetch boundary", () => {
 			"client-id",
 		);
 		expect(calls[0]?.[0]).toBe("https://platform.claude.com/v1/oauth/token");
-		expect(wireHeaders()).toEqual([["content-type", "application/json"]]);
+		expect(wireHeaders()).toEqual(axiosDefaults);
 	});
 
 	it("code exchange", async () => {
@@ -140,6 +154,6 @@ describe("Claude identity at the fetch boundary", () => {
 			mode: "claude-oauth",
 		});
 		expect(calls[0]?.[0]).toBe("https://platform.claude.com/v1/oauth/token");
-		expect(wireHeaders()).toEqual([["content-type", "application/json"]]);
+		expect(wireHeaders()).toEqual(axiosDefaults);
 	});
 });

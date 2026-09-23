@@ -16,7 +16,7 @@ import {
 	newerClaudeCliVersion,
 	newestClaudeCliVersion,
 } from "./claude-client-identity";
-import { CLAUDE_CLI_VERSION } from "./version";
+import { CLAUDE_CLI_VERSION, trackClientVersion } from "./version";
 
 describe("compareClaudeCliVersions", () => {
 	it("compares each segment numerically", () => {
@@ -102,35 +102,36 @@ describe("user agents", () => {
 });
 
 describe("endpoint profiles", () => {
-	it("usage read", () => {
-		expect(claudeUsageReadHeaders("tok")).toEqual({
+	it("usage read names the newer of last seen and pinned", () => {
+		expect(claudeUsageReadHeaders("tok", "9.0.0")).toEqual({
 			Authorization: "Bearer tok",
 			"anthropic-beta": "oauth-2025-04-20",
-			"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
-			Accept: "application/json",
 			"Content-Type": "application/json",
+			"User-Agent": "claude-cli/9.0.0 (external, cli)",
+			Accept: "application/json, text/plain, */*",
+			"Accept-Encoding": "gzip, compress, deflate, br",
 		});
+		expect(claudeUsageReadHeaders("tok", "2.1.63")["User-Agent"]).toBe(
+			`claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`,
+		);
+	});
+
+	it("banked reset sends the usage read's headers", () => {
+		for (const lastSeen of ["2.1.63", "9.0.0"])
+			expect(claudeBankedResetHeaders("tok", lastSeen)).toEqual(
+				claudeUsageReadHeaders("tok", lastSeen),
+			);
 	});
 
 	it("profile read", () => {
 		expect(claudeProfileReadHeaders("tok")).toEqual({
 			Authorization: "Bearer tok",
-			"anthropic-beta": "oauth-2025-04-20",
 			"Content-Type": "application/json",
-			"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
+			"Cache-Control": "no-cache",
+			"User-Agent": "axios/1.15.2",
+			Accept: "application/json, text/plain, */*",
+			"Accept-Encoding": "gzip, compress, deflate, br",
 		});
-	});
-
-	it("banked reset names the newer of last seen and pinned", () => {
-		expect(claudeBankedResetHeaders("tok", "9.0.0")).toEqual({
-			Authorization: "Bearer tok",
-			"anthropic-beta": "oauth-2025-04-20",
-			"Content-Type": "application/json",
-			"User-Agent": "claude-cli/9.0.0 (external, cli)",
-		});
-		expect(claudeBankedResetHeaders("tok", "2.1.63")["User-Agent"]).toBe(
-			`claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`,
-		);
 	});
 
 	it("keepalive names the last client seen, even an older one", () => {
@@ -188,20 +189,28 @@ describe("endpoint profiles", () => {
 	});
 
 	it("token refresh and code exchange", () => {
-		expect(claudeTokenRefreshHeaders()).toEqual({
+		const axios = {
 			"Content-Type": "application/json",
-		});
-		expect(claudeCodeExchangeHeaders()).toEqual({
-			"Content-Type": "application/json",
-		});
+			"User-Agent": "axios/1.15.2",
+			Accept: "application/json, text/plain, */*",
+			"Accept-Encoding": "gzip, compress, deflate, br",
+		};
+		expect(claudeTokenRefreshHeaders()).toEqual(axios);
+		expect(claudeCodeExchangeHeaders()).toEqual(axios);
 	});
 
-	it("create API key", () => {
+	it("create API key names the newer of last seen and pinned", () => {
+		trackClientVersion("claude-cli/2.1.63 (external, cli)");
 		expect(claudeCreateApiKeyHeaders("tok")).toEqual({
 			Authorization: "Bearer tok",
-			"Content-Type": "application/x-www-form-urlencoded",
+			"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
 			Accept: "application/json, text/plain, */*",
+			"Accept-Encoding": "gzip, compress, deflate, br",
 		});
+		trackClientVersion("claude-cli/2.1.999 (external, cli)");
+		expect(claudeCreateApiKeyHeaders("tok")["User-Agent"]).toBe(
+			"claude-code/2.1.999",
+		);
 	});
 
 	it("returns a fresh object on every call", () => {

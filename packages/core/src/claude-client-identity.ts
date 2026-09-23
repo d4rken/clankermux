@@ -8,6 +8,11 @@ import { CLAUDE_CLI_VERSION, getClientVersion } from "./version";
 export const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
 export const ANTHROPIC_API_VERSION = "2023-06-01";
 
+/** Defaults of the axios build Claude Code ships. */
+export const AXIOS_USER_AGENT = "axios/1.15.2";
+export const AXIOS_ACCEPT = "application/json, text/plain, */*";
+export const AXIOS_ACCEPT_ENCODING = "gzip, compress, deflate, br";
+
 export const CLAUDE_KEEPALIVE_BETAS: readonly string[] = Object.freeze([
 	CLAUDE_OAUTH_BETA,
 	"fine-grained-tool-streaming-2025-05-14",
@@ -108,13 +113,15 @@ export function newerClaudeCliVersion(a: string, b: string): string {
 /** GET /api/oauth/usage */
 export function claudeUsageReadHeaders(
 	accessToken: string,
+	lastSeen: string = lastSeenClaudeCliVersion(),
 ): Record<string, string> {
 	return {
 		Authorization: `Bearer ${accessToken}`,
 		"anthropic-beta": CLAUDE_OAUTH_BETA,
-		"User-Agent": claudeCodeUserAgent(pinnedClaudeCliVersion()),
-		Accept: "application/json",
 		"Content-Type": "application/json",
+		"User-Agent": claudeCliUserAgent(newestClaudeCliVersion(lastSeen)),
+		Accept: AXIOS_ACCEPT,
+		"Accept-Encoding": AXIOS_ACCEPT_ENCODING,
 	};
 }
 
@@ -124,9 +131,11 @@ export function claudeProfileReadHeaders(
 ): Record<string, string> {
 	return {
 		Authorization: `Bearer ${accessToken}`,
-		"anthropic-beta": CLAUDE_OAUTH_BETA,
 		"Content-Type": "application/json",
-		"User-Agent": claudeCodeUserAgent(pinnedClaudeCliVersion()),
+		"Cache-Control": "no-cache",
+		"User-Agent": AXIOS_USER_AGENT,
+		Accept: AXIOS_ACCEPT,
+		"Accept-Encoding": AXIOS_ACCEPT_ENCODING,
 	};
 }
 
@@ -139,12 +148,7 @@ export function claudeBankedResetHeaders(
 	accessToken: string,
 	lastSeen: string = lastSeenClaudeCliVersion(),
 ): Record<string, string> {
-	return {
-		Authorization: `Bearer ${accessToken}`,
-		"anthropic-beta": CLAUDE_OAUTH_BETA,
-		"Content-Type": "application/json",
-		"User-Agent": claudeCliUserAgent(newestClaudeCliVersion(lastSeen)),
-	};
+	return claudeUsageReadHeaders(accessToken, lastSeen);
 }
 
 /** The auto-refresh keepalive's in-process /v1/messages request. */
@@ -197,23 +201,33 @@ export function claudeModelPermissionsHeaders(
 	};
 }
 
+function axiosJsonPostHeaders(): Record<string, string> {
+	return {
+		"Content-Type": "application/json",
+		"User-Agent": AXIOS_USER_AGENT,
+		Accept: AXIOS_ACCEPT,
+		"Accept-Encoding": AXIOS_ACCEPT_ENCODING,
+	};
+}
+
 /** POST platform.claude.com/v1/oauth/token, grant_type refresh_token. */
 export function claudeTokenRefreshHeaders(): Record<string, string> {
-	return { "Content-Type": "application/json" };
+	return axiosJsonPostHeaders();
 }
 
 /** POST to the OAuth token URL, grant_type authorization_code. */
 export function claudeCodeExchangeHeaders(): Record<string, string> {
-	return { "Content-Type": "application/json" };
+	return axiosJsonPostHeaders();
 }
 
-/** POST /api/oauth/claude_cli/create_api_key */
+/** POST /api/oauth/claude_cli/create_api_key, with no body. */
 export function claudeCreateApiKeyHeaders(
 	accessToken: string,
 ): Record<string, string> {
 	return {
 		Authorization: `Bearer ${accessToken}`,
-		"Content-Type": "application/x-www-form-urlencoded",
-		Accept: "application/json, text/plain, */*",
+		"User-Agent": claudeCodeUserAgent(newestClaudeCliVersion()),
+		Accept: AXIOS_ACCEPT,
+		"Accept-Encoding": AXIOS_ACCEPT_ENCODING,
 	};
 }

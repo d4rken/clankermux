@@ -4,6 +4,7 @@
  * here changes the identity Anthropic sees, so it must be deliberate.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { trackClientVersion } from "@clankermux/core";
 import { mockFetch } from "@clankermux/test-support";
 import { OAuthFlow } from "../index";
 
@@ -15,6 +16,7 @@ describe("Claude identity at the fetch boundary", () => {
 	});
 
 	it("create API key", async () => {
+		trackClientVersion("claude-cli/2.1.63 (external, cli)");
 		const calls: Array<[string, RequestInit | undefined]> = [];
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 			mockFetch(async (input, init) => {
@@ -37,8 +39,10 @@ describe("Claude identity at the fetch boundary", () => {
 			),
 		).toEqual([
 			["accept", "application/json, text/plain, */*"],
+			["accept-encoding", "gzip, compress, deflate, br"],
 			["authorization", "Bearer tok"],
-			["content-type", "application/x-www-form-urlencoded"],
+			["user-agent", "claude-code/2.1.280"],
 		]);
+		expect(calls[0]?.[1]?.body).toBeUndefined();
 	});
 });
