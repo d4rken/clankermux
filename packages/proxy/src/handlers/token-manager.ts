@@ -11,6 +11,10 @@ import { getProvider, type TokenRefreshResult } from "@clankermux/providers";
 import type {
 	Account,
 	AccountIdentity,
+	AnthropicBankedResetClaimRequest,
+	AnthropicBankedResetClaimResult,
+	AnthropicBankedResetEventStatus,
+	AnthropicBankedResetWindow,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
@@ -1454,6 +1458,231 @@ export async function refreshCodexResetCreditsForAccount(
 		}
 	};
 	void promise.then(clearCreditsEntry, clearCreditsEntry);
+	return promise;
+}
+
+export interface AnthropicBankedResetRefreshOutcome {
+	success: boolean;
+	message: string;
+}
+
+export type AnthropicBankedResetClaimDispatchOutcome =
+	| {
+			/** The claim has a ledger row; `ledgerStatus` says whether it resolved. */
+			status: "completed";
+			accountName: string;
+			eventId: string;
+			ledgerStatus: AnthropicBankedResetEventStatus;
+			/** What this call's request received; null when a resolved row was returned without one. */
+			result: AnthropicBankedResetClaimResult | null;
+			reason: string | null;
+			/** The ledger row's recorded error, when it was answered from the ledger. */
+			errorMessage?: string | null;
+			resetsLeft: number | null;
+			cleared: AnthropicBankedResetWindow[];
+			/** ms epoch before which a still-pending claim should not be retried. */
+			nextAttemptAt: number | null;
+			windowsRestored: boolean;
+			statusRefreshed: boolean;
+	  }
+	| {
+			/** No request was sent. */
+			status: "failed";
+			code: "busy" | "grant_mismatch" | "account_state" | "error";
+			message: string;
+	  }
+	| {
+			/**
+			 * No request was sent: another claim on the account is unconfirmed,
+			 * and only a retry under its own request id may be sent.
+			 */
+			status: "failed";
+			code: "pending_claim";
+			message: string;
+			pendingRequestId: string;
+			pendingGrantId: string;
+	  };
+
+// Anthropic banked resets (Claude Code's `cedar_ember`): a status read on the
+// shared /oauth/usage bucket and a state-changing claim, each dispatched to one
+// registered server at a time.
+const anthropicBankedResetRefreshers = new Map<
+	string,
+	(
+		accountId: string,
+		force: boolean,
+	) => Promise<AnthropicBankedResetRefreshOutcome>
+>();
+const anthropicBankedResetRefreshInflight = new Map<
+	string,
+	Promise<AnthropicBankedResetRefreshOutcome>
+>();
+const anthropicBankedResetClaimers = new Map<
+	string,
+	(
+		accountId: string,
+		request: AnthropicBankedResetClaimRequest,
+	) => Promise<AnthropicBankedResetClaimDispatchOutcome>
+>();
+const anthropicBankedResetClaimInflight = new Map<
+	string,
+	{
+		requestId: string;
+		promise: Promise<AnthropicBankedResetClaimDispatchOutcome>;
+	}
+>();
+
+export function registerAnthropicBankedResetRefresher(
+	serverId: string,
+	refresher: (
+		accountId: string,
+		force: boolean,
+	) => Promise<AnthropicBankedResetRefreshOutcome>,
+): void {
+	anthropicBankedResetRefreshers.set(serverId, refresher);
+}
+
+export function unregisterAnthropicBankedResetRefresher(
+	serverId: string,
+): void {
+	anthropicBankedResetRefreshers.delete(serverId);
+}
+
+export function registerAnthropicBankedResetClaimer(
+	serverId: string,
+	claimer: (
+		accountId: string,
+		request: AnthropicBankedResetClaimRequest,
+	) => Promise<AnthropicBankedResetClaimDispatchOutcome>,
+): void {
+	anthropicBankedResetClaimers.set(serverId, claimer);
+}
+
+export function unregisterAnthropicBankedResetClaimer(serverId: string): void {
+	anthropicBankedResetClaimers.delete(serverId);
+}
+
+/**
+ * Read an account's banked-reset status through one registered server.
+ * Non-forced reads are cache-gated by the server; concurrent calls of the same
+ * mode share one read.
+ */
+export async function refreshAnthropicBankedResetsForAccount(
+	accountId: string,
+	force = false,
+): Promise<AnthropicBankedResetRefreshOutcome> {
+	const key = `${accountId}:${force ? "force" : "cached"}`;
+	const existing = anthropicBankedResetRefreshInflight.get(key);
+	if (existing) return existing;
+
+	const promise = (async (): Promise<AnthropicBankedResetRefreshOutcome> => {
+		if (anthropicBankedResetRefreshers.size === 0) {
+			return {
+				success: false,
+				message:
+					"No proxy server is registered to read Anthropic banked resets.",
+			};
+		}
+		let lastFailure: AnthropicBankedResetRefreshOutcome | null = null;
+		for (const [serverId, refresher] of anthropicBankedResetRefreshers) {
+			try {
+				const result = await refresher(accountId, force);
+				if (result.success) return result;
+				lastFailure = result;
+			} catch (error) {
+				log.error(
+					`Anthropic banked-reset status read via server ${serverId} threw for account ${accountId}:`,
+					error,
+				);
+				lastFailure = {
+					success: false,
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		}
+		return (
+			lastFailure ?? {
+				success: false,
+				message: "Anthropic banked-reset status read failed.",
+			}
+		);
+	})();
+
+	anthropicBankedResetRefreshInflight.set(key, promise);
+	const clear = () => {
+		if (anthropicBankedResetRefreshInflight.get(key) === promise) {
+			anthropicBankedResetRefreshInflight.delete(key);
+		}
+	};
+	void promise.then(clear, clear);
+	return promise;
+}
+
+/**
+ * Claim one banked reset through exactly one registered server. Concurrent
+ * dispatches of the same request id share one attempt; a different request id
+ * for an account with a claim in flight is refused without a request.
+ */
+export async function claimAnthropicBankedResetForAccount(
+	accountId: string,
+	request: AnthropicBankedResetClaimRequest,
+): Promise<AnthropicBankedResetClaimDispatchOutcome> {
+	const existing = anthropicBankedResetClaimInflight.get(accountId);
+	if (existing) {
+		if (existing.requestId === request.requestId) return existing.promise;
+		return {
+			status: "failed",
+			code: "busy",
+			message:
+				"Another banked-reset claim is already in progress for this account.",
+		};
+	}
+
+	const promise =
+		(async (): Promise<AnthropicBankedResetClaimDispatchOutcome> => {
+			if (anthropicBankedResetClaimers.size === 0) {
+				return {
+					status: "failed",
+					code: "error",
+					message:
+						"No proxy server is registered to claim Anthropic banked resets.",
+				};
+			}
+			let lastFailure: AnthropicBankedResetClaimDispatchOutcome | null = null;
+			for (const [serverId, claimer] of anthropicBankedResetClaimers) {
+				try {
+					const outcome = await claimer(accountId, request);
+					if (outcome.status === "completed") return outcome;
+					lastFailure = outcome;
+				} catch (error) {
+					log.error(
+						`Anthropic banked-reset claim via server ${serverId} threw for account ${accountId}:`,
+						error,
+					);
+					lastFailure = {
+						status: "failed",
+						code: "error",
+						message: error instanceof Error ? error.message : String(error),
+					};
+				}
+			}
+			return (
+				lastFailure ?? {
+					status: "failed",
+					code: "error",
+					message: "Anthropic banked-reset claim failed.",
+				}
+			);
+		})();
+
+	const entry = { requestId: request.requestId, promise };
+	anthropicBankedResetClaimInflight.set(accountId, entry);
+	const clear = () => {
+		if (anthropicBankedResetClaimInflight.get(accountId) === entry) {
+			anthropicBankedResetClaimInflight.delete(accountId);
+		}
+	};
+	void promise.then(clear, clear);
 	return promise;
 }
 

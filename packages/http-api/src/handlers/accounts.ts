@@ -36,6 +36,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	type AnyUsageData,
+	anthropicBankedResetCache,
 	type CodexCreditsInfo,
 	clearGrokSubscriptionUserIdCache,
 	codexRateLimitResetCreditsCache,
@@ -51,6 +52,7 @@ import {
 	getRepresentativeWindow,
 	type MinimaxUsageData,
 	USAGE_CACHE_TTL_MS,
+	USAGE_RATE_LIMITED_DEFAULT_MS,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -71,6 +73,7 @@ import {
 	getUsageRevisionAnchor,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
+	refreshAnthropicBankedResetsForAccount,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
@@ -114,6 +117,10 @@ import { getCachedOrPersistedCodexUsage } from "../services/resolve-codex-usage"
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 import { invalidateDashboardCache } from "./analytics-runner";
+import {
+	isAnthropicOAuthAccount,
+	toAnthropicBankedResetsInfo,
+} from "./anthropic-banked-resets";
 import {
 	API_KEY_PROVIDERS,
 	createApiKeyAccountAddHandler,
@@ -487,6 +494,8 @@ export async function listAccountResponses(
 			peak_hours_pause_enabled: 0 | 1;
 			codex_auto_apply_reset_credits_enabled: 0 | 1;
 			codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
+			anthropic_auto_apply_banked_resets_enabled: 0 | 1;
+			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
@@ -544,6 +553,8 @@ export async function listAccountResponses(
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
 					COALESCE(codex_auto_apply_reset_on_weekly_limit_enabled, 0) as codex_auto_apply_reset_on_weekly_limit_enabled,
+					COALESCE(anthropic_auto_apply_banked_resets_enabled, 0) as anthropic_auto_apply_banked_resets_enabled,
+					COALESCE(anthropic_auto_apply_banked_reset_on_weekly_limit_enabled, 0) as anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 
 					billing_type,
 					pause_reason,
@@ -741,6 +752,27 @@ export async function listAccountResponses(
 					codexRateLimitResetCreditsCache.needsRefresh(account.id, now)
 				) {
 					void refreshCodexResetCreditsForAccount(account.id);
+				}
+			}
+		}
+
+		// Anthropic banked resets, the same way: snapshot always, refresh from
+		// the management page only. The coordinator skips the read while the
+		// shared /oauth/usage bucket is rate-limited.
+		const anthropicBankedResetsByAccount = new Map(
+			accounts
+				.filter(isAnthropicOAuthAccount)
+				.map((a) => [a.id, anthropicBankedResetCache.get(a.id)]),
+		);
+		if (sideEffects === "management") {
+			for (const account of accounts) {
+				if (
+					!account.disabled &&
+					isAnthropicOAuthAccount(account) &&
+					account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
+					anthropicBankedResetCache.needsRefresh(account.id, now)
+				) {
+					void refreshAnthropicBankedResetsForAccount(account.id);
 				}
 			}
 		}
@@ -1251,12 +1283,23 @@ export async function listAccountResponses(
 						account.codex_auto_apply_reset_credits_enabled === 1,
 					autoApplyResetOnWeeklyLimitEnabled:
 						account.codex_auto_apply_reset_on_weekly_limit_enabled === 1,
+					autoApplyBankedResetsEnabled:
+						account.anthropic_auto_apply_banked_resets_enabled === 1,
+					autoApplyBankedResetOnWeeklyLimitEnabled:
+						account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled ===
+						1,
 					customEndpoint: account.custom_endpoint,
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
 					codexCredits, // Codex-only credits state (null otherwise)
 					codexRateLimitResetCredits,
+					anthropicBankedResets: isAnthropicOAuthAccount(account)
+						? (() => {
+								const entry = anthropicBankedResetsByAccount.get(account.id);
+								return entry ? toAnthropicBankedResetsInfo(entry) : null;
+							})()
+						: null,
 					staleUsage,
 					// When the reading in `usageData` was OBSERVED. Two honest sources:
 					// the live cache entry's own observation time, and — for a Codex
@@ -1696,6 +1739,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// usage-refresh paths already call.
 			clearAccountRefreshCache(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
+			anthropicBankedResetCache.delete(accountId);
 			// The Grok billing read's memoised user id is only replaced on a token
 			// change, never expired.
 			clearGrokSubscriptionUserIdCache(accountId);
@@ -1763,6 +1807,7 @@ export function createAccountDisabledHandler(
 				usageCache.stopPolling(accountId);
 				usageCache.delete(accountId);
 				codexRateLimitResetCreditsCache.delete(accountId);
+				anthropicBankedResetCache.delete(accountId);
 				clearWeeklyBurnSlopes(accountId);
 				clearUsageRevisionAnchors(accountId);
 				sessionCacheStore.evictAccount(accountId);
@@ -2772,15 +2817,27 @@ export function createAccountForceResetRateLimitHandler(
 			// other providers (e.g. Zai) use different endpoints handled by their own fetchers.
 			// This bypasses token refresh, but is acceptable since this path only runs when
 			// no active polling exists and the token is likely fresh from recent proxy requests.
+			// refreshNow also answers false while the shared /oauth/usage deadline
+			// stands, and that deadline holds this read too.
 			if (
 				!usagePollTriggered &&
 				provider === "anthropic" &&
-				account.access_token
+				account.access_token &&
+				usageCache.getRateLimitedUntil(accountId) === null
 			) {
-				const { data: usageData } = await fetchUsageData(account.access_token);
+				const {
+					data: usageData,
+					rateLimited,
+					retryAfterMs,
+				} = await fetchUsageData(account.access_token);
 				if (usageData) {
 					usageCache.set(account.id, usageData);
 					usagePollTriggered = true;
+				} else if (rateLimited) {
+					usageCache.noteRateLimited(
+						accountId,
+						Date.now() + (retryAfterMs ?? USAGE_RATE_LIMITED_DEFAULT_MS),
+					);
 				}
 			}
 

@@ -76,6 +76,35 @@ describe("deriveAccountPolicies — provider inventory", () => {
 		]);
 	});
 
+	it("adds the two banked-reset flags on an Anthropic OAuth account only", () => {
+		const oauth = makeAccount({
+			provider: "anthropic",
+			hasRefreshToken: true,
+			autoApplyBankedResetsEnabled: true,
+			autoApplyBankedResetOnWeeklyLimitEnabled: false,
+		});
+		expect(deriveAccountPolicies(oauth).map((p) => p.key)).toEqual([
+			"autoFallback",
+			"autoRefresh",
+			"extraSpend",
+			"autoApplyExpiry",
+			"autoApplyWeekly",
+		]);
+		expect(policyOf(oauth, "autoApplyExpiry").enabled).toBe(true);
+		expect(policyOf(oauth, "autoApplyWeekly").enabled).toBe(false);
+		// The Codex toggles never stand in for Anthropic's.
+		expect(
+			policyOf(
+				makeAccount({
+					provider: "anthropic",
+					hasRefreshToken: true,
+					autoApplyResetCreditsEnabled: true,
+				}),
+				"autoApplyExpiry",
+			).enabled,
+		).toBe(false);
+	});
+
 	it("gives a zai account three flags, in table order", () => {
 		expect(keysFor("zai")).toEqual([
 			"autoFallback",
@@ -309,4 +338,20 @@ it("offers Devin extra spend independently of session automation", () => {
 	expect(copy.description).toContain("CLI, Desktop, and cloud");
 	expect(copy.description).not.toContain("Anthropic");
 	expect(copy.description).not.toContain("five-hour");
+});
+
+it("words the auto-apply flags for Anthropic banked resets", () => {
+	const expiry = describeAccountPolicy("autoApplyExpiry", "anthropic");
+	const weekly = describeAccountPolicy("autoApplyWeekly", "anthropic");
+	expect(expiry.menuLabel).toBe("Auto-apply expiring banked resets");
+	expect(weekly.menuLabel).toBe("Auto-apply banked reset at weekly limit");
+	expect(expiry.chipLabel).toBe("Apply: expiry");
+	expect(weekly.chipLabel).toBe("Apply: weekly");
+	expect(expiry.description).not.toContain("Codex");
+	expect(weekly.description).not.toContain("Codex");
+	expect(weekly.description).toContain("Anthropic account");
+	// Codex keeps its own copy.
+	expect(describeAccountPolicy("autoApplyWeekly", "codex").menuLabel).toBe(
+		"Auto-apply reset at weekly limit",
+	);
 });

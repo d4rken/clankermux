@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+	anthropicBankedResetCache,
 	clearGrokSubscriptionUserIdCache,
 	codexRateLimitResetCreditsCache,
 	fetchGrokSubscriptionUsage,
@@ -194,6 +195,18 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 			availableCount: 2,
 			credits: null,
 		});
+		const bankedStatus = {
+			eligible: true,
+			ineligibleReason: null,
+			atLimit: null,
+			exhausted: [],
+			grants: [],
+			nextGrantId: null,
+			weeklyResetsAt: null,
+			cooldownUntil: null,
+		};
+		anthropicBankedResetCache.set("dup-a", bankedStatus);
+		anthropicBankedResetCache.set("dup-b", bankedStatus);
 		markCapacityRestoredProbePending("dup-a");
 		markCapacityRestoredProbePending("dup-b");
 
@@ -219,6 +232,9 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 				codexRateLimitResetCreditsCache.get("dup-b")?.summary.availableCount,
 			).toBe(2);
 
+			expect(anthropicBankedResetCache.get("dup-a")).toBeNull();
+			expect(anthropicBankedResetCache.get("dup-b")).not.toBeNull();
+
 			expect(hasCapacityRestoredProbePending("dup-a")).toBe(false);
 			expect(hasCapacityRestoredProbePending("dup-b")).toBe(true);
 		} finally {
@@ -226,6 +242,8 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 			usageCache.delete("dup-b");
 			codexRateLimitResetCreditsCache.delete("dup-a");
 			codexRateLimitResetCreditsCache.delete("dup-b");
+			anthropicBankedResetCache.delete("dup-a");
+			anthropicBankedResetCache.delete("dup-b");
 			clearCapacityRestoredProbePending("dup-a");
 			clearCapacityRestoredProbePending("dup-b");
 		}

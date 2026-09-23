@@ -38,6 +38,8 @@ function makeAccountRow(overrides: Record<string, unknown>) {
 		peak_hours_pause_enabled: 0,
 		codex_auto_apply_reset_credits_enabled: 0,
 		codex_auto_apply_reset_on_weekly_limit_enabled: 0,
+		anthropic_auto_apply_banked_resets_enabled: 0,
+		anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: 0,
 		custom_endpoint: null,
 		model_mappings: null,
 		model_fallbacks: null,

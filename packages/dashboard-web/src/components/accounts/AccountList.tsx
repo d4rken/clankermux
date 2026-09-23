@@ -51,6 +51,8 @@ interface AccountListProps {
 	onPeakHoursPauseToggle?: (account: Account) => void;
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
+	onAutoApplyBankedResetsToggle?: (account: Account) => void;
+	onAutoApplyBankedResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelPermissionsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
@@ -85,6 +87,8 @@ export function AccountList({
 	onPeakHoursPauseToggle,
 	onAutoApplyResetCreditsToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
+	onAutoApplyBankedResetsToggle,
+	onAutoApplyBankedResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
 	onModelPermissionsChange,
 	onReauth,
@@ -192,6 +196,10 @@ export function AccountList({
 					onAutoApplyResetCreditsToggle={onAutoApplyResetCreditsToggle}
 					onAutoApplyResetOnWeeklyLimitToggle={
 						onAutoApplyResetOnWeeklyLimitToggle
+					}
+					onAutoApplyBankedResetsToggle={onAutoApplyBankedResetsToggle}
+					onAutoApplyBankedResetOnWeeklyLimitToggle={
+						onAutoApplyBankedResetOnWeeklyLimitToggle
 					}
 					onCustomEndpointChange={onCustomEndpointChange}
 					onModelPermissionsChange={onModelPermissionsChange}

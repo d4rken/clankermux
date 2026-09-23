@@ -88,6 +88,8 @@ describe("ensureSchema completeness", () => {
 			"peak_hours_pause_enabled",
 			"codex_auto_apply_reset_credits_enabled",
 			"codex_auto_apply_reset_on_weekly_limit_enabled",
+			"anthropic_auto_apply_banked_resets_enabled",
+			"anthropic_auto_apply_banked_reset_on_weekly_limit_enabled",
 			"pause_reason",
 			"rate_limited_reason",
 			"rate_limited_at",
@@ -98,6 +100,7 @@ describe("ensureSchema completeness", () => {
 			"renewal_auto_start_date",
 			"notes",
 			"refresh_token_expires_at",
+			"identity_organization_uuid",
 		];
 		for (const col of expected) {
 			expect(cols.has(col)).toBe(true);
@@ -220,6 +223,41 @@ describe("ensureSchema completeness", () => {
 		for (const idx of [
 			"idx_codex_reset_credit_events_auto_attempt",
 			"idx_codex_reset_credit_events_account",
+		]) {
+			expect(indexExists(db, idx)).toBe(true);
+		}
+	});
+
+	it("creates the anthropic_banked_reset_events table and its indexes", () => {
+		expect(tableExists(db, "anthropic_banked_reset_events")).toBe(true);
+		const cols = columnNames(db, "anthropic_banked_reset_events");
+		for (const col of [
+			"id",
+			"account_id",
+			"account_name",
+			"grant_id",
+			"trigger",
+			"cause",
+			"attempt_seq",
+			"request_id",
+			"status",
+			"reason",
+			"cleared",
+			"resets_left",
+			"error_message",
+			"grant_ends_at",
+			"next_attempt_at",
+			"created_at",
+			"resolved_at",
+			"rearm_at",
+			"recovery_pending_until",
+		]) {
+			expect(cols.has(col)).toBe(true);
+		}
+		for (const idx of [
+			"idx_anthropic_banked_reset_events_auto_attempt",
+			"idx_anthropic_banked_reset_events_request",
+			"idx_anthropic_banked_reset_events_account",
 		]) {
 			expect(indexExists(db, idx)).toBe(true);
 		}

@@ -49,12 +49,20 @@ import {
 	type PayloadWriterFactory,
 } from "./payload-write-client";
 import {
+	type AccountPauseMarker,
 	AccountRepository,
 	type DevinCredentialReplacement,
 	type ProviderRenewalAnchorSync,
 	type ZaiCredentialReplacement,
 } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
+import {
+	type AnthropicBankedResetAutoClaim,
+	AnthropicBankedResetEventRepository,
+	type AnthropicBankedResetEventRow,
+	type AnthropicBankedResetManualBegin,
+	type AnthropicBankedResetResolution,
+} from "./repositories/anthropic-banked-reset-event.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
 	AuthRepository,
@@ -540,6 +548,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
 	private codexResetCreditEvents: CodexResetCreditEventRepository;
+	private anthropicBankedResetEvents: AnthropicBankedResetEventRepository;
 	private quotaDriftResults: QuotaDriftResultRepository;
 	private modelOverrides: ModelOverrideRepository;
 
@@ -687,6 +696,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.codexResetCreditEvents = retrying(
 			new CodexResetCreditEventRepository(this.adapter),
 			"codexResetCreditEvents",
+		);
+		this.anthropicBankedResetEvents = retrying(
+			new AnthropicBankedResetEventRepository(this.adapter),
+			"anthropicBankedResetEvents",
 		);
 		this.modelOverrides = retrying(
 			new ModelOverrideRepository(this.adapter),
@@ -1453,6 +1466,21 @@ OAuth tokens will need to be re-authenticated.
 		return this.accounts.resumeIfOveragePaused(accountId);
 	}
 
+	/** See {@link AccountRepository.getPauseMarker}. */
+	async getAccountPauseMarker(
+		accountId: string,
+	): Promise<AccountPauseMarker | null> {
+		return this.accounts.getPauseMarker(accountId);
+	}
+
+	/** See {@link AccountRepository.resumeIfOveragePausedAt}. */
+	async resumeAccountIfOveragePausedAt(
+		accountId: string,
+		pauseEpoch: number,
+	): Promise<boolean> {
+		return this.accounts.resumeIfOveragePausedAt(accountId, pauseEpoch);
+	}
+
 	/**
 	 * Resume an account only if it is paused specifically for needing re-auth
 	 * (`oauth_invalid_grant`). Called after a successful reauth so the account
@@ -1656,6 +1684,26 @@ OAuth tokens will need to be re-authenticated.
 	): Promise<void> {
 		await this.adapter.run(
 			"UPDATE accounts SET codex_auto_apply_reset_on_weekly_limit_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
+	async setAnthropicAutoApplyBankedResetsEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET anthropic_auto_apply_banked_resets_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
+	async setAnthropicAutoApplyBankedResetOnWeeklyLimitEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET anthropic_auto_apply_banked_reset_on_weekly_limit_enabled = ? WHERE id = ?",
 			[enabled ? 1 : 0, accountId],
 		);
 	}
@@ -3091,6 +3139,127 @@ OAuth tokens will need to be re-authenticated.
 		limit: number,
 	): Promise<CodexResetCreditEventRow[]> {
 		return this.codexResetCreditEvents.findRecentForAccount(accountId, limit);
+	}
+
+	// ── Anthropic banked-reset ledger operations delegated to repository ──────
+
+	async claimAnthropicBankedResetAutoAttempt(input: {
+		accountId: string;
+		accountName: string;
+		grantId: string;
+		grantEndsAt: number | null;
+		cause: "expiry" | "weekly-limit";
+		now?: number;
+	}): Promise<AnthropicBankedResetAutoClaim | null> {
+		return this.anthropicBankedResetEvents.claimAutoAttempt({
+			...input,
+			now: input.now ?? Date.now(),
+		});
+	}
+
+	async beginManualAnthropicBankedResetAttempt(input: {
+		accountId: string;
+		accountName: string;
+		grantId: string;
+		requestId: string;
+		grantEndsAt: number | null;
+		now?: number;
+	}): Promise<AnthropicBankedResetManualBegin> {
+		return this.anthropicBankedResetEvents.beginManualAttempt({
+			...input,
+			now: input.now ?? Date.now(),
+		});
+	}
+
+	async getAnthropicBankedResetEventByRequestId(
+		accountId: string,
+		requestId: string,
+	): Promise<AnthropicBankedResetEventRow | null> {
+		return this.anthropicBankedResetEvents.findByRequestId(
+			accountId,
+			requestId,
+		);
+	}
+
+	async getPendingAnthropicBankedResetAttempts(
+		accountId: string,
+		trigger?: "manual" | "auto",
+	): Promise<AnthropicBankedResetEventRow[]> {
+		return this.anthropicBankedResetEvents.findPendingForAccount(
+			accountId,
+			trigger,
+		);
+	}
+
+	async resolveAnthropicBankedResetAttempt(
+		id: string,
+		resolution: Omit<AnthropicBankedResetResolution, "now"> & {
+			now?: number;
+		},
+	): Promise<boolean> {
+		return this.anthropicBankedResetEvents.resolveAttempt(id, {
+			...resolution,
+			now: resolution.now ?? Date.now(),
+		});
+	}
+
+	async setAnthropicBankedResetNextAttemptAt(
+		id: string,
+		nextAttemptAt: number,
+		errorMessage: string | null,
+	): Promise<boolean> {
+		return this.anthropicBankedResetEvents.setNextAttemptAt(
+			id,
+			nextAttemptAt,
+			errorMessage,
+		);
+	}
+
+	async expireStaleAnthropicBankedResetAttempts(
+		now: number = Date.now(),
+	): Promise<number> {
+		return this.anthropicBankedResetEvents.expireStalePending(now);
+	}
+
+	async getAnthropicBankedResetRecoveryPending(): Promise<
+		AnthropicBankedResetEventRow[]
+	> {
+		return this.anthropicBankedResetEvents.findRecoveryPending();
+	}
+
+	async clearAnthropicBankedResetRecoveryPending(id: string): Promise<boolean> {
+		return this.anthropicBankedResetEvents.clearRecoveryPending(id);
+	}
+
+	async getAnthropicBankedResetRearmAt(
+		accountId: string,
+	): Promise<number | null> {
+		return this.anthropicBankedResetEvents.getRearmAt(accountId);
+	}
+
+	async getAnthropicBankedResetAutoApplyCooldownAnchorAt(
+		accountId: string,
+	): Promise<number | null> {
+		return this.anthropicBankedResetEvents.getLatestAutoApplyCooldownAnchorAt(
+			accountId,
+		);
+	}
+
+	async getNextAnthropicBankedResetAttemptSeq(
+		accountId: string,
+		grantId: string,
+	): Promise<number> {
+		return this.anthropicBankedResetEvents.nextAttemptSeq(accountId, grantId);
+	}
+
+	async getRecentAnthropicBankedResetEvents(
+		accountId: string,
+		limit: number,
+	): Promise<AnthropicBankedResetEventRow[]> {
+		return this.anthropicBankedResetEvents.findRecentForAccount(
+			accountId,
+			limit,
+		);
 	}
 
 	// The retired global model-catalogue curation, read-only. Its one reader is

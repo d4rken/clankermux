@@ -58,7 +58,11 @@ export function ensureSchema(db: Database): void {
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
+			anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0,
+			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
+			pause_epoch INTEGER NOT NULL DEFAULT 0,
+			pause_changed_at INTEGER,
 			rate_limited_reason TEXT,
 			rate_limited_at INTEGER,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +76,7 @@ export function ensureSchema(db: Database): void {
 			identity_external_id TEXT,
 			identity_email TEXT,
 			identity_organization_name TEXT,
+			identity_organization_uuid TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
 			identity_subscription_status TEXT,
@@ -955,6 +960,58 @@ export function ensureSchema(db: Database): void {
 			ON codex_reset_credit_events(account_id, created_at DESC)`,
 	);
 
+	// Ledger of Anthropic banked-reset claims (Claude Code's cedar_ember
+	// program), manual and automatic. Every row is written 'pending' before its
+	// POST and replayed with the same request_id until it resolves or expires to
+	// 'failed'. Auto rows use a deterministic id
+	// "{account_id}:{grant_id}:{attempt_seq}". Times are ms epoch; cleared is a
+	// JSON array of window names. Deliberately NO foreign key on account_id: the
+	// ledger must survive account deletion.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS anthropic_banked_reset_events (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			account_name TEXT NOT NULL,
+			grant_id TEXT NOT NULL,
+			trigger TEXT NOT NULL CHECK (trigger IN ('manual','auto')),
+			cause TEXT CHECK (cause IN ('expiry','weekly-limit')),
+			attempt_seq INTEGER,
+			request_id TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('pending','reset','already_used','not_limited','cooldown','ineligible','unavailable','failed')),
+			reason TEXT,
+			cleared TEXT,
+			resets_left INTEGER,
+			error_message TEXT,
+			grant_ends_at INTEGER,
+			next_attempt_at INTEGER,
+			created_at INTEGER NOT NULL,
+			resolved_at INTEGER,
+			rearm_at INTEGER,
+			recovery_pending_until INTEGER,
+			recovery_pause_epoch INTEGER,
+			recovery_pause_changed_at INTEGER
+		)
+	`);
+
+	// One auto attempt row per (account, grant, seq): INSERT OR IGNORE against
+	// it makes concurrent auto claims race-safe.
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_auto_attempt
+			ON anthropic_banked_reset_events(account_id, grant_id, attempt_seq)
+			WHERE trigger = 'auto'`,
+	);
+
+	// A replayed request_id lands on its existing row instead of a new claim.
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_request
+			ON anthropic_banked_reset_events(account_id, request_id)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_anthropic_banked_reset_events_account
+			ON anthropic_banked_reset_events(account_id, created_at DESC)`,
+	);
+
 	// Dashboard/management session auth.
 	//
 	// `auth_password` holds AT MOST ONE row — the CHECK on the primary key is
@@ -1065,6 +1122,15 @@ export function ensureSchema(db: Database): void {
 		BEGIN SELECT RAISE(ABORT, 'API key is referenced by routing rules'); END`);
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_attempt_retention AFTER DELETE ON requests
 		BEGIN DELETE FROM routing_attempts WHERE request_id=OLD.id; END`);
+
+	// A pause's identity. Every change of paused or pause_reason, by any of the
+	// many writers, advances pause_epoch and stamps pause_changed_at (ms), so a
+	// verdict owed to one pause can tell it from a later one.
+	db.run(`CREATE TRIGGER IF NOT EXISTS accounts_pause_epoch AFTER UPDATE OF paused, pause_reason ON accounts
+  WHEN OLD.paused IS NOT NEW.paused OR OLD.pause_reason IS NOT NEW.pause_reason
+  BEGIN UPDATE accounts SET pause_epoch = pause_epoch + 1,
+    pause_changed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+  WHERE id = NEW.id; END`);
 
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_permission_account_cleanup AFTER DELETE ON accounts
   BEGIN DELETE FROM account_model_permissions WHERE account_id=OLD.id;
@@ -1725,6 +1791,67 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "cache_creation_1h_input_tokens",
 		ddl: "ALTER TABLE requests ADD COLUMN cache_creation_1h_input_tokens INTEGER",
+	},
+	// Anthropic `organization.uuid`, the path segment of the banked-reset claim
+	// URL. Carried by the code exchange, every refresh envelope and the profile;
+	// NULL until one of them has been seen for the account.
+	{
+		table: "accounts",
+		column: "identity_organization_uuid",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_organization_uuid TEXT",
+	},
+	// Opt-in per-account toggles for Anthropic banked resets (Claude Code's
+	// cedar_ember grants): claim a grant before it expires unused, and claim
+	// one when the account hits a weekly limit a grant clears. Default OFF.
+	{
+		table: "accounts",
+		column: "anthropic_auto_apply_banked_resets_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	{
+		table: "accounts",
+		column: "anthropic_auto_apply_banked_reset_on_weekly_limit_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	// ms epoch before which no new automatic banked-reset claim starts on the
+	// account, set when a claim resolves not_limited, cooldown or ineligible.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "rearm_at",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN rearm_at INTEGER",
+	},
+	// ms epoch until which a spent banked reset still owes the account's
+	// overage pause a verdict, because the post-claim usage read was
+	// unavailable. The applier settles it from a later reading.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pending_until",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pending_until INTEGER",
+	},
+	// The identity of the account's pause the owed verdict is for: its
+	// pause_epoch and pause_changed_at when the claim was sent.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pause_epoch",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pause_epoch INTEGER",
+	},
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pause_changed_at",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pause_changed_at INTEGER",
+	},
+	// A pause's identity, advanced by the accounts_pause_epoch trigger on every
+	// change of paused or pause_reason. 0 and NULL on an account never paused
+	// since the column arrived.
+	{
+		table: "accounts",
+		column: "pause_epoch",
+		ddl: "ALTER TABLE accounts ADD COLUMN pause_epoch INTEGER NOT NULL DEFAULT 0",
+	},
+	{
+		table: "accounts",
+		column: "pause_changed_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN pause_changed_at INTEGER",
 	},
 ];
 

@@ -318,6 +318,8 @@ export class OAuthFlow {
 			email: profileIdentity?.email ?? envelope?.email ?? null,
 			organizationName:
 				profileIdentity?.organizationName ?? envelope?.organizationName ?? null,
+			organizationUuid:
+				profileIdentity?.organizationUuid ?? envelope?.organizationUuid ?? null,
 			planTier: profileIdentity?.planTier ?? envelope?.planTier ?? null,
 			rateLimitTier:
 				profileIdentity?.rateLimitTier ?? envelope?.rateLimitTier ?? null,
