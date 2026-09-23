@@ -3,22 +3,15 @@ import type { OpenAIRequest } from "@clankermux/openai-formats";
 import { getDefaultEndpoint, PROVIDER_NAMES } from "@clankermux/types";
 import type { RateLimitInfo } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
+import {
+	QWEN_CODE_CONTEXT_FILE,
+	QWEN_CODE_FEEDBACK_LINE,
+	QWEN_CODE_IDENTITY_PROMPT,
+	QWEN_CODE_PRODUCT_NAME,
+	qwenInferenceHeaders,
+} from "./client-identity";
 
 const _log = new Logger("QwenProvider");
-
-const QWEN_USER_AGENT = "QwenCode/sdk-typescript-v0.1.7 (darwin; arm64)";
-
-// Stainless SDK headers injected by the official OpenAI Node SDK (v5.x).
-// portal.qwen.ai validates these to confirm the official client is being used.
-const STAINLESS_HEADERS: Record<string, string> = {
-	"X-Stainless-Lang": "js",
-	"X-Stainless-Runtime": "node",
-	"X-Stainless-Runtime-Version": "v22.17.0",
-	"X-Stainless-Os": "MacOS",
-	"X-Stainless-Arch": "arm64",
-	"X-Stainless-Package-Version": "5.11.0",
-	"X-Stainless-Retry-Count": "0",
-};
 
 // Lines in the Claude Code system prompt that are environment/model-specific
 // and should be dropped entirely when proxying to Qwen.
@@ -45,7 +38,7 @@ function sanitizeForQwen(text: string): string {
 			"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." ||
 		text === "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 	) {
-		return "You are Qwen Code, an interactive CLI agent developed by Alibaba Group, specializing in software engineering tasks.";
+		return QWEN_CODE_IDENTITY_PROMPT;
 	}
 
 	// Process line-by-line for the main instructions block
@@ -57,16 +50,16 @@ function sanitizeForQwen(text: string): string {
 
 		let l = line;
 		// CLAUDE.md → QWEN.md
-		l = l.replace(/\bCLAUDE\.md\b/g, "QWEN.md");
+		l = l.replace(/\bCLAUDE\.md\b/g, QWEN_CODE_CONTEXT_FILE);
 		// /help feedback line
 		l = l.replace(
 			/To give feedback, users should report the issue at https:\/\/github\.com\/anthropics\/claude-code\/issues/,
-			"To report a bug or provide feedback, please use the /bug command",
+			QWEN_CODE_FEEDBACK_LINE,
 		);
 		// "Get help with using Claude Code"
 		l = l.replace(
 			/Get help with using Claude Code/,
-			"Get help with using Qwen Code",
+			`Get help with using ${QWEN_CODE_PRODUCT_NAME}`,
 		);
 		out.push(l);
 	}
@@ -101,31 +94,7 @@ export class QwenProvider extends OpenAICompatibleProvider {
 	): Headers {
 		// Start from a clean set — DashScope is sensitive to unexpected headers
 		// (e.g. x-stainless-*, anthropic-*, accept-encoding) causing 429s.
-		const newHeaders = new Headers();
-
-		// Set Qwen auth headers
-		if (accessToken) {
-			newHeaders.set("Authorization", `Bearer ${accessToken}`);
-		}
-
-		// Qwen/DashScope SDK headers (verified against qwen-code repo)
-		newHeaders.set("Content-Type", "application/json");
-		newHeaders.set("User-Agent", QWEN_USER_AGENT);
-		newHeaders.set("X-DashScope-CacheControl", "enable");
-		newHeaders.set("X-DashScope-UserAgent", QWEN_USER_AGENT);
-		newHeaders.set("X-DashScope-AuthType", "qwen-oauth");
-
-		// Stainless SDK headers — portal.qwen.ai validates these to confirm
-		// the official OpenAI Node SDK is being used (mimics openai npm pkg v5.x)
-		for (const [key, value] of Object.entries(STAINLESS_HEADERS)) {
-			newHeaders.set(key, value);
-		}
-		newHeaders.set("Accept-Language", "*");
-		newHeaders.set("Accept-Encoding", "gzip, deflate");
-		newHeaders.set("Sec-Fetch-Mode", "cors");
-		newHeaders.set("Connection", "keep-alive");
-
-		return newHeaders;
+		return new Headers(qwenInferenceHeaders(accessToken));
 	}
 
 	override parseRateLimit(_response: Response): RateLimitInfo {
