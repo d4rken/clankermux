@@ -295,6 +295,20 @@ class API extends HttpClient {
 		});
 	}
 
+	/**
+	 * Claim the first management password with the one-time setup code the
+	 * server printed to its own output.
+	 *
+	 * Signs the browser in on success, the same way {@link login} does: the
+	 * response sets the `HttpOnly` session cookie.
+	 */
+	async setupPassword(code: string, password: string): Promise<void> {
+		await this.post<{ authenticated: boolean }>("/api/auth/setup", {
+			code,
+			password,
+		});
+	}
+
 	async logout(): Promise<void> {
 		await this.post<{ authenticated: boolean }>("/api/auth/logout", {});
 	}

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useAuthStatus } from "../hooks/useAuthStatus";
 import { LoginScreen } from "./LoginScreen";
+import { SetupScreen } from "./SetupScreen";
 
 /**
  * Decides whether the app runs at all.
@@ -11,13 +12,11 @@ import { LoginScreen } from "./LoginScreen";
  * before deciding the browser is signed out — an `EventSource` retry loop
  * against a 401 behind a login form.
  *
- * Three states, and the middle one is the interesting one:
+ * Three states, and the app runs in only one of them:
  *
- *  - `configured: false` — the deployment is FAIL-OPEN. The app runs, and the
- *    navigation sidebar carries a permanent notice saying so
- *    ({@link UnprotectedApiNotice}, rendered there rather than here so it does
- *    not push every page's content down). This is what stops an upgrade from
- *    locking an operator out of a box that has never had a password.
+ *  - `configured: false` — no password exists yet. The setup screen, INSTEAD
+ *    of the app, with no way to skip it: the operator claims the first
+ *    password with the one-time code the server printed, and is signed in.
  *  - `configured: true, authenticated: false` — the login screen, INSTEAD of
  *    the app.
  *  - `configured: true, authenticated: true` — the app.
@@ -42,10 +41,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 		return <>{children}</>;
 	}
 
-	// Fail-open: the app runs. The standing "unprotected" notice is rendered by
-	// the navigation sidebar off the same `configured === false` signal.
 	if (!data.configured) {
-		return <>{children}</>;
+		return <SetupScreen />;
 	}
 
 	if (!data.authenticated) {
