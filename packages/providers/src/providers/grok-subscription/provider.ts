@@ -14,7 +14,7 @@ import {
 import { XAI_CLIENT_ID, XAI_TOKEN_ENDPOINT } from "./device-oauth";
 import { extractGrokSubscriptionIdentity } from "./identity";
 import { normalizeGrokRequestBody } from "./request-body";
-import { indexContentBlockDeltas } from "./response-stream";
+import { numberContentBlocks } from "./response-stream";
 import {
 	describeGrokUpgradeRequired,
 	isGrokUpgradeRequired,
@@ -242,7 +242,7 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 			);
 			const body =
 				streamed && response.body
-					? indexContentBlockDeltas(response.body)
+					? numberContentBlocks(response.body)
 					: response.body;
 			return new Response(body, {
 				status: response.status,

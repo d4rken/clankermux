@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { GrokSubscriptionProvider } from "../provider";
-import { indexContentBlockDeltas } from "../response-stream";
+import { numberContentBlocks } from "../response-stream";
 
 function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
@@ -12,41 +12,66 @@ function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
 	});
 }
 
-// Captured from cli-chat-proxy.grok.com: the deltas carry no `index`.
+const event = (type: string, fields: Record<string, unknown> = {}) =>
+	`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`;
+
+// The shape cli-chat-proxy.grok.com streams: every block starts and stops as
+// index 0, and deltas carry no index at all.
 const XAI_STREAM = [
-	'event: message_start\ndata: {"type":"message_start","message":{"id":"m","content":[]}}\n\n',
-	'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
-	'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"pi"}}\n\n',
+	event("message_start", { message: { id: "m", content: [] } }),
+	event("content_block_start", {
+		index: 0,
+		content_block: { type: "thinking", thinking: "" },
+	}),
+	event("content_block_delta", {
+		delta: { type: "thinking_delta", thinking: "hm" },
+	}),
+	event("content_block_stop", { index: 0 }),
+	event("content_block_start", {
+		index: 0,
+		content_block: { type: "text", text: "" },
+	}),
+	event("content_block_delta", { delta: { type: "text_delta", text: "run" } }),
 	': xai-usage {"output_tokens":1}\n\n',
-	'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"-ok"}}\n\n',
-	'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
-	'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"Bash","input":{}}}\n\n',
-	'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\\"command\\":1}"}}\n\n',
-	'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
-	'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+	event("content_block_stop", { index: 0 }),
+	event("content_block_start", {
+		index: 0,
+		content_block: { type: "tool_use", id: "t", name: "exec", input: {} },
+	}),
+	event("content_block_delta", {
+		delta: { type: "input_json_delta", partial_json: '{"cmd":"ls"}' },
+	}),
+	event("content_block_stop", { index: 0 }),
+	event("message_stop"),
 ];
 
-function dataEvents(text: string): Record<string, unknown>[] {
+function blockEvents(text: string): [string, unknown][] {
 	return text
 		.split("\n")
 		.filter((line) => line.startsWith("data: "))
-		.map((line) => JSON.parse(line.slice(6)));
+		.map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+		.filter((e) => String(e.type).startsWith("content_block_"))
+		.map((e) => [e.type as string, e.index]);
 }
 
-describe("indexContentBlockDeltas", () => {
-	it("gives each delta the index of the block it belongs to", async () => {
+const NUMBERED: [string, unknown][] = [
+	["content_block_start", 0],
+	["content_block_delta", 0],
+	["content_block_stop", 0],
+	["content_block_start", 1],
+	["content_block_delta", 1],
+	["content_block_stop", 1],
+	["content_block_start", 2],
+	["content_block_delta", 2],
+	["content_block_stop", 2],
+];
+
+describe("numberContentBlocks", () => {
+	it("numbers blocks in order and gives deltas and stops their block's number", async () => {
 		const text = await new Response(
-			indexContentBlockDeltas(streamOf(XAI_STREAM)),
+			numberContentBlocks(streamOf(XAI_STREAM)),
 		).text();
-		const deltas = dataEvents(text).filter(
-			(e) => e.type === "content_block_delta",
-		);
-		expect(deltas.map((d) => d.index)).toEqual([0, 0, 1]);
-		expect(deltas[0]).toEqual({
-			type: "content_block_delta",
-			index: 0,
-			delta: { type: "text_delta", text: "pi" },
-		});
+		expect(blockEvents(text)).toEqual(NUMBERED);
 	});
 
 	it("survives events split across chunk boundaries and keeps every other line", async () => {
@@ -55,34 +80,39 @@ describe("indexContentBlockDeltas", () => {
 		for (let i = 0; i < whole.length; i += 7)
 			chunks.push(whole.slice(i, i + 7));
 		const text = await new Response(
-			indexContentBlockDeltas(streamOf(chunks)),
+			numberContentBlocks(streamOf(chunks)),
 		).text();
 		expect(text).toContain(': xai-usage {"output_tokens":1}\n');
 		expect(text).toContain("event: message_stop\n");
-		expect(
-			dataEvents(text)
-				.filter((e) => e.type === "content_block_delta")
-				.map((d) => d.index),
-		).toEqual([0, 0, 1]);
+		expect(blockEvents(text)).toEqual(NUMBERED);
 	});
 
-	it("leaves a delta that already names its block untouched", async () => {
-		const line =
-			'data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"x"}}\n\n';
+	it("passes a stream that already numbers its blocks through byte for byte", async () => {
+		const conforming = [
+			event("content_block_start", {
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			event("content_block_delta", {
+				index: 0,
+				delta: { type: "text_delta", text: "x" },
+			}),
+			event("content_block_stop", { index: 0 }),
+			event("content_block_start", {
+				index: 1,
+				content_block: { type: "text", text: "" },
+			}),
+			event("content_block_stop", { index: 1 }),
+		];
 		const text = await new Response(
-			indexContentBlockDeltas(
-				streamOf([
-					'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
-					line,
-				]),
-			),
+			numberContentBlocks(streamOf(conforming)),
 		).text();
-		expect(text).toEndWith(line);
+		expect(text).toBe(conforming.join(""));
 	});
 });
 
 describe("GrokSubscriptionProvider.processResponse", () => {
-	it("indexes deltas on a streamed response", async () => {
+	it("numbers the blocks of a streamed response", async () => {
 		const processed = await new GrokSubscriptionProvider().processResponse(
 			new Response(streamOf(XAI_STREAM), {
 				status: 200,
@@ -90,10 +120,7 @@ describe("GrokSubscriptionProvider.processResponse", () => {
 			}),
 			null,
 		);
-		const deltas = dataEvents(await processed.text()).filter(
-			(e) => e.type === "content_block_delta",
-		);
-		expect(deltas.map((d) => d.index)).toEqual([0, 0, 1]);
+		expect(blockEvents(await processed.text())).toEqual(NUMBERED);
 	});
 
 	it("passes a JSON response body through unchanged", async () => {
