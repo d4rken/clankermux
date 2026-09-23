@@ -347,6 +347,37 @@ describe("tool-error query plans", () => {
 	});
 });
 
+describe("model performance reads the requested range once", () => {
+	// Both percentile halves read the same filtered rows. Left to plan them
+	// separately, SQLite drove the response-time half off
+	// idx_requests_response_time (model, response_time_ms), which carries no
+	// timestamp: it visited every request ever stored to keep the 7-day slice.
+	function modelPerformancePlan(): string[] {
+		const statement = statements.find(({ sql }) => sql.includes("resp_ranked"));
+		if (!statement)
+			throw new Error("model performance did not execute a query");
+		return plan(statement);
+	}
+
+	it.each([
+		["7d", ""],
+		["7d", `&accounts=${ACCOUNT_A}&projects=alpha&status=success`],
+		["all", ""],
+	])("reads requests once for range=%s%s", async (range, filters) => {
+		await fetch(`range=${range}&sections=modelPerformance${filters}`);
+		const details = modelPerformancePlan();
+
+		expect(
+			details.some((detail) => detail.includes("idx_requests_response_time")),
+		).toBe(false);
+		const requestReads = details.filter((detail) =>
+			/^(SEARCH|SCAN) r\b/.test(detail),
+		);
+		expect(requestReads).toHaveLength(1);
+		if (range !== "all") expect(requestReads[0]).toContain("timestamp>?");
+	});
+});
+
 describe("substitution origin stays one correlated read", () => {
 	// The origin model and the provider that answered it both come out of a
 	// single correlated subquery, driven off idx_routing_attempts_request once

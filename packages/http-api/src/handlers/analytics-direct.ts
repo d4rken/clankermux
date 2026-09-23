@@ -1139,7 +1139,9 @@ export function createAnalyticsHandler(context: APIContext) {
 						p95_tokens_per_second: number | null;
 					}>(
 						`
-				WITH filtered AS (
+				-- MATERIALIZED: both percentile halves read the range once
+				-- (pinned by analytics-query-plans.test.ts).
+				WITH filtered AS MATERIALIZED (
 					SELECT
 						model,
 						response_time_ms,
