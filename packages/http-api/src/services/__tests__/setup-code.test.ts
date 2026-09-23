@@ -33,7 +33,7 @@ class FakeHasher implements PasswordHasher {
 		this.hashCalls++;
 		return { verifier: digest(password), params: "{}" };
 	}
-	async verify(password: string, verifier: string) {
+	async verify(password: string, verifier: string, _params: string) {
 		this.verifyCalls++;
 		return digest(password) === verifier;
 	}
