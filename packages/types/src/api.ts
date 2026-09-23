@@ -95,6 +95,12 @@ export interface RequestMeta {
 	 * never a guess. Threaded to the recorder like `sessionKey`.
 	 */
 	clientHarness?: string | null;
+	/**
+	 * The 64-hex `device_id` of an external interactive Claude Code request's
+	 * `metadata.user_id`. Null/absent for other clients, internal dispatches
+	 * and malformed values.
+	 */
+	claudeDeviceId?: string | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;

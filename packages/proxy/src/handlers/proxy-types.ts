@@ -3,6 +3,7 @@ import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import type { Provider } from "@clankermux/providers";
 import type { LoadBalancingStrategy } from "@clankermux/types";
 import type { AccountModelPermissionService } from "../account-model-permissions";
+import type { ClaudeDeviceRegistry } from "../claude-device-registry";
 import type { RequestRecorder } from "../request-recorder";
 
 export interface ProxyContext {
@@ -30,6 +31,12 @@ export interface ProxyContext {
 	 * holds and long quiet streaming gaps aren't reaped by the 180s base timeout.
 	 */
 	server?: import("bun").Server<undefined>;
+	/**
+	 * Claude Code devices per account, recorded from successful client streams
+	 * and read by the auto-refresh keepalive. Without it nothing is recorded
+	 * and the keepalive sends no device.
+	 */
+	claudeDevices?: ClaudeDeviceRegistry;
 }
 
 /** Error messages used throughout the proxy module */

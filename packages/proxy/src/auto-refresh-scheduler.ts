@@ -32,6 +32,7 @@ import {
 } from "./grok-subscription-capture";
 import { getValidAccessToken } from "./handlers";
 import { refreshProactiveAccountToken } from "./proactive-token-refresh";
+import { isOfficialAnthropicProvider } from "./provider-overload-cooldown";
 import type { ProxyContext } from "./proxy";
 
 const log = new Logger("AutoRefreshScheduler");
@@ -54,6 +55,42 @@ type AutoRefreshAccountRow = {
 	auto_pause_on_overage_enabled: number;
 	pause_reason: string | null;
 };
+
+/**
+ * Claude Code's own quota probe, which it sends at every interactive start:
+ *
+ *   x-claude-code-session-id: 8644f453-…
+ *   {"model":"claude-haiku-4-5-20251001","max_tokens":1,
+ *    "messages":[{"role":"user","content":"quota"}],
+ *    "metadata":{"user_id":"{\"device_id\":\"e01c…\",\"account_uuid\":\"\",\"session_id\":\"8644f453-…\"}"}}
+ *
+ * Without a device the body carries no `metadata`. `account_uuid` stays empty
+ * for the pipeline to fill with the routed account's.
+ */
+function claudeQuotaProbe(deviceId: string | null): {
+	headers: Record<string, string>;
+	body(model: string): Record<string, unknown>;
+} {
+	const sessionId = crypto.randomUUID();
+	const metadata = deviceId
+		? {
+				user_id: JSON.stringify({
+					device_id: deviceId,
+					account_uuid: "",
+					session_id: sessionId,
+				}),
+			}
+		: null;
+	return {
+		headers: { "x-claude-code-session-id": sessionId },
+		body: (model) => ({
+			model,
+			max_tokens: 1,
+			messages: [{ role: "user", content: "quota" }],
+			...(metadata ? { metadata } : {}),
+		}),
+	};
+}
 
 function isZaiPeakHour(ts = Date.now()): boolean {
 	const d = new Date(ts);
@@ -777,7 +814,15 @@ export class AutoRefreshScheduler {
 				consecutive_rate_limits: 0,
 			};
 
-			// Prepare dummy message request
+			// Official Anthropic accounts send Claude Code's quota probe, one session
+			// across the model fallback below; Z.AI and relays keep a canned prompt.
+			const quotaProbe =
+				isOfficialAnthropicProvider(accountRow.provider) &&
+				!accountRow.custom_endpoint
+					? claudeQuotaProbe(
+							this.proxyContext.claudeDevices?.deviceIdFor(account.id) ?? null,
+						)
+					: null;
 			const dummyMessages = [
 				"Write a hello world program in Python",
 				"What is 2+2?",
@@ -810,6 +855,7 @@ export class AutoRefreshScheduler {
 				// bug 2). Mirrors the existing x-clankermux-keepalive
 				// pattern used by cache-keepalive-scheduler.ts.
 				"x-clankermux-auto-refresh": "true",
+				...quotaProbe?.headers,
 			});
 
 			// Try sending with multiple models if needed
@@ -829,16 +875,18 @@ export class AutoRefreshScheduler {
 						`Attempting auto-refresh for ${accountRow.name} with model: ${modelToTry}`,
 					);
 
-					const requestBody = {
-						model: modelToTry,
-						max_tokens: 10,
-						messages: [
-							{
-								role: "user",
-								content: randomMessage,
-							},
-						],
-					};
+					const requestBody = quotaProbe
+						? quotaProbe.body(modelToTry)
+						: {
+								model: modelToTry,
+								max_tokens: 10,
+								messages: [
+									{
+										role: "user",
+										content: randomMessage,
+									},
+								],
+							};
 
 					log.debug(
 						`Auto-refresh request payload: ${JSON.stringify(requestBody, null, 2)}`,
