@@ -36,6 +36,24 @@ export const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /** Longest password the login endpoint will hash. Checked BEFORE scrypt runs. */
 export const MAX_PASSWORD_BYTES = 1024;
 
+/** Shortest password that may be stored as the management password. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Null when `password` may be stored as the management password, otherwise a
+ * sentence for the operator. The upper bound is {@link MAX_PASSWORD_BYTES}: a
+ * longer password could be stored but never used to sign in.
+ */
+export function validateNewPassword(password: string): string | null {
+	if (password.length < MIN_PASSWORD_LENGTH) {
+		return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+	}
+	if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
+		return `Password must be at most ${MAX_PASSWORD_BYTES} bytes (UTF-8).`;
+	}
+	return null;
+}
+
 /** scrypt cost parameters for newly written verifiers. */
 const CURRENT_SCRYPT_PARAMS = {
 	v: 1 as const,

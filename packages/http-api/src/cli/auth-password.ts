@@ -37,10 +37,10 @@ import {
 	resolveDbPath,
 	runMigrations,
 } from "@clankermux/database";
-import { scryptPasswordHasher } from "../services/session-auth-service";
-
-/** Shortest password the CLI will store. */
-export const MIN_PASSWORD_LENGTH = 8;
+import {
+	scryptPasswordHasher,
+	validateNewPassword,
+} from "../services/session-auth-service";
 
 /**
  * What a ClankerMux database must already contain before this command will
@@ -249,10 +249,9 @@ export async function runAuthPasswordCommand(
 				: "Setting a management password.",
 		);
 		const first = await io.readPassword("New password: ");
-		if (first.length < MIN_PASSWORD_LENGTH) {
-			io.print(
-				`Password must be at least ${MIN_PASSWORD_LENGTH} characters. Nothing was changed.`,
-			);
+		const rejection = validateNewPassword(first);
+		if (rejection) {
+			io.print(`${rejection} Nothing was changed.`);
 			return 1;
 		}
 		const second = await io.readPassword("Repeat password: ");

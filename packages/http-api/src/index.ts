@@ -83,6 +83,8 @@ export {
 	type PublicStopsSnapshot,
 } from "./services/public-stops";
 export {
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
 	SESSION_ABSOLUTE_MAX_MS,
 	SESSION_COOKIE_NAME,
 	SESSION_IDLE_MAX_MS,
@@ -90,6 +92,7 @@ export {
 	type SessionAuthStore,
 	type SessionCheck,
 	scryptPasswordHasher,
+	validateNewPassword,
 } from "./services/session-auth-service";
 export {
 	closeStreamsForSession,

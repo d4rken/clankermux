@@ -23,11 +23,14 @@ import {
 	ensureSchema,
 } from "@clankermux/database";
 import { FLOOR_SCHEMA_SQL } from "../../../database/src/__tests__/schema-floor.fixture";
-import { scryptPasswordHasher } from "../services/session-auth-service";
+import {
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
+	scryptPasswordHasher,
+} from "../services/session-auth-service";
 import {
 	type AuthPasswordIo,
 	authPasswordUsage,
-	MIN_PASSWORD_LENGTH,
 	parseAuthPasswordArgs,
 	runAuthPasswordCli,
 	runAuthPasswordCommand,
@@ -270,6 +273,22 @@ describe("--set", () => {
 			1,
 		);
 		expect(out.lines.join("\n")).toContain(String(MIN_PASSWORD_LENGTH));
+
+		const { repo, close } = openRepo();
+		expect(await repo.getPassword()).toBeNull();
+		close();
+	});
+
+	it("refuses a password longer than login accepts, naming the limit", async () => {
+		createDb();
+		const tooLong = "a".repeat(MAX_PASSWORD_BYTES + 1);
+		const out = io([tooLong, tooLong]);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			1,
+		);
+		const output = out.lines.join("\n");
+		expect(output).toContain(String(MAX_PASSWORD_BYTES));
+		expect(output).toContain("Nothing was changed.");
 
 		const { repo, close } = openRepo();
 		expect(await repo.getPassword()).toBeNull();

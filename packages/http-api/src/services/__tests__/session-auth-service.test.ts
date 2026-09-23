@@ -22,6 +22,8 @@ import type {
 import {
 	clearedSessionCookieHeader,
 	hashSessionToken,
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
 	type PasswordHasher,
 	readSessionCookie,
 	SESSION_ABSOLUTE_MAX_MS,
@@ -32,6 +34,7 @@ import {
 	type SessionAuthStore,
 	scryptPasswordHasher,
 	sessionCookieHeader,
+	validateNewPassword,
 } from "../session-auth-service";
 
 /** In-memory store with the same semantics as AuthRepository, minus SQL. */
@@ -520,5 +523,35 @@ describe("cookie handling", () => {
 
 	it("clears with Max-Age=0", () => {
 		expect(clearedSessionCookieHeader()).toContain("Max-Age=0");
+	});
+});
+
+describe("new-password validation", () => {
+	it("rejects one character under the minimum", () => {
+		expect(MIN_PASSWORD_LENGTH).toBe(8);
+		expect(validateNewPassword("a".repeat(7))).toBe(
+			"Password must be at least 8 characters.",
+		);
+	});
+
+	it("accepts the minimum", () => {
+		expect(validateNewPassword("a".repeat(8))).toBeNull();
+	});
+
+	it("accepts exactly the byte ceiling login enforces", () => {
+		expect(validateNewPassword("a".repeat(MAX_PASSWORD_BYTES))).toBeNull();
+	});
+
+	it("rejects one byte over it, naming the limit", () => {
+		expect(validateNewPassword("a".repeat(MAX_PASSWORD_BYTES + 1))).toBe(
+			"Password must be at most 1024 bytes (UTF-8).",
+		);
+	});
+
+	it("counts UTF-8 bytes, not characters", () => {
+		// "é" is two bytes: 512 of them fill the ceiling, 513 exceed it while
+		// still being far fewer than 1024 characters.
+		expect(validateNewPassword("é".repeat(512))).toBeNull();
+		expect(validateNewPassword("é".repeat(513))).toContain("1024 bytes");
 	});
 });
