@@ -921,7 +921,7 @@ describe("CodexSpendCoordinator.consumeResetCredit", () => {
 		expect(outcome).toEqual({
 			status: "failed",
 			message:
-				"Failed to consume a reset credit for 'codex-fail': upstream timed out",
+				"Failed to apply a banked reset for 'codex-fail': upstream timed out",
 		});
 		expect(forceResetCalls).toEqual([]);
 		expect(mockFetchCodexRateLimitResetCredits).not.toHaveBeenCalled();
@@ -1069,7 +1069,7 @@ describe("CodexSpendCoordinator.consumeResetCredit — ledger", () => {
 				status: "failed",
 				windowsReset: null,
 				errorMessage:
-					"Failed to consume a reset credit for 'codex-fail': upstream timed out",
+					"Failed to apply a banked reset for 'codex-fail': upstream timed out",
 			},
 		]);
 	});
@@ -1714,9 +1714,7 @@ describe("CodexSpendCoordinator.refreshManual — GET-only (zero-cost)", () => {
 		expect(
 			outcome.message.startsWith("Account 'codex-x' is not a Codex account"),
 		).toBe(true);
-		expect(outcome.message).toContain(
-			"reset-credit metadata refresh also failed",
-		);
+		expect(outcome.message).toContain("banked-reset refresh also failed");
 		expect(mockFetchCodexUsageStatus).not.toHaveBeenCalled();
 	});
 
@@ -3083,7 +3081,7 @@ describe("CodexSpendCoordinator.refreshManual — combined outcome", () => {
 
 		expect(outcome.success).toBe(false);
 		expect(outcome.message).toContain("Usage refreshed for 'codex-c'");
-		expect(outcome.message).toContain("reset-credit metadata refresh failed");
+		expect(outcome.message).toContain("banked-reset refresh failed");
 	});
 
 	it("leads with the usage failure when only the usage read failed", async () => {
@@ -3101,7 +3099,7 @@ describe("CodexSpendCoordinator.refreshManual — combined outcome", () => {
 		expect(
 			outcome.message.startsWith("Codex usage read failed for 'codex-c'"),
 		).toBe(true);
-		expect(outcome.message).not.toContain("reset-credit metadata refresh");
+		expect(outcome.message).not.toContain("banked-reset refresh");
 	});
 
 	it("appends the reset-credit failure when BOTH reads failed", async () => {
@@ -3120,8 +3118,6 @@ describe("CodexSpendCoordinator.refreshManual — combined outcome", () => {
 		expect(
 			outcome.message.startsWith("Codex usage read failed for 'codex-c'"),
 		).toBe(true);
-		expect(outcome.message).toContain(
-			"reset-credit metadata refresh also failed",
-		);
+		expect(outcome.message).toContain("banked-reset refresh also failed");
 	});
 });

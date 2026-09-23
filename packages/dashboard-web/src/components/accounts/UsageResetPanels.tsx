@@ -5,9 +5,9 @@ import {
 } from "../../lib/account-status";
 import { Button } from "../ui/button";
 
-// Popover pieces shared by the banked usage-reset chips of every provider
-// (Codex reset credits, Anthropic banked resets). Pure and state-in, so each
-// step renders with static markup in tests.
+// Popover pieces shared by the banked-reset chips of every provider (Codex
+// reset credits, Anthropic banked resets). Pure and state-in, so each step
+// renders with static markup in tests.
 
 /**
  * Shared amber/red urgency palette for time-pressure chips — spread into both
@@ -45,6 +45,60 @@ export function usageResetChipLabel(
 	return shortExpiry ? `${countLabel} · expires ${shortExpiry}` : countLabel;
 }
 
+/** `2` → `"2 banked resets left."`, the opening of every reset chip's tooltip. */
+export function bankedResetsLeftSentence(count: number): string {
+	return `${count} banked reset${count === 1 ? "" : "s"} left.`;
+}
+
+/** `" Expires: 1/5/2024, 12:00:00 PM; 1/6/2024, …."`, or "" without dates. */
+export function bankedResetExpirySentence(
+	expiries: ReadonlyArray<Date>,
+): string {
+	return expiries.length > 0
+		? ` Expires: ${expiries.map((date) => date.toLocaleString()).join("; ")}.`
+		: "";
+}
+
+/**
+ * The tooltip's auto-apply sentence. `weeklyRule` completes "the next banked
+ * reset is applied …" with the provider's weekly trigger, e.g. "at the weekly
+ * limit when no other Codex account can serve and …".
+ */
+export function bankedResetAutoApplySentence({
+	count,
+	expiryArmed,
+	weeklyArmed,
+	weeklyRule,
+}: {
+	count: number;
+	expiryArmed: boolean;
+	weeklyArmed: boolean;
+	weeklyRule: string;
+}): string {
+	if (count <= 0) return "";
+	const pauses = " Manual pauses conserve banked resets.";
+	if (expiryArmed && weeklyArmed) {
+		return ` Auto-apply armed (expiry + weekly limit) — the next banked reset is applied shortly before it expires, and ${weeklyRule}.${pauses}`;
+	}
+	if (expiryArmed) {
+		return " Auto-apply armed — the next banked reset is applied shortly before it expires.";
+	}
+	if (weeklyArmed) {
+		return ` Auto-apply armed (weekly limit) — the next banked reset is applied ${weeklyRule}.${pauses}`;
+	}
+	return " Auto-apply is off — unused banked resets may expire.";
+}
+
+/** Retry text after an Apply-now request whose outcome is unknown. */
+export function applyResetFailedMessage(message: string): string {
+	return `Failed to apply reset: ${message}`;
+}
+
+export const RESET_HISTORY_HEADING = "Banked-reset history";
+
+export const APPLY_NOW_TITLE =
+	"Use the next banked reset now to clear the limits it covers";
+
 /** Lazy-load lifecycle of a reset-event history in a popover. */
 export type ResetEventsState<E> =
 	| { kind: "idle" }
@@ -64,7 +118,7 @@ export interface ResetEventBase {
 /** Cap on the inline error text per event row; full message stays in `title`. */
 const MAX_EVENT_ERROR_CHARS = 120;
 
-/** Human label for why an auto reset attempt was claimed. */
+/** Human label for why an auto reset attempt was made. */
 const RESET_EVENT_CAUSE_LABELS: Record<
 	NonNullable<ResetEventBase["cause"]>,
 	string
@@ -73,16 +127,30 @@ const RESET_EVENT_CAUSE_LABELS: Record<
 	"weekly-limit": "weekly limit",
 };
 
-export function ResetEventsPanel<E extends ResetEventBase>({
+interface ResetEventsPanelProps<E extends ResetEventBase> {
+	state: ResetEventsState<E>;
+	statusLabel: (event: E) => string;
+	/** Muted text after the status label, e.g. "cleared 2 windows". */
+	detail: (event: E) => string | null;
+}
+
+/** The popover's history section, under {@link RESET_HISTORY_HEADING}. */
+export function ResetEventsPanel<E extends ResetEventBase>(
+	props: ResetEventsPanelProps<E>,
+) {
+	return (
+		<div>
+			<p className="text-xs font-medium mb-item">{RESET_HISTORY_HEADING}</p>
+			<ResetEventsList {...props} />
+		</div>
+	);
+}
+
+function ResetEventsList<E extends ResetEventBase>({
 	state,
 	statusLabel,
 	detail,
-}: {
-	state: ResetEventsState<E>;
-	statusLabel: (event: E) => string;
-	/** Muted text after the status label, e.g. "2 windows reset". */
-	detail: (event: E) => string | null;
-}) {
+}: ResetEventsPanelProps<E>) {
 	if (state.kind === "idle" || state.kind === "loading") {
 		return (
 			<p className="text-xs text-muted-foreground">Loading reset events…</p>
@@ -164,7 +232,6 @@ export type ResetApplyState =
 export function ResetApplyConfirmPanel({
 	available,
 	state,
-	armTitle,
 	confirmPrompt,
 	onArm,
 	onConfirm,
@@ -176,7 +243,6 @@ export function ResetApplyConfirmPanel({
 	/** Whether a reset can be applied right now; gates the idle button only. */
 	available: boolean;
 	state: ResetApplyState;
-	armTitle: string;
 	confirmPrompt: ReactNode;
 	onArm: () => void;
 	onConfirm: () => void;
@@ -195,7 +261,7 @@ export function ResetApplyConfirmPanel({
 				size="sm"
 				className="h-7 text-xs"
 				onClick={onArm}
-				title={armTitle}
+				title={APPLY_NOW_TITLE}
 			>
 				Apply now
 			</Button>

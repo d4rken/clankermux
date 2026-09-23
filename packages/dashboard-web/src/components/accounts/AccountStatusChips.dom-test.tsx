@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { api } from "../../api";
 import { AccountStatusChips } from "./AccountStatusChips";
+import { APPLY_NOW_TITLE, RESET_HISTORY_HEADING } from "./UsageResetPanels";
 
 (
 	globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -35,6 +36,82 @@ async function clickButton(label: string): Promise<void> {
 	await act(async () => button?.click());
 }
 
+const account: AccountResponse = {
+	id: "reset-account",
+	name: "Codex test",
+	provider: "codex",
+	requestCount: 0,
+	totalRequests: 0,
+	lastUsed: null,
+	created: "2024-01-01T00:00:00Z",
+	paused: false,
+	tokenStatus: "valid",
+	tokenExpiresAt: null,
+	rateLimitStatus: "OK",
+	rateLimitCause: "ok",
+	rateLimitCauseResetMs: null,
+	rateLimitProviderStatus: null,
+	rateLimitReset: null,
+	rateLimitRemaining: null,
+	rateLimitedUntil: null,
+	rateLimitedReason: null,
+	rateLimitedAt: null,
+	sessionInfo: "No active session",
+	priority: 0,
+	autoFallbackEnabled: false,
+	autoRefreshEnabled: false,
+	customEndpoint: null,
+	usageUtilization: null,
+	usageWindow: null,
+	usageData: null,
+	usageRateLimitedUntil: null,
+	usageThrottledUntil: null,
+	usageThrottledWindows: [],
+	hasRefreshToken: false,
+	notes: null,
+	sessionStats: null,
+	isPrimary: false,
+	autoPauseOnOverageEnabled: false,
+	peakHoursPauseEnabled: false,
+	providerOverloadKey: null,
+	providerOverloadedUntil: null,
+	billingType: null,
+	renewalAnchor: null,
+	renewalCadence: null,
+	identityExternalId: null,
+	identityEmail: null,
+	identityOrganizationName: null,
+	identityPlanTier: null,
+	identityRateLimitTier: null,
+	identitySubscriptionStatus: null,
+	identitySubscriptionStartedAt: null,
+	identitySubscriptionEndsAt: null,
+	identitySubscriptionWillRenew: null,
+	identitySubscriptionGraceEndsAt: null,
+	identitySubscriptionCheckedAt: null,
+	identityCapturedAt: null,
+	identityProfileFetchedAt: null,
+	isDuplicateAccount: false,
+	duplicateAccountIds: [],
+	codexRateLimitResetCredits: {
+		availableCount: 1,
+		credits: [],
+		fetchedAt: new Date().toISOString(),
+	},
+};
+
+async function openPopover(): Promise<void> {
+	host = document.createElement("div");
+	document.body.appendChild(host);
+	root = createRoot(host);
+	await act(async () => root?.render(<AccountStatusChips account={account} />));
+	const trigger = document.querySelector<HTMLElement>(
+		'[title$="Click for history."]',
+	);
+	expect(trigger).not.toBeNull();
+	await act(async () => trigger?.click());
+}
+
 it.each([
 	true,
 	false,
@@ -58,83 +135,22 @@ it.each([
 			availableResetCount: 0,
 			localRateLimitStateCleared: true,
 		});
-	const account: AccountResponse = {
-		id: "reset-account",
-		name: "Codex test",
-		provider: "codex",
-		requestCount: 0,
-		totalRequests: 0,
-		lastUsed: null,
-		created: "2024-01-01T00:00:00Z",
-		paused: false,
-		tokenStatus: "valid",
-		tokenExpiresAt: null,
-		rateLimitStatus: "OK",
-		rateLimitCause: "ok",
-		rateLimitCauseResetMs: null,
-		rateLimitProviderStatus: null,
-		rateLimitReset: null,
-		rateLimitRemaining: null,
-		rateLimitedUntil: null,
-		rateLimitedReason: null,
-		rateLimitedAt: null,
-		sessionInfo: "No active session",
-		priority: 0,
-		autoFallbackEnabled: false,
-		autoRefreshEnabled: false,
-		customEndpoint: null,
-		usageUtilization: null,
-		usageWindow: null,
-		usageData: null,
-		usageRateLimitedUntil: null,
-		usageThrottledUntil: null,
-		usageThrottledWindows: [],
-		hasRefreshToken: false,
-		notes: null,
-		sessionStats: null,
-		isPrimary: false,
-		autoPauseOnOverageEnabled: false,
-		peakHoursPauseEnabled: false,
-		providerOverloadKey: null,
-		providerOverloadedUntil: null,
-		billingType: null,
-		renewalAnchor: null,
-		renewalCadence: null,
-		identityExternalId: null,
-		identityEmail: null,
-		identityOrganizationName: null,
-		identityPlanTier: null,
-		identityRateLimitTier: null,
-		identitySubscriptionStatus: null,
-		identitySubscriptionStartedAt: null,
-		identitySubscriptionEndsAt: null,
-		identitySubscriptionWillRenew: null,
-		identitySubscriptionGraceEndsAt: null,
-		identitySubscriptionCheckedAt: null,
-		identityCapturedAt: null,
-		identityProfileFetchedAt: null,
-		isDuplicateAccount: false,
-		duplicateAccountIds: [],
-		codexRateLimitResetCredits: {
-			availableCount: 1,
-			credits: [],
-			fetchedAt: new Date().toISOString(),
-		},
-	};
-	host = document.createElement("div");
-	document.body.appendChild(host);
-	root = createRoot(host);
-	await act(async () => root?.render(<AccountStatusChips account={account} />));
-	const trigger = document.querySelector<HTMLElement>(
-		'[title$="Click for reset history."]',
-	);
-	expect(trigger).not.toBeNull();
-	await act(async () => trigger?.click());
+	await openPopover();
+	expect(document.body.textContent).toContain(RESET_HISTORY_HEADING);
+	expect(
+		Array.from(document.querySelectorAll("button")).find(
+			(element) => element.textContent === "Apply now",
+		)?.title,
+	).toBe(APPLY_NOW_TITLE);
 	await clickButton("Apply now");
-	expect(document.body.textContent).toContain("Consume 1 reset for Codex test");
+	expect(document.body.textContent).toContain(
+		"Use 1 banked reset for Codex test?",
+	);
 	expect(consume).not.toHaveBeenCalled();
 	await clickButton("Confirm");
-	expect(document.body.textContent).toContain("Temporary failure");
+	expect(document.body.textContent).toContain(
+		"Failed to apply reset: Temporary failure",
+	);
 	expect(consume).toHaveBeenCalledTimes(1);
 	const key = consume.mock.calls[0]?.[1];
 	expect(key).toMatch(
@@ -150,4 +166,27 @@ it.each([
 	await clickButton("Confirm");
 	expect(consume).toHaveBeenCalledTimes(3);
 	expect(consume.mock.calls[2]?.[1]).not.toBe(key);
+});
+
+it.each([
+	["Reset applied", true],
+	["Already used", false],
+] as const)("settles an alreadyRedeemed answer as '%s'", async (message, success) => {
+	spyOn(api, "getAccountResetCreditEvents").mockResolvedValue([]);
+	spyOn(api, "consumeAccountResetCredit").mockResolvedValue({
+		success,
+		message: "This reset attempt already completed",
+		outcome: "alreadyRedeemed",
+		windowsReset: 0,
+		resetMetadataRefreshed: true,
+		availableResetCount: 0,
+		localRateLimitStateCleared: false,
+	});
+	await openPopover();
+	await clickButton("Apply now");
+	await clickButton("Confirm");
+	const outcome = Array.from(document.querySelectorAll("p")).find(
+		(element) => element.textContent === message,
+	);
+	expect(outcome?.classList.contains("text-success-strong")).toBe(success);
 });

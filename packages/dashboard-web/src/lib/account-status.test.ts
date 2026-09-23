@@ -1260,6 +1260,10 @@ describe("deriveAccountStatus — Anthropic banked resets", () => {
 			NOW,
 		);
 		expect(status.bankedResetNextExpiry?.getTime()).toBe(NOW + 5 * 60 * MINUTE);
+		expect(status.bankedResetExpiries.map((date) => date.getTime())).toEqual([
+			NOW + 5 * 60 * MINUTE,
+			NOW + 3 * 86_400_000,
+		]);
 		expect(status.bankedResetUrgency).toBe("soon");
 	});
 

@@ -727,7 +727,7 @@ interface HarnessOptions {
 	getPendingAttempt?: (
 		accountId: string,
 	) => Promise<CodexResetCreditEventRow | null>;
-	refreshResult?: (force: boolean) => boolean;
+	refreshResult?: (force: boolean, accountId: string) => boolean;
 	/** Accounts returned by listCandidateAccounts. */
 	candidates?: Array<{ id: string; name: string }>;
 	/** Per-call getAccount implementation (defaults to a stable codex account). */
@@ -764,6 +764,7 @@ interface HarnessOptions {
 		accountId: string,
 		request: CodexRateLimitResetCreditConsumeRequest,
 	) => Promise<CodexResetCreditConsumeDispatchOutcome>;
+	withdrawPendingAttempt?: (rowId: string) => Promise<boolean>;
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
@@ -773,6 +774,7 @@ function makeHarness(opts: HarnessOptions = {}) {
 		accountId: string;
 		request: CodexRateLimitResetCreditConsumeRequest;
 	}> = [];
+	const withdrawCalls: string[] = [];
 
 	const forceRefreshes = () => refreshCalls.filter((c) => c.force).length;
 	const creditsFn = opts.credits ?? (() => [makeCredit()]);
@@ -796,7 +798,7 @@ function makeHarness(opts: HarnessOptions = {}) {
 		},
 		refreshCredits: async (accountId, force) => {
 			refreshCalls.push({ accountId, force });
-			return opts.refreshResult?.(force) ?? true;
+			return opts.refreshResult?.(force, accountId) ?? true;
 		},
 		getTerminallyResolvedCreditIds: async () =>
 			opts.resolvedIds ?? new Set<string>(),
@@ -836,11 +838,15 @@ function makeHarness(opts: HarnessOptions = {}) {
 				localRateLimitStateCleared: true,
 			};
 		},
+		withdrawPendingAttempt: async (rowId) => {
+			withdrawCalls.push(rowId);
+			return opts.withdrawPendingAttempt?.(rowId) ?? true;
+		},
 		now: () => NOW,
 	};
 
 	const scheduler = new CodexResetCreditApplyScheduler(deps);
-	return { scheduler, refreshCalls, claimCalls, dispatchCalls };
+	return { scheduler, refreshCalls, claimCalls, dispatchCalls, withdrawCalls };
 }
 
 describe("CodexResetCreditApplyScheduler.tick", () => {
@@ -1414,6 +1420,294 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 	});
 });
 
+describe("CodexResetCreditApplyScheduler — pending attempts", () => {
+	const DAY = 86_400_000;
+	const bothToggles: Partial<Account> = {
+		codex_auto_apply_reset_on_weekly_limit_enabled: true,
+	};
+	const candidates = [
+		{ id: "acct-1", name: "codex-account" },
+		{ id: "late", name: "late" },
+	];
+	const exhausted = () => ({ usedPercent: 100, resetsAt: NOW + 6 * DAY });
+	/** acct-1: the pending credit-1 and credit-x both inside the expiry lead. */
+	const pendingAccountCredits = (_force: number, accountId: string) =>
+		accountId === "acct-1"
+			? [
+					makeCredit({ expiresAt: expirySec(2 * 60_000) }),
+					makeCredit({ id: "credit-x", expiresAt: expirySec(8 * 60_000) }),
+				]
+			: [makeCredit({ expiresAt: null })];
+	const timeout =
+		async (): Promise<CodexResetCreditConsumeDispatchOutcome> => ({
+			status: "failed",
+			message: "timeout",
+		});
+
+	// Only a weekly-cause replay holds the weekly slot that "late" would take.
+	for (const [cause, lateRedeems] of [
+		["weekly-limit", false],
+		["expiry", true],
+	] as const) {
+		it(`protects another expiring credit after a failing ${cause} replay`, async () => {
+			const h = makeHarness({
+				candidates,
+				getAccount: async (id) => makeCodexAccount({ id, ...bothToggles }),
+				getPendingAttempt: async (id) =>
+					id === "acct-1" ? pendingAttempt({ cause }) : null,
+				credits: pendingAccountCredits,
+				weeklyWindow: exhausted,
+				dispatchImpl: timeout,
+			});
+			await h.scheduler.tick();
+			expect(
+				h.dispatchCalls.map((c) => [c.accountId, c.request.idempotencyKey]),
+			).toEqual([
+				["acct-1", "codex-reset-auto:acct-1:credit-1:1"],
+				["acct-1", "codex-reset-auto:acct-1:credit-x:1"],
+				...(lateRedeems ? [["late", "codex-reset-auto:late:credit-1:1"]] : []),
+			]);
+			expect(h.claimCalls).toEqual([
+				expect.objectContaining({ creditId: "credit-x", cause: "expiry" }),
+				...(lateRedeems
+					? [
+							expect.objectContaining({
+								accountId: "late",
+								cause: "weekly-limit",
+							}),
+						]
+					: []),
+			]);
+		});
+	}
+
+	it("holds the weekly slot when a pending weekly attempt cannot be reconciled", async () => {
+		const h = makeHarness({
+			candidates,
+			getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+			getPendingAttempt: async (id) =>
+				id === "acct-1" ? pendingAttempt() : null,
+			refreshResult: (force, accountId) => !(force && accountId === "acct-1"),
+			credits: () => [makeCredit({ expiresAt: null })],
+			weeklyWindow: exhausted,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toEqual([]);
+		expect(h.claimCalls).toEqual([]);
+	});
+
+	it("still protects an expiring credit when the pending weekly attempt cannot be reconciled", async () => {
+		let acctForcedRefreshes = 0;
+		const h = makeHarness({
+			candidates,
+			getAccount: async (id) => makeCodexAccount({ id, ...bothToggles }),
+			getPendingAttempt: async (id) =>
+				id === "acct-1" ? pendingAttempt() : null,
+			// Only the reconcile read fails; the expiry confirmation read succeeds.
+			refreshResult: (force, accountId) =>
+				!(force && accountId === "acct-1" && ++acctForcedRefreshes === 1),
+			credits: pendingAccountCredits,
+			weeklyWindow: exhausted,
+		});
+		await h.scheduler.tick();
+		expect(
+			h.dispatchCalls.map((c) => [c.accountId, c.request.creditId]),
+		).toEqual([["acct-1", "credit-x"]]);
+		expect(h.claimCalls).toEqual([
+			expect.objectContaining({ creditId: "credit-x", cause: "expiry" }),
+		]);
+	});
+
+	it("neither reads nor replays for a disabled account, and leaves the weekly slot open", async () => {
+		const h = makeHarness({
+			candidates,
+			getAccount: async (id) =>
+				makeCodexAccount({ id, ...weeklyOnly, disabled: id === "acct-1" }),
+			getPendingAttempt: async (id) =>
+				id === "acct-1" ? pendingAttempt() : null,
+			credits: () => [makeCredit({ expiresAt: null })],
+			weeklyWindow: exhausted,
+		});
+		await h.scheduler.tick();
+		expect(h.refreshCalls.filter((c) => c.accountId === "acct-1")).toEqual([]);
+		expect(
+			h.dispatchCalls.map((c) => [c.accountId, c.request.idempotencyKey]),
+		).toEqual([["late", "codex-reset-auto:late:credit-1:1"]]);
+		expect(h.claimCalls).toEqual([
+			expect.objectContaining({ accountId: "late", cause: "weekly-limit" }),
+		]);
+	});
+
+	it("keeps the weekly slot held when discovery throws after a weekly replay", async () => {
+		const h = makeHarness({
+			candidates,
+			getAccount: async (id) => makeCodexAccount({ id, ...weeklyOnly }),
+			getPendingAttempt: async (id) =>
+				id === "acct-1" ? pendingAttempt() : null,
+			credits: () => [makeCredit({ expiresAt: null })],
+			weeklyWindow: (accountId) => {
+				if (accountId === "acct-1") throw new Error("usage cache exploded");
+				return exhausted();
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["acct-1"]);
+		expect(h.claimCalls).toEqual([]);
+	});
+
+	it("protects another expiring credit when a non-replayable attempt cannot be reconciled", async () => {
+		let acctForcedRefreshes = 0;
+		const h = makeHarness({
+			// Expiry toggle only: the pending weekly attempt may not replay.
+			getPendingAttempt: async () => pendingAttempt(),
+			refreshResult: (force) => !(force && ++acctForcedRefreshes === 1),
+			credits: () => [
+				makeCredit({ expiresAt: expirySec(2 * 60_000) }),
+				makeCredit({ id: "credit-x", expiresAt: expirySec(8 * 60_000) }),
+			],
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls.map((c) => c.request.creditId)).toEqual([
+			"credit-x",
+		]);
+		expect(h.claimCalls).toEqual([
+			expect.objectContaining({ creditId: "credit-x", cause: "expiry" }),
+		]);
+	});
+
+	it("does not hold the weekly slot for a pending weekly attempt whose toggle is off", async () => {
+		const h = makeHarness({
+			candidates,
+			getAccount: async (id) =>
+				makeCodexAccount(id === "acct-1" ? { id } : { id, ...weeklyOnly }),
+			getPendingAttempt: async (id) =>
+				id === "acct-1" ? pendingAttempt() : null,
+			refreshResult: (force, accountId) => !(force && accountId === "acct-1"),
+			credits: () => [makeCredit({ expiresAt: null })],
+			weeklyWindow: exhausted,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls.map((c) => c.accountId)).toEqual(["late"]);
+	});
+
+	describe("consume the registry never sent", () => {
+		const notSent =
+			async (): Promise<CodexResetCreditConsumeDispatchOutcome> => ({
+				status: "failed",
+				message: "Another banked-reset attempt is already in progress",
+				notSent: true,
+			});
+
+		it("withdraws a fresh claim so the next tick does not replay it", async () => {
+			let pending: CodexResetCreditEventRow | null = null;
+			let redeemedElsewhere = false;
+			const h = makeHarness({
+				getAccount: async () => makeCodexAccount(weeklyOnly),
+				getPendingAttempt: async () => pending,
+				weeklyUsedPercent: 100,
+				credits: () => [
+					makeCredit({
+						expiresAt: null,
+						status: redeemedElsewhere ? "redeemed" : "available",
+					}),
+				],
+				dispatchImpl: async () => {
+					// The claim wrote a pending row; a concurrent manual consume
+					// then redeems the credit.
+					pending = pendingAttempt();
+					redeemedElsewhere = true;
+					return notSent();
+				},
+				withdrawPendingAttempt: async () => {
+					pending = null;
+					return true;
+				},
+			});
+			await h.scheduler.tick();
+			expect(h.withdrawCalls).toEqual(["acct-1:credit-1:1"]);
+			await h.scheduler.tick();
+			expect(h.dispatchCalls).toHaveLength(1);
+		});
+
+		it("keeps a replayed row pending, because the original send is still unknown", async () => {
+			const h = makeHarness({
+				getAccount: async () => makeCodexAccount(weeklyOnly),
+				getPendingAttempt: async () => pendingAttempt(),
+				weeklyUsedPercent: 100,
+				credits: () => [makeCredit({ expiresAt: null })],
+				dispatchImpl: notSent,
+			});
+			await h.scheduler.tick();
+			await h.scheduler.tick();
+			expect(h.withdrawCalls).toEqual([]);
+			expect(h.dispatchCalls.map((c) => c.request.idempotencyKey)).toEqual([
+				"codex-reset-auto:acct-1:credit-1:1",
+				"codex-reset-auto:acct-1:credit-1:1",
+			]);
+		});
+
+		for (const [label, withdraw] of [
+			["refuses", async () => false],
+			[
+				"throws",
+				async (): Promise<boolean> => {
+					throw new Error("database is locked");
+				},
+			],
+		] as const) {
+			it(`replays a fresh claim with the same key when its withdrawal ${label}`, async () => {
+				let pending: CodexResetCreditEventRow | null = null;
+				const h = makeHarness({
+					candidates: [
+						{ id: "acct-1", name: "codex-account" },
+						{ id: "other", name: "other" },
+					],
+					getAccount: async (id) =>
+						makeCodexAccount(id === "acct-1" ? weeklyOnly : { id }),
+					getPendingAttempt: async (id) => (id === "acct-1" ? pending : null),
+					weeklyUsedPercent: 100,
+					credits: (_force, accountId) => [
+						makeCredit(accountId === "acct-1" ? { expiresAt: null } : {}),
+					],
+					dispatchImpl: async (accountId) => {
+						if (accountId !== "acct-1") return notSent();
+						pending ??= pendingAttempt();
+						return notSent();
+					},
+					withdrawPendingAttempt: withdraw,
+				});
+				await h.scheduler.tick();
+				// Expiry dispatches in the account loop, weekly after it.
+				expect(h.withdrawCalls).toEqual([
+					"other:credit-1:1",
+					"acct-1:credit-1:1",
+				]);
+				expect(pending).not.toBeNull();
+				await h.scheduler.tick();
+				expect(
+					h.dispatchCalls
+						.filter((c) => c.accountId === "acct-1")
+						.map((c) => c.request.idempotencyKey),
+				).toEqual([
+					"codex-reset-auto:acct-1:credit-1:1",
+					"codex-reset-auto:acct-1:credit-1:1",
+				]);
+				// The replay is never withdrawn; only "other"'s fresh claims are.
+				expect(h.withdrawCalls.filter((id) => id.startsWith("acct-1"))).toEqual(
+					["acct-1:credit-1:1"],
+				);
+			});
+		}
+
+		it("keeps a fresh claim pending after an ordinary failure", async () => {
+			const h = makeHarness({ dispatchImpl: timeout });
+			await h.scheduler.tick();
+			expect(h.dispatchCalls).toHaveLength(1);
+			expect(h.withdrawCalls).toEqual([]);
+		});
+	});
+});
+
 // ---------------------------------------------------------------------------
 // nothingToReset resolutions anchor the weekly cooldown (retry-storm guard)
 // ---------------------------------------------------------------------------
@@ -1520,6 +1814,7 @@ function makeLedgerHarness(opts: {
 				localRateLimitStateCleared: false,
 			};
 		},
+		withdrawPendingAttempt: async () => false,
 		now: () => nowMs,
 	};
 
@@ -1608,9 +1903,15 @@ describe("nothingToReset anchors the weekly cooldown (no 60s retry storm)", () =
 // ---------------------------------------------------------------------------
 
 describe("createCodexResetCreditApplyScheduler default listCandidateAccounts", () => {
-	it("includes codex accounts with EITHER auto-apply toggle on", async () => {
+	it("includes enabled codex accounts with EITHER auto-apply toggle on", async () => {
 		const accounts: Account[] = [
 			makeCodexAccount({ id: "expiry-only", name: "expiry-only" }),
+			makeCodexAccount({
+				id: "disabled",
+				name: "disabled",
+				disabled: true,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			}),
 			makeCodexAccount({
 				id: "weekly-only",
 				name: "weekly-only",
@@ -1649,6 +1950,7 @@ describe("createCodexResetCreditApplyScheduler default listCandidateAccounts", (
 				getTerminallyResolvedCodexResetCreditIds: async () => new Set<string>(),
 				claimCodexResetCreditAutoAttempt: async () => null,
 				getCodexResetCreditAutoApplyCooldownAnchorAt: async () => null,
+				withdrawPendingCodexResetCreditAttempt: async () => false,
 			},
 			coordinator: {
 				refreshResetCredits: async () => ({ success: true }),
@@ -1688,7 +1990,6 @@ describe("weekly reset conservation with the production pool check", () => {
 			now?: () => number;
 			readUsage?: (id: string) => Promise<{ success: boolean }>;
 			refreshCredits?: () => Promise<{ success: boolean }>;
-			cooldownAnchor?: (id: string) => Promise<number | null>;
 		} = {},
 	) {
 		const consumed: string[] = [];
@@ -1712,14 +2013,14 @@ describe("weekly reset conservation with the production pool check", () => {
 				getPendingCodexResetCreditAttempt: async () => null,
 				getAccount: async (id) => accounts.find((a) => a.id === id) ?? null,
 				getTerminallyResolvedCodexResetCreditIds: async () => new Set(),
-				getCodexResetCreditAutoApplyCooldownAnchorAt:
-					options.cooldownAnchor ?? (async () => null),
+				getCodexResetCreditAutoApplyCooldownAnchorAt: async () => null,
 				claimCodexResetCreditAutoAttempt: async ({ accountId }) => ({
 					id: accountId,
 					idempotencyKey: accountId,
 					attemptSeq: 1,
 					reused: false,
 				}),
+				withdrawPendingCodexResetCreditAttempt: async () => false,
 			},
 			coordinator: {
 				refreshResetCredits:
@@ -1812,7 +2113,7 @@ describe("weekly reset conservation with the production pool check", () => {
 		"throw",
 		"success-without-data",
 	] as const) {
-		it(`unknown usage does not block indefinitely after ${failure}`, async () => {
+		it(`an alternative whose usage stays unknown after ${failure} still blocks`, async () => {
 			const h = poolHarness(twoAccounts(), {
 				readUsage: async () => {
 					if (failure === "throw") throw new Error("Usage unavailable");
@@ -1820,8 +2121,8 @@ describe("weekly reset conservation with the production pool check", () => {
 				},
 			});
 			await h.scheduler.tick();
-			expect(h.usageReads).toEqual([otherId]); // Confirmation does not hammer it again.
-			expect(h.consumed).toEqual([targetId]);
+			expect(h.usageReads).toEqual([otherId]);
+			expect(h.consumed).toEqual([]);
 		});
 	}
 
@@ -1839,18 +2140,35 @@ describe("weekly reset conservation with the production pool check", () => {
 		expect(h.consumed).toEqual([targetId]);
 	});
 
-	it("gives a just-restored account one tick for usage to catch up, then retries unknown usage", async () => {
+	it("reads an unknown alternative once per tick and keeps conserving while it stays unknown", async () => {
 		let now = NOW;
 		const h = poolHarness(twoAccounts(), {
 			now: () => now,
 			readUsage: async () => ({ success: false }),
-			cooldownAnchor: async (id) => (id === otherId ? NOW : null),
+		});
+		await h.scheduler.tick();
+		now += 60_000;
+		await h.scheduler.tick();
+		expect(h.usageReads).toEqual([otherId, otherId]);
+		expect(h.consumed).toEqual([]);
+	});
+
+	it("redeems once a later read shows the unknown alternative exhausted", async () => {
+		let now = NOW;
+		let exhausted = false;
+		const h = poolHarness(twoAccounts(), {
+			now: () => now,
+			readUsage: async (id) => {
+				if (!exhausted) return { success: false };
+				usageCache.set(id, usage(100));
+				return { success: true };
+			},
 		});
 		await h.scheduler.tick();
 		expect(h.consumed).toEqual([]);
 		now += 60_000;
+		exhausted = true;
 		await h.scheduler.tick();
-		expect(h.usageReads).toEqual([otherId, otherId]);
 		expect(h.consumed).toEqual([targetId]);
 	});
 

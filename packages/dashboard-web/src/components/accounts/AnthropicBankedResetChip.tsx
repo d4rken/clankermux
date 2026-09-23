@@ -27,6 +27,10 @@ import { randomUUID } from "../../lib/uuid";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { StatusChip } from "./StatusChip";
 import {
+	applyResetFailedMessage,
+	bankedResetAutoApplySentence,
+	bankedResetExpirySentence,
+	bankedResetsLeftSentence,
 	RESET_CREDIT_URGENCY_CLASSES,
 	ResetApplyConfirmPanel,
 	type ResetApplyState,
@@ -34,6 +38,10 @@ import {
 	type ResetEventsState,
 	usageResetChipLabel,
 } from "./UsageResetPanels";
+
+/** Completes "the next banked reset is applied …" in the chip tooltip. */
+const ANTHROPIC_WEEKLY_RULE =
+	"at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts";
 
 /**
  * Claim rejections the same request can never turn around: bad input, a
@@ -244,7 +252,7 @@ export function AnthropicBankedResetChip({
 					setAttempt({
 						state: {
 							kind: "retry",
-							message: "Earlier claim unconfirmed — retry it",
+							message: "Earlier attempt unconfirmed — retry it",
 							detail: message,
 						},
 						requestId: pending.requestId,
@@ -267,7 +275,7 @@ export function AnthropicBankedResetChip({
 				setAttempt({
 					state: {
 						kind: "retry",
-						message: `Failed to apply reset: ${message}`,
+						message: applyResetFailedMessage(message),
 						detail: message,
 					},
 					requestId,
@@ -303,21 +311,14 @@ export function AnthropicBankedResetChip({
 
 	const left = info.resetsLeftTotal;
 	const nextExpiry = status.bankedResetNextExpiry;
-	const expiryLine = nextExpiry
-		? ` Next use-by: ${nextExpiry.toLocaleString()}.`
-		: "";
-	const expiryArmed = status.bankedResetAutoApplyArmed;
-	const weeklyArmed = status.bankedResetAutoApplyOnWeeklyLimitArmed;
-	const autoApplyLine =
-		left > 0
-			? expiryArmed && weeklyArmed
-				? " Auto-apply armed (expiry + weekly limit) — the next grant is claimed shortly before it expires, or at a weekly limit it clears when no other Anthropic account can serve."
-				: expiryArmed
-					? " Auto-apply armed — the next grant is claimed shortly before it expires."
-					: weeklyArmed
-						? " Auto-apply armed (weekly limit) — the next grant is claimed at a weekly limit it clears when no other Anthropic account can serve."
-						: " Auto-apply is off — these resets may expire unused."
-			: "";
+	const title = `${bankedResetsLeftSentence(left)}${bankedResetExpirySentence(
+		status.bankedResetExpiries,
+	)}${bankedResetAutoApplySentence({
+		count: left,
+		expiryArmed: status.bankedResetAutoApplyArmed,
+		weeklyArmed: status.bankedResetAutoApplyOnWeeklyLimitArmed,
+		weeklyRule: ANTHROPIC_WEEKLY_RULE,
+	})} Click for banked resets and history.`;
 	const colorClasses =
 		left > 0
 			? RESET_CREDIT_URGENCY_CLASSES[status.bankedResetUrgency]
@@ -328,10 +329,7 @@ export function AnthropicBankedResetChip({
 	return (
 		<Popover onOpenChange={handleOpenChange}>
 			<PopoverTrigger asChild>
-				<StatusChip
-					className={`cursor-pointer ${colorClasses}`}
-					title={`${left} banked reset${left === 1 ? "" : "s"} left.${expiryLine}${autoApplyLine} Click for grants and reset history.`}
-				>
+				<StatusChip className={`cursor-pointer ${colorClasses}`} title={title}>
 					<RotateCcw className="h-3.5 w-3.5" />
 					{usageResetChipLabel(left, nextExpiry)}
 				</StatusChip>
@@ -340,7 +338,6 @@ export function AnthropicBankedResetChip({
 				<ResetApplyConfirmPanel
 					available={claimable !== null}
 					state={shownState}
-					armTitle="Claim the next banked reset now to clear the limits it covers"
 					confirmPrompt={
 						<>
 							Use 1 reset from {claimGrant?.label || "the next grant"} for{" "}
@@ -354,16 +351,11 @@ export function AnthropicBankedResetChip({
 					onDismiss={handleCancel}
 				/>
 				<BankedResetGrantsPanel info={info} />
-				<div>
-					<p className="text-xs font-medium mb-item">Usage-reset history</p>
-					<ResetEventsPanel
-						state={eventsState}
-						statusLabel={(event) =>
-							bankedResetEventStatusLabel(event, grantIds)
-						}
-						detail={bankedResetEventDetail}
-					/>
-				</div>
+				<ResetEventsPanel
+					state={eventsState}
+					statusLabel={(event) => bankedResetEventStatusLabel(event, grantIds)}
+					detail={bankedResetEventDetail}
+				/>
 			</PopoverContent>
 		</Popover>
 	);

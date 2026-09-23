@@ -291,7 +291,7 @@ export class AnthropicBankedResetCoordinator {
 				status: "failed",
 				code: "busy",
 				message:
-					"Another banked-reset claim is already in progress for this account.",
+					"Another banked-reset attempt is already in progress for this account.",
 			};
 		}
 		const promise = this.runClaim(accountId, request);
@@ -391,7 +391,7 @@ export class AnthropicBankedResetCoordinator {
 			return {
 				status: "failed",
 				code: "error",
-				message: `The organization of '${account.name}' is unknown, so no claim was sent. Re-authenticate the account or retry once its profile can be read.`,
+				message: `The organization of '${account.name}' is unknown, so nothing was sent. Re-authenticate the account or retry once its profile can be read.`,
 			};
 		}
 
@@ -747,7 +747,7 @@ export class AnthropicBankedResetCoordinator {
 					outcome: {
 						status: "failed",
 						code: "grant_mismatch",
-						message: `Request ${request.requestId} was already used for grant ${begin.row.grant_id}; generate a new request id.`,
+						message: `Request ${request.requestId} was already used for banked reset ${begin.row.grant_id}; generate a new request id.`,
 					},
 				};
 			}
@@ -757,7 +757,7 @@ export class AnthropicBankedResetCoordinator {
 					outcome: {
 						status: "failed",
 						code: "pending_claim",
-						message: `An earlier banked-reset claim for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
+						message: `An earlier banked-reset attempt for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
 						pendingRequestId: begin.row.request_id,
 						pendingGrantId: begin.row.grant_id,
 						pendingReplayUntil:
@@ -790,7 +790,7 @@ export class AnthropicBankedResetCoordinator {
 				outcome: {
 					status: "failed",
 					code: "error",
-					message: `The banked-reset claim for '${account.name}' could not be recorded, so it was not sent: ${errorMessage(error)}`,
+					message: `The banked-reset attempt for '${account.name}' could not be recorded, so it was not sent: ${errorMessage(error)}`,
 				},
 			};
 		}
@@ -812,7 +812,7 @@ export class AnthropicBankedResetCoordinator {
 				await this.ctx.dbOps.resolveAnthropicBankedResetAttempt(target.rowId, {
 					status: "failed",
 					reason: BANKED_RESET_NOT_SENT_REASON,
-					errorMessage: `Not sent: the claim for '${account.name}' reached the end of its replay window before its request left`,
+					errorMessage: `Not sent: the attempt for '${account.name}' reached the end of its replay window before its request left`,
 					now: this.now(),
 				});
 			} else {
@@ -833,7 +833,7 @@ export class AnthropicBankedResetCoordinator {
 		return {
 			status: "failed",
 			code: "error",
-			message: `Not sent: the banked-reset claim for '${account.name}' reached the end of its replay window.`,
+			message: `Not sent: the banked-reset attempt for '${account.name}' reached the end of its replay window.`,
 		};
 	}
 

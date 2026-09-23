@@ -74,27 +74,50 @@ const EXTRA_SPEND_ANTHROPIC: AccountPolicyDescriptor = {
 };
 
 /**
- * Anthropic's banked resets (Claude Code grants) reuse the Codex reset-credit
- * keys: same two automations, each provider's own claim rules.
+ * Anthropic's banked resets (Claude Code grants) and Codex reset credits share
+ * the two auto-apply keys and their labels; only each provider's rules differ.
  */
-const AUTO_APPLY_EXPIRY_ANTHROPIC: AccountPolicyDescriptor = {
+const AUTO_APPLY_EXPIRY_LABELS = {
 	key: "autoApplyExpiry",
 	chipLabel: "Apply: expiry",
 	menuLabel: "Auto-apply expiring banked resets",
-	description:
-		"Automatically claim the next banked reset shortly (~10 min) before its grant expires so it isn't wasted. Only grants that clear a weekly limit are claimed, and a grant usable only at a limit is claimed only while one is reached. Applies even while paused, unless the account needs re-authentication.",
-};
+} as const;
 
-const AUTO_APPLY_WEEKLY_ANTHROPIC: AccountPolicyDescriptor = {
+const AUTO_APPLY_WEEKLY_LABELS = {
 	key: "autoApplyWeekly",
 	chipLabel: "Apply: weekly",
 	menuLabel: "Auto-apply banked reset at weekly limit",
+} as const;
+
+const AUTO_APPLY_EXPIRY_ANTHROPIC: AccountPolicyDescriptor = {
+	...AUTO_APPLY_EXPIRY_LABELS,
 	description:
-		"Automatically claim the next banked reset when this account reaches a weekly limit the grant clears and no other Anthropic account can serve the same models, or when the grant would expire before that limit resets. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+		"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Only grants that clear a weekly limit are applied, and a grant usable only at a limit is applied only while one is reached. Applies even while paused, unless the account needs re-authentication.",
+};
+
+const AUTO_APPLY_WEEKLY_ANTHROPIC: AccountPolicyDescriptor = {
+	...AUTO_APPLY_WEEKLY_LABELS,
+	description:
+		"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 12 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+};
+
+const AUTO_APPLY_EXPIRY_CODEX: AccountPolicyDescriptor = {
+	...AUTO_APPLY_EXPIRY_LABELS,
+	description:
+		"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
+};
+
+const AUTO_APPLY_WEEKLY_CODEX: AccountPolicyDescriptor = {
+	...AUTO_APPLY_WEEKLY_LABELS,
+	description:
+		"Automatically apply the next banked reset when this account reaches 100% weekly usage, no other Codex account can serve, and the account's natural weekly reset is at least 12 hours away. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 };
 
 const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
-	Exclude<AccountPolicyKey, "extraSpend">,
+	Exclude<
+		AccountPolicyKey,
+		"extraSpend" | "autoApplyExpiry" | "autoApplyWeekly"
+	>,
 	AccountPolicyDescriptor
 > = {
 	autoFallback: {
@@ -110,20 +133,6 @@ const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
 		menuLabel: "Auto-refresh",
 		description:
 			"Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing.",
-	},
-	autoApplyExpiry: {
-		key: "autoApplyExpiry",
-		chipLabel: "Apply: expiry",
-		menuLabel: "Auto-apply expiring usage resets",
-		description:
-			"Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
-	},
-	autoApplyWeekly: {
-		key: "autoApplyWeekly",
-		chipLabel: "Apply: weekly",
-		menuLabel: "Auto-apply reset at weekly limit",
-		description:
-			"Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 	},
 	peakHoursPause: {
 		key: "peakHoursPause",
@@ -156,9 +165,15 @@ export function describeAccountPolicy(
 			description:
 				"Use account metadata to pause when protected included quota is exhausted or unknown, and resume quota-paused accounts when capacity returns. Applies to new or unpinned requests; keeps manual and reconnect-required pauses. Does not send inference requests.",
 		};
-	if (provider === PROVIDER_NAMES.ANTHROPIC) {
-		if (key === "autoApplyExpiry") return AUTO_APPLY_EXPIRY_ANTHROPIC;
-		if (key === "autoApplyWeekly") return AUTO_APPLY_WEEKLY_ANTHROPIC;
+	if (key === "autoApplyExpiry") {
+		return provider === PROVIDER_NAMES.ANTHROPIC
+			? AUTO_APPLY_EXPIRY_ANTHROPIC
+			: AUTO_APPLY_EXPIRY_CODEX;
+	}
+	if (key === "autoApplyWeekly") {
+		return provider === PROVIDER_NAMES.ANTHROPIC
+			? AUTO_APPLY_WEEKLY_ANTHROPIC
+			: AUTO_APPLY_WEEKLY_CODEX;
 	}
 	if (key === "extraSpend") {
 		if (provider === PROVIDER_NAMES.DEVIN) return EXTRA_SPEND_DEVIN;

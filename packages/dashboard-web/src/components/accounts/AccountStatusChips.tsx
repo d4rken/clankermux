@@ -27,6 +27,10 @@ import { DegradedChip } from "./DegradedChip";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
 import { StatusChip } from "./StatusChip";
 import {
+	applyResetFailedMessage,
+	bankedResetAutoApplySentence,
+	bankedResetExpirySentence,
+	bankedResetsLeftSentence,
 	RESET_CREDIT_URGENCY_CLASSES,
 	ResetApplyConfirmPanel,
 	type ResetApplyState,
@@ -103,28 +107,32 @@ interface AccountStatusChipsProps {
 	degraded?: DegradedAccount;
 }
 
-const RESET_EVENT_STATUS_LABELS: Record<
+export const RESET_EVENT_STATUS_LABELS: Record<
 	CodexResetCreditEventResponse["status"],
 	string
 > = {
 	pending: "Pending",
 	reset: "Reset applied",
 	nothingToReset: "Nothing to reset",
-	noCredit: "No credit available",
-	alreadyRedeemed: "Already redeemed",
+	noCredit: "No banked reset left",
+	alreadyRedeemed: "Already used",
 	failed: "Failed",
 };
 
 /** Inline outcome copy for the manual Apply-now flow, keyed by API outcome. */
-const CONSUME_OUTCOME_LABELS: Record<
+export const CONSUME_OUTCOME_LABELS: Record<
 	CodexRateLimitResetCreditConsumeOutcome,
 	string
 > = {
-	reset: "Reset applied — usage windows cleared",
-	nothingToReset: "Nothing to reset",
-	noCredit: "No credit available",
-	alreadyRedeemed: "Already redeemed",
+	reset: "Reset applied",
+	nothingToReset: "Nothing to reset — none used",
+	noCredit: "No banked reset left",
+	alreadyRedeemed: "Already used",
 };
+
+/** Completes "the next banked reset is applied …" in the chip tooltip. */
+const CODEX_WEEKLY_RULE =
+	"at the weekly limit when no other Codex account can serve and the account's natural weekly reset is at least 12 hours away";
 
 /** Lazy-load lifecycle of the reset-credit event history in the popover. */
 export type ResetCreditEventsState =
@@ -133,7 +141,7 @@ export type ResetCreditEventsState =
 function codexEventDetail(event: CodexResetCreditEventResponse): string | null {
 	// windowsReset of 0 is noise next to "Nothing to reset".
 	if (event.windowsReset == null || event.windowsReset <= 0) return null;
-	return `${event.windowsReset} window${event.windowsReset === 1 ? "" : "s"} reset`;
+	return `cleared ${event.windowsReset} window${event.windowsReset === 1 ? "" : "s"}`;
 }
 
 /** Body of the Codex reset-credit history popover. */
@@ -163,6 +171,7 @@ export type ResetCreditApplyState =
 	| {
 			kind: "done";
 			outcome: CodexRateLimitResetCreditConsumeOutcome;
+			success: boolean;
 			message: string;
 	  }
 	| { kind: "error"; message: string };
@@ -172,13 +181,13 @@ function toResetApplyState(state: ResetCreditApplyState): ResetApplyState {
 		case "done":
 			return {
 				kind: "done",
-				success: state.outcome === "reset",
+				success: state.success,
 				message: state.message,
 			};
 		case "error":
 			return {
 				kind: "retry",
-				message: `Failed to apply reset: ${state.message}`,
+				message: applyResetFailedMessage(state.message),
 				detail: state.message,
 			};
 		default:
@@ -211,11 +220,10 @@ export function ResetCreditApplyPanel({
 		<ResetApplyConfirmPanel
 			available={availableCount > 0}
 			state={toResetApplyState(state)}
-			armTitle="Consume one banked usage reset now to clear this account's usage windows"
 			confirmPrompt={
 				<>
-					Consume 1 reset for <span className="font-medium">{accountName}</span>
-					?
+					Use 1 banked reset for{" "}
+					<span className="font-medium">{accountName}</span>?
 				</>
 			}
 			onArm={onArm}
@@ -269,10 +277,17 @@ function CodexUsageResetChip({
 			.then((response) => {
 				// Terminal business outcome — the attempt is settled, drop the key.
 				setApplyIdempotencyKey(null);
+				// A successful alreadyRedeemed means an earlier send with this key
+				// landed.
+				const outcome =
+					response.success && response.outcome === "alreadyRedeemed"
+						? "reset"
+						: response.outcome;
 				setApplyState({
 					kind: "done",
 					outcome: response.outcome,
-					message: CONSUME_OUTCOME_LABELS[response.outcome] ?? response.message,
+					success: response.success,
+					message: CONSUME_OUTCOME_LABELS[outcome] ?? response.message,
 				});
 				// Refresh the ledger below; the chip's own count/expiry refreshes with
 				// the Accounts page's periodic poll (no refresh callback is plumbed
@@ -303,33 +318,24 @@ function CodexUsageResetChip({
 		setApplyState({ kind: "idle" });
 	};
 
+	const count = summary.availableCount;
 	const availableExpiries = status.resetCreditAvailableExpiries;
-	const nextExpiry = status.resetCreditNextExpiry;
-	const countLabel = `${summary.availableCount} reset${summary.availableCount === 1 ? "" : "s"}`;
-	const label = usageResetChipLabel(summary.availableCount, nextExpiry);
-
-	const expiryDetails = availableExpiries.length
-		? ` Expirations: ${availableExpiries
-				.map((date) => date.toLocaleString())
-				.join("; ")}.`
-		: summary.availableCount > 0
-			? " Per-reset expiration details are unavailable."
-			: "";
-	const expiryArmed = status.resetCreditAutoApplyArmed;
-	const weeklyArmed = status.resetCreditAutoApplyOnWeeklyLimitArmed;
-	const autoApplyLine =
-		summary.availableCount > 0
-			? expiryArmed && weeklyArmed
-				? " Auto-apply armed (expiry + weekly limit) — a reset will be consumed automatically shortly before expiry, or at the weekly limit when no usable Codex alternative is available. Manual pauses defer weekly resets."
-				: expiryArmed
-					? " Auto-apply armed — a reset will be consumed automatically shortly before expiry."
-					: weeklyArmed
-						? " Auto-apply armed (weekly limit) — a reset will be consumed automatically at the weekly limit when no usable Codex alternative is available. Manual pauses defer weekly resets."
-						: " Auto-apply is off — this reset may expire unused."
-			: "";
+	const label = usageResetChipLabel(count, status.resetCreditNextExpiry);
+	const expirySentence =
+		availableExpiries.length === 0 && count > 0
+			? " Expiry dates are unavailable."
+			: bankedResetExpirySentence(availableExpiries);
+	const title = `${bankedResetsLeftSentence(count)}${expirySentence}${bankedResetAutoApplySentence(
+		{
+			count,
+			expiryArmed: status.resetCreditAutoApplyArmed,
+			weeklyArmed: status.resetCreditAutoApplyOnWeeklyLimitArmed,
+			weeklyRule: CODEX_WEEKLY_RULE,
+		},
+	)} Click for history.`;
 
 	const colorClasses =
-		summary.availableCount > 0
+		count > 0
 			? RESET_CREDIT_URGENCY_CLASSES[status.resetCreditUrgency]
 			: "bg-secondary text-muted-foreground";
 
@@ -347,10 +353,7 @@ function CodexUsageResetChip({
 	return (
 		<Popover onOpenChange={handleOpenChange}>
 			<PopoverTrigger asChild>
-				<StatusChip
-					className={`cursor-pointer ${colorClasses}`}
-					title={`${countLabel} available.${expiryDetails}${autoApplyLine} Click for reset history.`}
-				>
+				<StatusChip className={`cursor-pointer ${colorClasses}`} title={title}>
 					<RotateCcw className="h-3.5 w-3.5" />
 					{label}
 				</StatusChip>
@@ -358,7 +361,7 @@ function CodexUsageResetChip({
 			<PopoverContent align="start" className="w-80 p-row space-y-row">
 				<ResetCreditApplyPanel
 					accountName={account.name}
-					availableCount={summary.availableCount}
+					availableCount={count}
 					state={applyState}
 					onArm={handleArm}
 					onConfirm={handleConfirmOrRetry}
@@ -366,10 +369,7 @@ function CodexUsageResetChip({
 					onRetry={handleConfirmOrRetry}
 					onDismiss={handleCancel}
 				/>
-				<div>
-					<p className="text-xs font-medium mb-item">Usage-reset history</p>
-					<ResetCreditEventsPanel state={eventsState} />
-				</div>
+				<ResetCreditEventsPanel state={eventsState} />
 			</PopoverContent>
 		</Popover>
 	);

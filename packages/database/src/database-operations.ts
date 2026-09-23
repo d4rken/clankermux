@@ -3119,6 +3119,10 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async withdrawPendingCodexResetCreditAttempt(id: string): Promise<boolean> {
+		return this.codexResetCreditEvents.withdrawPendingAttempt(id);
+	}
+
 	async recordManualCodexResetCreditEvent(input: {
 		accountId: string;
 		accountName: string;
