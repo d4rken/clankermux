@@ -5,6 +5,7 @@ import {
 	buildCodexWeeklyRewrite,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
+	hashRoutingAffinityKey,
 	type RequestStartEvt,
 	requestEvents,
 	TIME_CONSTANTS,
@@ -56,7 +57,6 @@ import {
 	type RecordMeta,
 	type TransportOutcome,
 } from "./request-recorder";
-import { hashRoutingAffinityKey } from "./routing-telemetry";
 import {
 	dispatchObservationSource,
 	shouldRecordRequest,

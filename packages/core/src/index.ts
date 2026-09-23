@@ -1,5 +1,6 @@
 // Re-export only used items from each module
 
+export { hashRoutingAffinityKey } from "./affinity-key-hash";
 export {
 	isAccountAllowedByPin,
 	isPinActive,
