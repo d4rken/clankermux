@@ -1,4 +1,5 @@
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
+import type { SdkBridgeTranslationGaps } from "@clankermux/types";
 import { type BridgeError, bridgeErrors } from "./errors";
 
 export type Block = { type: string; [key: string]: unknown };
@@ -30,6 +31,10 @@ export interface TurnRequest {
 	toolResults: Block[];
 	tools: ClientTool[];
 	effort: EffortLevel | null;
+	/** The client's output limit; null when it set none. */
+	maxOutputTokens: number | null;
+	/** Fields accepted but not applied, by their Messages name. */
+	ignoredFields: string[];
 	/** Size of the whole request body. */
 	bodyBytes: number;
 	schemaBytes: number;
@@ -133,10 +138,51 @@ function parseTools(
 	return { tools, schemaBytes };
 }
 
+const IGNORED_FIELDS = ["temperature", "top_p"] as const;
+const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
+
+/**
+ * What a bridged turn does with the request fields Claude Code sets itself:
+ * - `max_tokens` is honoured, as Claude Code's own output limit;
+ * - `temperature` and `top_p` are accepted and not applied;
+ * - stop sequences, and a `tool_choice` that forces or forbids tool use, are
+ *   refused, since the answer would not be the one the client asked for.
+ * `gaps` names what the body cannot show: an adapter's default `max_tokens`
+ * is no limit of the client's, and a dropped field was still asked for.
+ */
+function applyFieldPolicy(
+	body: Record<string, unknown>,
+	gaps: SdkBridgeTranslationGaps | null,
+): { maxOutputTokens: number | null; ignoredFields: string[] } | BridgeError {
+	const stops = body.stop_sequences;
+	if (Array.isArray(stops) ? stops.length > 0 : stops != null)
+		return bridgeErrors.invalid(
+			"stop_sequences (stop in Chat Completions) is not supported through the SDK bridge",
+		);
+	const choice = isRecord(body.tool_choice) ? body.tool_choice.type : null;
+	if (typeof choice === "string" && FORCING_TOOL_CHOICES.has(choice))
+		return bridgeErrors.invalid(
+			`tool_choice "${choice}" is not supported through the SDK bridge; Claude Code decides when to call tools`,
+		);
+	let maxOutputTokens: number | null = null;
+	if (body.max_tokens !== undefined && !gaps?.maxTokensDefaulted) {
+		const limit = body.max_tokens;
+		if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1)
+			return bridgeErrors.invalid("max_tokens must be a positive integer");
+		maxOutputTokens = limit;
+	}
+	const dropped = new Set(gaps?.droppedFields ?? []);
+	const ignoredFields = IGNORED_FIELDS.filter(
+		(field) => body[field] != null || dropped.has(field),
+	);
+	return { maxOutputTokens, ignoredFields };
+}
+
 export function parseTurnRequest(
 	body: unknown,
 	reasoningEffort: string | null,
 	bodyBytes: number,
+	gaps: SdkBridgeTranslationGaps | null = null,
 ): { ok: true; turn: TurnRequest } | { ok: false; error: BridgeError } {
 	const fail = (error: BridgeError) => ({ ok: false as const, error });
 	if (!isRecord(body))
@@ -167,6 +213,8 @@ export function parseTurnRequest(
 		);
 	const tools = parseTools(body.tools);
 	if ("status" in tools) return fail(tools);
+	const fields = applyFieldPolicy(body, gaps);
+	if ("status" in fields) return fail(fields);
 	const toolResults = blocksOf(last).filter((b) => b.type === "tool_result");
 	return {
 		ok: true,
@@ -180,6 +228,8 @@ export function parseTurnRequest(
 			toolResults,
 			tools: tools.tools,
 			effort: mapEffort(reasoningEffort, body),
+			maxOutputTokens: fields.maxOutputTokens,
+			ignoredFields: fields.ignoredFields,
 			bodyBytes,
 			schemaBytes: tools.schemaBytes,
 		},

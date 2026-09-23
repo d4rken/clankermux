@@ -104,6 +104,7 @@ function send(
 	gw: Gateway,
 	endpoint: Endpoint,
 	signal?: AbortSignal,
+	fields: Record<string, unknown> = {},
 ): Promise<Response> {
 	const path =
 		endpoint === "chat"
@@ -115,8 +116,9 @@ function send(
 					model: MODEL,
 					stream: true,
 					messages: [{ role: "user", content: "hello" }],
+					...fields,
 				}
-			: { model: MODEL, stream: true, input: "hello" };
+			: { model: MODEL, stream: true, input: "hello", ...fields };
 	return fetch(`${gw.url}${path}`, {
 		method: "POST",
 		headers: {
@@ -429,5 +431,116 @@ for (const endpoint of ["responses", "chat"] as const) {
 				http_status: 503,
 			});
 		});
+	});
+}
+
+/**
+ * One field policy for bridged turns, whichever endpoint the client used: the
+ * output limit is honoured, sampling is accepted and recorded as ignored, and
+ * what would change the answer's shape is refused before Claude Code starts.
+ */
+for (const endpoint of ["responses", "chat"] as const) {
+	const tools =
+		endpoint === "chat"
+			? [
+					{
+						type: "function",
+						function: {
+							name: "read",
+							description: "Read a file",
+							parameters: { type: "object", properties: {} },
+						},
+					},
+				]
+			: [
+					{
+						type: "function",
+						name: "read",
+						description: "Read a file",
+						parameters: { type: "object", properties: {} },
+					},
+				];
+	const limit =
+		endpoint === "chat" ? { max_tokens: 321 } : { max_output_tokens: 321 };
+
+	/** A turn that runs: Claude Code's one model call succeeds. */
+	async function served(h: Harness, fields: Record<string, unknown>) {
+		const pending = send(h.gw, endpoint, undefined, fields);
+		const query = await h.sdk.next();
+		await query.nextPrompt();
+		await relay(query, await callModel(query));
+		return { seen: await read(await pending), query };
+	}
+
+	async function finishedTurn(gw: Gateway) {
+		let rows: Array<{ status: string; ignored_fields: string | null }> = [];
+		await waitFor(async () => {
+			rows = await gw.query(
+				"SELECT status, ignored_fields FROM sdk_bridge_turns WHERE status != 'running'",
+			);
+			return rows.length === 1;
+		});
+		return rows[0];
+	}
+
+	describe(`SDK bridge field policy at /wire/openai ${endpoint}`, () => {
+		it("honours the client's output limit as Claude Code's own", async () => {
+			const h = await harness();
+			const { seen, query } = await served(h, limit);
+
+			expect(seen.status).toBe(200);
+			expect(query.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("321");
+		});
+
+		it("leaves Claude Code's limit alone when the client sets none", async () => {
+			const h = await harness();
+			const { seen, query } = await served(h, {});
+
+			expect(seen.status).toBe(200);
+			expect(query.options.env).not.toHaveProperty(
+				"CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+			);
+		});
+
+		it("accepts temperature and top_p and records them as ignored", async () => {
+			const h = await harness();
+			const { seen } = await served(h, { temperature: 0.2, top_p: 0.9 });
+
+			expect(seen.status).toBe(200);
+			expect(await finishedTurn(h.gw)).toEqual({
+				status: "completed",
+				ignored_fields: '["temperature","top_p"]',
+			});
+		});
+
+		it("refuses a tool_choice that forces a tool, naming it, before Claude Code starts", async () => {
+			const h = await harness();
+			const seen = await read(
+				await send(h.gw, endpoint, undefined, {
+					tools,
+					tool_choice: "required",
+				}),
+			);
+
+			expect(seen.status).toBe(400);
+			expect(jsonError(seen).message).toContain('tool_choice "any"');
+			expect(h.sdk.queries).toEqual([]);
+			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
+				http_status: 400,
+				error_phase: "pre_head",
+			});
+		});
+
+		if (endpoint === "chat")
+			it("refuses stop sequences, naming the field, before Claude Code starts", async () => {
+				const h = await harness();
+				const seen = await read(
+					await send(h.gw, endpoint, undefined, { stop: ["END"] }),
+				);
+
+				expect(seen.status).toBe(400);
+				expect(jsonError(seen).message).toContain("stop_sequences");
+				expect(h.sdk.queries).toEqual([]);
+			});
 	});
 }

@@ -1121,7 +1121,8 @@ export function ensureSchema(db: Database): void {
 			sdk_input_tokens INTEGER,
 			sdk_output_tokens INTEGER,
 			sdk_cache_read_input_tokens INTEGER,
-			sdk_cache_creation_input_tokens INTEGER
+			sdk_cache_creation_input_tokens INTEGER,
+			ignored_fields TEXT
 		)
 	`);
 	db.run(
@@ -1987,6 +1988,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "sdk_bridge_turn_id",
 		ddl: "ALTER TABLE requests ADD COLUMN sdk_bridge_turn_id TEXT",
+	},
+	// JSON array of the request fields a bridged turn accepted but Claude Code
+	// cannot apply (temperature, top_p); NULL when there were none.
+	{
+		table: "sdk_bridge_turns",
+		column: "ignored_fields",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN ignored_fields TEXT",
 	},
 ];
 

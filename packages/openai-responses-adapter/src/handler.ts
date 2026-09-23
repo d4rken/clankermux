@@ -399,6 +399,12 @@ async function respondToResponsesRequest(
 		// no bridge the proxy excludes it. Unconditional: independent of any
 		// API-key pin, which can narrow routing further on top.
 		denyDirectOfficialAnthropic: true,
+		translationGaps: {
+			maxTokensDefaulted: body.max_output_tokens === undefined,
+			droppedFields: (["temperature", "top_p"] as const).filter(
+				(field) => (body as unknown as Record<string, unknown>)[field] != null,
+			),
+		},
 	});
 
 	// 6. Forward to proxy

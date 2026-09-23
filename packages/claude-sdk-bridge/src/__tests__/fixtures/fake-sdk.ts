@@ -461,6 +461,7 @@ export function makeMeta(
 		affinityKey: null,
 		model: MODEL,
 		reasoningEffort: null,
+		translationGaps: null,
 		...overrides,
 	};
 }

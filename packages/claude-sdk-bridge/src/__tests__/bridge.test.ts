@@ -184,6 +184,59 @@ describe("a plain turn", () => {
 		]);
 	});
 
+	it("gives Claude Code the client's output limit and records the fields it ignores", async () => {
+		const h = harness();
+		const t = await start(h, {
+			max_tokens: 777,
+			temperature: 0.1,
+			messages: [{ role: "user", content: "hello" }],
+		});
+		expect(t.query.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("777");
+		await waitFor(() => h.repo.turns.has(t.plan.turnId));
+		expect(h.repo.turns.get(t.plan.turnId)?.ignoredFields).toEqual([
+			"temperature",
+		]);
+
+		// An adapter's default limit is not the client's.
+		const d = await start(
+			h,
+			{ max_tokens: 4096, messages: [{ role: "user", content: "hello" }] },
+			{
+				meta: {
+					translationGaps: {
+						maxTokensDefaulted: true,
+						droppedFields: ["top_p"],
+					},
+				},
+			},
+		);
+		expect(d.query.options.env).not.toHaveProperty(
+			"CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+		);
+		await waitFor(() => h.repo.turns.has(d.plan.turnId));
+		expect(h.repo.turns.get(d.plan.turnId)?.ignoredFields).toEqual(["top_p"]);
+	});
+
+	it("refuses stop sequences before starting Claude Code", async () => {
+		const h = harness();
+		const plan = makePlan();
+		const res = await h.bridge.startTurn({
+			request: messagesRequest({
+				stop_sequences: ["END"],
+				messages: [{ role: "user", content: "hello" }],
+			}),
+			plan,
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(400);
+		expect(
+			((await res.json()) as { error: { message: string } }).error.message,
+		).toContain("stop_sequences");
+		expect(h.sdk.queries).toEqual([]);
+		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
+	});
+
 	it("never sends the client's system prompt", async () => {
 		const h = harness();
 		const t = await start(h, {

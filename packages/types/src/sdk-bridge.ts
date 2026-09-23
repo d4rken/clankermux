@@ -61,6 +61,11 @@ export interface SdkBridgeTurn {
 	sdkOutputTokens: number | null;
 	sdkCacheReadInputTokens: number | null;
 	sdkCacheCreationInputTokens: number | null;
+	/**
+	 * Request fields the turn accepted but Claude Code cannot apply, by the
+	 * Messages name (`temperature`, `top_p`). Null when there were none.
+	 */
+	ignoredFields: string[] | null;
 }
 
 /** What is known when a turn is admitted. Counters start at zero. */
@@ -82,6 +87,7 @@ export type SdkBridgeTurnInsert = Pick<
 			| "conversationKeyHash"
 			| "ccSessionId"
 			| "rebuildReason"
+			| "ignoredFields"
 		>
 	>;
 

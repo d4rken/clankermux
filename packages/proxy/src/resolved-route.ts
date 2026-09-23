@@ -333,7 +333,6 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			const field = unsupportedChatField(
 				account.provider,
 				input.chatRequirements,
-				bridged,
 			);
 			if (field) {
 				unsupportedField ??= field;

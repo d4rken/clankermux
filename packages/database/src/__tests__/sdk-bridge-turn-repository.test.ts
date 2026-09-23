@@ -98,8 +98,28 @@ describe("SdkBridgeTurnRepository", () => {
 			innerCallCount: 0,
 			innerErrorCount: 0,
 			sdkInputTokens: null,
+			ignoredFields: null,
 		});
 		expect(detail?.legs).toEqual([]);
+	});
+
+	it("stores the fields a turn ignored as a JSON array", async () => {
+		await repo.insertTurn({
+			id: "turn-2",
+			startedAt: 1_000,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+			ignoredFields: ["temperature", "top_p"],
+		});
+		expect((await repo.getTurnWithLegs("turn-2"))?.turn.ignoredFields).toEqual([
+			"temperature",
+			"top_p",
+		]);
+		expect(
+			db
+				.query("SELECT ignored_fields FROM sdk_bridge_turns WHERE id = ?")
+				.get("turn-2"),
+		).toEqual({ ignored_fields: '["temperature","top_p"]' });
 	});
 
 	it("returns null for an unknown turn", async () => {

@@ -137,7 +137,7 @@ export async function sendAuthorizedRequest(
 		if (
 			chat &&
 			(!supportsChatIngress(account.provider, bridged) ||
-				unsupportedChatField(account.provider, chat.requirements, bridged))
+				unsupportedChatField(account.provider, chat.requirements))
 		)
 			throw new RoutingPolicyError(
 				"Chat capability boundary changed before dispatch",

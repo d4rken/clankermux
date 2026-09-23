@@ -6,6 +6,7 @@
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
 //   last user text contains "SLOW"          -> any of the above, 3 s late
+//   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   a tools[].name outside ^[a-zA-Z0-9_-]{1,64}$ -> the API's 400
 
 type Block = { type: string; [k: string]: unknown };
@@ -111,7 +112,9 @@ function script(body: ScriptBody): string {
 
 	const stopReason = content.some((b) => b.type === "tool_use")
 		? "tool_use"
-		: "end_turn";
+		: /MAXTOK/.test(text)
+			? "max_tokens"
+			: "end_turn";
 	const usage = {
 		input_tokens: 100,
 		output_tokens: 20,

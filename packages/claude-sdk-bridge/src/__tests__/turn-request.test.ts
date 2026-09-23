@@ -129,6 +129,75 @@ describe("parseTurnRequest", () => {
 	});
 });
 
+describe("field policy", () => {
+	const parse = (
+		patch: Record<string, unknown>,
+		gaps: Parameters<typeof parseTurnRequest>[3] = null,
+	) => parseTurnRequest({ ...base, ...patch }, null, 1, gaps);
+	const turnOf = (parsed: ReturnType<typeof parseTurnRequest>) => {
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		return parsed.turn;
+	};
+
+	it("honours the client's max_tokens", () => {
+		expect(turnOf(parse({ max_tokens: 300 })).maxOutputTokens).toBe(300);
+		expect(turnOf(parse({})).maxOutputTokens).toBeNull();
+	});
+
+	it("leaves Claude Code's own limit when max_tokens is the adapter's default", () => {
+		const turn = turnOf(
+			parse(
+				{ max_tokens: 4096 },
+				{ maxTokensDefaulted: true, droppedFields: [] },
+			),
+		);
+		expect(turn.maxOutputTokens).toBeNull();
+	});
+
+	it("refuses a max_tokens that is not a positive integer", () => {
+		for (const max_tokens of [0, 1.5, "10"]) {
+			const parsed = parse({ max_tokens });
+			expect(!parsed.ok && parsed.error.message).toContain("max_tokens");
+		}
+	});
+
+	it("accepts temperature and top_p and records them as ignored", () => {
+		expect(
+			turnOf(parse({ temperature: 0.2, top_p: 0.9 })).ignoredFields,
+		).toEqual(["temperature", "top_p"]);
+		expect(turnOf(parse({})).ignoredFields).toEqual([]);
+		// What the Responses translation dropped still counts.
+		expect(
+			turnOf(parse({}, { maxTokensDefaulted: false, droppedFields: ["top_p"] }))
+				.ignoredFields,
+		).toEqual(["top_p"]);
+	});
+
+	it("refuses stop sequences with a 400 naming the field", () => {
+		const parsed = parse({ stop_sequences: ["END"] });
+		expect(parsed.ok).toBe(false);
+		if (parsed.ok) return;
+		expect(parsed.error.status).toBe(400);
+		expect(parsed.error.message).toContain("stop_sequences");
+		expect(turnOf(parse({ stop_sequences: [] })).ignoredFields).toEqual([]);
+	});
+
+	it("refuses a tool_choice that forces or forbids tool use, and takes auto", () => {
+		for (const tool_choice of [
+			{ type: "any" },
+			{ type: "tool", name: "read" },
+			{ type: "none" },
+		]) {
+			const parsed = parse({ tool_choice });
+			expect(!parsed.ok && parsed.error.status).toBe(400);
+			expect(!parsed.ok && parsed.error.message).toContain(
+				`tool_choice "${tool_choice.type}"`,
+			);
+		}
+		expect(parse({ tool_choice: { type: "auto" } }).ok).toBe(true);
+	});
+});
+
 describe("mapEffort", () => {
 	it("maps the client vocabulary onto the SDK's", () => {
 		expect(mapEffort("minimal")).toBe("low");

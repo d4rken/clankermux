@@ -175,6 +175,38 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"sends the client's max_tokens upstream as Claude Code's output limit",
+			async () => {
+				const s = scenario(await results(), "outputLimit");
+				type Case = {
+					reply: { status: number; stop: unknown };
+					upstream: Array<{ status: number; maxTokens: unknown }>;
+				};
+				const sent = (name: string) =>
+					(s[name] as Case).upstream.map((u) => u.maxTokens);
+				console.log(
+					`[claude-sdk-bridge] upstream max_tokens: client 321 -> ${sent("client321")}, none -> ${sent("clientNone")}, 200000 -> ${sent("client200000")}, 64 with a max_tokens stop -> ${sent("stopAtLimit")}`,
+				);
+				for (const name of [
+					"client321",
+					"clientNone",
+					"client200000",
+					"stopAtLimit",
+				])
+					expect((s[name] as Case).reply.status).toBe(200);
+				expect(sent("client321")).toEqual([321]);
+				expect(sent("clientNone")).not.toContain(321);
+				// The limit bounds each model call, not the turn: after a max_tokens
+				// stop Claude Code asks the model to resume, under the same limit.
+				const stopped = sent("stopAtLimit");
+				expect(stopped.length).toBeGreaterThan(1);
+				expect(new Set(stopped)).toEqual(new Set([64]));
+				expect((s.stopAtLimit as Case).reply.stop).toBe("end_turn");
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"resumes the conversation on the next user turn with a session header",
 			async () => {
 				const s = scenario(await results(), "resumeWithHeader");

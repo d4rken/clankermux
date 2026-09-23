@@ -297,27 +297,22 @@ describe("Chat capability boundary", () => {
 			}),
 		).toThrow("supports Chat Completions");
 	});
-	it("names the Chat field a bridged turn cannot honor", () => {
-		const onA = {
+	it("leaves the Chat fields of a bridged turn to the bridge's own field policy", () => {
+		const route = build({
 			rules: [],
 			pin: { accountId: "a", providers: null },
 			bridgesOfficialAnthropic: true,
-		};
-		for (const [requirements, param] of [
-			[{ fields: ["temperature"] }, "temperature"],
-			[{ fields: ["reasoning_content", "max_tokens"] }, "max_tokens"],
-			[{ fields: ["top_p"] }, "top_p"],
-			[{ fields: ["stop"] }, "stop"],
-			[{ fields: [], forcesToolChoice: true }, "tool_choice"],
-		] as const) {
-			expect(() => build({ ...onA, chatRequirements: requirements })).toThrow(
-				expect.objectContaining({
-					statusCode: 400,
-					code: "unsupported_parameter",
-					param,
-				}),
-			);
-		}
+			chatRequirements: {
+				fields: [
+					"reasoning_content",
+					"max_tokens",
+					"temperature",
+					"top_p",
+					"stop",
+				],
+			},
+		});
+		expect(route.accountIds()).toEqual(["a"]);
 	});
 	it("keeps other providers' Chat capabilities when official Anthropic is bridged", () => {
 		const route = build({
@@ -327,8 +322,7 @@ describe("Chat capability boundary", () => {
 			requestedModel: "claude-fable-5-1",
 			chatRequirements: { fields: ["temperature"] },
 		});
-		// OpenRouter honors temperature; the bridge would not.
-		expect(route.accountIds()).toEqual(["o"]);
+		expect([...route.accountIds()].sort()).toEqual(["a", "o"]);
 	});
 });
 

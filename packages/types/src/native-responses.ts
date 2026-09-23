@@ -1,4 +1,5 @@
 import type { RequestMeta } from "./api";
+import type { SdkBridgeTranslationGaps } from "./sdk-bridge-transport";
 
 /**
  * Original (decompressed, normalized) OpenAI-Responses request carried
@@ -29,6 +30,8 @@ export interface NativeResponsesContext {
 	 * it only through the SDK bridge (RequestMeta.officialAnthropicVia).
 	 */
 	denyDirectOfficialAnthropic?: boolean;
+	/** For a turn the SDK bridge serves; see SdkBridgeTranslationGaps. */
+	translationGaps?: SdkBridgeTranslationGaps;
 }
 
 /**

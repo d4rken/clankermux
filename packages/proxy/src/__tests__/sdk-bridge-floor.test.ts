@@ -385,26 +385,34 @@ describe("Chat Completions through the SDK bridge", () => {
 		expect(harness.upstreamKeys).toEqual([]);
 	});
 
-	it("answers 400 naming a Chat field the bridge cannot honor", async () => {
+	it("hands every Chat field to the bridge, whose field policy decides", async () => {
 		const bridge = makeFakeBridge();
 		harness = await makeBridgeHarness([claudeA()], { bridge });
 
-		for (const [requirements, param] of [
-			[{ fields: ["temperature"] }, "temperature"],
-			[{ fields: ["max_tokens"] }, "max_tokens"],
-			[{ fields: [], forcesToolChoice: true }, "tool_choice"],
-		] as const) {
-			const { response, text } = await run(
-				chatRequest(requirements),
-				harness.ctx,
-			);
-			expect(response.status).toBe(400);
-			expect(JSON.parse(text).error).toMatchObject({
-				type: "unsupported_parameter",
-				param,
-			});
-		}
-		expect(bridge.starts).toEqual([]);
+		const { response } = await run(
+			chatRequest({ fields: ["max_tokens", "temperature", "top_p", "stop"] }),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(bridge.starts[0].meta.translationGaps).toBeNull();
+	});
+
+	it("tells the bridge what the Responses translation could not carry", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+		const gaps = { maxTokensDefaulted: true, droppedFields: ["temperature"] };
+		const req = messagesRequest();
+		setNativeResponsesRequestContext(req, {
+			nativeBody: JSON.stringify({ model: MODEL }),
+			denyDirectOfficialAnthropic: true,
+			translationGaps: gaps,
+		});
+
+		await run(req, harness.ctx);
+
+		expect(bridge.starts[0].meta.translationGaps).toEqual(gaps);
 	});
 
 	it("replays reasoning_content through the bridge", async () => {

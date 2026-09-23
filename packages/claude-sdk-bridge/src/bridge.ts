@@ -360,6 +360,7 @@ export function createClaudeSdkBridge(
 			body.json,
 			meta.reasoningEffort,
 			body.bytes,
+			meta.translationGaps,
 		);
 		if (!parsed.ok)
 			return reject(recorder, meta, plan, startedAt, parsed.error, "invalid");
@@ -523,6 +524,7 @@ export function createClaudeSdkBridge(
 					toolServer,
 					systemPrompt,
 					effort: turn.effort,
+					maxOutputTokens: turn.maxOutputTokens,
 					sessionId,
 					resume:
 						history.mode === "resume" || history.mode === "rebuild_transcript",
@@ -615,7 +617,12 @@ export function createClaudeSdkBridge(
 			conversationKeyHash: convKey,
 			ccSessionId: sessionId,
 			rebuildReason: history.reason,
+			ignoredFields: turn.ignoredFields,
 		});
+		if (turn.ignoredFields.length)
+			log.info(
+				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code sets its own sampling`,
+			);
 		void recorder.insertLeg(meta.legId, "start", startedAt);
 		const owner = live;
 		const leg = newLeg(
@@ -670,6 +677,7 @@ export function createClaudeSdkBridge(
 			body.json,
 			meta.reasoningEffort,
 			body.bytes,
+			meta.translationGaps,
 		);
 		if (!parsed.ok) return refuse(parsed.error);
 		if (!parsed.turn.toolResults.length)

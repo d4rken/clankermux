@@ -42,6 +42,8 @@ export function childEnv(input: {
 	paths: WorkPaths;
 	baseUrl: string;
 	token: string;
+	/** The client's output limit for this query; null leaves Claude Code's own. */
+	maxOutputTokens?: number | null;
 }): Record<string, string> {
 	return {
 		PATH: input.paths.bin,
@@ -54,6 +56,9 @@ export function childEnv(input: {
 		// accounts; Claude Code's own backoff turned an all-accounts 429 from
 		// 0.7 s into 594 s in the spike.
 		CLAUDE_CODE_MAX_RETRIES: "0",
+		...(input.maxOutputTokens
+			? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(input.maxOutputTokens) }
+			: {}),
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 		DISABLE_AUTO_COMPACT: "1",
 		ENABLE_CLAUDEAI_MCP_SERVERS: "0",
@@ -77,6 +82,8 @@ export interface QueryOptionsInput {
 	toolServer: McpSdkServerConfigWithInstance | null;
 	systemPrompt: { append: string | null; excludeDynamicSections: boolean };
 	effort: EffortLevel | null;
+	/** From the turn's starting request; the child keeps it for the whole query. */
+	maxOutputTokens: number | null;
 	sessionId: string;
 	/** Resume `sessionId` from the session store instead of starting it. */
 	resume: boolean;

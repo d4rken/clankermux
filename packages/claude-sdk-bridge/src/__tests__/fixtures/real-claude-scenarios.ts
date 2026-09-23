@@ -121,21 +121,26 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		affinityKey: null,
 		model: MODEL,
 		reasoningEffort: null,
+		translationGaps: null,
 		...extra,
 	};
 }
 
-function request(messages: Msg[], tools = [READ_TOOL]) {
+function request(
+	messages: Msg[],
+	tools = [READ_TOOL],
+	fields: Record<string, unknown> = { max_tokens: 1024 },
+) {
 	return new Request("http://bridge.test/v1/messages", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({
 			model: MODEL,
-			max_tokens: 1024,
 			stream: true,
 			system: "You are pi, a coding agent.",
 			tools,
 			messages,
+			...fields,
 		}),
 	});
 }
@@ -345,6 +350,43 @@ await scenario("longToolName", async () => {
 				(t) => t.name,
 			),
 		})),
+	};
+});
+
+await scenario("outputLimit", async () => {
+	const sentMaxTokens = async (
+		fields: Record<string, unknown>,
+		text: string,
+	) => {
+		const from = mock.requests.length;
+		const p = plan();
+		const reply = await read(
+			bridge.startTurn({
+				request: request(
+					[{ role: "user", content: text }],
+					[READ_TOOL],
+					fields,
+				),
+				plan: p,
+				meta: meta(),
+				signal: new AbortController().signal,
+			}),
+		);
+		await settled();
+		return {
+			reply,
+			upstream: mock.requests.slice(from).map((q) => ({
+				status: q.status ?? null,
+				maxTokens: (q.body as { max_tokens?: unknown })?.max_tokens ?? null,
+			})),
+		};
+	};
+	return {
+		client321: await sentMaxTokens({ max_tokens: 321 }, "limit 321"),
+		clientNone: await sentMaxTokens({}, "no limit"),
+		client200000: await sentMaxTokens({ max_tokens: 200_000 }, "limit 200000"),
+		// The model stops at the client's limit: what Claude Code does next.
+		stopAtLimit: await sentMaxTokens({ max_tokens: 64 }, "MAXTOK stop at 64"),
 	};
 });
 

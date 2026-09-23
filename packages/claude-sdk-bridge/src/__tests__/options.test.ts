@@ -64,6 +64,7 @@ describe("query options", () => {
 		toolServer: server,
 		systemPrompt: { append: null, excludeDynamicSections: false },
 		effort: null,
+		maxOutputTokens: null,
 		sessionId: "11111111-1111-4111-8111-111111111111",
 		resume: false,
 		sessionStore: store,
@@ -131,6 +132,16 @@ describe("query options", () => {
 			excludeDynamicSections: true,
 			snapshot: false,
 		});
+	});
+
+	it("sets the client's output limit only when it gave one", () => {
+		expect(
+			buildQueryOptions({ ...base, maxOutputTokens: 500 }).env
+				?.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+		).toBe("500");
+		expect(buildQueryOptions(base).env).not.toHaveProperty(
+			"CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+		);
 	});
 
 	it("gives no MCP server to a turn without tools", () => {

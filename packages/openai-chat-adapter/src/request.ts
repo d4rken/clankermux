@@ -430,10 +430,6 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 		stream: req.stream === true,
 		includeUsage,
 		names,
-		requirements: Object.freeze({
-			fields: Object.freeze(fields),
-			forcesToolChoice:
-				body.tool_choice !== undefined && body.tool_choice.type !== "auto",
-		}),
+		requirements: Object.freeze({ fields: Object.freeze(fields) }),
 	};
 }

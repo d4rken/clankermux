@@ -1,6 +1,7 @@
 import { Logger } from "@clankermux/logger";
 import {
 	type Account,
+	getNativeResponsesMetaContext,
 	type RequestMeta,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
@@ -106,6 +107,8 @@ export function sdkBridgeTurnMeta(
 		affinityKey: meta.affinityKey ?? null,
 		model: meta.requestedModel ?? "",
 		reasoningEffort: meta.reasoningEffort ?? null,
+		translationGaps:
+			getNativeResponsesMetaContext(meta)?.translationGaps ?? null,
 	};
 }
 

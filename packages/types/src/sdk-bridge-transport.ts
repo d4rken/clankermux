@@ -85,6 +85,18 @@ export function sdkBridgeCandidatesForModel(
 	);
 }
 
+/**
+ * What the client asked for that the translated Messages body cannot show.
+ * The Responses adapter writes its own `max_tokens` when the client set no
+ * `max_output_tokens`, and drops `temperature` and `top_p`.
+ */
+export interface SdkBridgeTranslationGaps {
+	/** The body's `max_tokens` is the adapter's default, not the client's limit. */
+	readonly maxTokensDefaulted: boolean;
+	/** Fields the client set that the translation dropped, by their Messages name. */
+	readonly droppedFields: readonly string[];
+}
+
 /** Facts about the outer request that the bridge records and forwards. */
 export interface SdkBridgeTurnMeta {
 	/** The outer request id, which the client sees as `x-clankermux-request-id`. */
@@ -99,6 +111,8 @@ export interface SdkBridgeTurnMeta {
 	readonly affinityKey: string | null;
 	readonly model: string;
 	readonly reasoningEffort: string | null;
+	/** Null when the body is the client's own request, or an exact translation. */
+	readonly translationGaps: SdkBridgeTranslationGaps | null;
 }
 
 export interface SdkBridgeTransport {

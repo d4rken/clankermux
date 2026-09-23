@@ -48,6 +48,7 @@ interface TurnRow {
 	sdk_output_tokens: number | null;
 	sdk_cache_read_input_tokens: number | null;
 	sdk_cache_creation_input_tokens: number | null;
+	ignored_fields: string | null;
 }
 
 interface LegRow {
@@ -107,6 +108,10 @@ function toTurn(row: TurnRow): SdkBridgeTurn {
 		sdkOutputTokens: row.sdk_output_tokens,
 		sdkCacheReadInputTokens: row.sdk_cache_read_input_tokens,
 		sdkCacheCreationInputTokens: row.sdk_cache_creation_input_tokens,
+		ignoredFields:
+			row.ignored_fields === null
+				? null
+				: (JSON.parse(row.ignored_fields) as string[]),
 	};
 }
 
@@ -141,8 +146,9 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				id, started_at, status, api_key_id, api_key_name, account_id, model,
 				client_harness, client_user_agent, project, conversation_key_hash,
 				cc_session_id, history_mode, rebuild_reason, system_prompt_policy,
+				ignored_fields,
 				leg_count, tool_round_count, inner_call_count, inner_error_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
 			[
 				turn.id,
 				turn.startedAt,
@@ -159,6 +165,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				turn.historyMode,
 				turn.rebuildReason ?? null,
 				turn.systemPromptPolicy,
+				turn.ignoredFields?.length ? JSON.stringify(turn.ignoredFields) : null,
 			],
 		);
 	}
