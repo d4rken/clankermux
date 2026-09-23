@@ -32,6 +32,7 @@ import {
 	type ResetApplyState,
 	ResetEventsPanel,
 	type ResetEventsState,
+	usageResetChipLabel,
 } from "./UsageResetPanels";
 
 /**
@@ -301,7 +302,6 @@ export function AnthropicBankedResetChip({
 	};
 
 	const left = info.resetsLeftTotal;
-	const countLabel = `${left} reset${left === 1 ? "" : "s"}`;
 	const nextExpiry = status.bankedResetNextExpiry;
 	const expiryLine = nextExpiry
 		? ` Next use-by: ${nextExpiry.toLocaleString()}.`
@@ -333,7 +333,7 @@ export function AnthropicBankedResetChip({
 					title={`${left} banked reset${left === 1 ? "" : "s"} left.${expiryLine}${autoApplyLine} Click for grants and reset history.`}
 				>
 					<RotateCcw className="h-3.5 w-3.5" />
-					{countLabel}
+					{usageResetChipLabel(left, nextExpiry)}
 				</StatusChip>
 			</PopoverTrigger>
 			<PopoverContent align="start" className="w-80 p-row space-y-row">

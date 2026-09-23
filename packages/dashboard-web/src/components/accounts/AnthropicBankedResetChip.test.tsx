@@ -172,13 +172,22 @@ describe("AnthropicBankedResetChip — count and urgency", () => {
 				}),
 			}),
 		);
-		expect(text(bankedChip(html) ?? "")).toBe("3 resets");
+		expect(text(bankedChip(html) ?? "")).toBe("3 resets · expires Jan 6");
 		const single = render(
 			makeAccount({
 				anthropicBankedResets: info({ grants: [grant({ resetsLeft: 1 })] }),
 			}),
 		);
-		expect(text(bankedChip(single) ?? "")).toBe("1 reset");
+		expect(text(bankedChip(single) ?? "")).toBe("1 reset · expires Jan 6");
+	});
+
+	it("names no date when no grant with resets left has a use-by date", () => {
+		const html = render(
+			makeAccount({
+				anthropicBankedResets: info({ grants: [grant({ endsAt: null })] }),
+			}),
+		);
+		expect(text(bankedChip(html) ?? "")).toBe("2 resets");
 	});
 
 	it.each([
