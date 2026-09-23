@@ -1,6 +1,7 @@
 import type {
 	SdkBridgeHistoryMode,
 	SdkBridgeLegErrorPhase,
+	SdkBridgeRebuildReason,
 	SdkBridgeTurnStatus,
 	SdkBridgeTurnView,
 } from "@clankermux/types";
@@ -65,6 +66,15 @@ const HISTORY_LABEL: Record<SdkBridgeHistoryMode, string> = {
 	rebuild_flattened: "Rebuilt from history, flattened",
 };
 
+const REBUILD_REASON_LABEL: Record<SdkBridgeRebuildReason, string> = {
+	continuation: "continuation",
+	compaction: "compaction",
+	edit: "edit",
+	unknown: "unknown",
+	account_change: "account change",
+	dead_continuation: "tool results after their query ended",
+};
+
 const PHASE_LABEL: Record<SdkBridgeLegErrorPhase, string> = {
 	pre_head: "before response",
 	mid_stream: "mid-stream",
@@ -99,7 +109,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 export function SdkBridgeTurnDetails({ view }: { view: SdkBridgeTurnView }) {
 	const { turn, legs, inner, innerRequests, prunedInnerCalls } = view;
 	const history = turn.rebuildReason
-		? `${HISTORY_LABEL[turn.historyMode]} (${turn.rebuildReason.replaceAll("_", " ")})`
+		? `${HISTORY_LABEL[turn.historyMode]} (${REBUILD_REASON_LABEL[turn.rebuildReason] ?? turn.rebuildReason})`
 		: HISTORY_LABEL[turn.historyMode];
 	return (
 		<div className="space-y-group text-sm">

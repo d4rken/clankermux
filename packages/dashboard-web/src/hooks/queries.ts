@@ -4,6 +4,7 @@ import type {
 	ApiKeyResponse,
 	ProjectRulesSetRequest,
 	RetentionSetRequest,
+	SdkBridgeTurnView,
 } from "@clankermux/types";
 import {
 	useInfiniteQuery,
@@ -11,6 +12,7 @@ import {
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
+import { useRef } from "react";
 import {
 	api,
 	type RequestPayload,
@@ -737,19 +739,38 @@ export const useRequestById = (id: string | null) => {
 	});
 };
 
+type SdkBridgeTurnQuery = { state: { data?: SdkBridgeTurnView | null } };
+
 /**
  * An SDK bridge turn, by turn id or by a leg's request id; null when neither
- * exists. A running turn keeps changing, so it is refetched while open.
+ * exists. The turn row can land after its request is listed, so "not found"
+ * is asked again every 2 s for 60 s from `lookupStartedAt`, and never served
+ * from cache. A running turn keeps changing, so it is refetched while open.
  */
+export const sdkBridgeTurnQueryOptions = (
+	id: string,
+	lookupStartedAt: number,
+	now: () => number = Date.now,
+) => ({
+	queryKey: queryKeys.sdkBridgeTurn(id),
+	queryFn: () => api.getSdkBridgeTurn(id),
+	staleTime: (query: SdkBridgeTurnQuery) =>
+		query.state.data === null ? 0 : 5_000,
+	refetchInterval: (query: SdkBridgeTurnQuery): number | false => {
+		const data = query.state.data;
+		if (data === null) return now() - lookupStartedAt < 60_000 ? 2_000 : false;
+		return data?.turn.status === "running" ? 5_000 : false;
+	},
+	retry: shouldRetryDashboardQuery,
+});
+
 export const useSdkBridgeTurn = (id: string | null) => {
+	// The not-found window starts when this id is first looked up.
+	const lookup = useRef({ id, startedAt: Date.now() });
+	if (lookup.current.id !== id) lookup.current = { id, startedAt: Date.now() };
 	return useQuery({
-		queryKey: queryKeys.sdkBridgeTurn(id ?? ""),
-		queryFn: () => api.getSdkBridgeTurn(id as string),
+		...sdkBridgeTurnQueryOptions(id ?? "", lookup.current.startedAt),
 		enabled: id !== null,
-		staleTime: 5_000,
-		refetchInterval: (query) =>
-			query.state.data?.turn.status === "running" ? 5_000 : false,
-		retry: shouldRetryDashboardQuery,
 	});
 };
 

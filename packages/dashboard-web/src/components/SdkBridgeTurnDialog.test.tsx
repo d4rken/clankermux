@@ -137,6 +137,25 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(html).toContain("Rebuilt from history, flattened (account change)");
 	});
 
+	it("names the rebuild of tool results whose query had ended", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						historyMode: "rebuild_flattened",
+						rebuildReason: "dead_continuation",
+					},
+				}}
+			/>,
+		);
+		expect(html).toContain(
+			"Rebuilt from history, flattened (tool results after their query ended)",
+		);
+	});
+
 	it("lists legs with their error phase and the inner calls with accounts", () => {
 		const html = renderToStaticMarkup(<SdkBridgeTurnDetails view={view()} />);
 		expect(html).toContain("continue");
