@@ -1043,3 +1043,76 @@ describe("the overage pause a reset owes a verdict", () => {
 		await pending;
 	});
 });
+
+describe("a pause that cannot be read before the POST", () => {
+	const unreadable = {
+		getAccountPauseMarker: async () => {
+			throw new Error("database is locked");
+		},
+	} as Partial<DatabaseOperations>;
+
+	it("sends no new manual claim and releases its row as not sent", async () => {
+		dbOverrides = unreadable;
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-marker-new",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome.status === "failed" && outcome.code).toBe("error");
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			"req-marker-new",
+		);
+		expect(row?.status).toBe("failed");
+		expect(row?.reason).toBe("not_sent");
+		expect(row?.error_message).toContain("database is locked");
+	});
+
+	it("keeps a replayed manual claim pending with a short retry time, unsent", async () => {
+		await realDbOps.beginManualAnthropicBankedResetAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			requestId: "req-marker-replay",
+			grantEndsAt: null,
+			now: NOW - 60_000,
+		});
+		dbOverrides = unreadable;
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-marker-replay",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			"req-marker-replay",
+		);
+		expect(row?.status).toBe("pending");
+		expect(row?.next_attempt_at).toBe(NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS);
+	});
+
+	it("keeps an auto claim pending with a short retry time, unsent", async () => {
+		const auto = await realDbOps.claimAnthropicBankedResetAutoAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			grantEndsAt: null,
+			cause: "weekly-limit",
+			now: NOW,
+		});
+		if (!auto) throw new Error("expected an auto claim");
+		dbOverrides = unreadable;
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: auto.requestId,
+			autoApply: { ledgerRowId: auto.id, cause: "weekly-limit", replay: false },
+		});
+		expect(claim).not.toHaveBeenCalled();
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			auto.requestId,
+		);
+		expect(row?.status).toBe("pending");
+		expect(row?.next_attempt_at).toBe(NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS);
+	});
+});

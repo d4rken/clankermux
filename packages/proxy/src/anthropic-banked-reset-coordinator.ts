@@ -403,8 +403,29 @@ export class AnthropicBankedResetCoordinator {
 			return this.settledOutcome(account, target.row);
 
 		// The overage pause standing when the claim is sent, if any: the one a
-		// restoring reset owes a verdict.
-		const pauseAtClaim = await this.overagePauseAtClaim(account);
+		// restoring reset owes a verdict. Unreadable, the obligation could not
+		// be recorded, so nothing is sent.
+		const pauseRead = await this.overagePauseAtClaim(account);
+		if ("error" in pauseRead) {
+			const message = `Not sent: the pause of '${account.name}' could not be read (${pauseRead.error})`;
+			const now = this.now();
+			await this.writeLedger(account.name, target.rowId, (id) =>
+				target.createdHere
+					? this.ctx.dbOps.resolveAnthropicBankedResetAttempt(id, {
+							status: "failed",
+							reason: BANKED_RESET_NOT_SENT_REASON,
+							errorMessage: message,
+							now,
+						})
+					: this.ctx.dbOps.setAnthropicBankedResetNextAttemptAt(
+							id,
+							now + BANKED_RESET_CLAIM_RETRY_MIN_MS,
+							message,
+						),
+			);
+			return { status: "failed", code: "error", message };
+		}
+		const pauseAtClaim = pauseRead.pause;
 
 		// Last look at the account before the POST, after every await above: it
 		// may have been disabled, or its auto-apply toggle turned off, meanwhile.
@@ -553,21 +574,23 @@ export class AnthropicBankedResetCoordinator {
 	}
 
 	/**
-	 * The account's overage pause and its identity when the claim is sent, or
-	 * null when it is not paused for overage (or the read failed: then no
-	 * verdict is owed and the pause is left to its usual recovery).
+	 * The account's overage pause and its identity when the claim is sent;
+	 * `pause` is null when it is not paused for overage.
 	 */
 	private async overagePauseAtClaim(
 		account: Account,
-	): Promise<{ pauseEpoch: number; pauseChangedAt: number | null } | null> {
+	): Promise<
+		| { pause: { pauseEpoch: number; pauseChangedAt: number | null } | null }
+		| { error: string }
+	> {
 		try {
 			const marker = await this.ctx.dbOps.getAccountPauseMarker(account.id);
-			return marker && isOveragePause(marker) ? marker : null;
+			return { pause: marker && isOveragePause(marker) ? marker : null };
 		} catch (error) {
 			log.warn(
-				`Could not read the pause of '${account.name}' before its banked-reset claim: ${errorMessage(error)}`,
+				`Could not read the pause of '${account.name}' before its banked-reset claim; not sending it: ${errorMessage(error)}`,
 			);
-			return null;
+			return { error: errorMessage(error) };
 		}
 	}
 
