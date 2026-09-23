@@ -121,6 +121,7 @@ function claimResponse(
 		cleared: [],
 		cooldownUntil: null,
 		nextAttemptAt: null,
+		replayUntil: null,
 		statusRefreshed: false,
 		...overrides,
 	};
@@ -339,4 +340,50 @@ it("shows a pending claim for a grant no longer listed as Unconfirmed, with no R
 			(button) => button.textContent === "Apply now",
 		),
 	).toBe(true);
+});
+
+it("shows a pending claim past its replay window as Unconfirmed, with no Retry", async () => {
+	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([
+		{
+			id: "row-1",
+			grantId: "grant-1",
+			trigger: "manual",
+			cause: null,
+			attemptSeq: null,
+			status: "pending",
+			reason: null,
+			cleared: [],
+			resetsLeft: null,
+			errorMessage: null,
+			grantEndsAt: null,
+			nextAttemptAt: null,
+			createdAt: new Date(Date.now() - 11 * 60_000).toISOString(),
+			resolvedAt: null,
+			requestId: "stale-request",
+		},
+	]);
+	await openPopover();
+	expect(document.body.textContent).toContain("Unconfirmed");
+	expect(document.body.textContent).not.toContain("Couldn't confirm");
+	expect(retryButton()).toBeUndefined();
+});
+
+it("stops offering Retry for a pending answer whose replay window closes", async () => {
+	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([]);
+	const claim = spyOn(api, "claimAccountBankedReset").mockResolvedValue(
+		claimResponse({
+			status: "pending",
+			replayUntil: new Date(Date.now() + 200).toISOString(),
+		}),
+	);
+	await openPopover();
+	await clickButton("Apply now");
+	await clickButton("Confirm");
+	expect(retryButton()?.disabled).toBe(false);
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 400));
+	});
+	expect(retryButton()).toBeUndefined();
+	expect(document.body.textContent).toContain("Unconfirmed — gave up");
+	expect(claim).toHaveBeenCalledTimes(1);
 });

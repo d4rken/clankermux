@@ -1,6 +1,7 @@
-import type {
-	AnthropicBankedResetEventStatus,
-	AnthropicBankedResetWindow,
+import {
+	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+	type AnthropicBankedResetEventStatus,
+	type AnthropicBankedResetWindow,
 } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
@@ -93,9 +94,6 @@ export interface AnthropicBankedResetResolution {
 	now: number;
 }
 
-/** How long a claim may stay unconfirmed before it is given up as `failed`. */
-export const ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS = 60 * 60 * 1000;
-
 /**
  * How long after a `not_limited`, `cooldown` or `ineligible` answer no new
  * auto attempt starts on the account (longer when the server's
@@ -118,7 +116,10 @@ export const ANTHROPIC_BANKED_RESET_REARM_MS = 60 * 60 * 1000;
  *
  * While any claim on an account is pending, no new request id is recorded
  * for it, manual or auto: that claim may already have spent a reset, and only
- * a replay under its own request id can find out.
+ * a replay under its own request id can find out. A row is replayed only
+ * within {@link ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS} of `created_at`,
+ * which is written before its first POST; {@link expireStalePending} then
+ * gives it up.
  *
  * A grant holds several resets, so no outcome ends automation for it: when the
  * next attempt may start is the scheduler's decision, from
@@ -265,7 +266,11 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 		);
 	}
 
-	/** Resolve a pending attempt. False for an unknown or already-resolved row. */
+	/**
+	 * Resolve a pending attempt, or record the answer to one given up as
+	 * `unconfirmed` while its POST was still in flight: the server's answer
+	 * outranks the give-up. False for an unknown or otherwise resolved row.
+	 */
 	async resolveAttempt(
 		id: string,
 		resolution: AnthropicBankedResetResolution,
@@ -277,7 +282,8 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 				error_message = ?, next_attempt_at = NULL, resolved_at = ?,
 				rearm_at = ?, recovery_pending_until = ?, recovery_pause_epoch = ?,
 				recovery_pause_changed_at = ?
-			WHERE id = ? AND status = 'pending'
+			WHERE id = ?
+				AND (status = 'pending' OR (status = 'failed' AND reason = 'unconfirmed'))
 		`,
 			[
 				resolution.status,
@@ -322,20 +328,25 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 	}
 
 	/**
-	 * Give up on attempts unconfirmed for {@link ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS}
-	 * or longer, resolving them `failed`. Returns how many were expired.
+	 * Give up on attempts whose replay window has closed, resolving them
+	 * `failed` with reason `unconfirmed`. Returns how many were given up.
 	 */
 	async expireStalePending(now: number): Promise<number> {
 		return this.runWithChanges(
 			`
 			UPDATE anthropic_banked_reset_events
 			SET status = 'failed',
-				error_message = COALESCE(error_message, 'Claim unconfirmed for an hour'),
+				reason = 'unconfirmed',
+				error_message = ? || COALESCE(' (last: ' || error_message || ')', ''),
 				next_attempt_at = NULL,
 				resolved_at = ?
 			WHERE status = 'pending' AND created_at <= ?
 		`,
-			[now, now - ANTHROPIC_BANKED_RESET_PENDING_EXPIRY_MS],
+			[
+				`Unconfirmed ${ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS / 60_000} minutes after the claim opened; its request id is no longer replayed`,
+				now,
+				now - ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+			],
 		);
 	}
 

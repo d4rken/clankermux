@@ -1,11 +1,13 @@
 import { HttpError } from "@clankermux/http-common";
-import type {
-	AccountResponse,
-	AnthropicBankedResetClaimResponse,
-	AnthropicBankedResetEventResponse,
-	AnthropicBankedResetsInfo,
-	AnthropicBankedResetWindow,
+import {
+	type AccountResponse,
+	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+	type AnthropicBankedResetClaimResponse,
+	type AnthropicBankedResetEventResponse,
+	type AnthropicBankedResetsInfo,
+	type AnthropicBankedResetWindow,
 } from "@clankermux/types";
+import type { ResetApplyState } from "../components/accounts/UsageResetPanels";
 import { formatResetTime } from "./account-status";
 
 export type AnthropicBankedResetGrantInfo =
@@ -83,8 +85,29 @@ export function claimableBankedResetGrant(
 /** What the Apply-now flow shows after the server answered a claim. */
 export type BankedResetClaimView =
 	| { kind: "done"; success: boolean; message: string }
-	/** Unconfirmed: retry with the same request id, not before `retryAt` (ms epoch). */
-	| { kind: "retry"; message: string; retryAt?: number };
+	/**
+	 * Unconfirmed: retry with the same request id, not before `retryAt` and
+	 * not from `replayUntil` on (ms epoch).
+	 */
+	| { kind: "retry"; message: string; retryAt?: number; replayUntil?: number };
+
+const GAVE_UP_MESSAGE = "Unconfirmed — gave up";
+
+/**
+ * The Apply-now state to render: a Retry the server would no longer replay,
+ * because its window has closed or it could not be sent before it does, is
+ * shown as given up instead.
+ */
+export function bankedResetRetryState(
+	state: ResetApplyState,
+	replayUntil: number | null,
+	now: number,
+): ResetApplyState {
+	if (state.kind !== "retry" || replayUntil === null) return state;
+	return Math.max(now, state.retryAt ?? now) >= replayUntil
+		? { kind: "done", success: false, message: GAVE_UP_MESSAGE }
+		: state;
+}
 
 export function unconfirmedBankedResetMessage(
 	nextAttemptAt: string | null,
@@ -94,10 +117,15 @@ export function unconfirmedBankedResetMessage(
 		: "Couldn't confirm — retry";
 }
 
+function parseInstant(value: string | null | undefined): number | null {
+	const at = value ? Date.parse(value) : Number.NaN;
+	return Number.isFinite(at) ? at : null;
+}
+
 /** `{retryAt}` for a parseable next attempt time, else nothing. */
 export function retryAtOf(nextAttemptAt: string | null): { retryAt?: number } {
-	const at = nextAttemptAt ? Date.parse(nextAttemptAt) : Number.NaN;
-	return Number.isFinite(at) ? { retryAt: at } : {};
+	const at = parseInstant(nextAttemptAt);
+	return at === null ? {} : { retryAt: at };
 }
 
 export function describeBankedResetClaim(
@@ -137,36 +165,54 @@ export function describeBankedResetClaim(
 				message:
 					response.reason === "not_sent"
 						? (response.errorMessage ?? "Not sent")
-						: "Unconfirmed for an hour — gave up",
+						: GAVE_UP_MESSAGE,
 			};
-		default:
+		default: {
+			const replayUntil = parseInstant(response.replayUntil);
 			return {
 				kind: "retry",
 				message: unconfirmedBankedResetMessage(response.nextAttemptAt),
 				...retryAtOf(response.nextAttemptAt),
+				...(replayUntil === null ? {} : { replayUntil }),
 			};
+		}
 	}
+}
+
+function replayUntilOf(event: AnthropicBankedResetEventResponse): number {
+	return Date.parse(event.createdAt) + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
 }
 
 /**
  * A manual claim whose outcome was never confirmed, recovered from the ledger
  * so a reloaded page retries it with its own request id. The server refuses
  * every new claim on the account while it is pending, so it is offered for
- * any grant the status still lists; a claim for a grant that is gone has
- * nothing left to retry against.
+ * any grant the status still lists, until its replay window closes; a claim
+ * for a grant that is gone has nothing left to retry against.
  */
 export function findResumableBankedResetClaim(
 	events: ReadonlyArray<AnthropicBankedResetEventResponse>,
 	grantIds: ReadonlyArray<string>,
-): (AnthropicBankedResetEventResponse & { requestId: string }) | null {
+	now: number = Date.now(),
+):
+	| (AnthropicBankedResetEventResponse & {
+			requestId: string;
+			replayUntil: number;
+	  })
+	| null {
 	for (const event of events) {
 		if (
 			event.trigger === "manual" &&
 			event.status === "pending" &&
 			event.requestId &&
-			grantIds.includes(event.grantId)
+			grantIds.includes(event.grantId) &&
+			now < replayUntilOf(event)
 		) {
-			return { ...event, requestId: event.requestId };
+			return {
+				...event,
+				requestId: event.requestId,
+				replayUntil: replayUntilOf(event),
+			};
 		}
 	}
 	return null;
@@ -201,12 +247,19 @@ export function bankedResetEventDetail(
 	return null;
 }
 
-/** History label; a pending claim whose grant the status no longer lists is "Unconfirmed". */
+/**
+ * History label; a pending claim whose grant the status no longer lists, or
+ * whose replay window has closed, is "Unconfirmed".
+ */
 export function bankedResetEventStatusLabel(
 	event: AnthropicBankedResetEventResponse,
 	grantIds: ReadonlyArray<string>,
+	now: number = Date.now(),
 ): string {
-	if (event.status === "pending" && !grantIds.includes(event.grantId)) {
+	if (
+		event.status === "pending" &&
+		(!grantIds.includes(event.grantId) || now >= replayUntilOf(event))
+	) {
 		return "Unconfirmed";
 	}
 	return EVENT_STATUS_LABELS[event.status];
@@ -218,16 +271,21 @@ export function bankedResetEventStatusLabel(
  */
 export function pendingBankedResetClaimOf(
 	error: unknown,
-): { requestId: string; grantId: string } | null {
+): { requestId: string; grantId: string; replayUntil: number | null } | null {
 	if (!(error instanceof HttpError) || error.status !== 409) return null;
 	const details = error.details;
 	if (!details || typeof details !== "object") return null;
-	const { pendingRequestId, pendingGrantId } = details as Record<
-		string,
-		unknown
-	>;
+	const { pendingRequestId, pendingGrantId, pendingReplayUntil } =
+		details as Record<string, unknown>;
 	return typeof pendingRequestId === "string" &&
 		typeof pendingGrantId === "string"
-		? { requestId: pendingRequestId, grantId: pendingGrantId }
+		? {
+				requestId: pendingRequestId,
+				grantId: pendingGrantId,
+				replayUntil:
+					typeof pendingReplayUntil === "string"
+						? parseInstant(pendingReplayUntil)
+						: null,
+			}
 		: null;
 }

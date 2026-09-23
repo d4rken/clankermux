@@ -1,16 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { HttpError } from "@clankermux/http-common";
-import type {
-	AccountResponse,
-	AnthropicBankedResetClaimResponse,
-	AnthropicBankedResetEventResponse,
-	AnthropicBankedResetsInfo,
+import {
+	type AccountResponse,
+	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+	type AnthropicBankedResetClaimResponse,
+	type AnthropicBankedResetEventResponse,
+	type AnthropicBankedResetsInfo,
 } from "@clankermux/types";
 import {
 	type AnthropicBankedResetGrantInfo,
 	bankedResetClearsLabels,
 	bankedResetEventDetail,
 	bankedResetEventStatusLabel,
+	bankedResetRetryState,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
 	findResumableBankedResetClaim,
@@ -156,6 +158,7 @@ describe("describeBankedResetClaim", () => {
 			cleared: [],
 			cooldownUntil: null,
 			nextAttemptAt: null,
+			replayUntil: null,
 			statusRefreshed: false,
 			...overrides,
 		};
@@ -167,7 +170,7 @@ describe("describeBankedResetClaim", () => {
 		["not_limited", "Not at a limit — nothing used", false],
 		["cooldown", "Cooling down", false],
 		["ineligible", "Not eligible", false],
-		["failed", "Unconfirmed for an hour — gave up", false],
+		["failed", "Unconfirmed — gave up", false],
 	] as const)("settles '%s' as '%s'", (status, message, success) => {
 		expect(describeBankedResetClaim(response({ status }))).toEqual({
 			kind: "done",
@@ -230,6 +233,57 @@ describe("describeBankedResetClaim", () => {
 			describeBankedResetClaim(response({ status: "unavailable" })),
 		).toEqual({ kind: "retry", message: "Couldn't confirm — retry" });
 	});
+
+	it("carries the claim's replay deadline into the retry view", () => {
+		const view = describeBankedResetClaim(
+			response({
+				status: "pending",
+				replayUntil: "2030-01-05T10:10:00.000Z",
+			}),
+		);
+		expect(view.kind === "retry" && view.replayUntil).toBe(
+			Date.parse("2030-01-05T10:10:00.000Z"),
+		);
+	});
+});
+
+describe("bankedResetRetryState", () => {
+	const UNTIL = Date.parse("2030-01-05T10:10:00.000Z");
+	const retry = (retryAt?: number) => ({
+		kind: "retry" as const,
+		message: "Couldn't confirm — retry",
+		...(retryAt === undefined ? {} : { retryAt }),
+	});
+	const gaveUp = {
+		kind: "done" as const,
+		success: false,
+		message: "Unconfirmed — gave up",
+	};
+
+	it("keeps Retry while the replay window is open", () => {
+		expect(bankedResetRetryState(retry(), UNTIL, UNTIL - 1_000)).toEqual(
+			retry(),
+		);
+		expect(bankedResetRetryState(retry(), null, UNTIL + 1_000)).toEqual(
+			retry(),
+		);
+	});
+
+	it("offers no Retry once the window has closed", () => {
+		expect(bankedResetRetryState(retry(), UNTIL, UNTIL)).toEqual(gaveUp);
+	});
+
+	it("offers no Retry whose earliest time falls after the window", () => {
+		expect(bankedResetRetryState(retry(UNTIL), UNTIL, UNTIL - 60_000)).toEqual(
+			gaveUp,
+		);
+	});
+
+	it("leaves other states alone", () => {
+		expect(bankedResetRetryState({ kind: "confirm" }, UNTIL, UNTIL)).toEqual({
+			kind: "confirm",
+		});
+	});
 });
 
 function event(
@@ -266,6 +320,17 @@ describe("findResumableBankedResetClaim", () => {
 		);
 	});
 
+	it("offers a claim until its replay window closes, with that deadline", () => {
+		const opened = Date.parse("2030-01-01T00:00:00.000Z");
+		const events = [event({ requestId: "req-1" })];
+		const at = (ms: number) =>
+			findResumableBankedResetClaim(events, ["g1"], opened + ms);
+		expect(at(9 * 60_000 + 59_000)?.replayUntil).toBe(
+			opened + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+		);
+		expect(at(ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS)).toBeNull();
+	});
+
 	it("ignores a claim whose grant is gone, and one without a request id", () => {
 		expect(
 			findResumableBankedResetClaim([event({ requestId: "req-1" })], ["g2"]),
@@ -276,11 +341,28 @@ describe("findResumableBankedResetClaim", () => {
 
 describe("bankedResetEventStatusLabel", () => {
 	it("calls a pending claim for a grant no longer listed unconfirmed", () => {
-		expect(bankedResetEventStatusLabel(event({}), ["g1"])).toBe("Pending");
+		expect(
+			bankedResetEventStatusLabel(
+				event({}),
+				["g1"],
+				Date.parse("2030-01-01T00:05:00.000Z"),
+			),
+		).toBe("Pending");
 		expect(bankedResetEventStatusLabel(event({}), ["g2"])).toBe("Unconfirmed");
 		expect(
 			bankedResetEventStatusLabel(event({ status: "reset" }), ["g2"]),
 		).toBe("Reset applied");
+	});
+
+	it("calls a pending claim past its replay window unconfirmed", () => {
+		const opened = Date.parse("2030-01-01T00:00:00.000Z");
+		expect(
+			bankedResetEventStatusLabel(
+				event({}),
+				["g1"],
+				opened + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+			),
+		).toBe("Unconfirmed");
 	});
 });
 
@@ -299,7 +381,9 @@ describe("bankedResetEventDetail", () => {
 			bankedResetEventDetail(
 				event({
 					status: "failed",
-					errorMessage: "Claim unconfirmed for an hour",
+					reason: "unconfirmed",
+					errorMessage:
+						"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed",
 				}),
 			),
 		).toBeNull();
@@ -327,7 +411,20 @@ describe("pendingBankedResetClaimOf", () => {
 					pendingGrantId: "g0",
 				}),
 			),
-		).toEqual({ requestId: "req-pending", grantId: "g0" });
+		).toEqual({ requestId: "req-pending", grantId: "g0", replayUntil: null });
+		expect(
+			pendingBankedResetClaimOf(
+				new HttpError(409, "An earlier claim is unconfirmed", {
+					pendingRequestId: "req-pending",
+					pendingGrantId: "g0",
+					pendingReplayUntil: "2030-01-05T10:10:00.000Z",
+				}),
+			),
+		).toEqual({
+			requestId: "req-pending",
+			grantId: "g0",
+			replayUntil: Date.parse("2030-01-05T10:10:00.000Z"),
+		});
 		expect(
 			pendingBankedResetClaimOf(new HttpError(409, "busy", "busy")),
 		).toBeNull();
