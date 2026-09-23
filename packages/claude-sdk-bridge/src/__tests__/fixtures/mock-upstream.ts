@@ -24,12 +24,16 @@ export interface MockRequest {
 export interface MockUpstream {
 	url: string;
 	requests: MockRequest[];
-	/** The next `times` /v1/messages calls answer with this status and body. */
+	/**
+	 * The next `times` /v1/messages calls answer with this status and body;
+	 * with `match`, only calls whose authorization header contains it.
+	 */
 	failNext(
 		status: number,
 		body: unknown,
 		headers?: Record<string, string>,
 		times?: number,
+		match?: string,
 	): void;
 	clearFailures(): void;
 	/** Forward a request as if it had arrived over HTTP. */
@@ -72,7 +76,10 @@ function script(body: ScriptBody): string {
 	const user = blocksOf(lastUser(body.messages));
 	const toolResults = user.filter((b) => b.type === "tool_result");
 	const text = textOf(user);
-	const readTool = body.tools?.find((t) => t.name.endsWith("read"))?.name;
+	// A Chat client's tools arrive under opaque encoded names; any tool will do.
+	const readTool = (
+		body.tools?.find((t) => t.name.endsWith("read")) ?? body.tools?.[0]
+	)?.name;
 
 	const content: Block[] = [];
 	if (toolResults.length > 0) {
@@ -173,6 +180,7 @@ export function startMockUpstream(): MockUpstream {
 		body: unknown;
 		headers: Record<string, string>;
 		times: number;
+		match: string | null;
 	};
 	let failures: Failure[] = [];
 
@@ -193,7 +201,10 @@ export function startMockUpstream(): MockUpstream {
 		requests.push(record);
 
 		if (req.method === "POST" && url.pathname === "/v1/messages") {
-			const f = failures.find((x) => x.times > 0);
+			const auth = req.headers.get("authorization") ?? "";
+			const f = failures.find(
+				(x) => x.times > 0 && (x.match === null || auth.includes(x.match)),
+			);
 			if (f) {
 				f.times--;
 				failures = failures.filter((x) => x.times > 0);
@@ -246,8 +257,9 @@ export function startMockUpstream(): MockUpstream {
 	return {
 		url: `http://127.0.0.1:${server.port}`,
 		requests,
-		failNext(status, body, headers = {}, times = 1) {
-			if (times > 0) failures.push({ status, body, headers, times });
+		failNext(status, body, headers = {}, times = 1, match) {
+			if (times > 0)
+				failures.push({ status, body, headers, times, match: match ?? null });
 		},
 		clearFailures() {
 			failures = [];
