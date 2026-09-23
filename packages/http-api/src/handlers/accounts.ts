@@ -73,7 +73,7 @@ import {
 	getUsageRevisionAnchor,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
-	refreshAnthropicBankedResetsSpaced,
+	refreshAnthropicBankedResetsForAccount,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	restartUsagePollingForAccount,
@@ -765,17 +765,16 @@ export async function listAccountResponses(
 				.map((a) => [a.id, anthropicBankedResetCache.get(a.id)]),
 		);
 		if (sideEffects === "management") {
-			void refreshAnthropicBankedResetsSpaced(
-				accounts
-					.filter(
-						(account) =>
-							!account.disabled &&
-							isAnthropicOAuthAccount(account) &&
-							account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
-							anthropicBankedResetCache.needsRefresh(account.id, now),
-					)
-					.map((account) => account.id),
-			);
+			for (const account of accounts) {
+				if (
+					!account.disabled &&
+					isAnthropicOAuthAccount(account) &&
+					account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
+					anthropicBankedResetCache.needsRefresh(account.id, now)
+				) {
+					void refreshAnthropicBankedResetsForAccount(account.id);
+				}
+			}
 		}
 
 		// Last-known usage fallback: for Anthropic and Zai accounts whose live

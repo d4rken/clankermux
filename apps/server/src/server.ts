@@ -299,6 +299,7 @@ let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let stopModelPermissions: (() => void) | null = null;
+let stopBankedResetReads: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let codexUsagePoller: CodexUsagePoller | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
@@ -1311,6 +1312,7 @@ export default async function startServer(options?: {
 	const anthropicBankedResetCoordinator = new AnthropicBankedResetCoordinator(
 		proxyContext,
 	);
+	stopBankedResetReads = () => anthropicBankedResetCoordinator.stop();
 
 	// Register this server's refresh clearing capability
 	const serverId = `server-${runtime.port}`;
@@ -2141,6 +2143,8 @@ async function handleGracefulShutdown(signal: string) {
 
 		stopModelPermissions?.();
 		stopModelPermissions = null;
+		stopBankedResetReads?.();
+		stopBankedResetReads = null;
 
 		// Stop memory monitoring
 		if (memoryMonitorInterval) {

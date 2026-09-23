@@ -27,6 +27,7 @@ import {
 	type AnthropicBankedResetStatus,
 } from "@clankermux/types";
 import {
+	ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
 	AnthropicBankedResetCoordinator,
 	BANKED_RESET_CLAIM_RETRY_MIN_MS,
 	bankedResetClaimRetryDelayMs,
@@ -37,6 +38,7 @@ import {
 	resetFamilyWeeklyMemoForTests,
 } from "../family-weekly-memo";
 import type { ProxyContext } from "../handlers/proxy-types";
+import { SpacedReadGate } from "../spaced-read-gate";
 
 const tmpDb = tempDbTracker("banked-reset-coordinator");
 const NOW = Date.parse("2026-09-22T12:00:00Z");
@@ -143,7 +145,9 @@ function claimResult(
 	};
 }
 
-function coordinator(): AnthropicBankedResetCoordinator {
+function coordinator(
+	readGate = new SpacedReadGate({ spacingMs: 0 }),
+): AnthropicBankedResetCoordinator {
 	const dbOps = Object.create(realDbOps) as DatabaseOperations;
 	dbOps.getAccount = async (id: string) => {
 		dbCalls.push("getAccount");
@@ -187,6 +191,7 @@ function coordinator(): AnthropicBankedResetCoordinator {
 			canFetchProfile: () => canFetchProfile,
 			usage,
 			now: () => clock,
+			readGate,
 		},
 	);
 }
@@ -241,6 +246,93 @@ afterEach(async () => {
 afterAll(() => tmpDb.cleanup());
 
 describe("refreshStatus", () => {
+	function recordingGate() {
+		const sleeps: number[] = [];
+		const gate = new SpacedReadGate({
+			spacingMs: ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
+			jitter: () => 0,
+			now: () => clock,
+			sleep: async (ms) => {
+				sleeps.push(ms);
+				clock += ms;
+			},
+		});
+		return { gate, sleeps };
+	}
+
+	it("reads a second account only after the spacing, the same account at once", async () => {
+		const { gate, sleeps } = recordingGate();
+		const c = coordinator(gate);
+		await c.refreshStatus("acct-1", true);
+		await c.refreshStatus("acct-1", true);
+		expect(sleeps).toEqual([]);
+		await c.refreshStatus("acct-2", true);
+		expect(sleeps).toEqual([ANTHROPIC_BANKED_RESET_READ_SPACING_MS]);
+		expect(fetchStatus).toHaveBeenCalledTimes(3);
+	});
+
+	it("checks the account's rate limit again once its turn comes", async () => {
+		const { gate } = recordingGate();
+		const c = coordinator(gate);
+		await c.refreshStatus("acct-1", true);
+		// acct-2's own usage poll takes a 429 while acct-2 waits its turn.
+		usage.getRateLimitedUntil.mockImplementation((id: string) =>
+			id === "acct-2" && clock > NOW ? NOW + 60_000 : null,
+		);
+		try {
+			const outcome = await c.refreshStatus("acct-2", true);
+			expect(outcome.success).toBe(false);
+			expect(fetchStatus).toHaveBeenCalledTimes(1);
+		} finally {
+			usage.getRateLimitedUntil.mockImplementation(() => rateLimitedUntil);
+		}
+	});
+
+	it("does not read an account that was disabled while it waited", async () => {
+		const { gate } = recordingGate();
+		const c = coordinator(gate);
+		await c.refreshStatus("acct-1", true);
+		accountReads = [{}, { disabled: true }];
+		const outcome = await c.refreshStatus("acct-2", true);
+		expect(outcome.success).toBe(false);
+		expect(fetchStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("a skipped read leaves the spacing timeline where the last sent read put it", async () => {
+		const { gate, sleeps } = recordingGate();
+		const c = coordinator(gate);
+		await c.refreshStatus("acct-1", true);
+		accountReads = [{}, { disabled: true }];
+		await c.refreshStatus("acct-2", true);
+		// Had the skipped read counted, acct-3 would still owe 2 s of spacing.
+		clock += 1000;
+		await c.refreshStatus("acct-3", true);
+		expect(sleeps).toEqual([ANTHROPIC_BANKED_RESET_READ_SPACING_MS]);
+		expect(fetchStatus).toHaveBeenCalledTimes(2);
+	});
+
+	it("refuses reads still waiting for their turn once stopped", async () => {
+		let release!: () => void;
+		const gate = new SpacedReadGate({
+			spacingMs: ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
+			jitter: () => 0,
+			now: () => clock,
+			sleep: () =>
+				new Promise<void>((resolve) => {
+					release = resolve;
+				}),
+		});
+		const c = coordinator(gate);
+		await c.refreshStatus("acct-1", true);
+		const waiting = c.refreshStatus("acct-2", true);
+		await Bun.sleep(0);
+		c.stop();
+		release();
+		const outcome = await waiting;
+		expect(outcome.success).toBe(false);
+		expect(fetchStatus).toHaveBeenCalledTimes(1);
+	});
+
 	it("stores the status and logs nothing to the shared backoff on success", async () => {
 		const outcome = await coordinator().refreshStatus(ACCOUNT_ID, true);
 		expect(outcome.success).toBe(true);

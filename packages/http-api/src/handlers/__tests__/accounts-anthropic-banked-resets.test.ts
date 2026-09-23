@@ -9,7 +9,6 @@ import type { DatabaseOperations } from "@clankermux/database";
 import { anthropicBankedResetCache } from "@clankermux/providers";
 import {
 	registerAnthropicBankedResetRefresher,
-	resetAnthropicBankedResetSweepForTests,
 	unregisterAnthropicBankedResetRefresher,
 } from "@clankermux/proxy";
 import { listAccountResponses } from "../accounts";
@@ -104,7 +103,6 @@ async function list(
 }
 
 beforeEach(() => {
-	resetAnthropicBankedResetSweepForTests();
 	refreshed = [];
 	anthropicBankedResetCache.clear();
 	registerAnthropicBankedResetRefresher(REFRESHER_ID, async (id, force) => {
