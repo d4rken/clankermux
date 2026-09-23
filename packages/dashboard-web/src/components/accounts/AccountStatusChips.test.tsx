@@ -167,6 +167,7 @@ describe("AccountStatusChips — Usage presentation", () => {
 			isPrimary: true,
 			priority: 7,
 			autoFallbackEnabled: true,
+			autoRefreshEnabled: true,
 			autoApplyResetCreditsEnabled: true,
 			renewalAnchor: "2024-01-08",
 			renewalCadence: "none",
