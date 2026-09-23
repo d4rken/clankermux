@@ -4,11 +4,7 @@ import type {
 	ClientCatalogue,
 	ClientModelMetadataMap,
 } from "@clankermux/types";
-import {
-	aliasCodexMetadata,
-	aliasDefaultReasoningLevel,
-	renderClientCatalogue,
-} from "../client-catalogue";
+import { aliasCodexMetadata, renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
 import anthropicRetentionFixture from "./fixtures/cache-retention/anthropic.json";
 import codexRetentionFixture from "./fixtures/cache-retention/codex.json";
@@ -33,7 +29,7 @@ const catalogue: ClientCatalogue = {
 	],
 };
 describe("client catalogue serving", () => {
-	it("omits unknown Codex alias efforts while preserving the published entry", async () => {
+	it("publishes the fixed alias effort range to Codex whatever the metadata says", async () => {
 		const model = { ...catalogue.models[0], targetModel: "alias:unknown" };
 		for (const metadata of [
 			undefined,
@@ -41,7 +37,6 @@ describe("client catalogue serving", () => {
 			{ supportedReasoningEfforts: ["low", "medium"] as const },
 		]) {
 			const supported = metadata?.supportedReasoningEfforts;
-			const known = supported !== undefined;
 			const info = aliasCodexMetadata(
 				model,
 				supported === undefined
@@ -58,28 +53,13 @@ describe("client catalogue serving", () => {
 			expect(entry.base_instructions).toBe("You are a coding assistant.");
 			expect(entry.supports_reasoning_summaries).toBe(false);
 			expect(entry.supports_reasoning_summary_parameter).toBe(false);
-			if (known) {
-				expect(
-					entry.supported_reasoning_levels.map(
-						(level: { effort: string }) => level.effort,
-					),
-				).toEqual(["low", "medium"]);
-				expect(entry.default_reasoning_level).toBe("medium");
-			} else {
-				expect(entry).not.toHaveProperty("supported_reasoning_levels");
-				expect(entry).not.toHaveProperty("default_reasoning_level");
-			}
+			expect(
+				entry.supported_reasoning_levels.map(
+					(level: { effort: string }) => level.effort,
+				),
+			).toEqual(["low", "medium", "high", "xhigh", "max"]);
+			expect(entry.default_reasoning_level).toBe("medium");
 		}
-	});
-
-	it("defaults an alias to medium, else the nearest level below, else the first", () => {
-		expect(
-			aliasDefaultReasoningLevel(["low", "medium", "high", "xhigh", "max"]),
-		).toBe("medium");
-		expect(aliasDefaultReasoningLevel(["minimal", "low", "high"])).toBe("low");
-		expect(aliasDefaultReasoningLevel(["minimal", "high"])).toBe("minimal");
-		expect(aliasDefaultReasoningLevel(["high", "max"])).toBe("high");
-		expect(aliasDefaultReasoningLevel([])).toBeNull();
 	});
 	it("does not publish efforts for unmapped future GPT variants", async () => {
 		for (const targetModel of [
@@ -99,7 +79,6 @@ describe("client catalogue serving", () => {
 				"codex",
 				{ friendly: metadata },
 			).json();
-			expect(body.models[0]).not.toHaveProperty("supported_reasoning_levels");
 			expect(body.models[0].clankermux).not.toHaveProperty(
 				"supportedReasoningEfforts",
 			);

@@ -186,12 +186,17 @@ Anthropic upstream routes and unknown adapter/model combinations do not.
 For an alias, `supportedReasoningEfforts` is always `low`, `medium`, `high`,
 `xhigh`, `max`, whatever its targets accept, and `reasoning` is `true`. The
 chosen level is mapped onto the concrete fallback target selected for each
-attempt: it may be lowered to what that target accepts, turned into the target's
-own effort variant where the provider encodes effort in the model id, or
-dropped so the target runs at its default where the provider is not known to
-accept it. A request without an effort sends each target exactly as configured.
-The list is not a provider-specific thinking budget and does not advertise
-reasoning summaries.
+attempt:
+
+- Codex targets: lowered to the nearest level the model accepts.
+- Claude targets: lowered to the nearest level the model family accepts.
+- Z.AI targets: sent as chosen.
+- Devin targets: the target's sibling model variant at that effort.
+- Any other provider: no effort is sent, so the target uses its default.
+
+A request without an effort sends each target exactly as configured. The list
+is not a provider-specific thinking budget and does not advertise reasoning
+summaries.
 
 For a model that is not an alias, the effort field is present only when the
 route substantiates it; an unknown provider family, unresolved permissions or

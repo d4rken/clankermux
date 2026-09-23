@@ -146,7 +146,7 @@ function messageSuccess(model: string) {
 	});
 }
 
-it("exhausts Anthropic then applies OpenRouter's own Messages endpoint, authentication and effort adaptation", async () => {
+it("exhausts Anthropic then applies OpenRouter's own Messages endpoint and authentication without an effort", async () => {
 	const { ctx, backupModel } = await setup("openrouter");
 	const sent = mockUpstreams(({ body }) =>
 		body.model === "claude-fable-5"
@@ -168,13 +168,15 @@ it("exhausts Anthropic then applies OpenRouter's own Messages endpoint, authenti
 		url: "https://backup-alias.test/api/v1/messages",
 		authorization: "Bearer backup-key",
 		body: {
-			output_config: { effort: "high" },
 			messages: [
 				{ role: "user", content: "Explain this code." },
 				{ role: "system", content: "Use more effort now." },
 			],
 		},
 	});
+	// OpenRouter is not known to accept an alias effort, so the mid-conversation
+	// update is removed before the provider could lift it to the top level.
+	expect(sent[1]?.body).not.toHaveProperty("output_config");
 });
 
 it.each([

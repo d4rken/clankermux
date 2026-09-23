@@ -180,6 +180,46 @@ describe("client service integration", () => {
 			codexMetadataAvailable: true,
 		});
 	});
+	it("publishes the alias effort levels to Codex without target metadata", async () => {
+		await dbOps.modelAliases.save({
+			id: "alias:good",
+			displayName: "Good",
+			revision: 0,
+			targets: [{ model: "gpt-real", accountIds: ["c"] }],
+		});
+		const draft = blank();
+		draft.catalogues.codex.models = [
+			{
+				id: "good",
+				displayName: "Good",
+				targetModel: "alias:good",
+				accountIds: null,
+			},
+		];
+		const { client } = await service.commit(
+			(await service.review(draft)).token,
+		);
+		// Stands in for a lookup that overran the wire budget: the fallback is the
+		// same empty metadata either way.
+		const resolve = spyOn(
+			service as unknown as { resolveModelMetadata: () => Promise<never> },
+			"resolveModelMetadata",
+		).mockRejectedValue(new Error("metadata unavailable"));
+		try {
+			const [entry] = (
+				await (await service.wire(client.apiKeyId, "codex")).json()
+			).models;
+			expect(resolve).toHaveBeenCalled();
+			expect(
+				entry.supported_reasoning_levels.map(
+					(level: { effort: string }) => level.effort,
+				),
+			).toEqual(ALIAS_EFFORTS);
+			expect(entry.default_reasoning_level).toBe("medium");
+		} finally {
+			resolve.mockRestore();
+		}
+	});
 	it("rejects missing reusable aliases and invalidates review after alias edits", async () => {
 		const draft = blank();
 		draft.catalogues.openai.models = [

@@ -33,7 +33,10 @@ afterEach(() => {
 	clearProviderOverloadCooldown();
 	for (const db of dbs.splice(0)) db.close();
 });
-async function setup(providers = ["anthropic", "anthropic", "anthropic"]) {
+async function setup(
+	providers = ["anthropic", "anthropic", "anthropic"],
+	[primary, backup] = ["primary-model", "backup-model"],
+) {
 	const accounts = providers.map((provider, i) =>
 		makeAccount({
 			id: `alias-account-${i}`,
@@ -59,10 +62,10 @@ async function setup(providers = ["anthropic", "anthropic", "anthropic"]) {
 		revision: 0,
 		targets: [
 			{
-				model: "primary-model",
+				model: primary,
 				accountIds: accounts.slice(0, 2).map((a) => a.id),
 			},
-			{ model: "backup-model", accountIds: [accounts[2].id] },
+			{ model: backup, accountIds: [accounts[2].id] },
 		],
 	};
 	await modelAliases.save(alias);
@@ -76,8 +79,8 @@ async function setup(providers = ["anthropic", "anthropic", "anthropic"]) {
 	});
 	for (const a of accounts)
 		await routing.setManualModels(a.id, modelPermissionScope(a), [
-			"primary-model",
-			"backup-model",
+			primary,
+			backup,
 		]);
 	return { ctx, accounts, routing, modelAliases };
 }
@@ -480,10 +483,106 @@ describe("reasoning effort on alias attempts", () => {
 			"backup-model",
 		]);
 		for (const { body } of sent.slice(0, 2)) {
-			expect(body.thinking).toBeUndefined();
+			// A thinking budget is not an effort and still reaches the target.
+			expect(body.thinking).toEqual(effort.thinking);
 			expect(body.output_config).toBeUndefined();
 		}
 		expect(sent[2]?.body).toMatchObject(effort);
+	});
+	it("drops a mid-conversation effort update for a provider not known to handle it", async () => {
+		const { ctx } = await setup([
+			"anthropic-compatible",
+			"anthropic-compatible",
+			"anthropic",
+		]);
+		const sent = capture((model) => success(model));
+		const messages = [
+			{ role: "user", content: "hello" },
+			{ role: "system", output_config: { effort: "max" } },
+			{ role: "user", content: "again" },
+		];
+		expect(
+			(
+				await run(
+					ctx,
+					request(undefined, { thinking: { type: "adaptive" }, messages }),
+				)
+			).status,
+		).toBe(200);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.body.thinking).toBeUndefined();
+		expect(sent[0]?.body.messages).toEqual([
+			{ role: "user", content: "hello" },
+			{ role: "system" },
+			{ role: "user", content: "again" },
+		]);
+	});
+	it("clamps it to the Claude family's range on an Anthropic account", async () => {
+		const { ctx } = await setup(
+			["anthropic", "anthropic", "anthropic"],
+			["claude-haiku-4-5", "claude-opus-4-8"],
+		);
+		const sent = capture((model) =>
+			model === "claude-haiku-4-5"
+				? Response.json(
+						{ error: { type: "rate_limit_error" } },
+						{ status: 429 },
+					)
+				: success(model),
+		);
+		const adaptive = {
+			thinking: { type: "adaptive" },
+			output_config: { effort: "high" },
+			messages: [
+				{ role: "user", content: "hello" },
+				{ role: "system", output_config: { effort: "max" } },
+			],
+		};
+		expect((await run(ctx, request(undefined, adaptive))).status).toBe(200);
+		expect(sent.map((s) => s.body.model)).toEqual([
+			"claude-haiku-4-5",
+			"claude-haiku-4-5",
+			"claude-opus-4-8",
+		]);
+		for (const { body } of sent.slice(0, 2))
+			expect(body).toMatchObject({
+				thinking: { type: "adaptive" },
+				output_config: { effort: "medium" },
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "system", output_config: { effort: "medium" } },
+				],
+			});
+		// The fallback gets the level the client asked for, not the clamped one.
+		expect(sent[2]?.body).toMatchObject(adaptive);
+	});
+	it("sends max untouched to an Opus target", async () => {
+		const { ctx } = await setup(
+			["anthropic", "anthropic", "anthropic"],
+			["claude-opus-4-8", "claude-haiku-4-5"],
+		);
+		const sent = capture((model) => success(model));
+		const max = {
+			thinking: { type: "adaptive" },
+			output_config: { effort: "max" },
+		};
+		expect((await run(ctx, request(undefined, max))).status).toBe(200);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.body).toMatchObject({ model: "claude-opus-4-8", ...max });
+	});
+	it("does not clamp a request that did not name an alias", async () => {
+		const { ctx } = await setup(
+			["anthropic", "anthropic", "anthropic"],
+			["claude-haiku-4-5", "claude-opus-4-8"],
+		);
+		const sent = capture((model) => success(model));
+		const high = {
+			model: "claude-haiku-4-5",
+			thinking: { type: "adaptive" },
+			output_config: { effort: "high" },
+		};
+		expect((await run(ctx, request(undefined, high))).status).toBe(200);
+		expect(sent[0]?.body).toMatchObject(high);
 	});
 	it("drops it on the global force-account path too", async () => {
 		const { ctx, accounts } = await setup([
@@ -499,7 +598,7 @@ describe("reasoning effort on alias attempts", () => {
 			setForcedAccount(null);
 		}
 		expect(sent).toHaveLength(1);
-		expect(sent[0]?.body.thinking).toBeUndefined();
+		expect(sent[0]?.body.thinking).toEqual(effort.thinking);
 		expect(sent[0]?.body.output_config).toBeUndefined();
 	});
 	it("leaves a request that did not name an alias as the client sent it", async () => {

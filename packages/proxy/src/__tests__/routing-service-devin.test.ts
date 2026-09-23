@@ -137,7 +137,11 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 		"swe-2-high-fast": variant("high", "Fast Mode=@1"),
 		"swe-2-max-fast": variant("max", "Fast Mode=@1"),
 	};
-	function aliasSetup(target: string, reasoningEffort?: string) {
+	function aliasSetup(
+		target: string,
+		reasoningEffort?: string,
+		discoveredBeforeRefresh = true,
+	) {
 		const devin = {
 			id: "devin-route",
 			provider: "devin",
@@ -147,6 +151,10 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 		} as Account;
 		const codex = { ...devin, id: "codex-route", provider: "codex" } as Account;
 		const suppression = mock(async (..._args: unknown[]) => false);
+		let discovered = discoveredBeforeRefresh;
+		const refreshMisses = mock(async () => {
+			discovered = true;
+		});
 		const alias: ModelAlias = {
 			id: "alias:balanced",
 			displayName: "Balanced",
@@ -169,14 +177,18 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 					generation: 1,
 					completeness: "known-complete",
 					discovered_ids:
-						a.provider === "devin" ? Object.keys(variants) : ["gpt-5.6-sol"],
+						a.provider !== "devin"
+							? ["gpt-5.6-sol"]
+							: discovered
+								? Object.keys(variants)
+								: [],
 					manual_ids: [],
 					last_success_at: Date.now(),
 					last_attempt_at: Date.now(),
 					last_error: null,
-					model_variants: a.provider === "devin" ? variants : {},
+					model_variants: a.provider === "devin" && discovered ? variants : {},
 				}),
-				refreshMisses: mock(async () => {}),
+				refreshMisses,
 			},
 		} as unknown as ProxyContext;
 		const meta = {
@@ -187,13 +199,21 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 			timestamp: Date.now(),
 			reasoningEffort,
 		} as RequestMeta;
-		return { devin, codex, ctx, meta, suppression };
+		return { devin, codex, ctx, meta, suppression, refreshMisses };
 	}
-	async function stageModels(target: string, effort?: string) {
+	async function stageModels(
+		target: string,
+		effort?: string,
+		discoveredBeforeRefresh = true,
+	) {
 		lookup ??= spyOn(devinClient, "getAccount").mockRejectedValue(
 			new Error("must not fetch"),
 		);
-		const { devin, codex, ctx, meta, suppression } = aliasSetup(target, effort);
+		const { devin, codex, ctx, meta, suppression, refreshMisses } = aliasSetup(
+			target,
+			effort,
+			discoveredBeforeRefresh,
+		);
 		await initializeRequestRoute(meta, ctx, null, null);
 		expect(lookup).not.toHaveBeenCalled();
 		const [devinStage, codexStage] = getAliasRoutes(meta) ?? [];
@@ -201,6 +221,7 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 			devin: devinStage?.target(devin)?.upstreamModel,
 			codex: codexStage?.target(codex)?.upstreamModel,
 			suppressionReads: suppression.mock.calls.map((call) => call[2]),
+			refreshes: refreshMisses.mock.calls.length,
 		};
 	}
 	it("routes the sibling that serves the requested effort", async () => {
@@ -227,7 +248,13 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 		expect((await stageModels("swe-2-high", "xhigh")).devin).toBe("swe-2-high");
 		expect((await stageModels("swe-2-high", "low")).devin).toBe("swe-2-medium");
 	});
-	it("leaves a target without Devin variants unchanged", async () => {
-		expect((await stageModels("swe-2-max", "low")).codex).toBe("gpt-5.6-sol");
+	it("picks the variant from what the in-stage refresh discovered", async () => {
+		// Stored permissions predate the target and carry no variants; only the
+		// refresh the stage runs for the miss brings them in.
+		const routed = await stageModels("swe-2-max", "high", false);
+		expect(routed.refreshes).toBe(1);
+		expect(routed.devin).toBe("swe-2-high");
+		expect(routed.suppressionReads).toContain("swe-2-high");
+		expect(routed.suppressionReads).not.toContain("swe-2-max");
 	});
 });

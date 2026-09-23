@@ -304,7 +304,9 @@ export * from "./quota-drift";
 export * from "./rate-limit-status";
 export {
 	ALIAS_ADVERTISED_EFFORTS,
+	aliasEffortClampsToClaudeFamily,
 	aliasEffortReachesProvider,
+	clampEffortToModel,
 	getAliasReasoningEfforts,
 	getModelReasoningEfforts,
 	resolveTargetReasoningProfile,
