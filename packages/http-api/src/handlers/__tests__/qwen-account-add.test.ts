@@ -8,38 +8,55 @@
  * and ON on fresh ones.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	spyOn,
+} from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
 import * as qwenDeviceFlow from "@clankermux/providers/qwen";
 import { tempDbTracker } from "@clankermux/test-support";
+import {
+	createQwenDeviceFlowInitHandler,
+	createQwenDeviceFlowStatusHandler,
+} from "../oauth";
 
-// The real module is spread back in so this mock replaces exactly the two
-// network functions and nothing else — bun's mock.module is process-wide, and a
-// partial replacement breaks any later test file that imports the rest.
-mock.module("@clankermux/providers/qwen", () => ({
-	...qwenDeviceFlow,
-	initiateDeviceFlow: mock(async () => ({
-		deviceCode: "device-code",
-		userCode: "USER-CODE",
-		verificationUri: "https://chat.qwen.ai/authorize",
-		verificationUriComplete:
-			"https://chat.qwen.ai/authorize?user_code=USER-CODE",
-		expiresIn: 600,
-		interval: 0,
-		pkce: { verifier: "v", challenge: "c" },
-	})),
-	pollForToken: mock(async () => ({
-		access_token: "access",
-		refresh_token: "refresh",
-		token_type: "Bearer",
-		resource_url: "portal.qwen.ai",
-		expires_in: 3600,
-	})),
-}));
-
-const { createQwenDeviceFlowInitHandler, createQwenDeviceFlowStatusHandler } =
-	await import("../oauth");
+// Spies, not mock.module: a module mock is process-wide and cannot be undone,
+// and through the barrel's re-exports it replaced the real device-flow
+// functions for every later test file in the process.
+const qwenSpies: { mockRestore(): void }[] = [];
+beforeAll(() => {
+	qwenSpies.push(
+		spyOn(qwenDeviceFlow, "initiateDeviceFlow").mockImplementation(
+			async () => ({
+				deviceCode: "device-code",
+				userCode: "USER-CODE",
+				verificationUri: "https://chat.qwen.ai/authorize",
+				verificationUriComplete:
+					"https://chat.qwen.ai/authorize?user_code=USER-CODE",
+				expiresIn: 600,
+				interval: 0,
+				pkce: { verifier: "v", challenge: "c" },
+			}),
+		),
+		spyOn(qwenDeviceFlow, "pollForToken").mockImplementation(async () => ({
+			access_token: "access",
+			refresh_token: "refresh",
+			token_type: "Bearer",
+			resource_url: "portal.qwen.ai",
+			expires_in: 3600,
+		})),
+	);
+});
+afterAll(() => {
+	for (const spy of qwenSpies.splice(0)) spy.mockRestore();
+});
 
 const tmpDb = tempDbTracker("test-qwen-account-add-legacy-default");
 
