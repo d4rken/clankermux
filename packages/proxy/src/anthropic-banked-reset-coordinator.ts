@@ -472,12 +472,16 @@ export class AnthropicBankedResetCoordinator {
 				log.warn(
 					`Banked-reset claim for '${account.name}' not retried after an auth error: its replay window closed`,
 				);
+			} else if (refreshed) {
+				result = await this.claimReset(refreshed, orgUuid, ids);
+			}
+			// Whatever kept the retry from leaving, a claim past its window is
+			// given up now rather than left pending to block the account.
+			if (result.result === "auth_error" && this.now() >= replayUntil) {
 				return this.giveUpAtWindow(account, request, {
 					...target,
 					createdHere: false,
 				});
-			} else if (refreshed) {
-				result = await this.claimReset(refreshed, orgUuid, ids);
 			}
 		}
 

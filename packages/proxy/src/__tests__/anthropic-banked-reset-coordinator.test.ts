@@ -1305,6 +1305,31 @@ describe("the replay window", () => {
 		});
 	});
 
+	it("gives up a claim past its window whose token refresh after an auth error failed", async () => {
+		await openUnconfirmed("req-401-norefresh");
+		clock = NOW + WINDOW - 1;
+		refreshAccessTokenSafe.mockImplementationOnce(async () => {
+			clock = NOW + WINDOW;
+			throw new Error("refresh failed");
+		});
+		claimImpl = async () =>
+			claimResult({
+				result: "auth_error",
+				httpStatus: 401,
+				errorMessage: "401",
+			});
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-401-norefresh",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
 	it("records a new manual claim whose window closes before its POST as not sent", async () => {
 		dbOverrides = {
 			getAccountPauseMarker: async () => {
