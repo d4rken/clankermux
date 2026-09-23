@@ -3,6 +3,7 @@ import {
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	NETWORK,
+	trackClaudeCliStainlessHeaders,
 	trackClientVersion,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
@@ -136,6 +137,7 @@ export async function ingestProxyRequest(
 
 	// 1. Track client version from user-agent for use in auto-refresh
 	trackClientVersion(req.headers.get("user-agent"));
+	trackClaudeCliStainlessHeaders(req.headers);
 
 	// Best-effort re-arm of this connection's Bun idle timer. Called on a
 	// timer during long holds (CW hold) and long quiet streaming gaps so a

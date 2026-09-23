@@ -6,7 +6,10 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { trackClientVersion } from "@clankermux/core";
+import {
+	trackClaudeCliStainlessHeaders,
+	trackClientVersion,
+} from "@clankermux/core";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -43,6 +46,18 @@ afterEach(() => {
 describe("Claude identity at the fetch boundary", () => {
 	it("auto-refresh keepalive names the last client seen", async () => {
 		trackClientVersion("claude-cli/2.1.63 (external, cli)");
+		trackClaudeCliStainlessHeaders(
+			new Headers({
+				"user-agent": "claude-cli/2.1.63 (external, cli)",
+				"x-stainless-arch": "x64",
+				"x-stainless-lang": "js",
+				"x-stainless-os": "Linux",
+				"x-stainless-package-version": "0.112.7",
+				"x-stainless-retry-count": "1",
+				"x-stainless-runtime": "node",
+				"x-stainless-runtime-version": "v26.3.9",
+			}),
+		);
 		const dispatched: Request[] = [];
 		const scheduler = new AutoRefreshScheduler(
 			{
@@ -80,29 +95,26 @@ describe("Claude identity at the fetch boundary", () => {
 		expect(dispatched[0]?.url).toBe("http://internal.clankermux/v1/messages");
 		expect(sorted(dispatched[0]?.headers)).toEqual([
 			["accept", "application/json"],
-			["accept-language", "*"],
 			[
 				"anthropic-beta",
-				"oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+				"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01,oauth-2025-04-20",
 			],
 			["anthropic-dangerous-direct-browser-access", "true"],
 			["anthropic-version", "2023-06-01"],
 			["connection", "keep-alive"],
 			["content-type", "application/json"],
-			["sec-fetch-mode", "cors"],
 			["user-agent", "claude-cli/2.1.63 (external, cli)"],
 			["x-app", "cli"],
 			["x-clankermux-account-id", "acc-1"],
 			["x-clankermux-auto-refresh", "true"],
 			["x-clankermux-bypass-session", "true"],
 			["x-stainless-arch", "x64"],
-			["x-stainless-helper-method", "stream"],
 			["x-stainless-lang", "js"],
 			["x-stainless-os", "Linux"],
-			["x-stainless-package-version", "0.60.0"],
+			["x-stainless-package-version", "0.112.7"],
 			["x-stainless-retry-count", "0"],
 			["x-stainless-runtime", "node"],
-			["x-stainless-runtime-version", "v24.9.0"],
+			["x-stainless-runtime-version", "v26.3.9"],
 			["x-stainless-timeout", "600"],
 		]);
 	});

@@ -1629,6 +1629,60 @@ export async function refreshAnthropicBankedResetsForAccount(
 	return promise;
 }
 
+const ANTHROPIC_BANKED_RESET_SWEEP_SPACING_MS = 3000;
+const anthropicBankedResetSweepQueue: string[] = [];
+let anthropicBankedResetSweep: Promise<void> | undefined;
+let anthropicBankedResetSweepGeneration = 0;
+
+/**
+ * Read several accounts' banked-reset status one at a time, seconds apart,
+ * rather than all in the same instant. Ids join one queue shared by every
+ * caller; the first read starts at once.
+ */
+export function refreshAnthropicBankedResetsSpaced(
+	accountIds: readonly string[],
+	spacingMs = ANTHROPIC_BANKED_RESET_SWEEP_SPACING_MS,
+): Promise<void> {
+	for (const id of accountIds)
+		if (!anthropicBankedResetSweepQueue.includes(id))
+			anthropicBankedResetSweepQueue.push(id);
+	if (!anthropicBankedResetSweep && anthropicBankedResetSweepQueue.length > 0)
+		anthropicBankedResetSweep = drainAnthropicBankedResetSweep(
+			spacingMs,
+			anthropicBankedResetSweepGeneration,
+		);
+	return anthropicBankedResetSweep ?? Promise.resolve();
+}
+
+/**
+ * Starts on a non-empty queue with no wait. Each later read, including the
+ * first one queued after the queue ran dry, waits out the spacing.
+ */
+async function drainAnthropicBankedResetSweep(
+	spacingMs: number,
+	generation: number,
+): Promise<void> {
+	for (let read = 0; ; read++) {
+		if (read > 0)
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, spacingMs * (1 + Math.random() * 0.5)).unref?.();
+			});
+		if (generation !== anthropicBankedResetSweepGeneration) return;
+		const id = anthropicBankedResetSweepQueue.shift();
+		if (id === undefined) {
+			anthropicBankedResetSweep = undefined;
+			return;
+		}
+		await refreshAnthropicBankedResetsForAccount(id).catch(() => {});
+	}
+}
+
+export function resetAnthropicBankedResetSweepForTests(): void {
+	anthropicBankedResetSweepGeneration++;
+	anthropicBankedResetSweepQueue.length = 0;
+	anthropicBankedResetSweep = undefined;
+}
+
 /**
  * Claim one banked reset through exactly one registered server. Concurrent
  * dispatches of the same request id share one attempt; a different request id
