@@ -6,6 +6,7 @@
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
 //   last user text contains "SLOW"          -> any of the above, 3 s late
+//   a tools[].name outside ^[a-zA-Z0-9_-]{1,64}$ -> the API's 400
 
 type Block = { type: string; [k: string]: unknown };
 type Msg = { role: string; content: string | Block[] };
@@ -173,6 +174,25 @@ function script(body: ScriptBody): string {
 	return out;
 }
 
+const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/** The Messages API's 400 for a tool name outside its pattern, as it words it. */
+function invalidToolName(body: unknown): unknown {
+	const tools = (body as { tools?: unknown } | null)?.tools;
+	if (!Array.isArray(tools)) return null;
+	const index = tools.findIndex(
+		(t) => !TOOL_NAME.test(String((t as { name?: unknown })?.name ?? "")),
+	);
+	if (index < 0) return null;
+	return {
+		type: "error",
+		error: {
+			type: "invalid_request_error",
+			message: `tools.${index}.custom.name: String should match pattern '^[a-zA-Z0-9_-]{1,64}$'`,
+		},
+	};
+}
+
 export function startMockUpstream(): MockUpstream {
 	const requests: MockRequest[] = [];
 	type Failure = {
@@ -201,6 +221,11 @@ export function startMockUpstream(): MockUpstream {
 		requests.push(record);
 
 		if (req.method === "POST" && url.pathname === "/v1/messages") {
+			const invalid = invalidToolName(body);
+			if (invalid) {
+				record.status = 400;
+				return Response.json(invalid, { status: 400 });
+			}
 			const auth = req.headers.get("authorization") ?? "";
 			const f = failures.find(
 				(x) => x.times > 0 && (x.match === null || auth.includes(x.match)),

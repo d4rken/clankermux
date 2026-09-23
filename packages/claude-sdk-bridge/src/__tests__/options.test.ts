@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildQueryOptions, childEnv, workPaths } from "../options";
 import { FileSessionStore } from "../session-store";
-import { createToolServer, loadMcpSdk } from "../tool-server";
+import { createToolServer, loadMcpSdk, ToolNames } from "../tool-server";
 
 const ROOT = "/var/cache/clankermux/claude-agent-sdk";
 
@@ -52,6 +52,7 @@ describe("query options", () => {
 	const server = createToolServer(
 		mcpSdk,
 		[{ name: "read", description: "", input_schema: { type: "object" } }],
+		new ToolNames(["read"]),
 		async () => ({ content: [] }),
 	);
 	const base = {
@@ -89,12 +90,12 @@ describe("query options", () => {
 		expect(typeof stderr).toBe("function");
 		expect(abortController).toBe(base.abortController);
 		expect(sessionStore).toBe(store);
-		expect(mcpServers?.client).toBe(server);
+		expect(mcpServers?.c).toBe(server);
 		expect(rest).toEqual({
 			cwd: `${ROOT}/cwd`,
 			model: "claude-sonnet-5",
 			tools: [],
-			allowedTools: ["mcp__client__read"],
+			allowedTools: ["mcp__c__read"],
 			permissionMode: "dontAsk",
 			strictMcpConfig: true,
 			settingSources: [],

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type {
@@ -30,13 +31,90 @@ export async function loadMcpSdk(): Promise<McpSdk> {
 	};
 }
 
-export const MCP_SERVER_NAME = "client";
+/** One letter: the prefix below comes out of every tool name's 64 characters. */
+export const MCP_SERVER_NAME = "c";
 /** Claude Code names our tools `mcp__<server>__<tool>`. */
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 /** Where Claude Code puts the model's tool_use id on an MCP call. */
 export const TOOL_USE_ID_META = "claudecode/toolUseId";
 /** Parked calls wait on the client; the bridge's own timeouts end them first. */
 export const TOOL_CALL_TIMEOUT_MS = 24 * 60 * 60_000;
+
+/** The Messages API's rule for a tool name, which the prefixed name must meet. */
+const UPSTREAM_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+const ALIAS_PREFIX = "t_";
+const ALIAS_MIN_HEX = 16;
+
+/**
+ * The name each client tool goes by inside Claude Code. A name that still
+ * fits the API's rule once prefixed keeps its own name; any other gets a
+ * short alias derived from it:
+ *
+ *   read                -> mcp__c__read
+ *   cmux_chat_<48 hex>  -> mcp__c__t_<first 16 hex of sha256(name)>
+ *
+ * An alias depends only on the name (a collision within one tool list takes
+ * more hex), so a tool keeps its alias across the turns of a conversation and
+ * a resumed or rebuilt session still names it the same way.
+ */
+export class ToolNames {
+	private readonly exposedByClient = new Map<string, string>();
+	private readonly clientByExposed = new Map<string, string>();
+
+	constructor(private readonly clientNames: readonly string[]) {
+		const aliased: string[] = [];
+		for (const name of clientNames)
+			if (UPSTREAM_TOOL_NAME.test(`${MCP_TOOL_PREFIX}${name}`))
+				this.bind(name, name);
+			else aliased.push(name);
+		const maxHex = 64 - MCP_TOOL_PREFIX.length - ALIAS_PREFIX.length;
+		for (const name of aliased) {
+			const hex = createHash("sha256").update(name).digest("hex");
+			let length = ALIAS_MIN_HEX;
+			while (
+				length < maxHex &&
+				this.clientByExposed.has(`${ALIAS_PREFIX}${hex.slice(0, length)}`)
+			)
+				length++;
+			const alias = `${ALIAS_PREFIX}${hex.slice(0, length)}`;
+			if (this.clientByExposed.has(alias))
+				throw new Error(`No free alias for tool ${JSON.stringify(name)}`);
+			this.bind(name, alias);
+		}
+	}
+
+	private bind(client: string, exposed: string): void {
+		this.exposedByClient.set(client, exposed);
+		this.clientByExposed.set(exposed, client);
+	}
+
+	/** Every tool's name inside Claude Code, without the MCP prefix, in the client's order. */
+	get exposed(): string[] {
+		return this.clientNames.map(
+			(name) => this.exposedByClient.get(name) ?? name,
+		);
+	}
+
+	/** A client tool's name inside Claude Code, without the MCP prefix. */
+	exposedName(clientName: string): string | undefined {
+		return this.exposedByClient.get(clientName);
+	}
+
+	/** A client tool's name as Claude Code sends it upstream. */
+	upstreamName(clientName: string): string | undefined {
+		const exposed = this.exposedByClient.get(clientName);
+		return exposed === undefined ? undefined : `${MCP_TOOL_PREFIX}${exposed}`;
+	}
+
+	/** The client's name for a tool Claude Code names, or null for any other tool. */
+	clientName(upstreamName: string): string | null {
+		if (!upstreamName.startsWith(MCP_TOOL_PREFIX)) return null;
+		return (
+			this.clientByExposed.get(upstreamName.slice(MCP_TOOL_PREFIX.length)) ??
+			null
+		);
+	}
+}
 
 export type McpContent =
 	| { type: "text"; text: string }
@@ -46,16 +124,6 @@ export interface McpToolResult {
 	content: McpContent[];
 	isError?: boolean;
 	[key: string]: unknown;
-}
-
-/** The client's name for one of our tools, or null for any other tool. */
-export function clientToolName(
-	name: string,
-	known: ReadonlySet<string>,
-): string | null {
-	if (!name.startsWith(MCP_TOOL_PREFIX)) return null;
-	const stripped = name.slice(MCP_TOOL_PREFIX.length);
-	return known.has(stripped) ? stripped : null;
 }
 
 /** The client's JSON Schema verbatim, minus the `$schema` keyword. */
@@ -155,12 +223,13 @@ export class ParkedCalls {
 
 /**
  * An in-process MCP server exposing the client's tools under their own
- * schemas. Every call goes to `onCall`, which parks it until the client sends
- * the result.
+ * schemas and their {@link ToolNames} names. Every call goes to `onCall`,
+ * which parks it until the client sends the result.
  */
 export function createToolServer(
 	mcp: McpSdk,
 	tools: readonly ClientTool[],
+	names: ToolNames,
 	onCall: (toolUseId: string, name: string) => Promise<McpToolResult>,
 ): McpSdkServerConfigWithInstance {
 	const server = new mcp.McpServer(
@@ -168,7 +237,7 @@ export function createToolServer(
 		{ capabilities: { tools: {} } },
 	);
 	const listed = tools.map((tool) => ({
-		name: tool.name,
+		name: names.exposedName(tool.name) ?? tool.name,
 		description: tool.description,
 		inputSchema: mcpInputSchema(tool.input_schema) as {
 			type: "object";

@@ -223,7 +223,8 @@ export interface TranscriptContext {
 	sessionId: string;
 	cwd: string;
 	model: string;
-	toolPrefix: string;
+	/** A client tool's name as Claude Code sends it upstream. */
+	upstreamToolName: (clientName: string) => string;
 	version: string;
 	randomId: () => string;
 	now: () => number;
@@ -261,7 +262,7 @@ export function buildSyntheticTranscript(
 		else {
 			const content = message.content.map((b) =>
 				b.type === "tool_use"
-					? { ...b, name: `${ctx.toolPrefix}${String(b.name)}` }
+					? { ...b, name: ctx.upstreamToolName(String(b.name)) }
 					: b,
 			);
 			entries.push({
@@ -286,12 +287,15 @@ export function buildSyntheticTranscript(
 	return entries;
 }
 
-function flattenBlock(block: Block): string {
+function flattenBlock(
+	block: Block,
+	toolName: (clientName: string) => string,
+): string {
 	switch (block.type) {
 		case "text":
 			return String(block.text ?? "");
 		case "tool_use":
-			return `[tool call ${String(block.name)} id=${String(block.id)}] ${JSON.stringify(block.input ?? {})}`;
+			return `[tool call ${toolName(String(block.name))} id=${String(block.id)}] ${JSON.stringify(block.input ?? {})}`;
 		case "tool_result": {
 			const content = block.content;
 			const text =
@@ -322,12 +326,19 @@ export const FLATTENED_HISTORY_NOTE =
 /**
  * The history as one framed text block, for histories a transcript cannot
  * represent. Turns are marked with tags, never `Human:`/`Assistant:` labels,
- * which models have been seen to continue as invented turns.
+ * which models have been seen to continue as invented turns. A tool call names
+ * the tool as `toolName` gives it, so the model can match it to a tool it has.
  */
-export function flattenHistory(history: readonly ApiMessage[]): string {
+export function flattenHistory(
+	history: readonly ApiMessage[],
+	toolName: (clientName: string) => string = (name) => name,
+): string {
 	const turns = history
 		.map((message) => {
-			const body = message.content.map(flattenBlock).filter(Boolean).join("\n");
+			const body = message.content
+				.map((block) => flattenBlock(block, toolName))
+				.filter(Boolean)
+				.join("\n");
 			return body ? `<turn role="${message.role}">\n${body}\n</turn>` : "";
 		})
 		.filter(Boolean);

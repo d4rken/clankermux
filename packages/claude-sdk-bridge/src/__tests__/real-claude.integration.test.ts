@@ -103,7 +103,7 @@ describe.skipIf(reason !== null)(
 				expect(s.upstreamAuthorization).toBeNull();
 				// The drop policy: the client's system prompt never reaches the model.
 				expect(s.upstreamSystemMentionsPi).toBe(false);
-				expect(s.upstreamTools).toEqual(["mcp__client__read"]);
+				expect(s.upstreamTools).toEqual(["mcp__c__read"]);
 			},
 			TIMEOUT,
 		);
@@ -142,6 +142,34 @@ describe.skipIf(reason !== null)(
 				expect(s.toolUses).toBe(2);
 				expect(s.r1Stop).toBe("tool_use");
 				expect(s.r2).toMatchObject({ status: 200, stop: "end_turn" });
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"gives a 64-character client tool a short alias upstream and its own name back",
+			async () => {
+				const s = scenario(await results(), "longToolName");
+				const upstream = s.upstream as Array<{
+					status: number;
+					tools: string[];
+				}>;
+				expect(upstream.length).toBeGreaterThanOrEqual(2);
+				for (const call of upstream) {
+					expect(call.status).toBe(200);
+					expect(call.tools).toEqual([expect.stringMatching(/^mcp__c__t_/)]);
+					for (const name of call.tools)
+						expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+				}
+				expect(s.r1).toMatchObject({ status: 200, stop: "tool_use" });
+				expect((s.r1 as { content: unknown[] }).content).toEqual([
+					expect.objectContaining({ type: "tool_use", name: s.clientName }),
+				]);
+				expect(s.r2).toMatchObject({
+					status: 200,
+					stop: "end_turn",
+					content: [{ type: "text", text: "done: LONG" }],
+				});
 			},
 			TIMEOUT,
 		);

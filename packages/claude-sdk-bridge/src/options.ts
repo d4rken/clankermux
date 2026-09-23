@@ -72,6 +72,7 @@ export interface QueryOptionsInput {
 	baseUrl: string;
 	token: string;
 	model: string;
+	/** The client tools' names inside Claude Code (`ToolNames.exposed`). */
 	toolNames: readonly string[];
 	toolServer: McpSdkServerConfigWithInstance | null;
 	systemPrompt: { append: string | null; excludeDynamicSections: boolean };

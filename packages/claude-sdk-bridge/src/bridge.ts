@@ -55,9 +55,9 @@ import { getSystemPromptPolicy } from "./system-prompt-policy";
 import {
 	createToolServer,
 	loadMcpSdk,
-	MCP_TOOL_PREFIX,
 	type McpSdk,
 	ParkedCalls,
+	ToolNames,
 } from "./tool-server";
 import {
 	type Block,
@@ -442,6 +442,7 @@ export function createClaudeSdkBridge(
 		if (!isUuid(sessionId))
 			throw new Error("randomId must produce UUIDs for session ids");
 		const normalized = normalizeHistory(turn.history);
+		const toolNames = new ToolNames(turn.tools.map((t) => t.name));
 		if (history.mode === "resume" && claim?.current) {
 			if (!store.fork(claim.current.sessionId, sessionId))
 				history = {
@@ -461,7 +462,8 @@ export function createClaudeSdkBridge(
 					sessionId,
 					cwd: paths.cwd,
 					model: target.upstreamModel,
-					toolPrefix: MCP_TOOL_PREFIX,
+					// transcriptEligible admitted only this turn's own tools.
+					upstreamToolName: (name) => toolNames.upstreamName(name) ?? name,
 					version: CLAUDE_CODE_VERSION,
 					randomId: () => crypto.randomUUID(),
 					now,
@@ -470,7 +472,16 @@ export function createClaudeSdkBridge(
 		const lastBlocks = normalizeHistory([turn.last]).flatMap((m) => m.content);
 		const promptContent: Block[] =
 			history.mode === "rebuild_flattened"
-				? [{ type: "text", text: flattenHistory(normalized) }, ...lastBlocks]
+				? [
+						{
+							type: "text",
+							text: flattenHistory(
+								normalized,
+								(name) => toolNames.exposedName(name) ?? name,
+							),
+						},
+						...lastBlocks,
+					]
 				: lastBlocks.length
 					? lastBlocks
 					: blocksOf(turn.last);
@@ -490,9 +501,8 @@ export function createClaudeSdkBridge(
 		const registration = listener.register(context);
 		const baseUrl = listener.ensureStarted();
 		const parked = new ParkedCalls();
-		const toolNames = turn.tools.map((t) => t.name);
 		const toolServer = turn.tools.length
-			? createToolServer(mcp, turn.tools, (id) =>
+			? createToolServer(mcp, turn.tools, toolNames, (id) =>
 					live ? live.onToolCall(id) : parked.wait(id),
 				)
 			: null;
@@ -509,7 +519,7 @@ export function createClaudeSdkBridge(
 					baseUrl,
 					token: registration.token,
 					model: target.upstreamModel,
-					toolNames,
+					toolNames: toolNames.exposed,
 					toolServer,
 					systemPrompt,
 					effort: turn.effort,
@@ -537,7 +547,7 @@ export function createClaudeSdkBridge(
 		}
 
 		const composer = new ReplyComposer({
-			knownTools: new Set(toolNames),
+			toolNames,
 			onToolUse: (id) => {
 				toolIndex.set(id, plan.turnId);
 				const ids = turnToolIds.get(plan.turnId) ?? [];

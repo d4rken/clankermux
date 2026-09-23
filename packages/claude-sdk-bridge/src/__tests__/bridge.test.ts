@@ -256,7 +256,7 @@ describe("parked tool calls", () => {
 				_meta: { "anthropic/alwaysLoad": true },
 			},
 		]);
-		expect(t.query.options.allowedTools).toEqual(["mcp__client__read"]);
+		expect(t.query.options.allowedTools).toEqual(["mcp__c__read"]);
 
 		t.query.emit(
 			initMessage(),
@@ -265,7 +265,7 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_1",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: { path: "a.txt" },
 				},
 			]),
@@ -327,6 +327,130 @@ describe("parked tool calls", () => {
 		expect(h.bridge.findContinuation(["toolu_1"])).toBeNull();
 	});
 
+	describe("tool names that would not fit the API's 64 characters", () => {
+		const UPSTREAM_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+		// The longest name a client may send, and the Chat adapter's encoding.
+		const long = `${"x".repeat(60)}read`;
+		const chat = `cmux_chat_${"a1b2c3d4".repeat(6)}`;
+		const aliasedTools = [
+			{ ...READ_TOOL, name: long },
+			{ ...READ_TOOL, name: chat },
+			READ_TOOL,
+		];
+
+		it("go by a short alias inside Claude Code and by their own name to the client", async () => {
+			const h = harness();
+			const t = await start(h, { tools: aliasedTools, messages: [first] });
+			const listed = (await (await t.query.mcp()).listTools()).tools.map(
+				(tool) => tool.name,
+			);
+			const upstream = t.query.options.allowedTools ?? [];
+			expect(upstream).toEqual(listed.map((name) => `mcp__c__${name}`));
+			for (const name of upstream) expect(name).toMatch(UPSTREAM_NAME);
+			expect(listed[0]).toMatch(/^t_[0-9a-f]{16}$/);
+			expect(listed[1]).toMatch(/^t_[0-9a-f]{16}$/);
+			expect(listed[2]).toBe("read");
+
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{ type: "tool_use", id: "tl_1", name: upstream[0], input: {} },
+					{ type: "tool_use", id: "tl_2", name: upstream[1], input: {} },
+				]),
+			);
+			const r1 = await reply(t.response);
+			expect(r1.content.map((b) => b.name)).toEqual([long, chat]);
+
+			const calls = [
+				t.query.callTool("tl_1", listed[0] ?? ""),
+				t.query.callTool("tl_2", listed[1] ?? ""),
+			];
+			await waitFor(() => h.bridge.status().parked === 1);
+			const c = continueTurn(h, t.plan.turnId, {
+				tools: aliasedTools,
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "tl_1", content: "L" },
+							{ type: "tool_result", tool_use_id: "tl_2", content: "C" },
+						],
+					},
+				],
+			});
+			expect(
+				(await Promise.all(calls)).map(
+					(r) => (r.content as Array<{ text: string }>)[0]?.text,
+				),
+			).toEqual(["L", "C"]);
+			t.query.emit(
+				...streamedMessage([{ type: "text", text: "ok" }]),
+				resultMessage(),
+			);
+			expect((await reply(c.response)).content).toEqual([
+				{ type: "text", text: "ok" },
+			]);
+		});
+
+		it("keep their alias in a rebuilt transcript and a flattened history", async () => {
+			const h = harness();
+			const history = [
+				first,
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "tl_0", name: long, input: {} }],
+				},
+				{
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "tl_0", content: "r" }],
+				},
+				{ role: "assistant", content: "done" },
+				{ role: "user", content: "next" },
+			];
+			const t = await start(h, { tools: aliasedTools, messages: history });
+			const [alias] = t.query.options.allowedTools ?? [];
+			const store = new FileSessionStore(join(h.workRoot, "sessions"));
+			const entries = store.read(t.query.options.resume as string) ?? [];
+			const names = entries.flatMap((e) =>
+				e.type === "assistant"
+					? (
+							(e.message as { content: Array<{ type: string; name?: string }> })
+								.content ?? []
+						)
+							.filter((b) => b.type === "tool_use")
+							.map((b) => b.name)
+					: [],
+			);
+			expect(names).toEqual([alias]);
+
+			// A tool the turn no longer declares forces the flattened form.
+			const f = await start(h, {
+				tools: aliasedTools,
+				messages: [
+					...history.slice(0, 4),
+					{
+						role: "assistant",
+						content: [{ type: "tool_use", id: "g", name: "gone", input: {} }],
+					},
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: "g", content: "x" }],
+					},
+					{ role: "user", content: "next" },
+				],
+			});
+			const flat = (
+				f.query.prompts[0]?.message.content as Array<{ text: string }>
+			)[0]?.text;
+			expect(flat).toContain(
+				`[tool call ${alias?.slice("mcp__c__".length)} id=tl_0]`,
+			);
+			expect(flat).toContain("[tool call gone id=g]");
+		});
+	});
+
 	it("handles parallel calls whose results arrive before Claude Code asks", async () => {
 		const h = harness();
 		const t = await start(h, { tools, messages: [first] });
@@ -336,13 +460,13 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_a",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: { path: "a" },
 				},
 				{
 					type: "tool_use",
 					id: "toolu_b",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: { path: "b" },
 				},
 			]),
@@ -393,13 +517,13 @@ describe("parked tool calls", () => {
 			{
 				type: "tool_use",
 				id: "toolu_s1",
-				name: "mcp__client__read",
+				name: "mcp__c__read",
 				input: { path: "a" },
 			},
 			{
 				type: "tool_use",
 				id: "toolu_s2",
-				name: "mcp__client__read",
+				name: "mcp__c__read",
 				input: { path: "b" },
 			},
 		]);
@@ -457,7 +581,7 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_y",
-					name: "mcp__client__write",
+					name: "mcp__c__write",
 					input: {},
 				},
 			]),
@@ -476,7 +600,7 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_f",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: { path: "f" },
 				},
 			]),
@@ -514,7 +638,7 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_1",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 			]),
@@ -548,7 +672,7 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_1",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 			]),
@@ -613,13 +737,13 @@ describe("parked tool calls", () => {
 				{
 					type: "tool_use",
 					id: "toolu_1",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 				{
 					type: "tool_use",
 					id: "toolu_2",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 			]),
@@ -1127,7 +1251,7 @@ describe("availability and shutdown", () => {
 				{
 					type: "tool_use",
 					id: "toolu_p",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 			]),
@@ -1161,7 +1285,7 @@ describe("availability and shutdown", () => {
 				{
 					type: "tool_use",
 					id: "toolu_r",
-					name: "mcp__client__read",
+					name: "mcp__c__read",
 					input: {},
 				},
 			]),

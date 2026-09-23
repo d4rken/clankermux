@@ -304,6 +304,50 @@ await scenario("parallelTools", async () => {
 	return { toolUses: uses.length, r1Stop: r1.stop, r2 };
 });
 
+await scenario("longToolName", async () => {
+	// The longest name a client may send; prefixed as is it would be 72.
+	const tool = { ...READ_TOOL, name: `${"x".repeat(60)}read` };
+	const from = mock.requests.length;
+	const history: Msg[] = [{ role: "user", content: "TOOL read a.txt" }];
+	const p = plan();
+	const r1 = await read(
+		bridge.startTurn({
+			request: request(history, [tool]),
+			plan: p,
+			meta: meta(),
+			signal: new AbortController().signal,
+		}),
+	);
+	const tu = (r1.content ?? []).find((b) => b.type === "tool_use");
+	history.push({ role: "assistant", content: r1.content as Block[] });
+	history.push({
+		role: "user",
+		content: [
+			{ type: "tool_result", tool_use_id: String(tu?.id), content: "LONG" },
+		],
+	});
+	const r2 = await read(
+		bridge.continueTurn({
+			turnId: p.turnId,
+			request: request(history, [tool]),
+			meta: meta(),
+			signal: new AbortController().signal,
+		}),
+	);
+	await settled();
+	return {
+		clientName: tool.name,
+		r1,
+		r2,
+		upstream: mock.requests.slice(from).map((q) => ({
+			status: q.status ?? null,
+			tools: ((q.body as { tools?: Array<{ name: string }> })?.tools ?? []).map(
+				(t) => t.name,
+			),
+		})),
+	};
+});
+
 await scenario("resumeWithHeader", async () => {
 	const header = {
 		affinityScope: "client_session" as const,

@@ -1,4 +1,4 @@
-import { clientToolName } from "./tool-server";
+import type { ToolNames } from "./tool-server";
 import type { Block } from "./turn-request";
 
 export type StreamEvent = { type: string; [key: string]: unknown };
@@ -30,7 +30,7 @@ interface Accumulated {
  * model call Claude Code makes arrives as its own message; the client must see
  * a single message per request, so later messages of the same leg are merged
  * in with continued block indexes. Only the client's own tools are forwarded,
- * renamed back from `mcp__client__<name>`: forwarding any other tool_use would
+ * renamed back to the client's names: forwarding any other tool_use would
  * leave the client waiting on a call it cannot answer.
  */
 export class ReplyComposer {
@@ -50,7 +50,7 @@ export class ReplyComposer {
 
 	constructor(
 		private readonly opts: {
-			knownTools: ReadonlySet<string>;
+			toolNames: ToolNames;
 			/** A client tool_use was forwarded; its id now names this turn. */
 			onToolUse: (id: string) => void;
 			newMessageId: () => string;
@@ -137,10 +137,7 @@ export class ReplyComposer {
 	private openBlock(block: Block): number | null {
 		let out: Block;
 		if (block.type === "tool_use") {
-			const name = clientToolName(
-				String(block.name ?? ""),
-				this.opts.knownTools,
-			);
+			const name = this.opts.toolNames.clientName(String(block.name ?? ""));
 			if (name === null) return null;
 			const id = String(block.id);
 			out = { ...block, name };

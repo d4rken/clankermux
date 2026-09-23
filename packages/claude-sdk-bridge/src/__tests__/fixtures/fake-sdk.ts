@@ -22,6 +22,7 @@ import type {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { type ClaudeSdkBridge, createClaudeSdkBridge } from "../../bridge";
+import { MCP_SERVER_NAME } from "../../tool-server";
 import type {
 	BridgeLog,
 	BridgeQuery,
@@ -114,7 +115,7 @@ export class FakeQuery implements BridgeQuery {
 	/** The MCP client Claude Code would be, connected to the bridge's tool server. */
 	mcp(): Promise<Client> {
 		this.client ??= (async () => {
-			const server = this.options.mcpServers?.client as
+			const server = this.options.mcpServers?.[MCP_SERVER_NAME] as
 				| McpSdkServerConfigWithInstance
 				| undefined;
 			if (!server) throw new Error("no tool server");

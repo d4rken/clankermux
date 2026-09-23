@@ -202,7 +202,7 @@ describe("buildSyntheticTranscript (golden)", () => {
 			sessionId: "11111111-1111-4111-8111-111111111111",
 			cwd: "/work/cwd",
 			model: "claude-sonnet-5",
-			toolPrefix: "mcp__client__",
+			upstreamToolName: (name) => `mcp__c__${name}`,
 			version: "2.1.280",
 			randomId: () => `uuid-${++n}`,
 			now: () => Date.UTC(2026, 8, 23),
@@ -242,13 +242,13 @@ describe("buildSyntheticTranscript (golden)", () => {
 						{
 							type: "tool_use",
 							id: "t1",
-							name: "mcp__client__read",
+							name: "mcp__c__read",
 							input: { path: "a.txt" },
 						},
 						{
 							type: "tool_use",
 							id: "t2",
-							name: "mcp__client__read",
+							name: "mcp__c__read",
 							input: { path: "b.txt" },
 						},
 					],
@@ -299,5 +299,12 @@ describe("flattenHistory", () => {
 		expect(text).toContain("[tool result id=t2]\nB");
 		expect(text).not.toMatch(/^(Human|Assistant):/m);
 		expect(text).not.toContain("plan");
+	});
+
+	it("names a tool call the way the turn's tools are named inside Claude Code", () => {
+		const text = flattenHistory(normalizeHistory(conversation), (name) =>
+			name === "read" ? "t_0123456789abcdef" : name,
+		);
+		expect(text).toContain("[tool call t_0123456789abcdef id=t1]");
 	});
 });

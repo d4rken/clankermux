@@ -176,6 +176,12 @@ describe.skipIf(reason !== null)(
 					]);
 					expect(r2?.answer).toBe("done: GW-CONTENT");
 					expect(r3?.answer).toBe("echo: third turn");
+					// Chat's encoded names are 58 characters; Claude Code's MCP prefix
+					// must still leave them within the API's 64.
+					for (const names of s.upstreamToolNames as string[][])
+						expect(names).toEqual([expect.stringMatching(/^mcp__c__/)]);
+					for (const name of (s.upstreamToolNames as string[][]).flat())
+						expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
 					expect(s.upstreamAccounts as string[]).toHaveLength(1);
 					expect(new Set(s.cliRetries as string[])).toEqual(new Set(["0"]));
 					const turns = s.turns as Row[];
