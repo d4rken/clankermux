@@ -147,10 +147,15 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	 * Read the single most recent snapshot per account, for the given accounts.
 	 * Backs the dashboard's "last known usage" fallback when the live usage
 	 * cache has nothing (e.g. usage polling fails after a subscription lapses).
+	 *
+	 * Seeks each account's newest row on the (account_id, sampled_at) primary
+	 * key instead of ranking its whole history, which runs to tens of thousands
+	 * of rows per account.
 	 */
 	async getLatestSnapshots(accountIds: string[]): Promise<RankedSnapshot[]> {
-		if (accountIds.length === 0) return [];
-		const placeholders = accountIds.map(() => "?").join(", ");
+		const ids = [...new Set(accountIds)];
+		if (ids.length === 0) return [];
+		const values = ids.map(() => "(?)").join(", ");
 		const rows = await this.query<{
 			account_id: string;
 			provider: string | null;
@@ -161,15 +166,17 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			seven_day_reset: number | null;
 		}>(
 			`
-			WITH ranked AS (
-				SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY sampled_at DESC) AS rn
-				FROM usage_snapshots
-				WHERE account_id IN (${placeholders})
-			)
-			SELECT account_id, provider, sampled_at, five_hour_pct, seven_day_pct, five_hour_reset, seven_day_reset
-			FROM ranked WHERE rn = 1;
+			WITH ids(account_id) AS (VALUES ${values})
+			SELECT s.account_id, s.provider, s.sampled_at, s.five_hour_pct, s.seven_day_pct, s.five_hour_reset, s.seven_day_reset
+			FROM ids
+			JOIN usage_snapshots s
+				ON s.account_id = ids.account_id
+				AND s.sampled_at = (
+					SELECT MAX(latest.sampled_at) FROM usage_snapshots latest
+					WHERE latest.account_id = ids.account_id
+				);
 		`,
-			accountIds,
+			ids,
 		);
 
 		return rows.map((row) => ({
