@@ -32,12 +32,7 @@ export function requestDetailsHref(id: string): string {
  * expresses it and a link would silently show a subset.
  */
 export function laneRequestsHref(scope: LaneScope): string | null {
-	if (
-		scope.kind === "other" ||
-		scope.kind === "account-pending" ||
-		scope.kind === "no-account"
-	)
-		return null;
+	if (scope.kind === "other" || scope.kind === "account-pending") return null;
 	const params = paramsFor(scope);
 	return `/requests?${params.toString()}`;
 }
@@ -55,10 +50,13 @@ function paramsFor(scope: Exclude<LaneScope, { kind: "other" }>) {
 		case "no-client":
 			return new URLSearchParams({ noApiKey: "1" });
 		case "account":
-			return new URLSearchParams({ account: scope.accountId });
+			// By id, never by name: names are display labels and can be duplicated
+			// or renamed without changing which history lane this link addresses.
+			return new URLSearchParams({ accountId: scope.accountId });
 		case "account-pending":
-		case "no-account":
 			return new URLSearchParams();
+		case "no-account":
+			return new URLSearchParams({ noAccount: "1" });
 	}
 }
 

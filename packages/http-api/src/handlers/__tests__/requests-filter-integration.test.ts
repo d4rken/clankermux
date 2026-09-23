@@ -163,6 +163,31 @@ describe("requests filtering — real SQLite", () => {
 		expect(await ids(res)).toEqual(["ok-new", "err-429", "err-404", "ok-old"]);
 	});
 
+	it("account id and no-account filters agree between list and count", async () => {
+		const db = makeDb(rows);
+		const byId = await createRequestsSummaryHandler(db)(50, 0, {
+			accountId: "acc1",
+		});
+		expect(await ids(byId)).toEqual(["ok-new", "err-429", "err-404", "ok-old"]);
+		const byIdCount = await createRequestsCountHandler(db)({
+			accountId: "acc1",
+		});
+		expect(((await byIdCount.json()) as { total: number }).total).toBe(4);
+
+		const noAccount = await createRequestsSummaryHandler(db)(50, 0, {
+			account: "Primary",
+			accountId: "acc1",
+			noAccount: true,
+		});
+		expect(await ids(noAccount)).toEqual(["err-500"]);
+		const noAccountCount = await createRequestsCountHandler(db)({
+			account: "Primary",
+			accountId: "acc1",
+			noAccount: true,
+		});
+		expect(((await noAccountCount.json()) as { total: number }).total).toBe(1);
+	});
+
 	it("the noApiKey bucket matches NULL keys", async () => {
 		const res = await createRequestsSummaryHandler(makeDb(rows))(50, 0, {
 			noApiKey: true,

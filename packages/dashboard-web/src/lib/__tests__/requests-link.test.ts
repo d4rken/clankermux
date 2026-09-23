@@ -72,6 +72,18 @@ describe("laneRequestsHref", () => {
 		);
 	});
 
+	it("filters to an account by account id", () => {
+		expect(laneRequestsHref({ kind: "account", accountId: "acct-1" })).toBe(
+			"/requests?accountId=acct-1",
+		);
+	});
+
+	it("selects the no-account bucket with its own flag", () => {
+		expect(laneRequestsHref({ kind: "no-account" })).toBe(
+			"/requests?noAccount=1",
+		);
+	});
+
 	it("selects the keyless bucket with its own flag", () => {
 		expect(laneRequestsHref({ kind: "no-client" })).toBe(
 			"/requests?noApiKey=1",
