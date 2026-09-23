@@ -123,6 +123,7 @@ import {
 	createRoutingHandler,
 } from "./handlers/routing";
 import { createRunwayHandler } from "./handlers/runway";
+import { createSdkBridgeTurnHandler } from "./handlers/sdk-bridge-turns";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import { createStopsHistoryHandler } from "./handlers/stops-history";
 import {
@@ -720,6 +721,16 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// An SDK bridge turn, by turn id or by one of its legs' request ids
+		if (path.startsWith("/api/sdk-bridge-turns/") && method === "GET") {
+			const parts = path.split("/");
+			const id = parts[3];
+			if (id && parts.length === 4) {
+				const turnHandler = createSdkBridgeTurnHandler(this.context.dbOps);
+				return await this.wrapHandler(() => turnHandler(id))(req, url);
 			}
 		}
 

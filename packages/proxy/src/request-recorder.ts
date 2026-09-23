@@ -1684,6 +1684,7 @@ export class RequestRecorder {
 			refusalCategory: summary?.refusalCategory,
 			fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
 			fallbackFromModel: meta.fallbackFromModel ?? undefined,
+			sdkBridgeTurnId: meta.sdkBridgeTurnId ?? undefined,
 		};
 	}
 

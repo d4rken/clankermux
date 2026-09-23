@@ -337,6 +337,66 @@ describe("SdkBridgeTurnRepository", () => {
 		});
 	});
 
+	it("lists the inner rows that still exist, with the account's name", async () => {
+		await insertTurn();
+		db.run(
+			"INSERT INTO accounts (id, name, provider, created_at) VALUES ('acct-a', 'Claude A', 'anthropic', 0)",
+		);
+		await requests.save(
+			innerRequest("inner-1", {
+				usage: {
+					model: "claude-opus-5-5",
+					inputTokens: 10,
+					outputTokens: 200,
+					costUsd: 0.5,
+				},
+			}),
+		);
+		await requests.save(
+			innerRequest("inner-2", {
+				accountUsed: "gone",
+				statusCode: 429,
+				success: false,
+			}),
+		);
+		await requests.save(innerRequest("other", { sdkBridgeTurnId: "turn-2" }));
+
+		const rows = await repo.listInnerRequests("turn-1", 10);
+		expect(rows.map((r) => r.id)).toEqual(["inner-1", "inner-2"]);
+		expect(rows[0]).toMatchObject({
+			accountId: "acct-a",
+			accountName: "Claude A",
+			model: "claude-opus-5-5",
+			statusCode: 200,
+			success: true,
+			inputTokens: 10,
+			outputTokens: 200,
+			costUsd: 0.5,
+		});
+		expect(rows[1]).toMatchObject({
+			accountId: "gone",
+			accountName: null,
+			statusCode: 429,
+			success: false,
+			inputTokens: null,
+		});
+		expect(await repo.listInnerRequests("turn-1", 1)).toHaveLength(1);
+		db.run("DELETE FROM requests");
+		expect(await repo.listInnerRequests("turn-1", 10)).toEqual([]);
+	});
+
+	it("finds a turn by one of its legs", async () => {
+		await insertTurn();
+		await repo.insertLeg({
+			id: "leg-1",
+			turnId: "turn-1",
+			kind: "start",
+			startedAt: 1_000,
+		});
+		expect(await repo.findTurnIdByLeg("leg-1")).toBe("turn-1");
+		expect(await repo.findTurnIdByLeg("turn-1")).toBeNull();
+	});
+
 	it("reports zero inner rows when they were already pruned", async () => {
 		await insertTurn();
 		await repo.bumpTurnCounters("turn-1", { innerCalls: 2 });

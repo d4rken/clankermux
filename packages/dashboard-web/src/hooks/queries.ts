@@ -738,6 +738,22 @@ export const useRequestById = (id: string | null) => {
 };
 
 /**
+ * An SDK bridge turn, by turn id or by a leg's request id; null when neither
+ * exists. A running turn keeps changing, so it is refetched while open.
+ */
+export const useSdkBridgeTurn = (id: string | null) => {
+	return useQuery({
+		queryKey: queryKeys.sdkBridgeTurn(id ?? ""),
+		queryFn: () => api.getSdkBridgeTurn(id as string),
+		enabled: id !== null,
+		staleTime: 5_000,
+		refetchInterval: (query) =>
+			query.state.data?.turn.status === "running" ? 5_000 : false,
+		retry: shouldRetryDashboardQuery,
+	});
+};
+
+/**
  * Distinct project names observed across all recorded requests. Backs the
  * Project filter dropdown; mirrors useApiKeys' caching (the list changes
  * rarely, so a minute of staleness is fine).

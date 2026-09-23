@@ -89,6 +89,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			gateway_hint_prev_tool_durations: string | null;
 			gateway_hint_compaction: string | null;
 			gateway_hint_context_compacted: string | null;
+			sdk_bridge_turn_id: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name,
@@ -169,6 +170,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			gatewayHintCompaction: request.gateway_hint_compaction ?? undefined,
 			gatewayHintContextCompacted:
 				request.gateway_hint_context_compacted ?? undefined,
+			sdkBridgeTurnId: request.sdk_bridge_turn_id || undefined,
 		}));
 
 		return jsonResponse(response);

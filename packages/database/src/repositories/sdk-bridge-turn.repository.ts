@@ -1,5 +1,6 @@
 import type {
 	SdkBridgeHistoryMode,
+	SdkBridgeInnerRequest,
 	SdkBridgeInnerSummary,
 	SdkBridgeLegErrorPhase,
 	SdkBridgeLegFinish,
@@ -63,6 +64,21 @@ interface LegRow {
 	error_type: string | null;
 	error_message: string | null;
 	tool_use_ids: string | null;
+}
+
+interface InnerRequestRow {
+	id: string;
+	timestamp: number;
+	account_used: string | null;
+	account_name: string | null;
+	model: string | null;
+	status_code: number | null;
+	success: number | null;
+	input_tokens: number | null;
+	output_tokens: number | null;
+	cache_read_input_tokens: number | null;
+	cache_creation_input_tokens: number | null;
+	cost_usd: number | null;
 }
 
 interface InnerSummaryRow {
@@ -314,5 +330,46 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 			costUsd: inner?.cost_usd ?? 0,
 		};
 		return { turn: toTurn(turn), legs: legs.map(toLeg), inner: summary };
+	}
+
+	/** The turn a leg belongs to. A leg id is the client's request id. */
+	async findTurnIdByLeg(legId: string): Promise<string | null> {
+		const row = await this.get<{ turn_id: string }>(
+			`SELECT turn_id FROM sdk_bridge_turn_legs WHERE id = ?`,
+			[legId],
+		);
+		return row?.turn_id ?? null;
+	}
+
+	/** The turn's inner `requests` rows that still exist, oldest first. */
+	async listInnerRequests(
+		turnId: string,
+		limit: number,
+	): Promise<SdkBridgeInnerRequest[]> {
+		const rows = await this.query<InnerRequestRow>(
+			`SELECT r.id, r.timestamp, r.account_used, a.name AS account_name,
+				r.model, r.status_code, r.success, r.input_tokens, r.output_tokens,
+				r.cache_read_input_tokens, r.cache_creation_input_tokens, r.cost_usd
+			FROM requests r
+			LEFT JOIN accounts a ON a.id = r.account_used
+			WHERE r.sdk_bridge_turn_id = ?
+			ORDER BY r.timestamp, r.id
+			LIMIT ?`,
+			[turnId, limit],
+		);
+		return rows.map((row) => ({
+			id: row.id,
+			timestamp: Number(row.timestamp),
+			accountId: row.account_used,
+			accountName: row.account_name,
+			model: row.model,
+			statusCode: row.status_code,
+			success: !!row.success,
+			inputTokens: row.input_tokens,
+			outputTokens: row.output_tokens,
+			cacheReadInputTokens: row.cache_read_input_tokens,
+			cacheCreationInputTokens: row.cache_creation_input_tokens,
+			costUsd: row.cost_usd,
+		}));
 	}
 }

@@ -2527,6 +2527,26 @@ describe("RequestRecorder — refusal and fallback-credit marks", () => {
 	});
 });
 
+describe("RequestRecorder — SDK bridge inner calls", () => {
+	it("names the turn on the live summary event, so the row can link to it", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ sdkBridgeTurnId: "turn-1" }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.emitted).not.toHaveLength(0);
+		expect(h.emitted.at(-1)?.sdkBridgeTurnId).toBe("turn-1");
+
+		const plain = makeHarness();
+		plain.recorder.begin(makeMeta());
+		plain.recorder.attachUsageSummary("req-1", makeSummary());
+		plain.recorder.finishTransport("req-1", "success");
+		await plain.flush();
+		expect(plain.emitted).not.toHaveLength(0);
+		expect(plain.emitted.at(-1)?.sdkBridgeTurnId).toBeUndefined();
+	});
+});
+
 describe("RequestRecorder — cost provenance", () => {
 	it("persists and emits a reported zero without a model or a token-observation timestamp", async () => {
 		const h = makeHarness();

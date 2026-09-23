@@ -173,3 +173,34 @@ export interface SdkBridgeTurnDetail {
 	legs: SdkBridgeTurnLeg[];
 	inner: SdkBridgeInnerSummary;
 }
+
+/** One inner model call of a turn: a `requests` row carrying its turn id. */
+export interface SdkBridgeInnerRequest {
+	id: string;
+	timestamp: number;
+	accountId: string | null;
+	/** Null when the account was deleted since. */
+	accountName: string | null;
+	model: string | null;
+	statusCode: number | null;
+	success: boolean;
+	inputTokens: number | null;
+	outputTokens: number | null;
+	cacheReadInputTokens: number | null;
+	cacheCreationInputTokens: number | null;
+	costUsd: number | null;
+}
+
+/** `GET /api/sdk-bridge-turns/:id`, where `:id` is a turn id or a leg id. */
+export interface SdkBridgeTurnView extends SdkBridgeTurnDetail {
+	/** Name of `turn.accountId`; null when unset or deleted. */
+	accountName: string | null;
+	/** Oldest first, capped at {@link SDK_BRIDGE_TURN_VIEW_MAX_INNER}. */
+	innerRequests: SdkBridgeInnerRequest[];
+	/** Inner calls the turn counted whose `requests` row no longer exists. */
+	prunedInnerCalls: number;
+	/** The leg the lookup matched, when `:id` was a leg id. */
+	matchedLegId: string | null;
+}
+
+export const SDK_BRIDGE_TURN_VIEW_MAX_INNER = 200;

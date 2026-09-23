@@ -389,6 +389,8 @@ export interface RequestResponse extends GatewayHintMetadata {
 	fallbackCreditClaimed?: boolean;
 	/** The model whose refusal this retry redeems, when it could be resolved. */
 	fallbackFromModel?: string;
+	/** The SDK bridge turn this row is an inner model call of. */
+	sdkBridgeTurnId?: string;
 }
 
 // Detailed request with payload

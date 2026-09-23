@@ -36,6 +36,7 @@ import {
 	useRequestProjects,
 	useRequests,
 	useRequestsCount,
+	useSdkBridgeTurn,
 } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
 import { decodeBase64Utf8 } from "../lib/base64";
@@ -62,6 +63,7 @@ import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { ClientLabel } from "./clients/ClientLabel";
 import { RequestDetailsModal } from "./RequestDetailsModal";
+import { SdkBridgeTurnChip, SdkBridgeTurnDialog } from "./SdkBridgeTurnDialog";
 import { Alert } from "./ui/alert";
 import { Badge, badgeVariants } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -316,6 +318,29 @@ export function RequestsTab() {
 		);
 	}, [setSearchParams]);
 
+	/** The open SDK bridge turn, pushed and replaced like `request` above. */
+	const turnParam = searchParams.get("turn") || null;
+	const openTurn = useCallback(
+		(id: string) => {
+			setSearchParams((prev) => {
+				const next = new URLSearchParams(prev);
+				next.set("turn", id);
+				return next;
+			});
+		},
+		[setSearchParams],
+	);
+	const closeTurn = useCallback(() => {
+		setSearchParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				next.delete("turn");
+				return next;
+			},
+			{ replace: true },
+		);
+	}, [setSearchParams]);
+
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [accountFilter, setAccountFilter] = useState<string | null>(null);
 	const [dateFrom, setDateFrom] = useState<string>("");
@@ -468,8 +493,16 @@ export function RequestsTab() {
 	//    the SSE stream running, and the request lands in `data.summaries` on
 	//    completion — which opens the modal through step 1 above.
 	const byIdError = byIdActive ? byIdQuery.error : null;
-	const byIdMissing =
+	const byIdLookupEmpty =
 		byIdActive && byIdQuery.isSuccess && byIdQuery.data === null;
+	// A client's request id for a request the SDK bridge served names an outer
+	// leg, which has no request row. It opens that leg's turn instead.
+	const legTurnQuery = useSdkBridgeTurn(
+		byIdLookupEmpty ? modalRequestId : null,
+	);
+	const openLegTurn = byIdLookupEmpty && legTurnQuery.data != null;
+	const byIdMissing =
+		byIdLookupEmpty && legTurnQuery.isSuccess && legTurnQuery.data === null;
 
 	// Filter dropdown options come from dedicated endpoints (not from the loaded
 	// requests slice) so every configured account/API key is selectable, even
@@ -1413,6 +1446,7 @@ export function RequestsTab() {
 
 									{/* Row 3 "what/outcome": wraps freely — model, usage, cost, flags */}
 									{(modelPresentation ||
+										summary?.sdkBridgeTurnId ||
 										summary?.reasoningEffort ||
 										summary?.totalTokens != null ||
 										(summary?.attachmentChars ?? 0) > 0 ||
@@ -1444,6 +1478,14 @@ export function RequestsTab() {
 														.filter(Boolean)
 														.join(" · ")}
 												</Badge>
+											)}
+											{summary?.sdkBridgeTurnId && (
+												<SdkBridgeTurnChip
+													onOpen={() => {
+														if (summary.sdkBridgeTurnId)
+															openTurn(summary.sdkBridgeTurnId);
+													}}
+												/>
 											)}
 											{refusalBadge && (
 												<Badge variant="outline" title={refusalBadge.title}>
@@ -1546,6 +1588,12 @@ export function RequestsTab() {
 					isOpen={true}
 					onClose={closeRequest}
 				/>
+			)}
+			{openLegTurn && modalRequestId && (
+				<SdkBridgeTurnDialog lookupId={modalRequestId} onClose={closeRequest} />
+			)}
+			{turnParam && (
+				<SdkBridgeTurnDialog lookupId={turnParam} onClose={closeTurn} />
 			)}
 		</Card>
 	);
