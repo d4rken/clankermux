@@ -366,6 +366,32 @@ async function assertIntegrityCheck(server: Server): Promise<void> {
 	log("/api/storage/integrity/check: quick check ok, via a database worker");
 }
 
+/**
+ * The binary marks both Agent SDKs external, so it cannot run Claude Code. It
+ * must still start, and say so instead of offering official Anthropic
+ * accounts to clients that could only reach them through the bridge.
+ */
+async function assertSdkBridgeUnavailable(server: Server): Promise<void> {
+	const res = await get(server, "/api/system/status");
+	if (res?.status !== 200) {
+		fail(
+			server,
+			`GET /api/system/status: expected 200, got ${res?.status ?? "no response"}`,
+		);
+	}
+	const body = (await res.json()) as {
+		sdkBridge?: { availability?: { state?: string; reason?: string } };
+	};
+	const availability = body.sdkBridge?.availability;
+	if (availability?.state !== "unavailable") {
+		fail(
+			server,
+			`GET /api/system/status: expected the SDK bridge unavailable, got ${JSON.stringify(body.sdkBridge ?? null)}`,
+		);
+	}
+	log(`/api/system/status: SDK bridge unavailable (${availability.reason})`);
+}
+
 /** The catch-all for the silent failure mode: a worker that never loaded. */
 function assertNoModuleErrors(server: Server): void {
 	const output = server.output();
@@ -436,6 +462,7 @@ async function main(): Promise<void> {
 		await assertHealth(server);
 		await assertAsset(server, await assertDashboard(server));
 		await assertStats(server);
+		await assertSdkBridgeUnavailable(server);
 		await assertQuotaDrift(server);
 		await assertIntegrityCheck(server);
 

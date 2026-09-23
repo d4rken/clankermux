@@ -1,10 +1,34 @@
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
 	CallToolRequestSchema,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Block, ClientTool } from "./turn-request";
+
+/**
+ * The parts of the MCP SDK the tool server uses, imported on first use like
+ * the Agent SDK. The compiled server marks both SDKs external, and a static
+ * import of an external module stops the whole binary from starting instead
+ * of leaving just the bridge unavailable.
+ */
+export interface McpSdk {
+	McpServer: typeof McpServer;
+	CallToolRequestSchema: typeof CallToolRequestSchema;
+	ListToolsRequestSchema: typeof ListToolsRequestSchema;
+}
+
+export async function loadMcpSdk(): Promise<McpSdk> {
+	const [server, types] = await Promise.all([
+		import("@modelcontextprotocol/sdk/server/mcp.js"),
+		import("@modelcontextprotocol/sdk/types.js"),
+	]);
+	return {
+		McpServer: server.McpServer,
+		CallToolRequestSchema: types.CallToolRequestSchema,
+		ListToolsRequestSchema: types.ListToolsRequestSchema,
+	};
+}
 
 export const MCP_SERVER_NAME = "client";
 /** Claude Code names our tools `mcp__<server>__<tool>`. */
@@ -135,10 +159,11 @@ export class ParkedCalls {
  * the result.
  */
 export function createToolServer(
+	mcp: McpSdk,
 	tools: readonly ClientTool[],
 	onCall: (toolUseId: string, name: string) => Promise<McpToolResult>,
 ): McpSdkServerConfigWithInstance {
-	const server = new McpServer(
+	const server = new mcp.McpServer(
 		{ name: MCP_SERVER_NAME, version: "1.0.0" },
 		{ capabilities: { tools: {} } },
 	);
@@ -153,20 +178,23 @@ export function createToolServer(
 		// defer the client's tools behind tool search.
 		_meta: { "anthropic/alwaysLoad": true },
 	}));
-	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+	server.server.setRequestHandler(mcp.ListToolsRequestSchema, () => ({
 		tools: listed,
 	}));
-	server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-		const id = request.params._meta?.[TOOL_USE_ID_META];
-		if (typeof id !== "string")
-			return {
-				content: [
-					{ type: "text", text: `Missing _meta["${TOOL_USE_ID_META}"]` },
-				],
-				isError: true,
-			};
-		return onCall(id, request.params.name);
-	});
+	server.server.setRequestHandler(
+		mcp.CallToolRequestSchema,
+		async (request) => {
+			const id = request.params._meta?.[TOOL_USE_ID_META];
+			if (typeof id !== "string")
+				return {
+					content: [
+						{ type: "text", text: `Missing _meta["${TOOL_USE_ID_META}"]` },
+					],
+					isError: true,
+				};
+			return onCall(id, request.params.name);
+		},
+	);
 	return {
 		type: "sdk",
 		name: MCP_SERVER_NAME,

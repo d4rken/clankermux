@@ -6,6 +6,7 @@ import type {
 	SpawnedProcess,
 	SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
+import { errorSummary } from "./errors";
 
 function isMusl(): boolean {
 	const arch =
@@ -36,7 +37,7 @@ export function resolveClaudeExecutable():
 		return { path };
 	} catch (error) {
 		return {
-			error: `Claude Code binary package ${pkg} is not installed (${error instanceof Error ? error.message : String(error)})`,
+			error: `Claude Code binary package ${pkg} is not installed (${errorSummary(error)})`,
 		};
 	}
 }

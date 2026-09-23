@@ -36,7 +36,9 @@ describe("admission", () => {
 	});
 
 	it("answers 529 with Retry-After at the process cap, parked processes included", () => {
-		const rejection = checkAdmission(input({ processes: 4 }));
+		const rejection = checkAdmission(
+			input({ processes: DEFAULT_SDK_BRIDGE_LIMITS.maxProcesses }),
+		);
 		expect(rejection).toMatchObject({
 			status: 529,
 			reason: "process_cap",

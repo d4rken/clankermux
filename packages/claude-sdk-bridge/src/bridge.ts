@@ -2,9 +2,11 @@ import { mkdirSync } from "node:fs";
 import { Logger } from "@clankermux/logger";
 import {
 	type SdkBridgeAvailability,
+	type SdkBridgeCounters,
 	type SdkBridgeHistoryMode,
 	type SdkBridgeInnerContext,
 	type SdkBridgeRoutePlan,
+	type SdkBridgeStatus,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
@@ -19,7 +21,12 @@ import {
 	ConversationStore,
 	conversationKey,
 } from "./conversation-store";
-import { type BridgeError, bridgeErrors, errorResponse } from "./errors";
+import {
+	type BridgeError,
+	bridgeErrors,
+	errorResponse,
+	errorSummary,
+} from "./errors";
 import {
 	buildSyntheticTranscript,
 	classifyRebuild,
@@ -45,7 +52,13 @@ import {
 } from "./spawn";
 import { LegResponse } from "./sse";
 import { getSystemPromptPolicy } from "./system-prompt-policy";
-import { createToolServer, MCP_TOOL_PREFIX, ParkedCalls } from "./tool-server";
+import {
+	createToolServer,
+	loadMcpSdk,
+	MCP_TOOL_PREFIX,
+	type McpSdk,
+	ParkedCalls,
+} from "./tool-server";
 import {
 	type Block,
 	blocksOf,
@@ -65,27 +78,7 @@ import {
 const CLAUDE_CODE_VERSION = "2.1.280";
 const SYSTEM_PROMPT_POLICY = "drop";
 
-export interface SdkBridgeCounters {
-	turnsStarted: number;
-	turnsCompleted: number;
-	turnsFailed: number;
-	continuations: number;
-	rejected: Record<string, number>;
-	resumes: number;
-	rebuilds: number;
-}
-
-export interface SdkBridgeStatus {
-	availability: SdkBridgeAvailability;
-	/** Claude Code queries alive, parked ones included. */
-	live: number;
-	/** Queries waiting on the client's tool results. */
-	parked: number;
-	cap: number;
-	counters: SdkBridgeCounters;
-	/** Highest per-process peak RSS observed (VmHWM); null where unmeasurable. */
-	peakRssBytes: number | null;
-}
+export type { SdkBridgeCounters, SdkBridgeStatus };
 
 export interface ClaudeSdkBridge extends SdkBridgeTransport {
 	/** Refuse new turns and kill parked queries, now and whenever one parks later. */
@@ -102,12 +95,16 @@ function isUuid(value: string): boolean {
 }
 
 function sdkResolvable(): string | null {
-	try {
-		import.meta.resolve("@anthropic-ai/claude-agent-sdk");
-		return null;
-	} catch (error) {
-		return `@anthropic-ai/claude-agent-sdk cannot be loaded (${error instanceof Error ? error.message : String(error)})`;
-	}
+	for (const specifier of [
+		"@anthropic-ai/claude-agent-sdk",
+		"@modelcontextprotocol/sdk/server/mcp.js",
+	])
+		try {
+			import.meta.resolve(specifier);
+		} catch (error) {
+			return `${specifier} cannot be loaded (${errorSummary(error)})`;
+		}
+	return null;
 }
 
 export function createClaudeSdkBridge(
@@ -136,17 +133,20 @@ export function createClaudeSdkBridge(
 	}
 	if (!unavailableReason && !deps.queryFn) unavailableReason = sdkResolvable();
 
-	let queryFn: Promise<QueryFn> | null = deps.queryFn
-		? Promise.resolve(deps.queryFn)
-		: null;
-	const loadQueryFn = async (): Promise<QueryFn> => {
-		queryFn ??= import("@anthropic-ai/claude-agent-sdk").then(
-			(sdk) => sdk.query as QueryFn,
-		);
+	let sdks: Promise<{ query: QueryFn; mcp: McpSdk }> | null = null;
+	const loadSdks = async (): Promise<{ query: QueryFn; mcp: McpSdk }> => {
+		sdks ??= Promise.all([
+			deps.queryFn
+				? deps.queryFn
+				: import("@anthropic-ai/claude-agent-sdk").then(
+						(sdk) => sdk.query as QueryFn,
+					),
+			loadMcpSdk(),
+		]).then(([query, mcp]) => ({ query, mcp }));
 		try {
-			return await queryFn;
+			return await sdks;
 		} catch (error) {
-			unavailableReason = `@anthropic-ai/claude-agent-sdk failed to load (${error instanceof Error ? error.message : String(error)})`;
+			unavailableReason = `the Agent SDK or the MCP SDK failed to load (${errorSummary(error)})`;
 			throw new SdkBridgeUnavailableError(unavailableReason);
 		}
 	};
@@ -342,7 +342,7 @@ export function createClaudeSdkBridge(
 		bumpIdleTimeout?: () => void;
 	}): Promise<Response> {
 		assertAvailable();
-		const run = await loadQueryFn();
+		const { query: run, mcp } = await loadSdks();
 		const { plan, meta } = input;
 		const startedAt = now();
 		const recorder = new TurnRecorder(deps.turnRepo, log, plan.turnId);
@@ -492,7 +492,7 @@ export function createClaudeSdkBridge(
 		const parked = new ParkedCalls();
 		const toolNames = turn.tools.map((t) => t.name);
 		const toolServer = turn.tools.length
-			? createToolServer(turn.tools, (id) =>
+			? createToolServer(mcp, turn.tools, (id) =>
 					live ? live.onToolCall(id) : parked.wait(id),
 				)
 			: null;

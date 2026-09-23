@@ -54,7 +54,7 @@ export interface SdkBridgeLimits {
 }
 
 export const DEFAULT_SDK_BRIDGE_LIMITS: SdkBridgeLimits = {
-	maxProcesses: 4,
+	maxProcesses: 8,
 	parkedTimeoutMs: 15 * 60_000,
 	turnDeadlineMs: 60 * 60_000,
 	maxHistoryBytes: 64 * 1024 * 1024,

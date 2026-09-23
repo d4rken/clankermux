@@ -33,6 +33,15 @@ const CREDENTIAL_TEXT =
 
 const GENERIC_UPSTREAM_MESSAGE = "The upstream model call failed";
 
+/**
+ * An error's first line, for an availability reason. Module resolution errors
+ * append a require stack of internal paths that says nothing to an operator.
+ */
+export function errorSummary(error: unknown): string {
+	const text = error instanceof Error ? error.message : String(error);
+	return text.split("\n")[0]?.trim() ?? "";
+}
+
 export function sanitizeMessage(text: string | null | undefined): string {
 	const trimmed = (text ?? "").trim();
 	if (!trimmed || CREDENTIAL_TEXT.test(trimmed))

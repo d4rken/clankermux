@@ -180,6 +180,7 @@ export class APIRouter {
 			getStrategy,
 			getEventLoopLag,
 			getProviderOverload,
+			getSdkBridgeStatus,
 		} = this.context;
 
 		// The management login. Built from `dbOps` when the caller did not inject
@@ -296,6 +297,7 @@ export class APIRouter {
 			getIntegrityStatus,
 			getEventLoopLag,
 			getProviderOverload,
+			getSdkBridgeStatus,
 		});
 		const versionCheckHandler = createVersionCheckHandler();
 

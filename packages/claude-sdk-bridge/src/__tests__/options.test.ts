@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildQueryOptions, childEnv, workPaths } from "../options";
 import { FileSessionStore } from "../session-store";
-import { createToolServer } from "../tool-server";
+import { createToolServer, loadMcpSdk } from "../tool-server";
 
 const ROOT = "/var/cache/clankermux/claude-agent-sdk";
+
+const mcpSdk = await loadMcpSdk();
 
 describe("child environment", () => {
 	it("is exactly the allowlist, with every path under the work root", () => {
@@ -48,6 +50,7 @@ describe("query options", () => {
 	afterAll(() => rmSync(dir, { recursive: true, force: true }));
 	const store = new FileSessionStore(dir);
 	const server = createToolServer(
+		mcpSdk,
 		[{ name: "read", description: "", input_schema: { type: "object" } }],
 		async () => ({ content: [] }),
 	);

@@ -129,6 +129,10 @@ import {
 	type CapacityRestoredProbeMarker,
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
+import {
+	installSdkBridge,
+	type SdkBridgeWiring,
+} from "./claude-sdk-bridge-wiring";
 import { ClientService } from "./client-service";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { applyDevinQuotaAutomation } from "./devin-quota-automation";
@@ -310,6 +314,7 @@ let anthropicBankedResetApplyScheduler: AnthropicBankedResetApplyScheduler | nul
 	null;
 let quotaDriftScheduler: QuotaDriftScheduler | null = null;
 let affinityPinPersistence: AffinityPinPersistence | null = null;
+let sdkBridge: SdkBridgeWiring | null = null;
 let strategyGeneration = 0;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
@@ -906,6 +911,8 @@ export default async function startServer(options?: {
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getStrategy: () => currentStrategy,
 		getEventLoopLag: () => getEventLoopStats(),
+		// Built after this router, with the proxy context; null until then.
+		getSdkBridgeStatus: () => sdkBridge?.status() ?? null,
 		// Joins the breaker's live buckets with the hold semaphore's per-bucket
 		// occupancy — two module-level maps that only this layer sees together,
 		// and the pairing is the useful part: an open bucket with many holders is
@@ -1276,6 +1283,17 @@ export default async function startServer(options?: {
 	// The model-catalogue caches were built before the API router (they are
 	// shared with it) and reach token acquisition through this holder.
 	proxyContextRef = proxyContext;
+	// Before serve(): a floored request arriving first must already see whether
+	// official Anthropic accounts can serve it through the bridge.
+	const bridgeWiring = await installSdkBridge({
+		proxyContext,
+		config,
+		turnRepo: dbOps.sdkBridgeTurns,
+	});
+	sdkBridge = bridgeWiring;
+	// The graceful path disposes it explicitly after the HTTP drain; this covers
+	// every other exit that runs the disposables.
+	registerDisposable({ dispose: () => bridgeWiring.dispose() });
 	await clients.bootstrap();
 	for (const account of await dbOps.getAllAccounts()) {
 		const evidence = await modelPermissions.permissions(account);
@@ -2184,6 +2202,12 @@ async function handleGracefulShutdown(signal: string) {
 			);
 		}
 
+		// A parked bridge turn waits on its client's next request, which cannot
+		// arrive once the listener stops, so it would hold the drain until the
+		// watchdog. Turns still running finish during the drain; their Claude
+		// Code model calls use the bridge's own loopback listener.
+		sdkBridge?.beginShutdown();
+
 		// Stop accepting new connections and wait for in-flight HTTP requests
 		// (including streaming responses) to complete. stop() without args is
 		// Bun's graceful variant; stop(true) would force-close active conns.
@@ -2240,6 +2264,13 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop dashboard analytics first; HTTP drain above guarantees no new
 		// analytics calls are being accepted.
 		terminateAnalyticsWorker();
+
+		// Before the usage finalizers are awaited: disposing ends the last Claude
+		// Code processes, whose final model calls may still be finalizing.
+		if (sdkBridge) {
+			await sdkBridge.dispose();
+			sdkBridge = null;
+		}
 
 		// Usage is now finalized inline (no worker). The HTTP drain above means
 		// no new streams will start, but in-flight finalizers (the async cost

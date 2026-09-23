@@ -11,6 +11,30 @@ export type SdkBridgeAvailability =
 	| { state: "unavailable"; reason: string }
 	| { state: "shutting_down" };
 
+export interface SdkBridgeCounters {
+	turnsStarted: number;
+	turnsCompleted: number;
+	turnsFailed: number;
+	continuations: number;
+	/** Turns refused before any Claude Code process, by reason. */
+	rejected: Record<string, number>;
+	resumes: number;
+	rebuilds: number;
+}
+
+/** The bridge's live state, as `/api/system/status` reports it. */
+export interface SdkBridgeStatus {
+	availability: SdkBridgeAvailability;
+	/** Claude Code queries alive, parked ones included. */
+	live: number;
+	/** Queries waiting on the client's tool results. */
+	parked: number;
+	cap: number;
+	counters: SdkBridgeCounters;
+	/** Highest per-process peak RSS observed (VmHWM); null where unmeasurable. */
+	peakRssBytes: number | null;
+}
+
 export interface SdkBridgeRouteCandidate {
 	readonly accountId: string;
 	readonly provider: string;
