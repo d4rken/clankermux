@@ -113,25 +113,33 @@ function claimMessage(
 	result: AnthropicBankedResetClaimResponse["result"],
 	reason: string | null,
 	errorMessage: string | null,
+	windowsRestored: boolean,
 ): string {
 	if (status === "failed" && reason === "not_sent") {
-		return `The banked-reset claim for account '${accountName}' was never sent (${errorMessage ?? "refused before sending"}); start a new one.`;
+		return `The banked-reset attempt for account '${accountName}' was never sent (${errorMessage ?? "refused before sending"}); start a new one.`;
 	}
 	switch (status) {
 		case "reset":
 			return `Banked reset applied for account '${accountName}'.`;
 		case "already_used":
-			return `This banked-reset claim already completed for account '${accountName}'.`;
+			if (windowsRestored) {
+				return `Banked reset applied for account '${accountName}' by an earlier attempt with this request id.`;
+			}
+			// A row answered from the ledger does not record whether its
+			// already_used restored anything.
+			return result === null
+				? `This banked-reset attempt already completed for account '${accountName}'.`
+				: `This banked reset was already used for account '${accountName}'; nothing was restored.`;
 		case "not_limited":
-			return `Account '${accountName}' is not at a limit this grant clears.`;
+			return `Account '${accountName}' is not at a limit this banked reset clears.`;
 		case "cooldown":
 			return `Account '${accountName}' is in a banked-reset cooldown.`;
 		case "ineligible":
 			return `Account '${accountName}' cannot use this banked reset.`;
 		case "failed":
-			return `The banked-reset claim for account '${accountName}' was given up unconfirmed when its replay window closed; start a new one.`;
+			return `The banked-reset attempt for account '${accountName}' was given up unconfirmed when its replay window closed; start a new one.`;
 		default:
-			return `The banked-reset claim for account '${accountName}' is unconfirmed (${result ?? "pending"}); retry with the same request id.`;
+			return `The banked-reset attempt for account '${accountName}' is unconfirmed (${result ?? "pending"}); retry with the same request id.`;
 	}
 }
 
@@ -196,14 +204,14 @@ export function createAnthropicBankedResetClaimHandler(
 
 			const response: AnthropicBankedResetClaimResponse = {
 				success:
-					dispatched.ledgerStatus === "reset" ||
-					dispatched.ledgerStatus === "already_used",
+					dispatched.ledgerStatus === "reset" || dispatched.windowsRestored,
 				message: claimMessage(
 					dispatched.accountName,
 					dispatched.ledgerStatus,
 					dispatched.result?.result ?? null,
 					dispatched.reason,
 					dispatched.errorMessage ?? null,
+					dispatched.windowsRestored,
 				),
 				eventId: dispatched.eventId,
 				status: dispatched.ledgerStatus,
@@ -226,7 +234,7 @@ export function createAnthropicBankedResetClaimHandler(
 			return errorResponse(
 				error instanceof Error
 					? error
-					: new Error("Failed to claim a banked reset"),
+					: new Error("Failed to apply a banked reset"),
 			);
 		}
 	};
