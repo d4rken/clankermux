@@ -20,6 +20,7 @@ import type {
 	ClientModelMetadataMap,
 	ModelVariant,
 } from "@clankermux/types";
+import { isOfficialAnthropicProvider } from "./provider-overload-cooldown";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
 export function modelPermissionScope(account: Account): string {
@@ -58,7 +59,11 @@ interface DiscoveryDeps {
 	now?: () => number;
 	requestBudgetMs?: number;
 	backgroundBudgetMs?: number;
+	/** Gap between background reads of Anthropic accounts; jittered up to 1.5×. */
+	anthropicSpacingMs?: number;
 }
+
+const ANTHROPIC_DISCOVERY_SPACING_MS = 4000;
 
 /**
  * Whole-attempt discovery budget for providers whose catalogue endpoint rests on
@@ -109,6 +114,8 @@ export class AccountModelPermissionService {
 	private readonly nativeMetadata = new Map<string, NativeMetadataSnapshot>();
 	private readonly controllers = new Set<AbortController>();
 	private timer: ReturnType<typeof setInterval> | undefined;
+	private spacedSweep: Promise<void> | undefined;
+	private stopEpoch = 0;
 	private readonly now: () => number;
 	private readonly devin: DevinClient;
 	constructor(private readonly deps: DiscoveryDeps) {
@@ -475,6 +482,7 @@ export class AccountModelPermissionService {
 			this.nativeMetadata,
 		])
 			for (const key of map.keys()) if (!live.has(key)) map.delete(key);
+		const due: Account[] = [];
 		await Promise.allSettled(
 			accounts.map(async (account) => {
 				const p = await this.permissions(account);
@@ -486,9 +494,41 @@ export class AccountModelPermissionService {
 					this.now() >=
 						(this.nextRefresh.get(key) ?? p.last_success_at + 3600000)
 				)
-					await this.refresh(account);
+					due.push(account);
 			}),
 		);
+		const spaced = due.filter((a) => isOfficialAnthropicProvider(a.provider));
+		await Promise.allSettled([
+			...due
+				.filter((a) => !isOfficialAnthropicProvider(a.provider))
+				.map((a) => this.refresh(a)),
+			spaced.length > 0 && !this.spacedSweep
+				? this.refreshSpaced(spaced)
+				: undefined,
+		]);
+	}
+	/**
+	 * Anthropic accounts that fall due together (on a first boot, or after the
+	 * service was down for over an hour) are read one at a time, seconds apart,
+	 * rather than all in the same instant.
+	 */
+	private refreshSpaced(accounts: readonly Account[]): Promise<void> {
+		const epoch = this.stopEpoch;
+		const gap = this.deps.anthropicSpacingMs ?? ANTHROPIC_DISCOVERY_SPACING_MS;
+		const sweep: Promise<void> = (async () => {
+			for (const [i, account] of accounts.entries()) {
+				if (i > 0)
+					await new Promise<void>((resolve) => {
+						setTimeout(resolve, gap * (1 + Math.random() * 0.5)).unref?.();
+					});
+				if (epoch !== this.stopEpoch) return;
+				await this.refresh(account).catch(() => {});
+			}
+		})().finally(() => {
+			if (this.spacedSweep === sweep) this.spacedSweep = undefined;
+		});
+		this.spacedSweep = sweep;
+		return sweep;
 	}
 	start(): void {
 		if (this.timer) return;
@@ -499,6 +539,8 @@ export class AccountModelPermissionService {
 		this.timer.unref?.();
 	}
 	stop(): void {
+		this.stopEpoch++;
+		this.spacedSweep = undefined;
 		for (const controller of this.controllers)
 			controller.abort("model-discovery-stopped");
 		this.inFlight.clear();
