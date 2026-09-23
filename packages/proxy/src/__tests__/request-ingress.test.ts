@@ -461,6 +461,41 @@ describe("ingestProxyRequest", () => {
 			expect(meta.excludeOfficialAnthropic).toBe(false);
 		});
 
+		it("opens no session for an internal auto-refresh probe", async () => {
+			const result = await ingestProxyRequest(
+				jsonRequest("/v1/messages", contextBody(), {
+					"x-claude-code-session-id": uniqueId("probe-session"),
+					"x-clankermux-auto-refresh": "true",
+				}),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				true,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.affinityKey).toBeNull();
+			expect(result.context.requestMeta.affinityScope).toBeNull();
+		});
+
+		it("keeps the affinity of an external request that sets the auto-refresh header", async () => {
+			const sessionId = uniqueId("session");
+			const result = await ingestProxyRequest(
+				jsonRequest("/v1/messages", contextBody(), {
+					"x-claude-code-session-id": sessionId,
+					"x-clankermux-auto-refresh": "true",
+				}),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.affinityKey).toBe(sessionId);
+			expect(result.context.requestMeta.affinityScope).toBe("claude_session");
+		});
+
 		it('returns a finalBodyBuffer carrying the injected ttl:"1h" once the session is promoted', async () => {
 			// Promotion preconditions: the feature switch on, no token floor, the
 			// tracker in its production (turn-count) mode, and a session-keyed

@@ -21,6 +21,7 @@ import { computeContextAndToolStats } from "./context-composition";
 import {
 	createRequestMetadata,
 	getForcedAccount,
+	isTrustedSyntheticProbe,
 	type ProxyContext,
 	prepareRequestBody,
 	RequestBodyContext,
@@ -219,10 +220,18 @@ export async function ingestProxyRequest(
 			? computeCachePrefixHashes(parsedBody)
 			: null;
 	const nativeResponsesCtx = getNativeResponsesRequestContext(req);
-	const affinity = extractRequestAffinity(
+	// An auto-refresh probe carries a fresh `x-claude-code-session-id` like the
+	// client it imitates; it must not open a session of its own.
+	const affinity = isTrustedSyntheticProbe(
 		req.headers,
-		nativeResponsesCtx?.promptCacheKey ?? null,
-	);
+		isInternal,
+		"auto-refresh",
+	)
+		? { key: null, scope: null }
+		: extractRequestAffinity(
+				req.headers,
+				nativeResponsesCtx?.promptCacheKey ?? null,
+			);
 
 	// Coarse request-size estimate for the cache-warming session-promotion path
 	// (below). Kept on the legacy formula so promotion behavior is unchanged.
@@ -247,9 +256,10 @@ export async function ingestProxyRequest(
 	// cache breakpoints to ttl:"1h". This mutates requestBodyContext in place, so
 	// the finalBodyBuffer below — and the staged keepalive body downstream — both
 	// carry the 1h injection, letting ~50-min keepalives bridge an idle session
-	// for HOURS instead of ~15 min. Synthetic keepalive/auto-refresh requests strip
-	// the session header so affinity.key is null → naturally excluded. Gated on the
-	// cache-warming feature (same switch the keepalive scheduler uses).
+	// for HOURS instead of ~15 min. Keepalive replays strip the session header and
+	// auto-refresh probes lose their affinity above, so affinity.key is null →
+	// naturally excluded. Gated on the cache-warming feature (same switch the
+	// keepalive scheduler uses).
 	//
 	// SKIP entirely when a GLOBAL forced account is active (getForcedAccount() set,
 	// non-internal request — the exact condition that routes to proxyForcedAccount
