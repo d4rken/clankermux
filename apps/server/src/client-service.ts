@@ -55,6 +55,8 @@ import {
 	type ClientReview,
 	type ClientSuggestions,
 	type ClientView,
+	claudeCodeCatalogue,
+	claudeCodeName,
 	composeGlobalCatalogue,
 	type GlobalCatalogue,
 	type GlobalCatalogueClientResult,
@@ -340,6 +342,36 @@ function normalizeDelta(
 	};
 }
 
+/**
+ * For a Claude Code client's Anthropic catalogue, each listed stored ID's
+ * published name (see `claudeCodeCatalogue`); null for every other catalogue,
+ * which is published under its stored IDs.
+ */
+function claudeCodeNames(
+	profile: ClientProfile,
+	format: ClientFormat,
+): { models: Map<string, string>; defaultModel: string | null } | null {
+	if (format !== "anthropic" || profile.application !== "claude-code")
+		return null;
+	const { models, defaultModel } = claudeCodeCatalogue(
+		profile.catalogues.anthropic.models,
+		profile.catalogues.anthropic.defaultModel,
+	);
+	return {
+		models: new Map(models.map(({ model, name }) => [model.id, name])),
+		defaultModel,
+	};
+}
+const byClaudeCodeName = <T>(
+	byId: Record<string, T>,
+	names: { models: Map<string, string> },
+): Record<string, T> =>
+	Object.fromEntries(
+		[...names.models]
+			.filter(([id]) => Object.hasOwn(byId, id))
+			.map(([id, name]) => [name, byId[id] as T]),
+	);
+
 /** An alias's route, comparable the way `prepareModel` normalizes it. */
 const aliasRoute = (model: GlobalCatalogueModel): string => {
 	const { targetModel, accountIds } = globalEntry(model);
@@ -568,11 +600,9 @@ export class ClientService {
 					: [
 							"No Codex metadata was known at creation; review new model suggestions to populate its catalogue.",
 						]),
-				...(!catalogues.anthropic.models.some((m) =>
-					/claude|anthropic/i.test(m.id),
-				)
+				...(!catalogues.anthropic.models.length
 					? [
-							"Claude Code ignores an empty compatible catalogue and may show its built-in models. Configure this client to review compatible aliases.",
+							"Claude Code ignores an empty catalogue and may show its built-in models. Configure this client to choose its models.",
 						]
 					: []),
 			],
@@ -686,7 +716,7 @@ export class ClientService {
 		const key = await this.deps.dbOps.getApiKeyPin(id);
 		if (!profile || !key || key.malformed)
 			throw new Error("Client catalogue not found");
-		return catalogueWithin(
+		const resolved = await catalogueWithin(
 			this.resolveModelMetadata(
 				id,
 				key,
@@ -696,6 +726,10 @@ export class ClientService {
 			{ models: {}, catalogueLoaded: false, catalogueStale: false },
 			MODEL_METADATA_BUDGET_MS,
 		);
+		const names = claudeCodeNames(profile, format);
+		return names
+			? { ...resolved, models: byClaudeCodeName(resolved.models, names) }
+			: resolved;
 	}
 	private async resolveModelMetadata(
 		id: string,
@@ -1003,10 +1037,22 @@ export class ClientService {
 						model,
 						metadata?.models[model.id],
 					);
+		// Resolved above under the stored IDs, which are what routing sees.
+		const names = claudeCodeNames(profile, format);
+		if (names) {
+			catalogue.models = catalogue.models.flatMap((model) => {
+				const name = names.models.get(model.id);
+				return name ? [{ ...model, id: name }] : [];
+			});
+		}
 		return renderClientCatalogue(
 			catalogue,
 			format,
-			includeMetadata ? metadata?.models : undefined,
+			includeMetadata && metadata
+				? names
+					? byClaudeCodeName(metadata.models, names)
+					: metadata.models
+				: undefined,
 		);
 	}
 	private destinations(value: unknown): ClientDestinations {
@@ -1213,13 +1259,6 @@ export class ClientService {
 			model.createdAt =
 				existing?.catalogues.anthropic.models.find((m) => m.id === value.id)
 					?.createdAt ?? new Date().toISOString();
-			if (
-				context.application === "claude-code" &&
-				!/claude|anthropic/i.test(model.id)
-			)
-				throw BadRequest(
-					`Claude Code requires a compatible alias for ${model.id}`,
-				);
 		}
 		const reusableAlias = model.targetModel.startsWith("alias:")
 			? await this.deps.dbOps.modelAliases.get(model.targetModel)
@@ -1436,6 +1475,7 @@ export class ClientService {
 		for (const { format, delta, candidates, requestedDefault } of plans) {
 			const seen = new Set<string>();
 			const skipped: GlobalCatalogueSkip[] = [];
+			const accepted: Array<{ model: ClientModel; fromGlobal: boolean }> = [];
 			for (const { value, fromGlobal } of candidates) {
 				// Global entries are well-formed; a client's may not be, and
 				// prepareModel is what refuses those.
@@ -1466,10 +1506,9 @@ export class ClientService {
 							throw BadRequest(
 								`Alias ${model.id} has conflicting targets across catalogues`,
 							);
-						aliasModels.set(model.id, model);
 					}
 					seen.add(model.id);
-					catalogue[format].models.push(model);
+					accepted.push({ model, fromGlobal });
 				} catch (error) {
 					// A global entry passed every check that holds for all clients
 					// before it was saved, so what fails here is this client's own
@@ -1481,6 +1520,28 @@ export class ClientService {
 						throw error;
 					skipped.push({ id: value.id, reason: error.message });
 				}
+			}
+			// Claude Code lists `gpt-x` as `claude-gpt-x`. Among the entries this
+			// client can publish, one already stored under that name keeps it.
+			if (format === "anthropic" && draft.application === "claude-code") {
+				const held = new Set(
+					accepted
+						.map(({ model }) => model.id)
+						.filter((id) => claudeCodeName(id) === id),
+				);
+				for (const { model, fromGlobal } of accepted) {
+					const name = claudeCodeName(model.id);
+					if (name === model.id || !held.has(name)) continue;
+					const reason = `${model.id} appears to Claude Code as ${name}, which another entry already uses`;
+					if (!fromGlobal) throw BadRequest(reason);
+					skipped.push({ id: model.id, reason });
+					seen.delete(model.id);
+				}
+			}
+			for (const { model } of accepted) {
+				if (!seen.has(model.id)) continue;
+				if (model.id !== model.targetModel) aliasModels.set(model.id, model);
+				catalogue[format].models.push(model);
 			}
 			if (delta && globalState) {
 				const published =
@@ -1576,9 +1637,9 @@ export class ClientService {
 		const notices = [
 			"Catalogue selections control discovery only. Requests for unlisted models still use the normal routing policy.",
 		];
-		if (!catalogue.anthropic.models.some((m) => /claude|anthropic/i.test(m.id)))
+		if (!catalogue.anthropic.models.length)
 			notices.push(
-				"Claude Code ignores an empty compatible catalogue and may show its built-in models.",
+				"Claude Code ignores an empty catalogue and may show its built-in models.",
 			);
 		if (aliasRules.length)
 			notices.push(
@@ -1879,8 +1940,8 @@ export class ClientService {
 	}
 	/**
 	 * Proposes one catalogue operation to many clients. Catalogue entries are
-	 * not portable verbatim — account pins, Claude Code's compatible-alias rule
-	 * and Codex metadata are all properties of the target client — so every
+	 * not portable verbatim — account pins, Claude Code name clashes and
+	 * Codex metadata are all properties of the target client — so every
 	 * client re-validates the proposal and the ones that refuse it are reported
 	 * and skipped rather than failing the batch.
 	 */
@@ -1953,6 +2014,13 @@ export class ClientService {
 				);
 				draft.global = { formats: { ...formats, [operation.format]: next } };
 				untouched = deepEqual(next, delta);
+				const hidden = next.removals.filter(
+					(id) => !delta.removals.includes(id),
+				);
+				if (hidden.length)
+					notices.push(
+						`Hides ${hidden.join(", ")} from this client only; the global catalogue still lists ${hidden.length === 1 ? "it" : "them"}.`,
+					);
 				afterIds = new Set(
 					composeGlobalCatalogue(global.catalogues[operation.format], next).map(
 						({ model }) => model.id,

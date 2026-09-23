@@ -261,3 +261,23 @@ describe("toApiKey — pinned_providers parsing", () => {
 		expect(toApiKey(row).pinnedAccountId).toBe("acc-9");
 	});
 });
+
+describe("ApiKeyRepository.findRawPinById", () => {
+	it("carries the key's client application, and null for a key without a profile", async () => {
+		const { db, repo } = makeDb();
+		try {
+			insertApiKey(db, "cc");
+			insertApiKey(db, "bare");
+			db.run(
+				"INSERT INTO client_profiles(api_key_id,application,revision,catalogues,notices) VALUES('cc','claude-code',1,'{}','[]')",
+			);
+			expect((await repo.findRawPinById("cc"))?.application).toBe(
+				"claude-code",
+			);
+			expect((await repo.findRawPinById("bare"))?.application).toBeNull();
+			expect(await repo.findRawPinById("missing")).toBeNull();
+		} finally {
+			db.close();
+		}
+	});
+});

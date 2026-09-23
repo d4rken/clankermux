@@ -574,19 +574,22 @@ describe("new client setup defaults", () => {
 		expect(catalogueOf("anthropic")?.models).toEqual([]);
 	});
 
-	it("aliases seeded Claude Code entries and seeds nothing else", async () => {
+	it("seeds Claude Code entries under their real IDs, says how Claude Code lists them, and seeds nothing else", async () => {
 		await mountNew();
 		await choose("Application", "claude-code");
 		await click("Next");
 		await click("Next");
-		await choose("Default model for setup", "claude-new");
+		expect(document.body.textContent).toContain(
+			"Claude Code lists it as claude-new",
+		);
+		await choose("Default model for setup", "new");
 		await click("Review");
 		expect(catalogueOf("anthropic")?.models).toEqual([
 			{
-				id: "claude-new",
+				id: "new",
 				displayName: "New model",
 				targetModel: "new",
-				accountIds: ["a"],
+				accountIds: null,
 			},
 		]);
 		expect(catalogueOf("openai")?.models).toEqual([]);
@@ -962,7 +965,7 @@ describe("two-pane catalogue transfers", () => {
 		await click("Application");
 		await choose("Application", "claude-code");
 		await click("Catalogue");
-		expect(listedModels()).toEqual(["claude-new"]);
+		expect(listedModels()).toEqual(["new"]);
 	});
 
 	it("clears staged checks on tab changes without moving any models", async () => {
@@ -1069,49 +1072,13 @@ describe("copying another client's setup", () => {
 		expect(document.body.textContent).not.toContain(
 			"Choose your catalogue models before reviewing",
 		);
-		await choose("Default model for setup", "claude-new");
+		await choose("Default model for setup", "new");
 		await click("Review");
 		expect(reviewed?.application).toBe("claude-code");
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"claude-new",
+			"new",
 		]);
 		expect(reviewed?.catalogues.openai.models).toEqual([]);
-	});
-
-	it("names copied entries the server will refuse before Review does", async () => {
-		const generic: ClientView = {
-			...source,
-			apiKeyId: "generic",
-			application: "generic",
-			key: { ...source.key, id: "generic", name: "Generic" },
-			catalogues: {
-				...source.catalogues,
-				anthropic: {
-					models: [
-						{
-							id: "old",
-							targetModel: "old",
-							displayName: "Old model",
-							accountIds: null,
-						},
-					],
-					defaultModel: "old",
-				},
-			},
-		};
-		await mount(existing, true, DEFAULT_SUGGESTIONS, [source, generic]);
-		await choose("Copy from", "generic");
-		await untick("Application recipe");
-		await click("Copy into this draft");
-		// The draft is still generic, so publishing `old` under its own ID is fine.
-		expect(document.body.textContent).not.toContain("claude-* alias");
-		await click("Application");
-		await choose("Application", "claude-code");
-		await click("Catalogue");
-		await click("Copy into this draft");
-		expect(document.body.textContent).toContain(
-			"Claude Code cannot publish old under that ID",
-		);
 	});
 
 	it("picks up a seed stranded by a failed copy on the retry", async () => {
@@ -1131,10 +1098,10 @@ describe("copying another client's setup", () => {
 		expect(document.body.textContent).not.toContain(
 			"Choose your catalogue models before reviewing",
 		);
-		await choose("Default model for setup", "claude-new");
+		await choose("Default model for setup", "new");
 		await click("Review");
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"claude-new",
+			"new",
 		]);
 	});
 
@@ -1148,10 +1115,10 @@ describe("copying another client's setup", () => {
 		await untick("Allowed destinations");
 		await click("Copy into this draft");
 		expect(suggestionFetches).toBe(before);
-		await choose("Default model for setup", "claude-new");
+		await choose("Default model for setup", "new");
 		await click("Review");
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"claude-new",
+			"new",
 		]);
 	});
 
@@ -1211,13 +1178,13 @@ describe("copying another client's setup", () => {
 		expect(document.body.textContent).toContain("Discovery unavailable");
 		// No second copy: filling the catalogue in is the whole recovery.
 		await transferShown("available");
-		await choose("Default model for setup", "claude-new");
+		await choose("Default model for setup", "new");
 		await click("Review");
 		expect(document.body.textContent).not.toContain(
 			"Choose your catalogue models before reviewing",
 		);
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"claude-new",
+			"new",
 		]);
 	});
 
@@ -1233,14 +1200,14 @@ describe("copying another client's setup", () => {
 		// The failed copy left the seed armed on Anthropic. Answering it by hand
 		// has to retire it, not just skip it.
 		await transferShown("available");
-		await choose("Default model for setup", "claude-new");
+		await choose("Default model for setup", "new");
 		await click("Copy into this draft");
 		await click("Review");
 		expect(document.body.textContent).not.toContain(
 			"Choose your catalogue models before reviewing",
 		);
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"claude-new",
+			"new",
 		]);
 	});
 });
@@ -1472,4 +1439,34 @@ describe("the global catalogue in the client editor", () => {
 			defaultModel: null,
 		});
 	});
+});
+
+it("blocks adding a model Claude Code would list under a name the catalogue already uses", async () => {
+	const legacy: ClientView = {
+		...existing,
+		application: "claude-code",
+		catalogues: {
+			...existing.catalogues,
+			anthropic: {
+				models: [
+					{
+						id: "claude-new",
+						displayName: "New (old alias)",
+						targetModel: "new",
+						accountIds: ["a"],
+					},
+				],
+				defaultModel: "claude-new",
+			},
+		},
+	};
+	await mount(legacy, true);
+	expect(document.body.textContent).toContain(
+		"Clashes with claude-new in this catalogue",
+	);
+	expect(
+		[...document.querySelectorAll("button")].find(
+			(b) => b.getAttribute("aria-label") === "Add new",
+		)?.disabled,
+	).toBe(true);
 });

@@ -18,7 +18,11 @@ import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientModelMetadata, clientRequest } from "./api";
 import { ClientLabel } from "./ClientLabel";
-import { clientSetupExports, preferredFormat } from "./setup";
+import {
+	clientSetupExports,
+	preferredFormat,
+	publishedCatalogue,
+} from "./setup";
 
 /**
  * The recipes that declare per-model entries. The others name no models at
@@ -124,7 +128,12 @@ export function ClientSetupDialog({
 			setSaving(false);
 		}
 	};
-	const catalogue = client.catalogues[format];
+	// The names the client sees, which the metadata above is keyed by too.
+	const catalogue = publishedCatalogue(
+		client.application,
+		format,
+		client.catalogues[format],
+	);
 	const ready = Boolean(apiKey) && metadataSettled;
 	const exports =
 		apiKey && metadataSettled

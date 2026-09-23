@@ -15,6 +15,7 @@ import type {
 	AccountPaymentRow,
 	AccountSubscriptionState,
 	AffinityPin,
+	ClientApplication,
 	ClientDestinations,
 	ClientProfile,
 	CodexWindowObservationRow,
@@ -2682,6 +2683,8 @@ OAuth tokens will need to be re-authenticated.
 		excludedProviders?: string[] | null;
 		/** Invalid stored selectors must fail closed in routing. */
 		malformed: boolean;
+		/** The key's client application; absent or null when it has no profile. */
+		application?: ClientApplication | null;
 	} | null> {
 		const raw = await this.apiKeys.findRawPinById(id);
 		if (!raw) {
@@ -2708,6 +2711,7 @@ OAuth tokens will need to be re-authenticated.
 			pinnedProviders,
 			excludedProviders,
 			malformed,
+			application: raw.application,
 		};
 	}
 

@@ -1005,7 +1005,7 @@ describe("client service integration", () => {
 		).toEqual(["shared"]);
 	});
 
-	it("rejects an incompatible Anthropic ID for Claude Code while a generic client takes it", async () => {
+	it("takes a non-Claude Anthropic ID for Claude Code as it does for a generic client", async () => {
 		await service.bootstrap();
 		const cc = await makeClient("Claude Code", (d) => {
 			d.application = "claude-code";
@@ -1020,16 +1020,13 @@ describe("client service integration", () => {
 				add: [plain("gpt-fast")],
 			},
 		});
-		expect(review.clients[0]?.status).toBe("rejected");
-		expect(review.clients[0]?.reason).toBe(
-			"Claude Code requires a compatible alias for gpt-fast",
-		);
-		expect(review.clients[1]?.status).toBe("changed");
+		expect(review.clients.map((c) => c.status)).toEqual(["changed", "changed"]);
 		await service.bulkCommit(review.token);
 		expect(
-			(await dbOps.clients.getProfile(cc.apiKeyId))?.catalogues.anthropic
-				.models,
-		).toEqual([]);
+			(
+				await dbOps.clients.getProfile(cc.apiKeyId)
+			)?.catalogues.anthropic.models.map((m) => m.id),
+		).toEqual(["gpt-fast"]);
 		expect(
 			(
 				await dbOps.clients.getProfile(generic.apiKeyId)

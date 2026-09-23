@@ -5,6 +5,7 @@ import {
 	clientSetup,
 	clientSetupExports,
 	destinationsLabel,
+	publishedCatalogue,
 } from "./setup";
 
 it("labels provider exclusion destinations and invalid empty exclusions", () => {
@@ -392,4 +393,36 @@ it("tells the operator what an omitted field and a published rate mean", () => {
 		expect(note).toContain("defaults");
 		expect(note).toContain("list prices");
 	}
+});
+
+it("hands Claude Code its catalogue under the names it lists, and every other client its stored IDs", () => {
+	const model = (id: string) => ({
+		id,
+		displayName: id,
+		targetModel: id,
+		accountIds: null,
+	});
+	const catalogue = {
+		models: [model("gpt-6-astra"), model("claude-opus-5-5")],
+		defaultModel: "gpt-6-astra",
+	};
+	const claude = publishedCatalogue("claude-code", "anthropic", catalogue);
+	expect(claude.models.map((m) => m.id)).toEqual([
+		"claude-gpt-6-astra",
+		"claude-opus-5-5",
+	]);
+	expect(claude.defaultModel).toBe("claude-gpt-6-astra");
+	expect(
+		clientSetupExports(
+			"claude-code",
+			"http://host",
+			"key",
+			claude.defaultModel,
+			claude.models,
+		)[0]?.snippet,
+	).toContain('"ANTHROPIC_MODEL": "claude-gpt-6-astra"');
+	expect(publishedCatalogue("generic", "anthropic", catalogue)).toBe(catalogue);
+	expect(publishedCatalogue("claude-code", "openai", catalogue)).toBe(
+		catalogue,
+	);
 });
