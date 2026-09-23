@@ -31,7 +31,11 @@ pipeline. The client keeps executing its own tools.
   401/429/529 classification, no probes, no holds, no `forwardToClient` row.
   Its response is final. Only `SdkBridgeUnavailableError` (bridge
   infrastructure) fails over to the next outer candidate. An inner 429/529
-  never relaunches Claude Code on another outer candidate.
+  never relaunches Claude Code on another outer candidate. Its subclass
+  `SdkBridgeCapacityError` (process or rebuild cap) fails over too, and when
+  it was the last failure the give-up terminals answer its 529 and
+  Retry-After instead of their own 503; later official candidates of the same
+  request skip the bridge (`sdk-bridge-capacity.ts`).
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
@@ -42,11 +46,34 @@ pipeline. The client keeps executing its own tools.
   calls `dispatchProxyRequest` in `sdk-bridge-inner` mode. That mode is not
   `isInternal` (maintenance traffic). Inner requests are always `"direct"`, so
   there is no re-entry. They are ordinary `requests` rows with
-  `sdk_bridge_turn_id`; token and cost truth lives there.
-- **Continuations bypass routing.** A request whose last user message holds
-  `tool_result` ids of a live parked query goes straight to that query
-  (`continueParkedSdkBridgeTurn`), before any route is built.
-  Owner key mismatch is 409.
+  `sdk_bridge_turn_id`; token and cost truth lives there. A body over
+  `maxHistoryBytes` is refused with 413 before it is read.
+- **Inner accounting.** `inner_call_count` counts rows begun
+  (`onInnerRequestStarted`, from `forwardToClient`'s `begin` or a synthetic
+  terminal); `inner_error_count` counts error outcomes, listener refusals
+  included, so it can exceed the call count. A 2xx SSE reply reports its
+  outcome when the stream ends, from what it carried: an `error` event counts
+  as its status, a missing `message_stop` as 502. `handleProxy` returns the
+  wrapped response, which is the one Claude Code must read.
+- **Continuations bypass routing.** A request whose final user message (the
+  trailing user messages, merged: Chat sends text typed with tool results as
+  a user message after them) holds `tool_result` ids a live query waits on
+  *now* goes straight to that query (`continueParkedSdkBridgeTurn`), before
+  any route is built. The bridge refuses, with one `continue` leg recorded
+  each: another key's turn (409), ids that do not cover every awaited call or
+  that an earlier round handed out (409 "stale tool results"), shutdown (503).
+- **Dead continuations.** Tool results no live query holds, sent with the
+  assistant message that made the calls, start a new query with
+  `rebuild_reason = dead_continuation`: the history and the results are
+  flattened into the prompt. Never a transcript: resuming a transcript that
+  ends in tool calls, Claude Code drops the calls as interrupted and the
+  results with them ("No response requested." / "(no content)" upstream).
+- **Text sent with tool results** goes to Claude Code before the results,
+  while it still waits on the MCP calls; it then sends it after them in the
+  same model request. Sent after the results, it became a turn of its own
+  whose answer reached nobody.
+- **Superseding.** A new start turn of a conversation whose query is parked
+  on tool calls tears that query down (`aborted`, "superseded").
 - **Accounting.** `sdk_bridge_turns` (one per Claude Code query) and
   `sdk_bridge_turn_legs` (one per outer HTTP request; the leg id is the
   client's `x-clankermux-request-id`). Legs have no `requests` row.
@@ -56,9 +83,16 @@ pipeline. The client keeps executing its own tools.
 
 The environment is an allowlist built from nothing (`childEnv` in
 `options.ts`); never pass `process.env`. PATH is an empty dir, HOME,
-CLAUDE_CONFIG_DIR and TMPDIR live under the work root
+CLAUDE_CONFIG_DIR and TMPDIR live under the process's own generation
+directory, `gen-<id>/` in the work root
 (`$XDG_CACHE_HOME/clankermux/claude-agent-sdk`, inside the unit's
-ReadWritePaths).
+ReadWritePaths). Everything there is 0700/0600 and written without
+following symlinks (`work-dirs.ts`). Startup removes earlier generations
+whose `owner.json` pid is gone; dispose removes its own. A closed query's
+session files and Claude Code's own transcript under
+`claude-config/projects/` are deleted. The directories the earlier layout
+kept directly under the work root (`sessions`, `claude-config`, …) are only
+made private, never deleted: no pid says whether a process still uses them.
 
 - `CLAUDE_CODE_MAX_RETRIES=0`. Retries belong to the proxy's inner calls,
   which fail over across accounts. With the CLI's own backoff the proxy's
