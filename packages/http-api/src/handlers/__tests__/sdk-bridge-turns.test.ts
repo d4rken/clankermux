@@ -102,6 +102,18 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 		expect(view.prunedInnerCalls).toBe(3);
 	});
 
+	it("counts no call pruned for errors that never had a row", async () => {
+		await inner("inner-1");
+		await inner("inner-2");
+		// Two rows begun; one ended in error, and the listener refused a third
+		// call before any row existed.
+		await turns.bumpTurnCounters("turn-1", { innerCalls: 2, innerErrors: 2 });
+
+		const view = (await (await handler("turn-1")).json()) as SdkBridgeTurnView;
+		expect(view.turn).toMatchObject({ innerCallCount: 2, innerErrorCount: 2 });
+		expect(view.prunedInnerCalls).toBe(0);
+	});
+
 	it("answers 404 for an unknown id", async () => {
 		expect((await handler("nope")).status).toBe(404);
 	});

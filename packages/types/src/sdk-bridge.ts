@@ -20,6 +20,20 @@ export type SdkBridgeHistoryMode =
 	| "rebuild_transcript"
 	| "rebuild_flattened";
 
+/**
+ * Why a turn could not resume its conversation's Claude Code session.
+ * `dead_continuation`: the request answered tool calls of a query that no
+ * longer exists, so the history up to those calls was rebuilt and the tool
+ * results became the new query's prompt.
+ */
+export type SdkBridgeRebuildReason =
+	| "continuation"
+	| "compaction"
+	| "edit"
+	| "unknown"
+	| "account_change"
+	| "dead_continuation";
+
 /** `start` opens a turn; `continue` delivers tool results to a parked one. */
 export type SdkBridgeLegKind = "start" | "continue";
 
@@ -45,12 +59,17 @@ export interface SdkBridgeTurn {
 	conversationKeyHash: string | null;
 	ccSessionId: string | null;
 	historyMode: SdkBridgeHistoryMode;
-	rebuildReason: string | null;
+	rebuildReason: SdkBridgeRebuildReason | null;
 	systemPromptPolicy: string;
 	stopReason: string | null;
 	legCount: number;
 	toolRoundCount: number;
+	/** Inner calls whose `requests` row began. */
 	innerCallCount: number;
+	/**
+	 * Inner calls that ended in error, and calls refused before any row
+	 * existed, so it can exceed `innerCallCount`.
+	 */
 	innerErrorCount: number;
 	spawnMs: number | null;
 	firstEventMs: number | null;

@@ -129,7 +129,10 @@ export interface SdkBridgeTransport {
 		signal: AbortSignal;
 		bumpIdleTimeout?: () => void;
 	}): Promise<Response>;
-	/** The live parked turn these tool_result ids answer, if any. */
+	/**
+	 * The live parked turn waiting on these tool_result ids now, if any. Ids a
+	 * turn handed out in an earlier round do not select it.
+	 */
 	findContinuation(
 		toolUseIds: readonly string[],
 	): { turnId: string; ownerApiKeyId: string | null } | null;
@@ -147,6 +150,51 @@ export class SdkBridgeUnavailableError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "SdkBridgeUnavailableError";
+	}
+}
+
+/**
+ * Every Claude Code slot (or rebuild slot) is taken. The outer attempt fails
+ * over like any unavailability, but when no other candidate serves, this is
+ * the answer the client gets: the bridge's 529 and its Retry-After, not a
+ * generic pool-exhausted 503.
+ */
+export class SdkBridgeCapacityError extends SdkBridgeUnavailableError {
+	readonly status: number;
+	readonly errorType: string;
+	readonly retryAfter: string | null;
+	/** `process_cap` or `rebuild_cap`. */
+	readonly reason: string;
+
+	constructor(input: {
+		reason: string;
+		status: number;
+		type: string;
+		message: string;
+		retryAfter: string | null;
+	}) {
+		super(input.message);
+		this.name = "SdkBridgeCapacityError";
+		this.reason = input.reason;
+		this.status = input.status;
+		this.errorType = input.type;
+		this.retryAfter = input.retryAfter;
+	}
+
+	/** The terminal answer, built fresh on every call (a body reads once). */
+	terminalResponse(headers: Record<string, string> = {}): Response {
+		const out = new Headers({
+			"content-type": "application/json",
+			...headers,
+		});
+		if (this.retryAfter) out.set("retry-after", this.retryAfter);
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: this.errorType, message: this.message },
+			}),
+			{ status: this.status, headers: out },
+		);
 	}
 }
 
@@ -174,6 +222,13 @@ export interface SdkBridgeInnerContext {
 	readonly projectAttributionSource?: ProjectAttributionSource | null;
 	/** Epoch ms after which an inner call is refused. */
 	readonly deadlineAt: number;
+	/** An inner call's `requests` row has begun; once per request id. */
+	readonly onInnerRequestStarted?: (requestId: string) => void;
+	/**
+	 * How an inner call ended, once per call. A streamed reply reports when its
+	 * stream ends, so an error event inside a 200 counts as the error it is.
+	 * A refusal before dispatch reports with an empty `requestId`.
+	 */
 	readonly onInnerOutcome?: (outcome: SdkBridgeInnerOutcome) => void;
 }
 
