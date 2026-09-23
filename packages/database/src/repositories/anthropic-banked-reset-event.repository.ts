@@ -36,6 +36,10 @@ export interface AnthropicBankedResetEventRow {
 	 * cleared once a later reading decides it, or when this passes.
 	 */
 	recovery_pending_until: number | null;
+	/** The account's pause_epoch when the claim was sent: the pause owed. */
+	recovery_pause_epoch: number | null;
+	/** That pause's pause_changed_at (ms); null when unrecorded. */
+	recovery_pause_changed_at: number | null;
 	created_at: number;
 	resolved_at: number | null;
 }
@@ -77,6 +81,15 @@ export interface AnthropicBankedResetResolution {
 	errorMessage?: string | null;
 	/** The server's `cooldown_until`, ms epoch. */
 	cooldownUntil?: number | null;
+	/**
+	 * An overage-pause verdict this resolution owes, recorded in the same write
+	 * so no crash can separate the spent reset from the obligation.
+	 */
+	recovery?: {
+		until: number;
+		pauseEpoch: number;
+		pauseChangedAt: number | null;
+	} | null;
 	now: number;
 }
 
@@ -262,7 +275,8 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			UPDATE anthropic_banked_reset_events
 			SET status = ?, reason = ?, cleared = ?, resets_left = ?,
 				error_message = ?, next_attempt_at = NULL, resolved_at = ?,
-				rearm_at = ?
+				rearm_at = ?, recovery_pending_until = ?, recovery_pause_epoch = ?,
+				recovery_pause_changed_at = ?
 			WHERE id = ? AND status = 'pending'
 		`,
 			[
@@ -278,6 +292,9 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 							resolution.cooldownUntil ?? 0,
 						)
 					: null,
+				resolution.recovery?.until ?? null,
+				resolution.recovery?.pauseEpoch ?? null,
+				resolution.recovery?.pauseChangedAt ?? null,
 				id,
 			],
 		);
@@ -355,16 +372,6 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			[accountId],
 		);
 		return row?.latest ?? null;
-	}
-
-	/** Owe the account's overage pause a verdict on this row until `until`. */
-	async markRecoveryPending(id: string, until: number): Promise<boolean> {
-		const changes = await this.runWithChanges(
-			`UPDATE anthropic_banked_reset_events SET recovery_pending_until = ?
-			 WHERE id = ?`,
-			[until, id],
-		);
-		return changes > 0;
 	}
 
 	/** Rows still owing a verdict, every account, oldest first. */

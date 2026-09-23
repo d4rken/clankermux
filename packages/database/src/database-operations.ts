@@ -49,6 +49,7 @@ import {
 	type PayloadWriterFactory,
 } from "./payload-write-client";
 import {
+	type AccountPauseMarker,
 	AccountRepository,
 	type DevinCredentialReplacement,
 	type ProviderRenewalAnchorSync,
@@ -1463,6 +1464,21 @@ OAuth tokens will need to be re-authenticated.
 	 */
 	async resumeAccountIfOveragePaused(accountId: string): Promise<boolean> {
 		return this.accounts.resumeIfOveragePaused(accountId);
+	}
+
+	/** See {@link AccountRepository.getPauseMarker}. */
+	async getAccountPauseMarker(
+		accountId: string,
+	): Promise<AccountPauseMarker | null> {
+		return this.accounts.getPauseMarker(accountId);
+	}
+
+	/** See {@link AccountRepository.resumeIfOveragePausedAt}. */
+	async resumeAccountIfOveragePausedAt(
+		accountId: string,
+		pauseEpoch: number,
+	): Promise<boolean> {
+		return this.accounts.resumeIfOveragePausedAt(accountId, pauseEpoch);
 	}
 
 	/**
@@ -3203,13 +3219,6 @@ OAuth tokens will need to be re-authenticated.
 		now: number = Date.now(),
 	): Promise<number> {
 		return this.anthropicBankedResetEvents.expireStalePending(now);
-	}
-
-	async markAnthropicBankedResetRecoveryPending(
-		id: string,
-		until: number,
-	): Promise<boolean> {
-		return this.anthropicBankedResetEvents.markRecoveryPending(id, until);
 	}
 
 	async getAnthropicBankedResetRecoveryPending(): Promise<

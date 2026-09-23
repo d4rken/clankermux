@@ -329,6 +329,8 @@ describe("GET /api/accounts/:id/banked-resets/events", () => {
 			next_attempt_at: null,
 			rearm_at: null,
 			recovery_pending_until: null,
+			recovery_pause_epoch: null,
+			recovery_pause_changed_at: null,
 			created_at: NOW,
 			resolved_at: NOW + 1_000,
 		};
@@ -376,6 +378,8 @@ describe("GET /api/accounts/:id/banked-resets/events", () => {
 			next_attempt_at: NOW + 60_000,
 			rearm_at: null,
 			recovery_pending_until: null,
+			recovery_pause_epoch: null,
+			recovery_pause_changed_at: null,
 			created_at: NOW,
 			resolved_at: null,
 		};

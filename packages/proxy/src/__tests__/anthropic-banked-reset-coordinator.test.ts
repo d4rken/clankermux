@@ -40,6 +40,13 @@ import type { ProxyContext } from "../handlers/proxy-types";
 const tmpDb = tempDbTracker("banked-reset-coordinator");
 const NOW = Date.parse("2026-09-22T12:00:00Z");
 const ACCOUNT_ID = "acct-1";
+const PAUSE_EPOCH = 7;
+const OVERAGE_PAUSED = {
+	paused: true,
+	pause_reason: "overage",
+	auto_pause_on_overage_enabled: true,
+} as const;
+const resumedAny = () => dbCalls.some((call) => call.startsWith("resume"));
 
 let clock = NOW;
 let realDbOps: DatabaseOperations;
@@ -146,6 +153,19 @@ function coordinator(): AnthropicBankedResetCoordinator {
 		dbCalls.push("resumeAccountIfOveragePaused");
 		return false;
 	};
+	dbOps.resumeAccountIfOveragePausedAt = async (_id, epoch) => {
+		dbCalls.push(`resume@${epoch}`);
+		return true;
+	};
+	dbOps.getAccountPauseMarker = async () => ({
+		paused: Boolean(baseAccount.paused),
+		pauseReason: baseAccount.pause_reason ?? null,
+		autoPauseOnOverageEnabled: Boolean(
+			baseAccount.auto_pause_on_overage_enabled,
+		),
+		pauseEpoch: PAUSE_EPOCH,
+		pauseChangedAt: NOW - 600_000,
+	});
 	dbOps.setAccountIdentityFromProfile = async () => {
 		dbCalls.push("setAccountIdentityFromProfile");
 		return true;
@@ -344,6 +364,7 @@ describe("claim", () => {
 			return claimResult();
 		};
 		clock = NOW + 1;
+		Object.assign(baseAccount, OVERAGE_PAUSED);
 		const outcome = await coordinator().claim(ACCOUNT_ID, {
 			grantId: "g1",
 			requestId: "req-2",
@@ -357,7 +378,8 @@ describe("claim", () => {
 		expect(
 			getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "sonnet", NOW),
 		).not.toBeNull();
-		expect(dbCalls).toContain("resumeAccountIfOveragePaused");
+		expect(dbCalls).toContain(`resume@${PAUSE_EPOCH}`);
+		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
 		expect(dbCalls).not.toContain("forceResetAccountRateLimit");
 		expect(fetchStatus).toHaveBeenCalledTimes(1);
 	});
@@ -397,7 +419,7 @@ describe("claim", () => {
 		});
 		expect(second.status === "completed" && second.windowsRestored).toBe(true);
 		expect(usage.fenceAndRefetch).toHaveBeenCalledTimes(1);
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+		expect(resumedAny()).toBe(false);
 		expect(claim.mock.calls.map((call) => call[2].requestId)).toEqual([
 			"req-replay",
 			"req-replay",
@@ -923,93 +945,101 @@ describe("claim", () => {
 	});
 });
 
-describe("the overage pause after a reset", () => {
-	const claimOnce = (requestId: string) =>
-		coordinator().claim(ACCOUNT_ID, { grantId: "g1", requestId });
-
-	it("is lifted when the weekly window was cleared and the refetched reading has headroom", async () => {
-		await claimOnce("req-lift");
-		expect(dbCalls).toContain("resumeAccountIfOveragePaused");
+describe("the overage pause a reset owes a verdict", () => {
+	const HOUR = 60 * 60_000;
+	async function claimOnce(requestId: string) {
+		await coordinator().claim(ACCOUNT_ID, { grantId: "g1", requestId });
+		return realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			requestId,
+		);
+	}
+	beforeEach(() => {
+		Object.assign(baseAccount, OVERAGE_PAUSED);
 	});
 
-	it("is lifted for a cleared seven_day_overage_included window", async () => {
+	it("lifts exactly the claim-time pause and clears the obligation when the reading has headroom", async () => {
+		const row = await claimOnce("req-lift");
+		expect(dbCalls).toContain(`resume@${PAUSE_EPOCH}`);
+		expect(row?.recovery_pending_until).toBeNull();
+	});
+
+	it("does the same for a cleared seven_day_overage_included window", async () => {
 		claimImpl = async () =>
 			claimResult({ cleared: ["seven_day_overage_included"] });
 		await claimOnce("req-overage-window");
-		expect(dbCalls).toContain("resumeAccountIfOveragePaused");
+		expect(dbCalls).toContain(`resume@${PAUSE_EPOCH}`);
 	});
 
-	it("is kept when only the 5-hour window was cleared", async () => {
-		claimImpl = async () => claimResult({ cleared: ["five_hour"] });
-		await claimOnce("req-5h");
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
-	});
-
-	it("is kept when the post-claim usage fetch failed", async () => {
+	it("keeps the pause and records the obligation when the post-claim read failed", async () => {
 		refetchSucceeds = false;
-		await claimOnce("req-no-refetch");
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+		const row = await claimOnce("req-owed-fail");
+		expect(resumedAny()).toBe(false);
+		expect(row?.recovery_pending_until).toBe(NOW + HOUR);
+		expect(row?.recovery_pause_epoch).toBe(PAUSE_EPOCH);
+		expect(row?.recovery_pause_changed_at).toBe(NOW - 600_000);
 	});
 
-	it("is kept while the refetched reading shows a window still at its limit", async () => {
+	it("keeps the obligation when the post-claim reading lacks a window", async () => {
+		usageReading = { five_hour: { utilization: 10, resets_at: null } };
+		const row = await claimOnce("req-owed-partial-reading");
+		expect(resumedAny()).toBe(false);
+		expect(row?.recovery_pending_until).toBe(NOW + HOUR);
+	});
+
+	it("keeps the pause and clears the obligation when the reading is at a limit", async () => {
 		usageReading = reading(100, 20);
-		await claimOnce("req-5h-full");
+		const five = await claimOnce("req-5h-full");
 		usageReading = reading(20, 100);
-		await claimOnce("req-7d-full");
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
+		const seven = await claimOnce("req-7d-full");
+		expect(resumedAny()).toBe(false);
+		expect(five?.recovery_pending_until).toBeNull();
+		expect(seven?.recovery_pending_until).toBeNull();
 	});
 
-	it("is kept when the refetched reading lacks a window", async () => {
-		usageReading = { five_hour: { utilization: 10, resets_at: null } };
-		await claimOnce("req-partial");
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
-	});
-});
-
-describe("owed overage-pause verdicts", () => {
-	const HOUR = 60 * 60_000;
-	const overagePaused = {
-		paused: true,
-		pause_reason: "overage",
-		auto_pause_on_overage_enabled: true,
-	} as const;
-	async function claimAndReadMark(requestId: string) {
-		await coordinator().claim(ACCOUNT_ID, { grantId: "g1", requestId });
-		return (
-			await realDbOps.getAnthropicBankedResetEventByRequestId(
-				ACCOUNT_ID,
-				requestId,
-			)
-		)?.recovery_pending_until;
-	}
-
-	it("marks a paused account's reset when the post-claim usage read failed", async () => {
-		Object.assign(baseAccount, overagePaused);
-		refetchSucceeds = false;
-		expect(await claimAndReadMark("req-owed-fail")).toBe(NOW + HOUR);
-		expect(dbCalls).not.toContain("resumeAccountIfOveragePaused");
-	});
-
-	it("marks it when the post-claim reading lacks a window", async () => {
-		Object.assign(baseAccount, overagePaused);
-		usageReading = { five_hour: { utilization: 10, resets_at: null } };
-		expect(await claimAndReadMark("req-owed-partial-reading")).toBe(NOW + HOUR);
-	});
-
-	it("does not mark a partial reset, a reading at a limit, an unpaused account or a lifted pause", async () => {
-		Object.assign(baseAccount, overagePaused);
+	it("owes nothing for a partial reset, an unpaused account or another kind of pause", async () => {
 		claimImpl = async () => claimResult({ cleared: ["five_hour"] });
-		expect(await claimAndReadMark("req-partial")).toBeNull();
+		expect((await claimOnce("req-5h"))?.recovery_pending_until).toBeNull();
 
 		claimImpl = async () => claimResult();
-		usageReading = reading(20, 100);
-		expect(await claimAndReadMark("req-exhausted")).toBeNull();
-
-		usageReading = reading(10, 10);
-		expect(await claimAndReadMark("req-lifted")).toBeNull();
-
-		baseAccount.paused = false;
 		refetchSucceeds = false;
-		expect(await claimAndReadMark("req-unpaused")).toBeNull();
+		baseAccount.pause_reason = "manual";
+		expect((await claimOnce("req-manual"))?.recovery_pending_until).toBeNull();
+		baseAccount.paused = false;
+		baseAccount.pause_reason = null;
+		expect(
+			(await claimOnce("req-unpaused"))?.recovery_pending_until,
+		).toBeNull();
+		expect(resumedAny()).toBe(false);
+	});
+
+	it("records the obligation with the resolution, before verification: a crash while verifying leaves it for recovery", async () => {
+		let releaseRefetch: ((ok: boolean) => void) | undefined;
+		usage.fenceAndRefetch.mockImplementationOnce(
+			() =>
+				new Promise<boolean>((resolve) => {
+					releaseRefetch = resolve;
+				}),
+		);
+		const pending = coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-crash-verify",
+		});
+		// The process "dies" here: the claim is still awaiting verification.
+		for (let i = 0; i < 100; i++) {
+			const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+				ACCOUNT_ID,
+				"req-crash-verify",
+			);
+			if (row?.status === "reset") break;
+			await new Promise((r) => setTimeout(r, 1));
+		}
+		const owed = await realDbOps.getAnthropicBankedResetRecoveryPending();
+		expect(
+			owed.map((row) => [row.request_id, row.recovery_pause_epoch]),
+		).toEqual([["req-crash-verify", PAUSE_EPOCH]]);
+		expect(resumedAny()).toBe(false);
+		releaseRefetch?.(false);
+		await pending;
 	});
 });

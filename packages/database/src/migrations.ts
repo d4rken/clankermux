@@ -61,6 +61,8 @@ export function ensureSchema(db: Database): void {
 			anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0,
 			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
+			pause_epoch INTEGER NOT NULL DEFAULT 0,
+			pause_changed_at INTEGER,
 			rate_limited_reason TEXT,
 			rate_limited_at INTEGER,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
@@ -985,7 +987,9 @@ export function ensureSchema(db: Database): void {
 			created_at INTEGER NOT NULL,
 			resolved_at INTEGER,
 			rearm_at INTEGER,
-			recovery_pending_until INTEGER
+			recovery_pending_until INTEGER,
+			recovery_pause_epoch INTEGER,
+			recovery_pause_changed_at INTEGER
 		)
 	`);
 
@@ -1118,6 +1122,15 @@ export function ensureSchema(db: Database): void {
 		BEGIN SELECT RAISE(ABORT, 'API key is referenced by routing rules'); END`);
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_attempt_retention AFTER DELETE ON requests
 		BEGIN DELETE FROM routing_attempts WHERE request_id=OLD.id; END`);
+
+	// A pause's identity. Every change of paused or pause_reason, by any of the
+	// many writers, advances pause_epoch and stamps pause_changed_at (ms), so a
+	// verdict owed to one pause can tell it from a later one.
+	db.run(`CREATE TRIGGER IF NOT EXISTS accounts_pause_epoch AFTER UPDATE OF paused, pause_reason ON accounts
+  WHEN OLD.paused IS NOT NEW.paused OR OLD.pause_reason IS NOT NEW.pause_reason
+  BEGIN UPDATE accounts SET pause_epoch = pause_epoch + 1,
+    pause_changed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+  WHERE id = NEW.id; END`);
 
 	db.run(`CREATE TRIGGER IF NOT EXISTS routing_permission_account_cleanup AFTER DELETE ON accounts
   BEGIN DELETE FROM account_model_permissions WHERE account_id=OLD.id;
@@ -1814,6 +1827,31 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "anthropic_banked_reset_events",
 		column: "recovery_pending_until",
 		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pending_until INTEGER",
+	},
+	// The identity of the account's pause the owed verdict is for: its
+	// pause_epoch and pause_changed_at when the claim was sent.
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pause_epoch",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pause_epoch INTEGER",
+	},
+	{
+		table: "anthropic_banked_reset_events",
+		column: "recovery_pause_changed_at",
+		ddl: "ALTER TABLE anthropic_banked_reset_events ADD COLUMN recovery_pause_changed_at INTEGER",
+	},
+	// A pause's identity, advanced by the accounts_pause_epoch trigger on every
+	// change of paused or pause_reason. 0 and NULL on an account never paused
+	// since the column arrived.
+	{
+		table: "accounts",
+		column: "pause_epoch",
+		ddl: "ALTER TABLE accounts ADD COLUMN pause_epoch INTEGER NOT NULL DEFAULT 0",
+	},
+	{
+		table: "accounts",
+		column: "pause_changed_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN pause_changed_at INTEGER",
 	},
 ];
 

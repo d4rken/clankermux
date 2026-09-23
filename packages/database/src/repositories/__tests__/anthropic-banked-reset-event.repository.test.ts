@@ -384,30 +384,45 @@ describe("AnthropicBankedResetEventRepository", () => {
 	});
 
 	describe("overage-pause recovery marks", () => {
-		it("marks, lists across accounts, and clears a resolved row", async () => {
+		it("records the obligation in the same write as the resolution, lists it across accounts, and clears it", async () => {
 			const one = await repo.beginManualAttempt(MANUAL);
-			await repo.resolveAttempt(one.row.id, { status: "reset", now: NOW });
+			await repo.resolveAttempt(one.row.id, {
+				status: "reset",
+				now: NOW,
+				recovery: { until: NOW + HOUR, pauseEpoch: 4, pauseChangedAt: NOW - 5 },
+			});
 			const two = await repo.beginManualAttempt({
 				...MANUAL,
 				accountId: "acc-2",
 				now: NOW + 1,
 			});
-			await repo.resolveAttempt(two.row.id, { status: "reset", now: NOW });
-			expect(await repo.findRecoveryPending()).toEqual([]);
+			await repo.resolveAttempt(two.row.id, {
+				status: "reset",
+				now: NOW,
+				recovery: { until: NOW + HOUR, pauseEpoch: 1, pauseChangedAt: null },
+			});
+			const three = await repo.beginManualAttempt({
+				...MANUAL,
+				accountId: "acc-3",
+				now: NOW + 2,
+			});
+			await repo.resolveAttempt(three.row.id, { status: "reset", now: NOW });
 
-			expect(await repo.markRecoveryPending(one.row.id, NOW + HOUR)).toBe(true);
-			expect(await repo.markRecoveryPending(two.row.id, NOW + HOUR)).toBe(true);
 			expect(
 				(await repo.findRecoveryPending()).map((r) => [
 					r.account_id,
+					r.status,
 					r.recovery_pending_until,
+					r.recovery_pause_epoch,
+					r.recovery_pause_changed_at,
 				]),
 			).toEqual([
-				["acc-1", NOW + HOUR],
-				["acc-2", NOW + HOUR],
+				["acc-1", "reset", NOW + HOUR, 4, NOW - 5],
+				["acc-2", "reset", NOW + HOUR, 1, null],
 			]);
 
 			expect(await repo.clearRecoveryPending(one.row.id)).toBe(true);
+			expect(await repo.clearRecoveryPending(one.row.id)).toBe(false);
 			expect(
 				(await repo.findRecoveryPending()).map((r) => r.account_id),
 			).toEqual(["acc-2"]);

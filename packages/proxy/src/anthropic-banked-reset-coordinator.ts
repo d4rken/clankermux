@@ -3,7 +3,10 @@ import {
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
 } from "@clankermux/core";
-import type { AnthropicBankedResetEventRow } from "@clankermux/database";
+import type {
+	AccountPauseMarker,
+	AnthropicBankedResetEventRow,
+} from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import {
 	anthropicBankedResetCache,
@@ -112,6 +115,18 @@ export function bankedResetsLeftTotal(
 	status: AnthropicBankedResetStatus,
 ): number {
 	return status.grants.reduce((sum, grant) => sum + grant.resetsLeft, 0);
+}
+
+/**
+ * The proxy's own overage pause, the only one a restored week lifts: the rule
+ * resumeIfOveragePaused applies in SQL.
+ */
+export function isOveragePause(marker: AccountPauseMarker): boolean {
+	return (
+		marker.paused &&
+		marker.autoPauseOnOverageEnabled &&
+		(marker.pauseReason === null || marker.pauseReason === "overage")
+	);
 }
 
 function notYetDue(row: AnthropicBankedResetEventRow, now: number): boolean {
@@ -387,6 +402,10 @@ export class AnthropicBankedResetCoordinator {
 		if (target.kind === "settled")
 			return this.settledOutcome(account, target.row);
 
+		// The overage pause standing when the claim is sent, if any: the one a
+		// restoring reset owes a verdict.
+		const pauseAtClaim = await this.overagePauseAtClaim(account);
+
 		// Last look at the account before the POST, after every await above: it
 		// may have been disabled, or its auto-apply toggle turned off, meanwhile.
 		const gate = await this.claimableAccount(accountId, request);
@@ -446,6 +465,17 @@ export class AnthropicBankedResetCoordinator {
 		}
 
 		const now = this.now();
+		// Owed only by a fresh reset that cleared the weekly window of an account
+		// overage-paused when the claim was sent. Recorded in the resolving write
+		// itself, so no crash can leave a spent reset without it.
+		const owedPause =
+			result.result === "reset" &&
+			refetch &&
+			pauseAtClaim &&
+			(result.cleared.includes("seven_day") ||
+				result.cleared.includes("seven_day_overage_included"))
+				? pauseAtClaim
+				: null;
 		let ledgerStatus: AnthropicBankedResetEventStatus;
 		let nextAttemptAt: number | null = null;
 		if (RESOLVING_RESULTS.has(result.result)) {
@@ -460,6 +490,11 @@ export class AnthropicBankedResetCoordinator {
 					cleared: result.cleared,
 					resetsLeft: result.resetsLeft,
 					cooldownUntil: result.cooldownUntil,
+					recovery: owedPause && {
+						until: now + BANKED_RESET_RECOVERY_WINDOW_MS,
+						pauseEpoch: owedPause.pauseEpoch,
+						pauseChangedAt: owedPause.pauseChangedAt,
+					},
 					now,
 				}),
 			);
@@ -486,42 +521,14 @@ export class AnthropicBankedResetCoordinator {
 			`banked_reset_claim account=${account.name} grant=${request.grantId} trigger=${request.autoApply ? `auto:${request.autoApply.cause}` : "manual"} replay=${target.replay} result=${result.result} reason=${result.reason ?? "none"} ledger=${ledgerStatus}`,
 		);
 
-		if (result.result === "reset" && refetch) {
-			// `reset` only: an already_used replay may surface long after the
-			// windows were restored, and the account may have spent them since.
-			const keepPause = await this.overagePauseKeptBy(
+		if (owedPause && refetch) {
+			await this.settleOwedPause(
+				account.name,
 				accountId,
-				result,
+				target.rowId,
+				owedPause.pauseEpoch,
 				refetch,
 			);
-			try {
-				if (keepPause) {
-					log.info(
-						`Overage pause of '${account.name}' kept after a banked reset: ${keepPause.reason}`,
-					);
-					if (keepPause.verificationUnavailable && account.paused) {
-						// The reset is spent and its row settled, so the verdict is owed
-						// separately: the applier decides it from a later reading.
-						await this.writeLedger(account.name, target.rowId, (id) =>
-							this.ctx.dbOps.markAnthropicBankedResetRecoveryPending(
-								id,
-								now + BANKED_RESET_RECOVERY_WINDOW_MS,
-							),
-						);
-					}
-				} else if (
-					await this.ctx.dbOps.resumeAccountIfOveragePaused(accountId)
-				) {
-					log.info(
-						`Resumed '${account.name}' from its overage pause: a banked reset restored its usage windows`,
-					);
-				}
-			} catch (error) {
-				log.error(
-					`Banked reset claimed for '${account.name}', but its overage pause could not be lifted:`,
-					error,
-				);
-			}
 		}
 
 		let statusRefreshed = false;
@@ -546,51 +553,76 @@ export class AnthropicBankedResetCoordinator {
 	}
 
 	/**
-	 * Why a fresh reset must not lift the overage pause yet, or null when it
-	 * may. The pause stands for spending past a spent window; only a reset that
-	 * cleared the weekly window, confirmed by a post-claim reading with headroom
-	 * in both the 5-hour and weekly windows, removes its reason.
-	 * `verificationUnavailable` marks the one case a later reading can still
-	 * decide.
+	 * The account's overage pause and its identity when the claim is sent, or
+	 * null when it is not paused for overage (or the read failed: then no
+	 * verdict is owed and the pause is left to its usual recovery).
 	 */
-	private async overagePauseKeptBy(
+	private async overagePauseAtClaim(
+		account: Account,
+	): Promise<{ pauseEpoch: number; pauseChangedAt: number | null } | null> {
+		try {
+			const marker = await this.ctx.dbOps.getAccountPauseMarker(account.id);
+			return marker && isOveragePause(marker) ? marker : null;
+		} catch (error) {
+			log.warn(
+				`Could not read the pause of '${account.name}' before its banked-reset claim: ${errorMessage(error)}`,
+			);
+			return null;
+		}
+	}
+
+	/**
+	 * Decide the verdict a reset owes the claim-time pause from the fenced
+	 * post-claim reading: headroom in both the 5-hour and weekly windows lifts
+	 * exactly that pause, a window at its limit keeps it; either way the
+	 * obligation is settled. Without a usable reading the obligation stays for
+	 * the applier.
+	 */
+	private async settleOwedPause(
+		accountName: string,
 		accountId: string,
-		result: AnthropicBankedResetClaimResult,
+		rowId: string,
+		pauseEpoch: number,
 		refetch: Promise<boolean>,
-	): Promise<{ reason: string; verificationUnavailable: boolean } | null> {
-		if (
-			!result.cleared.includes("seven_day") &&
-			!result.cleared.includes("seven_day_overage_included")
-		) {
-			return {
-				reason: `the reset cleared ${result.cleared.join(", ") || "no window"}, not the weekly window`,
-				verificationUnavailable: false,
-			};
+	): Promise<void> {
+		try {
+			if (!(await refetch)) {
+				log.info(
+					`Overage pause of '${accountName}' kept after a banked reset for now: the post-claim usage read failed or was deferred`,
+				);
+				return;
+			}
+			const verdict = overagePauseVerdict(
+				this.usage.get(accountId) as UsageData | null,
+				this.now(),
+			);
+			if (verdict.kind === "unknown") {
+				log.info(
+					`Overage pause of '${accountName}' kept after a banked reset for now: the post-claim reading lacks the 5-hour or weekly window`,
+				);
+				return;
+			}
+			if (verdict.kind === "exhausted") {
+				log.info(
+					`Overage pause of '${accountName}' kept after a banked reset: the post-claim reading is still at a limit (${verdict.detail})`,
+				);
+			} else if (
+				await this.ctx.dbOps.resumeAccountIfOveragePausedAt(
+					accountId,
+					pauseEpoch,
+				)
+			) {
+				log.info(
+					`Resumed '${accountName}' from its overage pause: a banked reset restored its usage windows`,
+				);
+			}
+			await this.ctx.dbOps.clearAnthropicBankedResetRecoveryPending(rowId);
+		} catch (error) {
+			log.error(
+				`Banked reset claimed for '${accountName}', but its overage pause could not be settled; the applier retries it:`,
+				error,
+			);
 		}
-		if (!(await refetch)) {
-			return {
-				reason: "the post-claim usage read failed or was deferred",
-				verificationUnavailable: true,
-			};
-		}
-		const verdict = overagePauseVerdict(
-			this.usage.get(accountId) as UsageData | null,
-			this.now(),
-		);
-		if (verdict.kind === "unknown") {
-			return {
-				reason:
-					"the post-claim usage reading lacks the 5-hour or weekly window",
-				verificationUnavailable: true,
-			};
-		}
-		if (verdict.kind === "exhausted") {
-			return {
-				reason: `the post-claim reading is still at a limit (${verdict.detail})`,
-				verificationUnavailable: false,
-			};
-		}
-		return null;
 	}
 
 	/**

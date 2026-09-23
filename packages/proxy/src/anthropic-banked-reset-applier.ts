@@ -35,6 +35,7 @@ import {
 	PAUSE_REASON_NEEDS_REAUTH,
 } from "@clankermux/core";
 import type {
+	AccountPauseMarker,
 	AnthropicBankedResetAutoClaim,
 	AnthropicBankedResetEventRow,
 	DatabaseOperations,
@@ -53,7 +54,10 @@ import {
 	type AnthropicBankedResetWindow,
 	type AnthropicUsageData,
 } from "@clankermux/types";
-import { overagePauseVerdict } from "./anthropic-banked-reset-coordinator";
+import {
+	isOveragePause,
+	overagePauseVerdict,
+} from "./anthropic-banked-reset-coordinator";
 import { weeklyResetCanLiftPause } from "./codex-reset-credit-applier";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
@@ -328,7 +332,13 @@ export interface BankedResetApplyDeps {
 	/** Rows owing an overage-pause verdict, every account. */
 	getRecoveryPending(): Promise<AnthropicBankedResetEventRow[]>;
 	clearRecoveryPending(rowId: string): Promise<boolean>;
-	resumeIfOveragePaused(accountId: string): Promise<boolean>;
+	/** The account's pause and its identity now; null for an unknown account. */
+	getPauseMarker(accountId: string): Promise<AccountPauseMarker | null>;
+	/** Lift the overage pause identified by `pauseEpoch`, and no later one. */
+	resumeIfOveragePausedAt(
+		accountId: string,
+		pauseEpoch: number,
+	): Promise<boolean>;
 	/** The cached usage reading and when it was observed; never a network call. */
 	peekUsageObservation(
 		accountId: string,
@@ -486,11 +496,32 @@ export class AnthropicBankedResetApplyScheduler {
 			);
 			return;
 		}
-		const resolvedAt = row.resolved_at ?? row.created_at;
+		// The verdict is owed to the pause standing when the claim was sent.
+		// One lifted or replaced since is not that pause: a reading cannot speak
+		// for it, and the obligation is void.
+		const pauseEpoch = row.recovery_pause_epoch;
+		const marker = await this.deps.getPauseMarker(row.account_id);
+		if (
+			pauseEpoch === null ||
+			!marker ||
+			marker.pauseEpoch !== pauseEpoch ||
+			!isOveragePause(marker)
+		) {
+			await this.deps.clearRecoveryPending(row.id);
+			log.info(
+				`Banked-reset applier: the overage pause of '${name}' changed since its banked reset; nothing owed`,
+			);
+			return;
+		}
+		// Evidence must postdate both the claim and the pause it is for.
+		const after = Math.max(
+			row.resolved_at ?? row.created_at,
+			row.recovery_pause_changed_at ?? 0,
+		);
 		const postClaimReading = () => {
 			const observation = this.deps.peekUsageObservation(row.account_id);
 			return observation?.observedAtMs != null &&
-				observation.observedAtMs > resolvedAt
+				observation.observedAtMs > after
 				? observation.data
 				: null;
 		};
@@ -504,7 +535,7 @@ export class AnthropicBankedResetApplyScheduler {
 		const verdict = overagePauseVerdict(reading, this.now());
 		if (verdict.kind === "unknown") return;
 		if (verdict.kind === "lift") {
-			if (await this.deps.resumeIfOveragePaused(row.account_id)) {
+			if (await this.deps.resumeIfOveragePausedAt(row.account_id, pauseEpoch)) {
 				log.info(
 					`Resumed '${name}' from its overage pause: a later usage reading confirmed its banked reset`,
 				);
@@ -776,7 +807,8 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		| "expireStaleAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetRecoveryPending"
 		| "clearAnthropicBankedResetRecoveryPending"
-		| "resumeAccountIfOveragePaused"
+		| "getAccountPauseMarker"
+		| "resumeAccountIfOveragePausedAt"
 		| "getPendingAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetAutoApplyCooldownAnchorAt"
 		| "getAnthropicBankedResetRearmAt"
@@ -821,8 +853,9 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		getRecoveryPending: () => dbOps.getAnthropicBankedResetRecoveryPending(),
 		clearRecoveryPending: (rowId) =>
 			dbOps.clearAnthropicBankedResetRecoveryPending(rowId),
-		resumeIfOveragePaused: (accountId) =>
-			dbOps.resumeAccountIfOveragePaused(accountId),
+		getPauseMarker: (accountId) => dbOps.getAccountPauseMarker(accountId),
+		resumeIfOveragePausedAt: (accountId, pauseEpoch) =>
+			dbOps.resumeAccountIfOveragePausedAt(accountId, pauseEpoch),
 		peekUsageObservation: (accountId) => {
 			const entry = usage.peekWithAge(accountId);
 			return entry

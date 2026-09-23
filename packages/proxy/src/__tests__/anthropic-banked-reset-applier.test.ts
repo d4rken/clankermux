@@ -5,6 +5,7 @@
  */
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type {
+	AccountPauseMarker,
 	AnthropicBankedResetAutoClaim,
 	AnthropicBankedResetEventRow,
 } from "@clankermux/database";
@@ -391,6 +392,8 @@ function pendingRow(
 		next_attempt_at: null,
 		rearm_at: null,
 		recovery_pending_until: null,
+		recovery_pause_epoch: null,
+		recovery_pause_changed_at: null,
 		created_at: NOW - 60_000,
 		resolved_at: null,
 		...overrides,
@@ -417,6 +420,8 @@ function harness(
 			observedAtMs: number | null;
 		} | null;
 		candidates?: Array<{ id: string; name: string }>;
+		/** The account's pause as the recovery pass reads it, now. */
+		pauseMarker?: () => AccountPauseMarker | null;
 	} = {},
 ): Harness {
 	let observation = options.observation ?? null;
@@ -438,8 +443,13 @@ function harness(
 				h.cleared.push(rowId);
 				return true;
 			},
-			resumeIfOveragePaused: async (accountId) => {
-				h.resumed.push(accountId);
+			getPauseMarker: async () =>
+				options.pauseMarker ? options.pauseMarker() : null,
+			resumeIfOveragePausedAt: async (accountId, pauseEpoch) => {
+				// The compare-and-set the ledger does in SQL.
+				const marker = options.pauseMarker?.() ?? null;
+				if (!marker || marker.pauseEpoch !== pauseEpoch) return false;
+				h.resumed.push(`${accountId}@${pauseEpoch}`);
 				return true;
 			},
 			peekUsageObservation: () => observation,
@@ -775,7 +785,8 @@ function poolScheduler(options: {
 			getAnthropicBankedResetRearmAt: async () => null,
 			getAnthropicBankedResetRecoveryPending: async () => [],
 			clearAnthropicBankedResetRecoveryPending: async () => true,
-			resumeAccountIfOveragePaused: async () => false,
+			getAccountPauseMarker: async () => null,
+			resumeAccountIfOveragePausedAt: async () => false,
 			claimAnthropicBankedResetAutoAttempt: async (input) => ({
 				id: `acct-1:${input.grantId}:1`,
 				requestId: "req",
@@ -913,6 +924,7 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 
 describe("owed overage-pause verdicts", () => {
 	const HOUR = 60 * 60_000;
+	const EPOCH = 5;
 	function owed(
 		overrides: Partial<AnthropicBankedResetEventRow> = {},
 	): AnthropicBankedResetEventRow {
@@ -922,8 +934,19 @@ describe("owed overage-pause verdicts", () => {
 			status: "reset",
 			resolved_at: NOW - 60_000,
 			recovery_pending_until: NOW - 60_000 + HOUR,
+			recovery_pause_epoch: EPOCH,
+			recovery_pause_changed_at: NOW - 3_600_000,
 			...overrides,
 		});
+	}
+	function overagePause(pauseEpoch = EPOCH): AccountPauseMarker {
+		return {
+			paused: true,
+			pauseReason: "overage",
+			autoPauseOnOverageEnabled: true,
+			pauseEpoch,
+			pauseChangedAt: NOW - 3_600_000,
+		};
 	}
 	const headroom = {
 		five_hour: { utilization: 10, resets_at: null },
@@ -941,20 +964,72 @@ describe("owed overage-pause verdicts", () => {
 	} as UsageData;
 
 	async function run(options: Parameters<typeof harness>[0]) {
-		const h = harness({ candidates: [], ...options });
+		const h = harness({
+			candidates: [],
+			pauseMarker: () => overagePause(),
+			...options,
+		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		return h;
 	}
 
-	it("lifts the pause from a post-claim reading with headroom, for an account with no toggle on", async () => {
+	it("lifts exactly the claim-time pause from a post-claim reading with headroom, for an account with no toggle on", async () => {
 		const h = await run({
 			recovery: [owed()],
 			observation: { data: headroom, observedAtMs: NOW - 1_000 },
 		});
-		expect(h.resumed).toEqual(["acct-owed"]);
+		expect(h.resumed).toEqual([`acct-owed@${EPOCH}`]);
 		expect(h.cleared).toEqual(["owed-row"]);
 		expect(h.usageRefreshes).toEqual([]);
 		expect(h.dispatched).toEqual([]);
+	});
+
+	it("never lifts a newer pause: operator resume, headroom, re-pause for overage, then a tick", async () => {
+		// The claim recorded pause EPOCH. The operator resumes (EPOCH + 1), a
+		// poll sees headroom, traffic spends a window and the account is paused
+		// for overage again (EPOCH + 2), all before the next tick.
+		let marker = overagePause();
+		const h = harness({
+			candidates: [],
+			recovery: [owed()],
+			pauseMarker: () => marker,
+			observation: { data: headroom, observedAtMs: NOW - 30_000 },
+		});
+		marker = {
+			...marker,
+			paused: false,
+			pauseReason: null,
+			pauseEpoch: EPOCH + 1,
+		};
+		marker = { ...overagePause(EPOCH + 2), pauseChangedAt: NOW - 10_000 };
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
+		expect(h.usageRefreshes).toEqual([]);
+	});
+
+	it("settles without resuming once the account is no longer paused", async () => {
+		const h = await run({
+			recovery: [owed()],
+			pauseMarker: () => ({
+				...overagePause(EPOCH + 1),
+				paused: false,
+				pauseReason: null,
+			}),
+			observation: { data: headroom, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
+	});
+
+	it("requires the reading to postdate the recorded pause as well as the claim", async () => {
+		const h = await run({
+			recovery: [owed({ recovery_pause_changed_at: NOW - 500 })],
+			observation: { data: headroom, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual([]);
+		expect(h.usageRefreshes).toEqual(["acct-owed"]);
 	});
 
 	it("keeps the pause but settles the verdict when the reading is at a limit", async () => {
@@ -984,7 +1059,7 @@ describe("owed overage-pause verdicts", () => {
 			observationAfterRefresh: { data: headroom, observedAtMs: NOW },
 		});
 		expect(h.usageRefreshes).toEqual(["acct-owed"]);
-		expect(h.resumed).toEqual(["acct-owed"]);
+		expect(h.resumed).toEqual([`acct-owed@${EPOCH}`]);
 		expect(h.cleared).toEqual(["owed-row"]);
 	});
 

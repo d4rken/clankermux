@@ -24,6 +24,7 @@ export {
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
 export {
+	type AccountPauseMarker,
 	AccountRepository,
 	type ProviderRenewalAnchorSync,
 } from "./repositories/account.repository";

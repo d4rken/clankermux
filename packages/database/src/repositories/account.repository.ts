@@ -261,6 +261,19 @@ function seedDerivedRenewalPrice(db: Database, accountId: string): void {
 	);
 }
 
+/**
+ * An account's pause and its identity. `pauseEpoch` advances on every change
+ * of `paused` or `pause_reason`; `pauseChangedAt` (ms) is when it last did,
+ * null when it never has since the column arrived.
+ */
+export interface AccountPauseMarker {
+	paused: boolean;
+	pauseReason: string | null;
+	autoPauseOnOverageEnabled: boolean;
+	pauseEpoch: number;
+	pauseChangedAt: number | null;
+}
+
 export interface DevinCredentialReplacement {
 	apiKey: string;
 	expiresAt: number | null;
@@ -1187,6 +1200,53 @@ export class AccountRepository extends BaseRepository<Account> {
 			   AND COALESCE(auto_pause_on_overage_enabled, 0) = 1
 			   AND (pause_reason IS NULL OR pause_reason = 'overage')`,
 			[accountId],
+		);
+		return changes > 0;
+	}
+
+	/** The account's pause and its identity; null for an unknown account. */
+	async getPauseMarker(accountId: string): Promise<AccountPauseMarker | null> {
+		const row = await this.get<{
+			paused: number;
+			pause_reason: string | null;
+			auto_pause_on_overage_enabled: number;
+			pause_epoch: number;
+			pause_changed_at: number | null;
+		}>(
+			`SELECT COALESCE(paused, 0) AS paused, pause_reason,
+				COALESCE(auto_pause_on_overage_enabled, 0) AS auto_pause_on_overage_enabled,
+				pause_epoch, pause_changed_at
+			 FROM accounts WHERE id = ?`,
+			[accountId],
+		);
+		return row
+			? {
+					paused: row.paused === 1,
+					pauseReason: row.pause_reason,
+					autoPauseOnOverageEnabled: row.auto_pause_on_overage_enabled === 1,
+					pauseEpoch: row.pause_epoch,
+					pauseChangedAt: row.pause_changed_at,
+				}
+			: null;
+	}
+
+	/**
+	 * {@link resumeIfOveragePaused}, but only for the pause identified by
+	 * `pauseEpoch`: one lifted and re-applied since is another pause.
+	 */
+	async resumeIfOveragePausedAt(
+		accountId: string,
+		pauseEpoch: number,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts
+			 SET paused = 0, pause_reason = NULL
+			 WHERE id = ?
+			   AND paused = 1
+			   AND COALESCE(auto_pause_on_overage_enabled, 0) = 1
+			   AND (pause_reason IS NULL OR pause_reason = 'overage')
+			   AND pause_epoch = ?`,
+			[accountId, pauseEpoch],
 		);
 		return changes > 0;
 	}
