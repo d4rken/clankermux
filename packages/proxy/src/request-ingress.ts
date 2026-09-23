@@ -216,7 +216,11 @@ export async function ingestProxyRequest(
 		req.method === "POST" && url.pathname === "/v1/messages"
 			? computeCachePrefixHashes(parsedBody)
 			: null;
-	const affinity = extractRequestAffinity(req.headers);
+	const nativeResponsesCtx = getNativeResponsesRequestContext(req);
+	const affinity = extractRequestAffinity(
+		req.headers,
+		nativeResponsesCtx?.promptCacheKey ?? null,
+	);
 
 	// Coarse request-size estimate for the cache-warming session-promotion path
 	// (below). Kept on the legacy formula so promotion behavior is unchanged.
@@ -338,7 +342,6 @@ export async function ingestProxyRequest(
 	transferChatContext(req, requestMeta);
 	// Native Responses passthrough: re-key the adapter's Request-scoped context
 	// onto the RequestMeta so it reaches each per-account attempt downstream.
-	const nativeResponsesCtx = getNativeResponsesRequestContext(req);
 	if (nativeResponsesCtx) {
 		try {
 			const native = JSON.parse(nativeResponsesCtx.nativeBody);

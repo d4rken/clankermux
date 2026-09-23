@@ -16,6 +16,7 @@ export interface ResponsesRequest {
 	previous_response_id?: string | null;
 	max_output_tokens?: number;
 	store?: boolean;
+	prompt_cache_key?: string;
 }
 
 // ResponseItem union — all item types codex can send
