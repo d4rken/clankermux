@@ -118,6 +118,11 @@ export interface RequestMeta {
 	 * pin and also disables the (Anthropic-only) burst-hold for the request.
 	 */
 	excludeOfficialAnthropic?: boolean | null;
+	/**
+	 * The SDK bridge turn this request is an inner model call of. Set only from
+	 * the in-process inner context, never from a header.
+	 */
+	sdkBridgeTurnId?: string | null;
 }
 
 export type RequestAffinityScope =

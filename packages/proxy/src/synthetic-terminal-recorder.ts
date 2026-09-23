@@ -85,6 +85,7 @@ export function createSyntheticTerminalRecorder(
 			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 			clientUserAgent: requestMeta.clientUserAgent ?? null,
 			clientHarness: requestMeta.clientHarness ?? null,
+			sdkBridgeTurnId: requestMeta.sdkBridgeTurnId ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,

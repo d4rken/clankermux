@@ -21,6 +21,7 @@ export type RecordFieldsFromMeta = Pick<
 	| "clientHarness"
 	| "comboName"
 	| "routing"
+	| "sdkBridgeTurnId"
 >;
 
 /**
@@ -49,5 +50,6 @@ export function recordFieldsFromMeta(
 		clientHarness: requestMeta.clientHarness,
 		comboName: requestMeta.comboName,
 		routing: requestMeta.routing ?? null,
+		sdkBridgeTurnId: requestMeta.sdkBridgeTurnId,
 	};
 }

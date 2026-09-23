@@ -20,6 +20,7 @@ import {
 } from "./resolved-route";
 import { observeRoutingResponse } from "./routing-response-audit";
 import { getModelPermissionService } from "./routing-service";
+import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 
 /** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
 export interface RoutingAttemptAudit {
@@ -242,6 +243,7 @@ export async function sendAuthorizedRequest(
 		await ctx.dbOps.routing.recordAttempt(attempt);
 		recorded = true;
 		if (audit) audit.id = attempt.id;
+		noteSdkBridgeInnerSend(meta, account.id);
 		response = await makeProxyRequest(
 			request,
 			undefined,

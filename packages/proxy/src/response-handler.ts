@@ -571,6 +571,8 @@ export interface ResponseHandlerOptions {
 	clientUserAgent?: string | null;
 	/** Observed harness family (see RequestMeta.clientHarness). */
 	clientHarness?: string | null;
+	/** See RequestMeta.sdkBridgeTurnId. */
+	sdkBridgeTurnId?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -776,6 +778,7 @@ async function forwardToClientInner(
 		cachePrefixHashes,
 		clientUserAgent,
 		clientHarness,
+		sdkBridgeTurnId,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -935,6 +938,7 @@ async function forwardToClientInner(
 			cachePrefixHashes: cachePrefixHashes ?? null,
 			clientUserAgent: clientUserAgent ?? null,
 			clientHarness: clientHarness ?? null,
+			sdkBridgeTurnId: sdkBridgeTurnId ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:

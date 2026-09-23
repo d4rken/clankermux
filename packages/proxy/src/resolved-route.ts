@@ -100,6 +100,8 @@ export interface BuildRouteInput {
 	chatRequirements?: ChatRequirements;
 	/** Only in-process scheduler code supplies this, never client headers alone. */
 	maintenance?: { accountId: string; purpose: "auto_refresh" | "keepalive" };
+	/** Set on the route of a bridge inner call, from its in-process context. */
+	sdkBridgeTurnId?: string;
 }
 /** Private maps never escape: Object.freeze alone would not freeze a Map's entries. */
 export class ResolvedRoute {
@@ -154,6 +156,9 @@ export class ResolvedRoute {
 			headerAccountId: input.headerAccountId ?? null,
 			excludeOfficialAnthropic: input.excludeOfficialAnthropic ?? false,
 			maintenance: this.maintenance,
+			...(input.sdkBridgeTurnId
+				? { sdkBridgeTurnId: input.sdkBridgeTurnId }
+				: {}),
 			chatRequirements: input.chatRequirements,
 			targets: [...this.#targets].map(
 				([id, { upstreamModel, targetSource, provider }]) => ({

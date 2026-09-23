@@ -141,6 +141,8 @@ export interface RecordMeta {
 	 */
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
+	/** See RequestMeta.sdkBridgeTurnId. Optional: absent stays NULL. */
+	sdkBridgeTurnId?: string | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -1218,6 +1220,7 @@ export class RequestRecorder {
 			cachePrefixHashes: meta.cachePrefixHashes ?? null,
 			clientUserAgent: meta.clientUserAgent ?? null,
 			clientHarness: meta.clientHarness ?? null,
+			sdkBridgeTurnId: meta.sdkBridgeTurnId ?? null,
 			// Response-side facts come off the finalized usage summary; the
 			// two credit marks are ingress facts carried on the meta.
 			stopReason: record.usage?.stopReason,

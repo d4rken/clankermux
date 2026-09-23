@@ -15,7 +15,11 @@ import {
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	getSdkBridgeInnerMetaContext,
+	type RequestMeta,
+} from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -77,6 +81,10 @@ import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
 } from "./routing-service";
+import {
+	reportSdkBridgeInnerFailure,
+	reportSdkBridgeInnerResponse,
+} from "./sdk-bridge-inner-outcome";
 import { isIngressRecordable } from "./should-record-request";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 import { resolveZeroAccountsOutcome } from "./zero-accounts-terminal";
@@ -310,7 +318,9 @@ export async function handleProxy(
 			burstHoldTimingOverride,
 		);
 		retractIfNeverStarted(response.status);
-		return withRequestId(response);
+		const stamped = withRequestId(response);
+		reportSdkBridgeInnerResponse(requestMeta, stamped);
+		return stamped;
 	} catch (error) {
 		// A later alias stage can reject after an earlier attempt staged a cache body.
 		cacheBodyStore.discardStaged(requestMeta.id);
@@ -365,7 +375,9 @@ export async function handleProxy(
 				apiKeyId,
 				apiKeyName,
 			)(response, error.code);
-			return withRequestId(response);
+			const stamped = withRequestId(response);
+			reportSdkBridgeInnerResponse(requestMeta, stamped);
+			return stamped;
 		}
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.
@@ -375,6 +387,7 @@ export async function handleProxy(
 		// error or those rows, which are the ones most worth looking up, answer
 		// without the header every other terminal now carries.
 		attachRequestId(error, requestMeta.id);
+		reportSdkBridgeInnerFailure(requestMeta, error);
 		throw error;
 	}
 }
@@ -411,7 +424,12 @@ async function handleIngestedProxy(
 		canRearmIdleTimeout,
 	} = ingressContext;
 
-	const forcedId = isInternal ? null : getForcedAccount();
+	// A bridge inner call's destinations were fixed when the outer request was
+	// routed, under whatever force applied then; force is not consulted again.
+	const forcedId =
+		isInternal || getSdkBridgeInnerMetaContext(requestMeta)
+			? null
+			: getForcedAccount();
 	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null, forcedId);
 
 	// 4b. Global force-account override (Feature 3). When a forced account is

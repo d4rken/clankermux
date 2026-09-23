@@ -1,7 +1,10 @@
 import type { Config, RuntimeConfig } from "@clankermux/config";
 import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import type { Provider } from "@clankermux/providers";
-import type { LoadBalancingStrategy } from "@clankermux/types";
+import type {
+	LoadBalancingStrategy,
+	SdkBridgeTransport,
+} from "@clankermux/types";
 import type { AccountModelPermissionService } from "../account-model-permissions";
 import type { RequestRecorder } from "../request-recorder";
 
@@ -30,6 +33,11 @@ export interface ProxyContext {
 	 * holds and long quiet streaming gaps aren't reaped by the 180s base timeout.
 	 */
 	server?: import("bun").Server<undefined>;
+	/**
+	 * The Claude Agent SDK bridge. Absent means unavailable ("not configured"),
+	 * so floored requests exclude official Anthropic accounts.
+	 */
+	sdkBridge?: SdkBridgeTransport;
 }
 
 /** Error messages used throughout the proxy module */
