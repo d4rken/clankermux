@@ -5,6 +5,11 @@ import type {
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
+import { MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH } from "@clankermux/types";
+
+// Re-exported: the limits live in @clankermux/types so a browser bundle can
+// import them without pulling in a server package.
+export { MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH };
 
 const log = new Logger("SessionAuth");
 
@@ -32,12 +37,6 @@ export const SESSION_IDLE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
  * which is a rounding error against seven days.
  */
 export const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
-
-/** Longest password the login endpoint will hash. Checked BEFORE scrypt runs. */
-export const MAX_PASSWORD_BYTES = 1024;
-
-/** Shortest password that may be stored as the management password. */
-export const MIN_PASSWORD_LENGTH = 8;
 
 /**
  * Null when `password` may be stored as the management password, otherwise a
