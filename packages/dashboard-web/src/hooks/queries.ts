@@ -44,6 +44,7 @@ export function summaryToPlaceholder(summary: RequestSummary): RequestPayload {
 				: null,
 		error: summary.errorMessage ?? undefined,
 		meta: {
+			accountId: summary.accountId ?? undefined,
 			accountName,
 			timestamp: new Date(summary.timestamp).getTime(),
 			success: summary.success,

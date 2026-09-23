@@ -32,7 +32,12 @@ export function requestDetailsHref(id: string): string {
  * expresses it and a link would silently show a subset.
  */
 export function laneRequestsHref(scope: LaneScope): string | null {
-	if (scope.kind === "other") return null;
+	if (
+		scope.kind === "other" ||
+		scope.kind === "account-pending" ||
+		scope.kind === "no-account"
+	)
+		return null;
 	const params = paramsFor(scope);
 	return `/requests?${params.toString()}`;
 }
@@ -49,6 +54,11 @@ function paramsFor(scope: Exclude<LaneScope, { kind: "other" }>) {
 			return new URLSearchParams({ apiKeyId: scope.apiKeyId });
 		case "no-client":
 			return new URLSearchParams({ noApiKey: "1" });
+		case "account":
+			return new URLSearchParams({ account: scope.accountId });
+		case "account-pending":
+		case "no-account":
+			return new URLSearchParams();
 	}
 }
 

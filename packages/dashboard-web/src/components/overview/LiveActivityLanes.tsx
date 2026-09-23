@@ -1,9 +1,14 @@
 import { getModelShortName } from "@clankermux/core";
-import type { ClientApplication, ClientView } from "@clankermux/types";
+import type {
+	AccountResponse,
+	ClientApplication,
+	ClientView,
+} from "@clankermux/types";
 import { formatNumber, formatTokens } from "@clankermux/ui-common";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CHART_TOKENS, PINNED_MARK_COLORS } from "../../constants";
+import { useAccounts } from "../../hooks/queries";
 import {
 	type SeriesPalette,
 	useSeriesPalette,
@@ -147,6 +152,7 @@ function markColor(
 const DIMENSION_NOUN: Record<LaneDimension, string> = {
 	project: "project",
 	client: "client",
+	account: "account",
 };
 
 /** What the clients list knows about one API key right now. */
@@ -160,6 +166,10 @@ export type ResolveClient = (apiKeyId: string) => ClientLaneInfo | null;
 
 /** No clients list to consult — every key falls back to its recorded name. */
 const NO_CLIENT_INFO: ResolveClient = () => null;
+
+/** Current account metadata; null when the account was deleted or unknown. */
+export type ResolveAccount = (accountId: string) => AccountResponse | null;
+const NO_ACCOUNT_INFO: ResolveAccount = () => null;
 
 /**
  * What to call the client behind one API key.
@@ -192,6 +202,8 @@ interface LaneRow {
 	lane: Lane;
 	/** Set only for a client lane the clients list still carries. */
 	client: ClientLaneInfo | null;
+	/** Set only for an account lane the accounts list still carries. */
+	account: AccountResponse | null;
 	/** What the gutter and the description call this lane. */
 	label: string;
 }
@@ -204,20 +216,34 @@ interface LaneRow {
  * up here. An unresolved key keeps its own row rather than joining the keyless
  * bucket — it did present a key, we just cannot name it.
  */
-function laneRows(lanes: Lane[], resolve: ResolveClient): LaneRow[] {
+function laneRows(
+	lanes: Lane[],
+	resolveClient: ResolveClient,
+	resolveAccount: ResolveAccount,
+): LaneRow[] {
 	return lanes.map((lane) => {
+		if (lane.scope.kind === "account") {
+			const account = resolveAccount(lane.scope.accountId);
+			return {
+				lane,
+				client: null,
+				account,
+				label: account?.name ?? lane.label,
+			};
+		}
 		if (lane.scope.kind !== "client") {
-			return { lane, client: null, label: lane.label };
+			return { lane, client: null, account: null, label: lane.label };
 		}
 		const { apiKeyId } = lane.scope;
 		return {
 			lane,
-			client: resolve(apiKeyId),
+			client: resolveClient(apiKeyId),
+			account: null,
 			// An unnamed key is the one whose lane label IS its id.
 			label: clientName(
 				apiKeyId,
 				lane.label === apiKeyId ? null : lane.label,
-				resolve,
+				resolveClient,
 			),
 		};
 	});
@@ -276,6 +302,8 @@ export interface LiveActivityLanesViewProps {
 	 * lane labels fall back to the names the events themselves recorded.
 	 */
 	resolveClient?: ResolveClient;
+	/** Current account names, resolved at render so renames never split a lane. */
+	resolveAccount?: ResolveAccount;
 	/**
 	 * Interaction wiring. Optional so the view stays a pure function of props
 	 * and can be rendered on the server.
@@ -329,8 +357,9 @@ export function LiveActivityLanesView({
 	windowControl,
 	groupControl,
 	resolveClient = NO_CLIENT_INFO,
+	resolveAccount = NO_ACCOUNT_INFO,
 }: LiveActivityLanesViewProps) {
-	const rows = laneRows(lanes, resolveClient);
+	const rows = laneRows(lanes, resolveClient, resolveAccount);
 	const description = describeLanes(rows, windowMs, dimension);
 	const usable = Math.max(plotWidth - NOW_INSET, 1);
 	const pxPerMs = usable / windowMs;
@@ -1177,6 +1206,7 @@ function describeLanes(
 export function LiveActivityLanes() {
 	const { events, connected, outages, coverageFrom, primed } =
 		useLiveActivity();
+	const { data: accounts } = useAccounts();
 	const { windowMs, setWindowMs } = useLiveWindow();
 
 	/**
@@ -1214,6 +1244,12 @@ export function LiveActivityLanes() {
 			return { name: client.key.name, application: client.application };
 		};
 	}, [clients]);
+	const resolveAccount = useMemo<ResolveAccount>(() => {
+		const byId = new Map(
+			(accounts ?? []).map((account) => [account.id, account]),
+		);
+		return (accountId) => byId.get(accountId) ?? null;
+	}, [accounts]);
 
 	const plotAreaRef = useRef<HTMLDivElement>(null);
 	const [plotWidth, setPlotWidth] = useState(DEFAULT_PLOT_WIDTH);
@@ -1247,6 +1283,7 @@ export function LiveActivityLanes() {
 	const orderRef = useRef<Record<LaneDimension, string[]>>({
 		project: [],
 		client: [],
+		account: [],
 	});
 	const { lanes, order } = useMemo(
 		() =>
@@ -1257,8 +1294,9 @@ export function LiveActivityLanes() {
 				windowMs,
 				MAX_LANES,
 				orderRef.current[dimension],
+				(accountId) => resolveAccount(accountId)?.name ?? null,
 			),
-		[dimension, events, renderNow, windowMs],
+		[dimension, events, renderNow, windowMs, resolveAccount],
 	);
 	orderRef.current[dimension] = order;
 
@@ -1294,6 +1332,7 @@ export function LiveActivityLanes() {
 				dimension={dimension}
 				setDimension={setDimension}
 				resolveClient={resolveClient}
+				resolveAccount={resolveAccount}
 				renderNow={renderNow}
 				windowMs={windowMs}
 				setWindowMs={setWindowMs}
@@ -1326,6 +1365,7 @@ export function ScrollingLanes({
 	dimension,
 	setDimension,
 	resolveClient,
+	resolveAccount,
 	renderNow,
 	windowMs,
 	setWindowMs,
@@ -1341,6 +1381,7 @@ export function ScrollingLanes({
 	dimension: LaneDimension;
 	setDimension: (dimension: LaneDimension) => void;
 	resolveClient?: ResolveClient;
+	resolveAccount?: ResolveAccount;
 	renderNow: number;
 	windowMs: number;
 	setWindowMs: (ms: number) => void;
@@ -1583,6 +1624,7 @@ export function ScrollingLanes({
 					palette={palette}
 					selected={selected}
 					resolveClient={resolveClient}
+					resolveAccount={resolveAccount}
 					windowControl={{ value: windowMs, onChange: setWindowMs }}
 					groupControl={{ value: dimension, onChange: setDimension }}
 					plot={{
@@ -1599,7 +1641,11 @@ export function ScrollingLanes({
 				/>
 			</div>
 			{selected && (
-				<MarkTooltip event={selected} resolveClient={resolveClient} />
+				<MarkTooltip
+					event={selected}
+					resolveClient={resolveClient}
+					resolveAccount={resolveAccount}
+				/>
 			)}
 		</div>
 	);
@@ -1620,11 +1666,19 @@ function clamp(value: number, min: number, max: number): number {
 function MarkTooltip({
 	event,
 	resolveClient = NO_CLIENT_INFO,
+	resolveAccount = NO_ACCOUNT_INFO,
 }: {
 	event: LiveEvent;
 	resolveClient?: ResolveClient;
+	resolveAccount?: ResolveAccount;
 }) {
 	const client = eventClientName(event, resolveClient);
+	const account =
+		event.accountId == null
+			? event.account
+			: (resolveAccount(event.accountId)?.name ??
+				event.account ??
+				event.accountId);
 	return (
 		<div
 			role="status"
@@ -1646,7 +1700,7 @@ function MarkTooltip({
 					/>
 				)}
 				{event.model && <Row label="Model" value={event.model} />}
-				{event.account && <Row label="Account" value={event.account} />}
+				{account && <Row label="Account" value={account} />}
 				<Row label="Project" value={event.project ?? "(no project)"} />
 				{/* Shown in both dimensions: the request's client is not otherwise
 				    readable from the plot while it is grouped by project. */}

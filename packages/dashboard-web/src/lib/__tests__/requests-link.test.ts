@@ -22,6 +22,7 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		status: "ok",
 		durationMs: 1200,
 		tokensPerSecond: null,
+		accountId: null,
 		account: "backup2-darken",
 		apiKeyId: null,
 		apiKeyName: null,
