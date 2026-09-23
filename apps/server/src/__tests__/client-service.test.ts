@@ -537,6 +537,45 @@ describe("client service integration", () => {
 			"broad",
 		]);
 	});
+	it("drops only the hidden alias routes a draft names", async () => {
+		await service.bootstrap();
+		const draft = blank();
+		draft.application = "claude-code";
+		draft.destinations = { accountId: "d", providers: null };
+		draft.catalogues.anthropic.models = [
+			"claude-swe-high",
+			"claude-swe-low",
+		].map((id) => ({
+			id,
+			displayName: id,
+			targetModel: id.slice("claude-".length),
+			accountIds: ["d"],
+		}));
+		const { client } = await create(draft);
+		const hidden = edit(client);
+		hidden.catalogues.anthropic.models = [];
+		hidden.droppedAliasRoutes = ["claude-swe-low"];
+		const review = await service.review(hidden);
+		expect(review.aliasRules.map((r) => r.match_model_value)).toEqual([
+			"claude-swe-high",
+		]);
+		await service.commit(review.token);
+		const rules = await dbOps.routing.listRules();
+		expect(
+			matchRoutingRule(rules, client.apiKeyId, "claude-swe-high")?.target_model,
+		).toBe("swe-high");
+		expect(matchRoutingRule(rules, client.apiKeyId, "claude-swe-low")).toBe(
+			null,
+		);
+		expect(await dbOps.clients.ownedRuleIds(client.apiKeyId)).toHaveLength(1);
+	});
+	it("refuses a malformed list of dropped alias routes", async () => {
+		await service.bootstrap();
+		const draft = { ...blank(), droppedAliasRoutes: "claude-swe-low" };
+		await expect(service.review(draft)).rejects.toThrow(
+			"Invalid dropped alias routes",
+		);
+	});
 	it("rejects a stale routing review without creating any key", async () => {
 		await service.bootstrap();
 		const review = await service.review(blank());
