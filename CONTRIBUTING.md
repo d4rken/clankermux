@@ -11,8 +11,11 @@ agree that:
   `Copyright (c) ClankerMux contributors`;
 * you wrote it yourself, or you otherwise have the right to submit it under
   those terms; and
-* it may be distributed as part of ClankerMux under the AGPL, or under any
-  other terms the project adopts later.
+* it may be distributed as part of ClankerMux under the AGPL or, as the MIT
+  License permits, under other terms.
+
+You keep the copyright in your contribution. The collective copyright line
+covers everyone who has contributed; the git history records who wrote what.
 
 MIT is used inbound so the project keeps the option of offering ClankerMux
 under other terms later without tracking down every past contributor. Your
