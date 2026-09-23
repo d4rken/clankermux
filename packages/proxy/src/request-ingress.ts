@@ -17,6 +17,7 @@ import {
 } from "@clankermux/types";
 import { computeCachePrefixHashes } from "./cache-prefix-hash";
 import { injectCacheTtl1h } from "./cache-ttl-injector";
+import { extractClaudeCliDeviceId } from "./claude-device-registry";
 import { computeContextAndToolStats } from "./context-composition";
 import {
 	createRequestMetadata,
@@ -407,6 +408,9 @@ export async function ingestProxyRequest(
 	const harness = detectHarness(req.headers);
 	requestMeta.clientUserAgent = harness.userAgent;
 	requestMeta.clientHarness = harness.harness;
+	requestMeta.claudeDeviceId = isInternal
+		? null
+		: extractClaudeCliDeviceId(req.headers, parsedBody);
 	// Per-request reasoning effort, derived once for all failover attempts. The
 	// Codex path's translated Anthropic body loses reasoning.effort, so fall
 	// back to the value captured from the ORIGINAL Responses body (Stage A).

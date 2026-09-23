@@ -14,6 +14,7 @@ import {
 	claudeTokenRefreshHeaders,
 	claudeUsageReadHeaders,
 	compareClaudeCliVersions,
+	isClaudeCliUserAgent,
 	lastSeenClaudeStainlessHeaders,
 	newerClaudeCliVersion,
 	newestClaudeCliVersion,
@@ -102,6 +103,20 @@ describe("user agents", () => {
 		expect(claudeCliUserAgent("2.1.280")).toBe(
 			"claude-cli/2.1.280 (external, cli)",
 		);
+	});
+
+	it("recognises only the interactive CLI", () => {
+		expect(isClaudeCliUserAgent("claude-cli/2.1.280 (external, cli)")).toBe(
+			true,
+		);
+		for (const ua of [
+			"claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.280)",
+			"claude-code/2.1.280",
+			"claude-cli/2.1.280 (external, cli) extra",
+			"",
+			null,
+		])
+			expect(isClaudeCliUserAgent(ua)).toBe(false);
 	});
 });
 

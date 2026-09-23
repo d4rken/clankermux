@@ -68,6 +68,7 @@ import {
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
+	ClaudeDeviceRegistry,
 	CodexModelCatalogCache,
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
@@ -1275,6 +1276,7 @@ export default async function startServer(options?: {
 		refreshInFlight: new Map(),
 		asyncWriter,
 		requestRecorder,
+		claudeDevices: new ClaudeDeviceRegistry(),
 	};
 	// The model-catalogue caches were built before the API router (they are
 	// shared with it) and reach token acquisition through this holder.

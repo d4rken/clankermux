@@ -55,6 +55,12 @@ export const CLAUDE_STAINLESS_HEADERS: Readonly<Record<string, string>> =
 	});
 
 const CLAUDE_CLI_USER_AGENT = /^claude-cli\/\S+ \(external, cli\)$/;
+
+/** Interactive Claude Code, as opposed to the Agent SDK or another client. */
+export function isClaudeCliUserAgent(userAgent: string | null): boolean {
+	return userAgent !== null && CLAUDE_CLI_USER_AGENT.test(userAgent);
+}
+
 const STAINLESS_VALUE = /^[\w.-]{1,40}$/;
 
 let lastSeenCli: {
@@ -70,7 +76,7 @@ let lastSeenCli: {
  */
 export function trackClaudeCliStainlessHeaders(headers: Headers): void {
 	const userAgent = headers.get("user-agent") ?? "";
-	if (!CLAUDE_CLI_USER_AGENT.test(userAgent)) return;
+	if (!isClaudeCliUserAgent(userAgent)) return;
 	const version = extractClaudeVersion(userAgent);
 	if (!version) return;
 	const runtime: Record<string, string> = {};

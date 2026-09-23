@@ -50,6 +50,7 @@ export {
 } from "./bridge-policy";
 export { type BridgeStatsSnapshot, bridgeStats } from "./bridge-stats";
 export { CacheKeepaliveScheduler } from "./cache-keepalive-scheduler";
+export { ClaudeDeviceRegistry } from "./claude-device-registry";
 export {
 	CODEX_MODEL_CATALOG_LOOKUP_BUDGET_MS,
 	CODEX_MODEL_CATALOG_MAX_ENTRIES,

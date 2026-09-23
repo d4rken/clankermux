@@ -496,6 +496,47 @@ describe("ingestProxyRequest", () => {
 			expect(result.context.requestMeta.affinityScope).toBe("claude_session");
 		});
 
+		it("carries the Claude Code device_id of an external CLI request only", async () => {
+			const device = "e01ccdf3".repeat(8);
+			const body = {
+				...contextBody(),
+				metadata: {
+					user_id: JSON.stringify({
+						device_id: device,
+						account_uuid: "",
+						session_id: "11111111-2222-3333-4444-555555555555",
+					}),
+				},
+			};
+			const deviceOf = async (
+				headers: Record<string, string>,
+				isInternal: boolean,
+			) => {
+				const result = await ingestProxyRequest(
+					jsonRequest("/v1/messages", body, headers),
+					urlFor("/v1/messages"),
+					makeCtx(),
+					null,
+					isInternal,
+				);
+				if (result.kind !== "context") throw new Error("expected a context");
+				return result.context.requestMeta.claudeDeviceId;
+			};
+			const cli = { "user-agent": "claude-cli/2.1.280 (external, cli)" };
+
+			expect(await deviceOf(cli, false)).toBe(device);
+			expect(await deviceOf(cli, true)).toBeNull();
+			expect(
+				await deviceOf(
+					{
+						"user-agent":
+							"claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.280)",
+					},
+					false,
+				),
+			).toBeNull();
+		});
+
 		it('returns a finalBodyBuffer carrying the injected ttl:"1h" once the session is promoted', async () => {
 			// Promotion preconditions: the feature switch on, no token floor, the
 			// tracker in its production (turn-count) mode, and a session-keyed
