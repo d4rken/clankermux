@@ -96,9 +96,35 @@ describe("GrokSubscriptionProvider", () => {
 			expect(headers.get("x-grok-client-version")).toBe(GROK_CLI_VERSION);
 		});
 
-		it("sends the Grok CLI identity alone, never Claude Code's alongside it", () => {
-			const inbound = new Headers({
-				// Claude Code 2.x on /v1/messages, as it reaches the proxy.
+		/** What every client below must reduce to: the Grok CLI and nothing else. */
+		const GROK_ONLY = {
+			accept: "application/json",
+			"anthropic-version": "2023-06-01",
+			authorization: "Bearer account-token",
+			"content-type": "application/json",
+			"user-agent": GROK_CLI_USER_AGENT,
+			"x-authenticateresponse": "authenticate-response",
+			"x-grok-client-identifier": "grok-shell",
+			"x-grok-client-mode": "interactive",
+			"x-grok-client-version": GROK_CLI_VERSION,
+			"x-grok-conv-id": "client-conversation",
+			"x-xai-token-auth": "xai-grok-cli",
+		};
+
+		/** Headers every request carries into prepareHeaders, whatever the client. */
+		const COMMON_INBOUND = {
+			authorization: "Bearer client-token",
+			host: "proxy.local",
+			"accept-encoding": "gzip, br",
+			"content-length": "1234",
+			accept: "application/json",
+			"content-type": "application/json",
+			"anthropic-version": "2023-06-01",
+			"x-grok-conv-id": "client-conversation",
+		};
+
+		const CLIENTS: Record<string, Record<string, string>> = {
+			"Claude Code": {
 				"x-stainless-arch": "x64",
 				"x-stainless-lang": "js",
 				"x-stainless-os": "Linux",
@@ -107,7 +133,6 @@ describe("GrokSubscriptionProvider", () => {
 				"x-stainless-runtime": "node",
 				"x-stainless-runtime-version": "v24.3.0",
 				"x-stainless-timeout": "600",
-				"anthropic-version": "2023-06-01",
 				"anthropic-beta":
 					"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
 				"anthropic-dangerous-direct-browser-access": "true",
@@ -116,31 +141,61 @@ describe("GrokSubscriptionProvider", () => {
 				"x-claude-code-request-class": "main",
 				"x-client-request-id": "8a0c7e1f-2b3d-4c5e-9f60-718293a4b5c6",
 				"user-agent": "claude-cli/2.1.240 (external, cli)",
-				authorization: "Bearer client-token",
-				host: "proxy.local",
-				"accept-encoding": "gzip, br",
-				accept: "application/json",
-				"content-type": "application/json",
-				"x-grok-conv-id": "client-conversation",
-			});
+			},
+			// Reaches /v1/messages through the Responses adapter, which forwards
+			// the client's own headers.
+			Codex: {
+				originator: "codex_cli_rs",
+				session_id: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+				version: "0.155.1",
+				"openai-beta": "responses=experimental",
+				"chatgpt-account-id": "acct-1234",
+				"x-codex-turn-metadata": '{"turn":1}',
+				"x-codex-beta-features": "unified_exec",
+				"user-agent": "codex_cli_rs/0.155.1 (Debian 13; x86_64) xterm-256color",
+			},
+			Pi: {
+				"x-stainless-lang": "js",
+				"x-stainless-package-version": "5.20.0",
+				"x-stainless-os": "Linux",
+				"user-agent": "OpenAI/JS 5.20.0",
+			},
+			"an unknown client": {
+				"x-future-client": "1",
+				"x-future-client-session": "s-1",
+				"user-agent": "future-agent/0.1",
+			},
+		};
 
+		for (const [client, identity] of Object.entries(CLIENTS)) {
+			it(`sends the Grok CLI identity alone, never ${client}'s alongside it`, () => {
+				const sent = Object.fromEntries(
+					provider
+						.prepareHeaders(
+							new Headers({ ...COMMON_INBOUND, ...identity }),
+							"account-token",
+						)
+						.entries(),
+				);
+				expect(sent).toEqual(GROK_ONLY);
+			});
+		}
+
+		it("adds no forwarded header the client did not send", () => {
 			const sent = Object.fromEntries(
-				provider.prepareHeaders(inbound, "account-token").entries(),
+				provider.prepareHeaders(new Headers(), "account-token").entries(),
 			);
-
-			expect(sent).toEqual({
-				accept: "application/json",
-				"anthropic-version": "2023-06-01",
-				authorization: "Bearer account-token",
-				"content-type": "application/json",
-				"user-agent": GROK_CLI_USER_AGENT,
-				"x-authenticateresponse": "authenticate-response",
-				"x-grok-client-identifier": "grok-shell",
-				"x-grok-client-mode": "interactive",
-				"x-grok-client-version": GROK_CLI_VERSION,
-				"x-grok-conv-id": "client-conversation",
-				"x-xai-token-auth": "xai-grok-cli",
-			});
+			expect(Object.keys(sent).sort()).toEqual(
+				[
+					"authorization",
+					"user-agent",
+					"x-authenticateresponse",
+					"x-grok-client-identifier",
+					"x-grok-client-mode",
+					"x-grok-client-version",
+					"x-xai-token-auth",
+				].sort(),
+			);
 		});
 	});
 

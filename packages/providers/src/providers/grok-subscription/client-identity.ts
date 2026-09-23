@@ -43,46 +43,35 @@ export const GROK_CLI_IDENTITY_HEADERS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Header families that name the inbound client (Claude Code and the Anthropic
- * SDK it is built on). Prefixes, because each family is open-ended: Claude Code
- * adds `x-claude-code-*` headers release by release, Stainless adds
- * `x-stainless-*` suffixes as the SDK evolves, and an enumeration would start
- * leaking on the next release. None of them is part of the chat proxy's
- * protocol surface.
+ * The only request headers that travel from the inbound client to the chat
+ * proxy. An allowlist because every harness routed here (Claude Code, Codex,
+ * pi, whatever comes next) sends its own identity headers, and a denylist
+ * leaks the next one it has never seen. `authorization` is the account's own
+ * bearer by the time this applies, never the client's; `anthropic-version` is
+ * the Messages protocol version, which every request the proxy has answered
+ * so far carried.
  */
-const INBOUND_CLIENT_HEADER_PREFIXES = [
-	"x-stainless-",
-	"anthropic-",
-	"x-claude-code-",
+const FORWARDED_REQUEST_HEADERS = [
+	"content-type",
+	"accept",
+	"authorization",
+	"anthropic-version",
+	"x-grok-conv-id",
 ] as const;
 
-/** Single inbound-client headers whose family (`x-*`) is too broad to sweep. */
-const INBOUND_CLIENT_HEADERS: ReadonlySet<string> = new Set([
-	"x-app",
-	"x-client-request-id",
-	"user-agent",
-]);
-
 /**
- * The Messages wire-protocol version, not a client identity. Every request the
- * chat proxy has answered so far carried it, so it stays.
+ * The header set sent upstream: {@link FORWARDED_REQUEST_HEADERS} from
+ * `prepared`, then {@link GROK_CLI_IDENTITY_HEADERS}, so the Grok CLI is the
+ * only client identity the proxy sees.
  */
-const PROTOCOL_HEADERS: ReadonlySet<string> = new Set(["anthropic-version"]);
-
-/**
- * Drop the inbound client's identity from an outbound header set, in place, so
- * {@link GROK_CLI_IDENTITY_HEADERS} is the only identity the proxy sees.
- * `x-grok-*`, `content-type` and `accept` are untouched.
- */
-export function stripInboundClientIdentity(headers: Headers): void {
-	// Collected first: deleting while iterating a Headers skips entries.
-	const identifying = [...headers.keys()].filter((raw) => {
-		const name = raw.toLowerCase();
-		if (PROTOCOL_HEADERS.has(name)) return false;
-		return (
-			INBOUND_CLIENT_HEADERS.has(name) ||
-			INBOUND_CLIENT_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix))
-		);
-	});
-	for (const name of identifying) headers.delete(name);
+export function grokUpstreamHeaders(prepared: Headers): Headers {
+	const upstream = new Headers();
+	for (const name of FORWARDED_REQUEST_HEADERS) {
+		const value = prepared.get(name);
+		if (value !== null) upstream.set(name, value);
+	}
+	for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS)) {
+		upstream.set(name, value);
+	}
+	return upstream;
 }

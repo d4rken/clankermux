@@ -9,9 +9,8 @@ import type { TokenRefreshResult } from "../../types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 import {
 	GROK_CHAT_PROXY_ENDPOINT,
-	GROK_CLI_IDENTITY_HEADERS,
 	GROK_CLI_USER_AGENT,
-	stripInboundClientIdentity,
+	grokUpstreamHeaders,
 } from "./client-identity";
 import { XAI_CLIENT_ID, XAI_TOKEN_ENDPOINT } from "./device-oauth";
 import { extractGrokSubscriptionIdentity } from "./identity";
@@ -191,14 +190,10 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 		accessToken?: string,
 		apiKey?: string,
 	): Headers {
-		const prepared = super.prepareHeaders(headers, accessToken, apiKey);
-		stripInboundClientIdentity(prepared);
-		// The proxy refuses a bare bearer with 426; these identify us as the CLI
-		// it expects. Set after super so a client-supplied value cannot survive.
-		for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS)) {
-			prepared.set(name, value);
-		}
-		return prepared;
+		// super swaps the client's credentials for the account's bearer.
+		return grokUpstreamHeaders(
+			super.prepareHeaders(headers, accessToken, apiKey),
+		);
 	}
 
 	/**
