@@ -19,6 +19,7 @@ import type { Account } from "@clankermux/types";
 import { AccountModelPermissionService } from "../account-model-permissions";
 import { AnthropicModelCatalogCache } from "../anthropic-model-catalog-cache";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { ClaudeDeviceRegistry } from "../claude-device-registry";
 
 function sorted(headers: HeadersInit | undefined): Array<[string, string]> {
 	return Array.from(new Headers(headers).entries()).sort(([a], [b]) =>
@@ -58,6 +59,8 @@ describe("Claude identity at the fetch boundary", () => {
 				"x-stainless-runtime-version": "v26.3.9",
 			}),
 		);
+		const devices = new ClaudeDeviceRegistry();
+		devices.record("acc-1", "e01ccdf3".repeat(8));
 		const dispatched: Request[] = [];
 		const scheduler = new AutoRefreshScheduler(
 			{
@@ -68,6 +71,7 @@ describe("Claude identity at the fetch boundary", () => {
 			{
 				runtime: { port: 8080, clientId: "test-client" },
 				refreshInFlight: new Map(),
+				claudeDevices: devices,
 			} as never,
 			undefined,
 			(async (req: Request) => {
@@ -93,6 +97,13 @@ describe("Claude identity at the fetch boundary", () => {
 		});
 
 		expect(dispatched[0]?.url).toBe("http://internal.clankermux/v1/messages");
+		const sessionId = dispatched[0]?.headers.get("x-claude-code-session-id");
+		expect(sessionId).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
+		expect(await dispatched[0]?.text()).toBe(
+			`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"quota"}],"metadata":{"user_id":"{\\"device_id\\":\\"${"e01ccdf3".repeat(8)}\\",\\"account_uuid\\":\\"\\",\\"session_id\\":\\"${sessionId}\\"}"}}`,
+		);
 		expect(sorted(dispatched[0]?.headers)).toEqual([
 			["accept", "application/json"],
 			[
@@ -108,6 +119,7 @@ describe("Claude identity at the fetch boundary", () => {
 			["x-clankermux-account-id", "acc-1"],
 			["x-clankermux-auto-refresh", "true"],
 			["x-clankermux-bypass-session", "true"],
+			["x-claude-code-session-id", sessionId as string],
 			["x-stainless-arch", "x64"],
 			["x-stainless-lang", "js"],
 			["x-stainless-os", "Linux"],
