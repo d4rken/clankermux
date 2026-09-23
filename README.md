@@ -127,3 +127,5 @@ to offer them the source of your modified version.
 The inherited upstream code, and everything previously published under MIT, stay
 MIT ([LICENSE.MIT](LICENSE.MIT)); the bundled Devin protocol code and the Geist
 fonts keep their own terms.
+
+Contributions are accepted under MIT; see [CONTRIBUTING.md](CONTRIBUTING.md).
