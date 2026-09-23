@@ -54,6 +54,7 @@ import {
 	type RequestMeta,
 	transferChatContext,
 } from "@clankermux/types";
+import { bindAnthropicAccountUuid } from "../anthropic-account-uuid";
 import { cacheBodyStore } from "../cache-body-store";
 import { recordCodexTransientFailure } from "../codex-transient-health";
 import {
@@ -1371,6 +1372,7 @@ export async function proxyWithAccount(
 		if (!effectiveBodyContext)
 			throw new RoutingPolicyError("Cannot apply resolved model");
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
+		bindAnthropicAccountUuid(effectiveBodyContext, account);
 		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Stage the original request body + headers for cache keepalive replay.
@@ -3537,6 +3539,7 @@ export async function proxyForcedAccount(
 		if (!effectiveBodyContext)
 			throw new RoutingPolicyError("Cannot apply resolved model");
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
+		bindAnthropicAccountUuid(effectiveBodyContext, account);
 		effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Get the provider for this account
