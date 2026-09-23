@@ -435,7 +435,14 @@ export function ensureSchema(db: Database): void {
 	db.run(`CREATE TABLE IF NOT EXISTS client_profiles (
 		api_key_id TEXT PRIMARY KEY REFERENCES api_keys(id) ON DELETE CASCADE,
 		application TEXT NOT NULL, revision INTEGER NOT NULL,
-		catalogues TEXT NOT NULL, notices TEXT NOT NULL
+		catalogues TEXT NOT NULL, notices TEXT NOT NULL,
+		global_state TEXT DEFAULT NULL
+	)`);
+	// One row, id 1, created by the first save.
+	db.run(`CREATE TABLE IF NOT EXISTS global_catalogue (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		revision INTEGER NOT NULL CHECK (revision > 0),
+		catalogues TEXT NOT NULL
 	)`);
 	db.run(`CREATE TABLE IF NOT EXISTS client_alias_rules (
 		api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
@@ -1121,6 +1128,15 @@ export function ensureSchema(db: Database): void {
 		WHEN EXISTS(SELECT 1 FROM client_profiles p, json_each(p.catalogues) c,
 			json_each(json_extract(c.value,'$.models')) m WHERE json_extract(m.value,'$.targetModel')=OLD.id)
 		BEGIN SELECT RAISE(ABORT, 'Model alias is referenced by client catalogues'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS model_alias_global_catalogue_delete_guard BEFORE DELETE ON model_aliases
+		WHEN EXISTS(SELECT 1 FROM global_catalogue g, json_each(g.catalogues) c,
+			json_each(json_extract(c.value,'$.models')) m WHERE json_extract(m.value,'$.targetModel')=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Model alias is referenced by the global catalogue'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS global_catalogue_account_delete_guard BEFORE DELETE ON accounts
+		WHEN EXISTS(SELECT 1 FROM global_catalogue g, json_each(g.catalogues) c,
+			json_each(json_extract(c.value,'$.models')) m,
+			json_each(COALESCE(json_extract(m.value,'$.accountIds'),'[]')) a WHERE a.value=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Account is referenced by the global catalogue'); END`);
 	db.run(`CREATE TRIGGER IF NOT EXISTS model_alias_account_delete_guard BEFORE DELETE ON accounts
 		WHEN EXISTS(SELECT 1 FROM model_aliases m, json_each(m.targets) t, json_each(json_extract(t.value,'$.accountIds')) a WHERE a.value=OLD.id)
 		BEGIN SELECT RAISE(ABORT, 'Account is referenced by model aliases'); END`);
@@ -1873,6 +1889,12 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "account_model_permissions",
 		column: "model_variants",
 		ddl: "ALTER TABLE account_model_permissions ADD COLUMN model_variants TEXT NOT NULL DEFAULT '{}'",
+	},
+	// JSON ClientGlobalState; NULL for a client that keeps its own catalogues.
+	{
+		table: "client_profiles",
+		column: "global_state",
+		ddl: "ALTER TABLE client_profiles ADD COLUMN global_state TEXT DEFAULT NULL",
 	},
 ];
 

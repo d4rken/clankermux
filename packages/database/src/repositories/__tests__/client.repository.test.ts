@@ -36,6 +36,7 @@ const profile = (id: string): ClientProfile => ({
 		codex: { models: [], defaultModel: null },
 	},
 	notices: [],
+	global: null,
 });
 describe("independent client catalogues", () => {
 	let db: Database;
@@ -101,5 +102,118 @@ describe("independent client catalogues", () => {
 				])
 			).sort(),
 		).toEqual([false, true]);
+	});
+});
+
+describe("global catalogue storage", () => {
+	let db: Database;
+	let repo: ClientRepository;
+	const adapter = () => new BunSqlAdapter(db);
+	const catalogues = (ids: string[]) => ({
+		anthropic: { models: [], defaultModel: null },
+		openai: {
+			models: ids.map((id) => ({
+				id,
+				displayName: id,
+				targetModel: id,
+				accountIds: null,
+			})),
+			defaultModel: ids[0] ?? null,
+		},
+		codex: { models: [], defaultModel: null },
+	});
+	beforeEach(() => {
+		db = new Database(":memory:");
+		ensureSchema(db);
+		repo = new ClientRepository(adapter());
+		db.query(
+			"INSERT INTO api_keys(id,name,hashed_key,prefix_last_8,created_at,is_active) VALUES('a','a','h','a',1,1)",
+		).run();
+	});
+	afterEach(() => db.close());
+	it("reads an empty revision 0 until the first save, then advances one revision per save", async () => {
+		expect(await repo.getGlobal()).toEqual({
+			revision: 0,
+			catalogues: catalogues([]) as never,
+		});
+		repo.saveGlobalInTransaction(catalogues(["one"]), 0);
+		expect((await repo.getGlobal()).revision).toBe(1);
+		repo.saveGlobalInTransaction(catalogues(["one", "two"]), 1);
+		const saved = await repo.getGlobal();
+		expect(saved.revision).toBe(2);
+		expect(saved.catalogues.openai.models.map((m) => m.id)).toEqual([
+			"one",
+			"two",
+		]);
+	});
+	it("refuses a save made against a stale revision", async () => {
+		repo.saveGlobalInTransaction(catalogues(["one"]), 0);
+		expect(() => repo.saveGlobalInTransaction(catalogues([]), 0)).toThrow(
+			"global catalogue changed",
+		);
+		expect(() => repo.saveGlobalInTransaction(catalogues([]), 5)).toThrow(
+			"global catalogue changed",
+		);
+		expect((await repo.getGlobal()).revision).toBe(1);
+	});
+	it("round-trips a client's global state and lists subscribers", async () => {
+		const global = {
+			appliedRevision: 3,
+			formats: {
+				openai: {
+					additions: [],
+					removals: ["gone"],
+					inheritDefault: true,
+					defaultModel: null,
+					skipped: [{ id: "x", reason: "why" }],
+				},
+			},
+		};
+		repo.insertInTransaction({ ...profile("a"), global });
+		expect((await repo.getProfile("a"))?.global).toEqual(global);
+		expect(await repo.subscribers()).toEqual(["a"]);
+		repo.markGlobalAppliedInTransaction("a", 1, {
+			...global,
+			appliedRevision: 4,
+		});
+		const after = await repo.getProfile("a");
+		expect(after?.global?.appliedRevision).toBe(4);
+		expect(after?.revision).toBe(1);
+		expect(() => repo.markGlobalAppliedInTransaction("a", 2, global)).toThrow(
+			"Client changed",
+		);
+	});
+	it("protects aliases and accounts the global catalogue names", () => {
+		db.query(
+			"INSERT INTO model_aliases(id,display_name,targets,revision) VALUES('alias:x','X','[]',1)",
+		).run();
+		db.query(
+			"INSERT INTO accounts(id,name,provider,created_at) VALUES('acc','acc','codex',1)",
+		).run();
+		const entries = catalogues([]);
+		entries.openai.models = [
+			{
+				id: "x",
+				displayName: "x",
+				targetModel: "alias:x",
+				accountIds: null,
+			},
+			{
+				id: "pinned",
+				displayName: "pinned",
+				targetModel: "other",
+				accountIds: ["acc"] as never,
+			},
+		];
+		repo.saveGlobalInTransaction(entries, 0);
+		expect(() =>
+			db.query("DELETE FROM model_aliases WHERE id='alias:x'").run(),
+		).toThrow("referenced by the global catalogue");
+		expect(() => db.query("DELETE FROM accounts WHERE id='acc'").run()).toThrow(
+			"referenced by the global catalogue",
+		);
+		repo.saveGlobalInTransaction(catalogues([]), 1);
+		db.query("DELETE FROM model_aliases WHERE id='alias:x'").run();
+		db.query("DELETE FROM accounts WHERE id='acc'").run();
 	});
 });

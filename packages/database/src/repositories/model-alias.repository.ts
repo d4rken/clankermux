@@ -94,6 +94,16 @@ export class ModelAliasRepository {
 				throw new ModelAliasConflictError(
 					"Model alias is referenced by client catalogues; update those clients before deleting",
 				);
+			if (
+				db
+					.query(`SELECT 1 FROM global_catalogue g, json_each(g.catalogues) c,
+				json_each(json_extract(c.value,'$.models')) m
+				WHERE json_extract(m.value,'$.targetModel')=?`)
+					.get(id)
+			)
+				throw new ModelAliasConflictError(
+					"Model alias is referenced by the global catalogue; update it before deleting",
+				);
 			return (
 				db
 					.query("DELETE FROM model_aliases WHERE id=? AND revision=?")

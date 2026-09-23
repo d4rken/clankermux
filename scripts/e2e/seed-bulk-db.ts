@@ -107,6 +107,7 @@ const CLIENTS: {
 			application: "generic",
 			revision: 1,
 			notices: [],
+			global: null,
 			catalogues: {
 				anthropic: { models: [], defaultModel: null },
 				openai: {
@@ -132,6 +133,7 @@ const CLIENTS: {
 			application: "generic",
 			revision: 1,
 			notices: [],
+			global: null,
 			catalogues: {
 				anthropic: { models: [], defaultModel: null },
 				openai: { models: [], defaultModel: null },
@@ -147,6 +149,7 @@ const CLIENTS: {
 			application: "claude-code",
 			revision: 1,
 			notices: [],
+			global: null,
 			catalogues: {
 				anthropic: { models: [], defaultModel: null },
 				openai: { models: [], defaultModel: null },

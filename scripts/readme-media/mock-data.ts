@@ -214,6 +214,7 @@ export const MOCK_CLIENT_PROFILES: ClientProfile[] = [
 			codex: { models: [], defaultModel: null },
 		},
 		notices: [],
+		global: null,
 	},
 	{
 		apiKeyId: "key-ci",
@@ -238,6 +239,7 @@ export const MOCK_CLIENT_PROFILES: ClientProfile[] = [
 			codex: { models: [], defaultModel: null },
 		},
 		notices: [],
+		global: null,
 	},
 	{
 		apiKeyId: "key-laptop",
@@ -261,6 +263,7 @@ export const MOCK_CLIENT_PROFILES: ClientProfile[] = [
 			},
 		},
 		notices: [],
+		global: null,
 	},
 ];
 

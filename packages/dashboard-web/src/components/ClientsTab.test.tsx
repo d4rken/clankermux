@@ -17,6 +17,7 @@ it("lists clients by name and highlights requests from the last 24 hours", () =>
 		revision: 1,
 		aliasRules: [],
 		notices: [],
+		global: null,
 		key: {
 			id: name,
 			name,

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
-import type { ClientDraft, ClientView } from "@clankermux/types";
+import type {
+	ClientDraft,
+	ClientView,
+	GlobalCatalogueView,
+} from "@clankermux/types";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ClientWizard } from "./ClientWizard";
@@ -16,6 +20,7 @@ const existing: ClientView = {
 	application: "generic",
 	revision: 1,
 	notices: [],
+	global: null,
 	aliasRules: [],
 	key: {
 		id: "key",
@@ -51,6 +56,7 @@ const source: ClientView = {
 	application: "claude-code",
 	revision: 3,
 	notices: [],
+	global: null,
 	aliasRules: [],
 	key: {
 		id: "source",
@@ -173,6 +179,17 @@ const DEFAULT_SUGGESTIONS = [
 	},
 ];
 let suggested = DEFAULT_SUGGESTIONS;
+const NO_GLOBAL: GlobalCatalogueView = {
+	revision: 0,
+	subscribers: [],
+	catalogues: {
+		anthropic: { models: [], defaultModel: null },
+		openai: { models: [], defaultModel: null },
+		codex: { models: [], defaultModel: null },
+	},
+};
+let globalView = NO_GLOBAL;
+let globalFails = false;
 let suggestionFetches = 0;
 let suggestionBodies: unknown[] = [];
 /** Number of upcoming `/suggestions` calls that answer 503 instead. */
@@ -192,7 +209,8 @@ function holdSuggestions() {
 }
 async function mount(
 	client: ClientView | null = existing,
-	jump = false,
+	/** `"stay"` leaves an existing client on the Application step. */
+	jump: boolean | "stay" = false,
 	models = DEFAULT_SUGGESTIONS,
 	others: ClientView[] = [],
 ) {
@@ -219,6 +237,13 @@ async function mount(
 						},
 					],
 				});
+			if (path.endsWith("/global-catalogue"))
+				return globalFails
+					? Response.json(
+							{ error: { message: "Global catalogue down" } },
+							{ status: 503 },
+						)
+					: Response.json({ data: globalView });
 			if (path.endsWith("/suggestions")) {
 				suggestionFetches += 1;
 				suggestionBodies.push(JSON.parse(String(init?.body)));
@@ -274,7 +299,7 @@ async function mount(
 			/>,
 		);
 	});
-	if (!client) return;
+	if (!client || jump === "stay") return;
 	if (jump) await click("Catalogue");
 	else {
 		await click("Next");
@@ -293,6 +318,8 @@ afterEach(async () => {
 	await act(async () => root?.unmount());
 	host?.remove();
 	mock.restore();
+	globalView = NO_GLOBAL;
+	globalFails = false;
 });
 describe("client catalogue editing", () => {
 	it("jumps straight to catalogues and preserves each format while navigating", async () => {
@@ -1232,4 +1259,217 @@ it("publishes a reusable alias using inherited client destinations", async () =>
 	expect(document.body.textContent).not.toContain(
 		"Some model destinations need attention",
 	);
+});
+
+describe("the global catalogue in the client editor", () => {
+	const entry = (id: string) => ({
+		id,
+		displayName: id,
+		targetModel: id,
+		accountIds: null,
+	});
+	const withGlobal = (): GlobalCatalogueView => ({
+		...NO_GLOBAL,
+		revision: 1,
+		catalogues: {
+			codex: { models: [], defaultModel: null },
+			anthropic: { models: [entry("claude-g")], defaultModel: "claude-g" },
+			openai: { models: [entry("g1"), entry("g2")], defaultModel: "g1" },
+		},
+	});
+	const subscriber: ClientView = {
+		...existing,
+		apiKeyId: "pi",
+		application: "pi",
+		key: { ...existing.key, id: "pi", name: "Pi" },
+		catalogues: {
+			anthropic: { models: [], defaultModel: null },
+			openai: { models: [entry("g1"), entry("g2")], defaultModel: "g1" },
+			codex: { models: [], defaultModel: null },
+		},
+		global: {
+			appliedRevision: 1,
+			formats: {
+				openai: {
+					additions: [],
+					removals: [],
+					inheritDefault: true,
+					defaultModel: null,
+					skipped: [{ id: "g3", reason: "No allowed accounts" }],
+				},
+			},
+		},
+	};
+
+	it("marks where each entry comes from and sends a removal as a difference", async () => {
+		globalView = withGlobal();
+		await mount(subscriber, true);
+		expect(document.body.textContent).toContain("From the global catalogue");
+		expect(document.body.textContent).toContain(
+			"Global entries this client cannot publish",
+		);
+		expect(document.body.textContent).toContain("g3: No allowed accounts");
+		await click("Remove g2");
+		expect(document.body.textContent).toContain(
+			"In the global catalogue, removed for this client",
+		);
+		await click("Review changes");
+		expect(reviewed?.global).toEqual({
+			formats: {
+				openai: {
+					additions: [],
+					removals: ["g2"],
+					inheritDefault: true,
+					defaultModel: null,
+				},
+			},
+		});
+	});
+
+	it("keeps what a client publishes as its own when it stops using the global catalogue", async () => {
+		globalView = withGlobal();
+		await mount(subscriber, true);
+		await untick("Use the global catalogue");
+		await click("Review changes");
+		expect(reviewed?.global).toBeNull();
+		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
+			"g1",
+			"g2",
+		]);
+	});
+
+	it("starts a client that opts in from the global catalogue in every format it covers", async () => {
+		globalView = withGlobal();
+		await mount(existing, true);
+		await untick("Use the global catalogue");
+		// A generic client opens on OpenAI.
+		expect(listedModels("Selected")).toEqual(["g1", "g2"]);
+		await click("Review changes");
+		const pure = {
+			additions: [],
+			removals: [],
+			inheritDefault: true,
+			defaultModel: null,
+		};
+		expect(reviewed?.global).toEqual({
+			formats: { anthropic: pure, openai: pure, codex: pure },
+		});
+	});
+
+	it("leaves a client that never used the global catalogue saying nothing about it", async () => {
+		globalView = withGlobal();
+		await mount(existing, true);
+		await click("Review changes");
+		expect(reviewed && "global" in reviewed).toBe(false);
+	});
+
+	it("shows and saves a lagging subscriber against the current global catalogue", async () => {
+		globalView = withGlobal();
+		globalView.revision = 2;
+		globalView.catalogues.openai.models.push(entry("g4"));
+		await mount(subscriber, true);
+		expect(listedModels("Selected")).toEqual(["g1", "g2", "g4"]);
+		await click("Review changes");
+		expect(reviewed?.global).toEqual({
+			formats: {
+				openai: {
+					additions: [],
+					removals: [],
+					inheritDefault: true,
+					defaultModel: null,
+				},
+			},
+		});
+	});
+
+	it("starts a format that becomes covered on an application change from the global catalogue", async () => {
+		globalView = withGlobal();
+		globalView.catalogues.codex.models = [entry("gpt-c")];
+		await mount(subscriber, "stay");
+		await choose("Application", "codex");
+		await click("Catalogue");
+		expect(listedModels("Selected")).toEqual(["gpt-c"]);
+		await click("Review changes");
+		expect(reviewed?.global).toEqual({
+			formats: {
+				codex: {
+					additions: [],
+					removals: [],
+					inheritDefault: true,
+					defaultModel: null,
+				},
+			},
+		});
+	});
+
+	it("never seeds discovery over a format a new opted-in client takes from the global catalogue", async () => {
+		globalView = withGlobal();
+		await mountNew();
+		await choose("Application", "claude-code");
+		await click("Next");
+		await click("Next");
+		await untick("Use the global catalogue");
+		await click("Application");
+		await choose("Application", "opencode");
+		await click("Catalogue");
+		expect(listedModels("Selected")).toEqual(["g1", "g2"]);
+		await click("Review changes");
+		expect(reviewed?.global?.formats).toEqual({
+			openai: {
+				additions: [],
+				removals: [],
+				inheritDefault: true,
+				defaultModel: null,
+			},
+		});
+	});
+
+	it("refuses to review a subscriber while the global catalogue cannot be loaded", async () => {
+		globalFails = true;
+		await mount(subscriber, true);
+		await click("Review changes");
+		expect(reviewed).toBeUndefined();
+		expect(document.body.textContent).toContain(
+			"The global catalogue could not be loaded",
+		);
+	});
+
+	it("restores a removed global entry with the global definition, not discovery's", async () => {
+		globalView = withGlobal();
+		const removed: ClientView = {
+			...subscriber,
+			catalogues: {
+				...subscriber.catalogues,
+				openai: { models: [entry("g1")], defaultModel: "g1" },
+			},
+			global: {
+				appliedRevision: 1,
+				formats: {
+					openai: {
+						additions: [],
+						removals: ["g2"],
+						inheritDefault: true,
+						defaultModel: null,
+						skipped: [],
+					},
+				},
+			},
+		};
+		await mount(removed, true, [
+			{
+				id: "g2",
+				displayName: "Discovered G2",
+				accountIds: ["a"],
+				codexMetadataAvailable: false,
+			},
+		]);
+		await click("Add g2");
+		await click("Review changes");
+		expect(reviewed?.global?.formats.openai).toEqual({
+			additions: [],
+			removals: [],
+			inheritDefault: true,
+			defaultModel: null,
+		});
+	});
 });

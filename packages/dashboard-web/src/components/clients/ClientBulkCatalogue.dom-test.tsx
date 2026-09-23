@@ -20,6 +20,7 @@ const client = (id: string, models: ClientModel[]): ClientView => ({
 	application: "generic",
 	revision: 1,
 	notices: [],
+	global: null,
 	aliasRules: [],
 	key: {
 		id,

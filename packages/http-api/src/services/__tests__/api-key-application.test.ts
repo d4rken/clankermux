@@ -32,6 +32,7 @@ function giveProfile(
 		revision: 1,
 		catalogues: emptyCatalogues,
 		notices: [],
+		global: null,
 	});
 }
 

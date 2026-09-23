@@ -1,13 +1,19 @@
-import type {
-	ClientApplication,
-	ClientCatalogue,
-	ClientDraft,
-	ClientFormat,
-	ClientModel,
-	ClientReview,
-	ClientSuggestions,
-	ClientView,
-	ModelAlias,
+import {
+	type ClientApplication,
+	type ClientCatalogue,
+	type ClientDraft,
+	type ClientFormat,
+	type ClientGlobalDelta,
+	type ClientModel,
+	type ClientReview,
+	type ClientSuggestions,
+	type ClientView,
+	composeGlobalCatalogue,
+	type GlobalCatalogueView,
+	globalCatalogueFormats,
+	globalDeltaFromList,
+	type ModelAlias,
+	sameGlobalEntry,
 } from "@clankermux/types";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
@@ -16,7 +22,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
-import { CatalogueSelector } from "./CatalogueSelector";
+import {
+	type CatalogueRowExtras,
+	CatalogueSelector,
+} from "./CatalogueSelector";
 import { ClientLabel, clientLabelText } from "./ClientLabel";
 import { NO_DESTINATION_FILTER, servingAccounts } from "./destination-filter";
 import {
@@ -35,6 +44,30 @@ export interface DestinationAccount {
 }
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
 const FORMAT_KEYS = Object.keys(FORMATS) as ClientFormat[];
+const FOLLOW_GLOBAL_DEFAULT = "__global__";
+const pureGlobal = (): ClientGlobalDelta => ({
+	additions: [],
+	removals: [],
+	inheritDefault: true,
+	defaultModel: null,
+});
+/** What a client with these differences publishes, before the server checks it. */
+function composedCatalogue(
+	view: GlobalCatalogueView,
+	format: ClientFormat,
+	delta: ClientGlobalDelta,
+): ClientCatalogue {
+	const models = composeGlobalCatalogue(view.catalogues[format], delta).map(
+		({ model }) => model,
+	);
+	const wanted = delta.inheritDefault
+		? view.catalogues[format].defaultModel
+		: delta.defaultModel;
+	return {
+		models,
+		defaultModel: models.some((m) => m.id === wanted) ? wanted : null,
+	};
+}
 const COPY_PARTS = [
 	{ key: "application", label: "Application recipe" },
 	{ key: "destinations", label: "Allowed destinations" },
@@ -55,6 +88,17 @@ export function draftFor(client?: ClientView): ClientDraft {
 						: {}),
 				},
 				catalogues: structuredClone(client.catalogues),
+				...(client.global
+					? {
+							global: {
+								formats: Object.fromEntries(
+									Object.entries(client.global.formats).map(
+										([f, { skipped: _, ...delta }]) => [f, delta],
+									),
+								),
+							},
+						}
+					: {}),
 			}
 		: {
 				name: "",
@@ -128,6 +172,25 @@ export function ClientWizard({
 	const [step, setStep] = useState(0);
 	const [aliases, setAliases] = useState<ModelAlias[]>([]);
 	const [aliasesError, setAliasesError] = useState<string | null>(null);
+	const [globalView, setGlobalView] = useState<GlobalCatalogueView | null>(
+		null,
+	);
+	const [globalError, setGlobalError] = useState<string | null>(null);
+	// Loaded up front: an application change on the first step already decides
+	// which formats follow the global catalogue.
+	useEffect(() => {
+		let active = true;
+		clientRequest<GlobalCatalogueView>("/global-catalogue")
+			.then((view) => {
+				if (active) setGlobalView(view);
+			})
+			.catch((e: unknown) => {
+				if (active) setGlobalError(e instanceof Error ? e.message : String(e));
+			});
+		return () => {
+			active = false;
+		};
+	}, []);
 	useEffect(() => {
 		if (step !== 2) return;
 		let active = true;
@@ -206,6 +269,81 @@ export function ClientWizard({
 		catalogues: true,
 	});
 	const [copied, setCopied] = useState<string | null>(null);
+	const covered = new Set(
+		draft.global ? globalCatalogueFormats(draft.application) : [],
+	);
+	/** Global entries the server last left out of this client's catalogue. */
+	const skippedFor = (f: ClientFormat) =>
+		client?.global && draft.global
+			? (client.global.formats[f]?.skipped ?? [])
+			: [];
+	const deltaFor = (f: ClientFormat): ClientGlobalDelta =>
+		draft.global?.formats[f] ?? pureGlobal();
+	const subscribed = !!draft.global;
+	// A covered format the operator has not edited shows what saving publishes:
+	// the current global catalogue with this client's differences. The stored
+	// list may have been composed from an older global revision, and deriving
+	// differences from it would pin that revision.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: recompose only when the global catalogue, the application or the subscription changes, never on the operator's own edits
+	useEffect(() => {
+		if (!globalView) return;
+		setDraft((d) => {
+			if (!d.global) return d;
+			const formats = globalCatalogueFormats(d.application).filter(
+				(f) => !touched.has(f),
+			);
+			if (!formats.length) return d;
+			return {
+				...d,
+				catalogues: {
+					...d.catalogues,
+					...Object.fromEntries(
+						formats.map((f) => {
+							const composed = composedCatalogue(
+								globalView,
+								f,
+								d.global?.formats[f] ?? pureGlobal(),
+							);
+							const skipped = new Set(skippedFor(f).map((skip) => skip.id));
+							return [
+								f,
+								{
+									...composed,
+									models: composed.models.filter((m) => !skipped.has(m.id)),
+								},
+							];
+						}),
+					),
+				},
+			};
+		});
+	}, [globalView, draft.application, subscribed]);
+	const chooseGlobal = (on: boolean) => {
+		if (!on) {
+			// What the client publishes now becomes its own catalogue.
+			setDraft(({ global: _, ...d }) => ({ ...d, global: null }));
+			return;
+		}
+		if (!globalView) return;
+		const formats = globalCatalogueFormats(draft.application);
+		setDraft((d) => ({
+			...d,
+			global: {
+				formats: Object.fromEntries(formats.map((f) => [f, pureGlobal()])),
+			},
+			catalogues: {
+				...d.catalogues,
+				...Object.fromEntries(
+					formats.map((f) => [
+						f,
+						composedCatalogue(globalView, f, pureGlobal()),
+					]),
+				),
+			},
+		}));
+		setTouched((current) => new Set([...current, ...formats]));
+		setPendingSeed(false);
+	};
 	const mode =
 		draft.destinations.accountId !== null
 			? "account"
@@ -372,6 +510,14 @@ export function ClientWizard({
 		models: ClientSuggestions["models"],
 	) => {
 		const preferred = preferredFormat(application);
+		// Discovery never overwrites a format the global catalogue fills.
+		if (
+			draft.global &&
+			globalCatalogueFormats(application).includes(preferred)
+		) {
+			setPendingSeed(false);
+			return;
+		}
 		setDraft((d) => ({
 			...d,
 			catalogues: {
@@ -418,15 +564,27 @@ export function ClientWizard({
 			const previous = preferredFormat(d.application);
 			const drop =
 				previous !== next && seeded === previous && !touched.has(previous);
+			const catalogues = drop
+				? {
+						...d.catalogues,
+						[previous]: { models: [], defaultModel: null },
+					}
+				: d.catalogues;
+			if (!d.global) return { ...d, application, catalogues };
+			// A format the global catalogue stops covering keeps its list and
+			// forgets its differences; one it starts covering follows it unchanged.
 			return {
 				...d,
 				application,
-				catalogues: drop
-					? {
-							...d.catalogues,
-							[previous]: { models: [], defaultModel: null },
-						}
-					: d.catalogues,
+				catalogues,
+				global: {
+					formats: Object.fromEntries(
+						globalCatalogueFormats(application).map((f) => [
+							f,
+							d.global?.formats[f] ?? pureGlobal(),
+						]),
+					),
+				},
 			};
 		});
 		if (client) return;
@@ -436,7 +594,7 @@ export function ClientWizard({
 		// Decide the pending seed in both directions. Returning to a format the
 		// operator has edited must WITHDRAW a seed armed by the trip away from it,
 		// or that seed lands on their work the next time the catalogue opens.
-		setPendingSeed(!touched.has(next));
+		setPendingSeed(!draft.global && !touched.has(next));
 	};
 	const copySources = clients
 		.filter((c) => c.apiKeyId !== client?.apiKeyId)
@@ -541,8 +699,41 @@ export function ClientWizard({
 			);
 			candidates.set(model.id, model);
 		}
+	// Restoring a global entry restores the global definition, not discovery's.
+	if (covered.has(format) && globalView)
+		for (const model of globalView.catalogues[format].models)
+			candidates.set(model.id, model);
 	// Re-adding restores the operator's definition, even after discovery refresh.
 	for (const model of removedModels[format]) candidates.set(model.id, model);
+	const globalById = new Map(
+		(covered.has(format) && globalView
+			? globalView.catalogues[format].models
+			: []
+		).map((m) => [m.id, m]),
+	);
+	const provenance = (
+		model: ClientModel,
+		selected: boolean,
+	): CatalogueRowExtras => {
+		const entry = globalById.get(model.id);
+		if (!covered.has(format)) return {};
+		const text = !entry
+			? selected
+				? "Added for this client"
+				: null
+			: !selected
+				? "In the global catalogue, removed for this client"
+				: sameGlobalEntry(entry, model)
+					? "From the global catalogue"
+					: "Changes the global entry for this client";
+		return text
+			? {
+					note: (
+						<span className="block text-xs text-muted-foreground">{text}</span>
+					),
+				}
+			: {};
+	};
 	const selectedIds = new Set(draft.catalogues[format].models.map((m) => m.id));
 	const availableModels = [...candidates.values()].filter(
 		(m) => !selectedIds.has(m.id),
@@ -556,8 +747,15 @@ export function ClientWizard({
 			if (target === 3) {
 				if (pendingSeed)
 					throw new Error("Choose your catalogue models before reviewing");
+				if (draft.global && !globalView)
+					throw new Error(
+						globalError
+							? `The global catalogue could not be loaded: ${globalError}`
+							: "The global catalogue is still loading",
+					);
 				const undecided = FORMAT_KEYS.find(
 					(f) =>
+						!covered.has(f) &&
 						draft.catalogues[f].models.length > 0 &&
 						!draft.catalogues[f].models.some(
 							(m) => m.id === draft.catalogues[f].defaultModel,
@@ -572,7 +770,32 @@ export function ClientWizard({
 				}
 				// Send only drops that still name a kept route: re-adding an alias
 				// to a catalogue supersedes its earlier removal.
-				const { droppedAliasRoutes: _, ...rest } = draft;
+				const { droppedAliasRoutes: _, ...edited } = draft;
+				const rest: ClientDraft =
+					edited.global && globalView
+						? {
+								...edited,
+								global: {
+									formats: Object.fromEntries(
+										[...covered].map((f) => {
+											const delta = deltaFor(f);
+											return [
+												f,
+												{
+													...delta,
+													...globalDeltaFromList(
+														globalView.catalogues[f],
+														delta,
+														draft.catalogues[f].models,
+														new Set(skippedFor(f).map((skip) => skip.id)),
+													),
+												},
+											];
+										}),
+									),
+								},
+							}
+						: edited;
 				setReview(
 					await clientRequest<ClientReview>(
 						"/review",
@@ -894,6 +1117,31 @@ export function ClientWizard({
 							together. Hiding a model only removes it from discovery; it does
 							not block requests.
 						</p>
+						<div className="rounded-md border p-3 space-y-1">
+							<label className="flex items-center gap-2 text-sm font-medium">
+								<input
+									type="checkbox"
+									disabled={busy || (!draft.global && !globalView)}
+									checked={!!draft.global}
+									onChange={(e) => chooseGlobal(e.target.checked)}
+								/>
+								Use the global catalogue
+							</label>
+							<p className="text-xs text-muted-foreground">
+								{draft.global
+									? `${globalCatalogueFormats(draft.application)
+											.map((f) => FORMAT_LABELS[f])
+											.join(
+												", ",
+											)} follows the global catalogue. Models you add or remove there apply to this client only; everything else follows later global edits.`
+									: "Publish the shared global catalogue in this application's format, with this client's own additions and removals."}
+							</p>
+							{globalError && (
+								<p role="alert" className="text-xs text-destructive">
+									The global catalogue could not be loaded: {globalError}
+								</p>
+							)}
+						</div>
 						<details className="rounded-md border p-3">
 							<summary className="cursor-pointer w-fit text-sm font-medium">
 								Copy setup from another client
@@ -1111,6 +1359,7 @@ export function ClientWizard({
 								modelAccounts={(model) =>
 									servingAccounts(model, suggestions, accounts)
 								}
+								rowExtras={provenance}
 								onAdd={(models) => {
 									const ids = new Set(models.map((m) => m.id));
 									setRemovedModels((current) => ({
@@ -1154,26 +1403,66 @@ export function ClientWizard({
 									Default model for setup
 									<select
 										className={`${SELECT} min-w-0 w-full`}
-										disabled={busy || !draft.catalogues[format].models.length}
-										value={draft.catalogues[format].defaultModel ?? ""}
+										disabled={
+											busy ||
+											(!covered.has(format) &&
+												!draft.catalogues[format].models.length)
+										}
+										value={
+											covered.has(format) && deltaFor(format).inheritDefault
+												? FOLLOW_GLOBAL_DEFAULT
+												: (draft.catalogues[format].defaultModel ?? "")
+										}
 										onChange={(e) => {
 											markTouched(format);
+											const follow = e.target.value === FOLLOW_GLOBAL_DEFAULT;
+											const chosen = follow ? null : e.target.value || null;
+											const globalDefault =
+												globalView?.catalogues[format].defaultModel ?? null;
 											setDraft({
 												...draft,
+												...(covered.has(format) && draft.global
+													? {
+															global: {
+																formats: {
+																	...draft.global.formats,
+																	[format]: {
+																		...deltaFor(format),
+																		inheritDefault: follow,
+																		defaultModel: chosen,
+																	},
+																},
+															},
+														}
+													: {}),
 												catalogues: {
 													...draft.catalogues,
 													[format]: {
 														...draft.catalogues[format],
-														defaultModel: e.target.value || null,
+														defaultModel: follow
+															? draft.catalogues[format].models.some(
+																	(m) => m.id === globalDefault,
+																)
+																? globalDefault
+																: null
+															: chosen,
 													},
 												},
 											});
 										}}
 									>
+										{covered.has(format) && (
+											<option value={FOLLOW_GLOBAL_DEFAULT}>
+												Follow the global default (
+												{globalView?.catalogues[format].defaultModel ?? "none"})
+											</option>
+										)}
 										<option value="">
-											{draft.catalogues[format].models.length
-												? "Choose a default model"
-												: "No selected models"}
+											{covered.has(format)
+												? "No default"
+												: draft.catalogues[format].models.length
+													? "Choose a default model"
+													: "No selected models"}
 										</option>
 										{draft.catalogues[format].models.map((m) => (
 											<option value={m.id} key={m.id}>
@@ -1183,6 +1472,21 @@ export function ClientWizard({
 									</select>
 								</label>
 							</CatalogueSelector>
+							{covered.has(format) && skippedFor(format).length > 0 && (
+								<section
+									aria-label="Skipped global entries"
+									className="rounded-md border p-3 text-sm space-y-1"
+								>
+									<p className="font-medium">
+										Global entries this client cannot publish
+									</p>
+									{skippedFor(format).map((skip) => (
+										<p key={skip.id} className="text-muted-foreground">
+											{skip.id}: {skip.reason}
+										</p>
+									))}
+								</section>
+							)}
 							<details
 								ref={editorRef}
 								className="rounded-md border p-3"

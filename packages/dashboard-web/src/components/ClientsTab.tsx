@@ -5,7 +5,7 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
-import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
+import { Globe, MoreHorizontal, Plus, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAccounts } from "../hooks/queries";
 import { invalidateCapacityQueries } from "../lib/query-keys";
@@ -16,6 +16,7 @@ import { ClientBulkCatalogue } from "./clients/ClientBulkCatalogue";
 import { clientLabelText } from "./clients/ClientLabel";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
+import { GlobalCatalogueEditor } from "./clients/GlobalCatalogueEditor";
 import { APPLICATIONS, destinationsLabel } from "./clients/setup";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
@@ -123,6 +124,7 @@ export function ClientsTab() {
 		() => new Set(),
 	);
 	const [bulkIds, setBulkIds] = useState<ReadonlySet<string> | null>(null);
+	const [editingGlobal, setEditingGlobal] = useState(false);
 	// Re-derived from every list refresh, so a client deleted elsewhere cannot
 	// linger in the selection and be sent to the bulk endpoint.
 	const selected = useMemo(() => {
@@ -242,6 +244,22 @@ export function ClientsTab() {
 				onSaved={finish}
 			/>
 		);
+	if (editingGlobal)
+		return (
+			<GlobalCatalogueEditor
+				clients={clients}
+				accounts={accounts}
+				onCancel={() => setEditingGlobal(false)}
+				onApplied={(committed) => {
+					const byId = new Map(committed.map((c) => [c.apiKeyId, c]));
+					queryClient.setQueryData<ClientView[]>(["clients"], (old) =>
+						(old ?? []).map((c) => byId.get(c.apiKeyId) ?? c),
+					);
+					setEditingGlobal(false);
+					reload();
+				}}
+			/>
+		);
 	if (bulkIds && bulkClients.length)
 		return (
 			<ClientBulkCatalogue
@@ -267,10 +285,16 @@ export function ClientsTab() {
 					Each installation or integration has its own key, allowed upstream
 					destinations, and advertised model catalogue.
 				</p>
-				<Button onClick={() => setEditing("new")}>
-					<Plus className="h-4 w-4 mr-2" />
-					Add client
-				</Button>
+				<div className="flex flex-wrap gap-2">
+					<Button variant="outline" onClick={() => setEditingGlobal(true)}>
+						<Globe className="h-4 w-4 mr-2" />
+						Global catalogue
+					</Button>
+					<Button onClick={() => setEditing("new")}>
+						<Plus className="h-4 w-4 mr-2" />
+						Add client
+					</Button>
+				</div>
 			</div>
 			{error && (
 				<p role="alert" className="text-destructive">
@@ -413,6 +437,7 @@ export function ClientsTab() {
 											{client.catalogues.codex.models.length}
 										</span>{" "}
 										Codex
+										{client.global && <p>Uses the global catalogue</p>}
 									</div>
 									<div className="text-xs text-muted-foreground">
 										<p className="xl:sr-only mb-1">Last request</p>
