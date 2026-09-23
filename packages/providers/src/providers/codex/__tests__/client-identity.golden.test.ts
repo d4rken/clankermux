@@ -326,18 +326,28 @@ describe("Codex identity golden: translated request after body transform", () =>
 		expect(await translate("opaque", null)).toBeNull();
 	});
 
-	it("sends no ChatGPT-Account-ID to a custom endpoint when translation fails", async () => {
-		const request = new Request("https://proxy.local/v1/messages", {
-			method: "POST",
-			headers: provider.prepareHeaders(claudeCodeInbound(), TOKEN_WITH_ACCOUNT),
-			body: "{not json",
-		});
-		const out = await provider.transformRequestBody(request, {
-			id: "a",
-			name: "a",
-			custom_endpoint: "https://llm.example.com/v1/responses",
-		} as never);
-		expect(out.headers.get("chatgpt-account-id")).toBeNull();
+	it("gates ChatGPT-Account-ID on the endpoint when translation fails", async () => {
+		const malformed = async (custom_endpoint: string | null) => {
+			const request = new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: provider.prepareHeaders(
+					claudeCodeInbound(),
+					TOKEN_WITH_ACCOUNT,
+				),
+				body: "{not json",
+			});
+			const out = await provider.transformRequestBody(request, {
+				id: "a",
+				name: "a",
+				custom_endpoint,
+			} as never);
+			return out.headers.get("chatgpt-account-id");
+		};
+		expect(await malformed(null)).toBe("acct-from-jwt");
+		expect(
+			await malformed("https://chatgpt.com/backend-api/codex/responses"),
+		).toBe("acct-from-jwt");
+		expect(await malformed("https://llm.example.com/v1/responses")).toBeNull();
 	});
 
 	it("keeps the pinned persona for a Codex client routed through the translator", async () => {

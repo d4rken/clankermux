@@ -171,7 +171,7 @@ const BEARER_PREFIX = "Bearer ";
  * ChatGPT backend: a custom endpoint has no use for the workspace id. Any
  * other value is removed.
  */
-function applyChatGptAccountId(
+export function applyChatGptAccountId(
 	headers: Headers,
 	chatGptBackend: boolean,
 ): void {

@@ -31,6 +31,7 @@ import {
 	sanitizeChatGptBackendBody,
 } from "./backend-params";
 import {
+	applyChatGptAccountId,
 	applyCodexNativeProfile,
 	applyCodexTranslatedProfile,
 	CODEX_CLIENT_ID,
@@ -661,6 +662,10 @@ export class CodexProvider extends BaseProvider {
 				throw error;
 			}
 			log.error("Failed to transform request body to Codex format:", error);
+			applyChatGptAccountId(
+				request.headers,
+				targetsChatGptCodexBackend(account),
+			);
 			return request;
 		}
 	}
