@@ -616,12 +616,33 @@ async function runCleanup(
 		// (request_payloads has no children, so .changes there is accurate.)
 		const removedOrphans = await deleteOrphanedPayloads(db);
 
+		// SDK bridge turns age out on the request cutoff; their legs cascade. Runs
+		// before the orphan-attempt pass so the attempts of the legs it removes
+		// go on this same tick.
+		if (requestCutoff !== null) {
+			await deleteBatched(
+				db,
+				"sdk_bridge_turns",
+				"started_at < ?",
+				requestCutoff,
+			);
+		}
+		// Legs left behind by a turn deleted with foreign keys off (the sqlite3
+		// shell's default).
+		await deleteBatched(
+			db,
+			"sdk_bridge_turn_legs",
+			"started_at < ? AND NOT EXISTS(SELECT 1 FROM sdk_bridge_turns WHERE sdk_bridge_turns.id=sdk_bridge_turn_legs.turn_id)",
+			Date.now(),
+		);
+
 		// Attempts can precede their parent and internal/local requests may never
 		// create one. Allow a day for in-flight work, then prune those orphans.
+		// An SDK bridge leg is a parent too: outer legs have no requests row.
 		await deleteBatched(
 			db,
 			"routing_attempts",
-			"started_at < ? AND NOT EXISTS(SELECT 1 FROM requests WHERE requests.id=routing_attempts.request_id)",
+			"started_at < ? AND NOT EXISTS(SELECT 1 FROM requests WHERE requests.id=routing_attempts.request_id) AND NOT EXISTS(SELECT 1 FROM sdk_bridge_turn_legs WHERE sdk_bridge_turn_legs.id=routing_attempts.request_id)",
 			Date.now() - 24 * 60 * 60 * 1000,
 		);
 

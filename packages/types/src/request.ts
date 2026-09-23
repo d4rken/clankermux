@@ -221,6 +221,12 @@ export interface RequestRow {
 	 * credit token was not seen on a refusal within its lifetime.
 	 */
 	fallback_from_model: string | null;
+	/**
+	 * The SDK bridge turn (`sdk_bridge_turns.id`) this row is an inner model
+	 * call of. NULL for every other request. Not a foreign key, so the turn may
+	 * already have been pruned.
+	 */
+	sdk_bridge_turn_id: string | null;
 }
 
 /**

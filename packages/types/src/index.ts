@@ -28,6 +28,7 @@ export * from "./request";
 export * from "./request-cost";
 export * from "./routing";
 export * from "./runway";
+export * from "./sdk-bridge";
 export * from "./stats";
 export * from "./stops-history";
 export * from "./strategy";

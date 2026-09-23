@@ -26,6 +26,8 @@ export function createStatsResetHandler(dbOps: DatabaseOperations) {
 		const adapter = dbOps.getAdapter();
 		// Clear request history
 		await adapter.run("DELETE FROM requests");
+		// SDK bridge turns are request history too; their legs cascade.
+		await adapter.run("DELETE FROM sdk_bridge_turns");
 		// Reset account statistics
 		await adapter.run(
 			"UPDATE accounts SET request_count = 0, session_request_count = 0",
