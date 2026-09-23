@@ -2,6 +2,7 @@ import { isRoutingPinValid } from "@clankermux/core";
 import {
 	type ApiKey,
 	type ApiKeyRow,
+	type ClientApplication,
 	parsePinnedProviders,
 	toApiKey,
 } from "@clankermux/types";
@@ -86,16 +87,20 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		pinnedAccountId: string | null;
 		pinnedProvidersRaw: string | null;
 		excludedProvidersRaw: string | null;
+		application: ClientApplication | null;
 	} | null> {
 		const row = await this.get<{
 			pinned_account_id: string | null;
 			pinned_providers: string | null;
 			excluded_providers: string | null;
+			application: ClientApplication | null;
 		}>(
 			`
-			SELECT pinned_account_id, pinned_providers, excluded_providers
-			FROM api_keys
-			WHERE id = ?
+			SELECT k.pinned_account_id, k.pinned_providers, k.excluded_providers,
+				p.application
+			FROM api_keys k
+			LEFT JOIN client_profiles p ON p.api_key_id = k.id
+			WHERE k.id = ?
 		`,
 			[id],
 		);
@@ -105,6 +110,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 					pinnedAccountId: row.pinned_account_id ?? null,
 					pinnedProvidersRaw: row.pinned_providers ?? null,
 					excludedProvidersRaw: row.excluded_providers ?? null,
+					application: row.application ?? null,
 				}
 			: null;
 	}

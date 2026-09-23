@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+	claudeCodeCatalogue,
+	claudeCodeName,
+	claudeCodeTarget,
 	composeGlobalCatalogue,
 	type GlobalCatalogueFormat,
 	type GlobalCatalogueModel,
@@ -99,5 +102,54 @@ describe("globalCatalogueFormats", () => {
 		expect(globalCatalogueFormats("codex")).toEqual(["codex"]);
 		for (const application of ["opencode", "pi", "oh-my-pi"] as const)
 			expect(globalCatalogueFormats(application)).toEqual(["openai"]);
+	});
+});
+
+describe("Claude Code names", () => {
+	it("prefixes only IDs Claude Code would not list, and reads the prefix back", () => {
+		for (const [id, name] of [
+			["gpt-6-astra", "claude-gpt-6-astra"],
+			["alias:frontier", "claude-alias:frontier"],
+			["claude-opus-5-5", "claude-opus-5-5"],
+			["alias:frontier_anthropic", "alias:frontier_anthropic"],
+		] as const) {
+			expect(claudeCodeName(id)).toBe(name);
+			if (name !== id) expect(claudeCodeTarget(name)).toBe(id);
+		}
+	});
+	it("yields no candidate for a name the prefix cannot have produced", () => {
+		expect(claudeCodeTarget("gpt-6-astra")).toBeNull();
+		expect(claudeCodeTarget("claude-")).toBeNull();
+		expect(claudeCodeTarget("claude-claude-x")).toBeNull();
+		expect(claudeCodeTarget("claude-anthropic-x")).toBeNull();
+		// Only a candidate: the accounts decide whether it is a prefixed name.
+		expect(claudeCodeTarget("claude-opus-5-5")).toBe("opus-5-5");
+	});
+});
+
+describe("claudeCodeCatalogue", () => {
+	it("lists every entry under its Claude Code name and carries the default", () => {
+		expect(
+			claudeCodeCatalogue(
+				[entry("gpt-6-astra"), entry("claude-opus-5-5")],
+				"gpt-6-astra",
+			),
+		).toEqual({
+			models: [
+				{ model: entry("gpt-6-astra"), name: "claude-gpt-6-astra" },
+				{ model: entry("claude-opus-5-5"), name: "claude-opus-5-5" },
+			],
+			defaultModel: "claude-gpt-6-astra",
+		});
+	});
+	it("keeps the entry already stored under a contested name, and drops a default that lost", () => {
+		const result = claudeCodeCatalogue(
+			[entry("gpt-6", "gpt-6"), entry("claude-gpt-6", "other")],
+			"gpt-6",
+		);
+		expect(result.models.map(({ model }) => model.targetModel)).toEqual([
+			"other",
+		]);
+		expect(result.defaultModel).toBeNull();
 	});
 });

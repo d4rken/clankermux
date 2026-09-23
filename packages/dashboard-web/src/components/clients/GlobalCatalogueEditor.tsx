@@ -3,6 +3,7 @@ import {
 	type ClientModel,
 	type ClientSuggestions,
 	type ClientView,
+	claudeCodeName,
 	type GlobalCatalogueClientResult,
 	type GlobalCatalogueDraft,
 	type GlobalCatalogueReview,
@@ -170,15 +171,7 @@ export function GlobalCatalogueEditor({
 	const candidates = new Map<string, ClientModel>();
 	for (const m of suggestions?.models ?? [])
 		if (format !== "codex" || m.codexMetadataAvailable) {
-			// The Anthropic catalogue is read by Claude Code, which only lists IDs
-			// that name Claude, so other models are offered under a claude- alias.
-			const model = suggestedModel(
-				m.id,
-				m.displayName,
-				m.accountIds,
-				format === "anthropic" ? "claude-code" : "generic",
-				format,
-			);
+			const model = suggestedModel(m.id, m.displayName);
 			candidates.set(model.id, model);
 		}
 	for (const model of removed[format]) candidates.set(model.id, model);
@@ -320,6 +313,17 @@ export function GlobalCatalogueEditor({
 					busy={busy}
 					modelAccounts={(model) =>
 						servingAccounts(model, suggestions, accounts)
+					}
+					rowExtras={(model) =>
+						format === "anthropic" && claudeCodeName(model.id) !== model.id
+							? {
+									note: (
+										<span className="block text-xs text-muted-foreground">
+											Claude Code lists it as {claudeCodeName(model.id)}
+										</span>
+									),
+								}
+							: {}
 					}
 					onAdd={(models) => {
 						const ids = new Set(models.map((m) => m.id));

@@ -183,6 +183,18 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 			});
 		if (path.endsWith("/bulk/commit"))
 			return Response.json({ data: { clients: commitResponse } });
+		if (path.endsWith("/global-catalogue"))
+			return Response.json({
+				data: {
+					revision: 1,
+					subscribers: ["alpha"],
+					catalogues: {
+						anthropic: { models: [], defaultModel: null },
+						openai: { models: [shared], defaultModel: null },
+						codex: { models: [], defaultModel: null },
+					},
+				},
+			});
 		throw new Error(`Unexpected request ${path}`);
 	}) as unknown as typeof fetch);
 	host = document.createElement("div");
@@ -576,6 +588,72 @@ describe("bulk catalogue editing", () => {
 				},
 			},
 		});
+	});
+});
+
+describe("clients using the global catalogue", () => {
+	const subscribed: ClientView = {
+		...alpha,
+		application: "pi",
+		global: {
+			appliedRevision: 1,
+			formats: {
+				openai: {
+					additions: [],
+					removals: [],
+					inheritDefault: true,
+					defaultModel: null,
+					skipped: [],
+				},
+			},
+		},
+	};
+	it("marks global models and makes hiding one from a subscriber an explicit choice", async () => {
+		await mount([subscribed, bravo]);
+		expect(document.body.textContent).toContain(
+			"1 of the selected clients uses the global catalogue for OpenAI",
+		);
+		expect(rowText(IN, "shared")).toContain("Global catalogue");
+		expect(rowText(IN, "fast")).not.toContain("Global catalogue");
+		await click("Remove shared");
+		expect(button("Review changes").disabled).toBe(true);
+		await check("Hide these global models from these clients");
+		expect(button("Review changes").disabled).toBe(false);
+		// A confirmation covers the removal it was given for, not the next one.
+		await click("Discard changes");
+		await click("Remove shared");
+		expect(button("Review changes").disabled).toBe(true);
+	});
+	it("does not ask about a global model no selected subscriber publishes", async () => {
+		const hidden: ClientView = {
+			...subscribed,
+			catalogues: {
+				...subscribed.catalogues,
+				openai: {
+					models: [alpha.catalogues.openai.models[1] as ClientModel],
+					defaultModel: null,
+				},
+			},
+		};
+		await mount([hidden, bravo]);
+		await click("Remove shared");
+		expect(button("Review changes").disabled).toBe(false);
+	});
+	it("asks before a replacement hides global models from subscribers", async () => {
+		await mount([subscribed, bravo, charlie]);
+		await choose("Start from", "charlie");
+		await click("Replace catalogue for 3 clients");
+		expect(button("Replace catalogues").disabled).toBe(true);
+		await check("Hide these global models with the replacement");
+		expect(button("Replace catalogues").disabled).toBe(false);
+	});
+	it("asks for nothing when no selected client uses the global catalogue", async () => {
+		await mount([alpha, bravo]);
+		await click("Remove shared");
+		expect(button("Review changes").disabled).toBe(false);
+		expect(posted.map((p) => p.path)).not.toContain(
+			"/api/clients/global-catalogue",
+		);
 	});
 });
 
