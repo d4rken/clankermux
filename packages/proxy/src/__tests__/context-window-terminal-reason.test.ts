@@ -1,9 +1,9 @@
 /**
  * The context_window_exceeded 400 explains why no LARGER-context backend picked
  * the request up. That explanation was a hardcoded "rate-limited or paused",
- * which is false for Codex CLI traffic: the /v1/responses adapter sets an
- * unconditional floor (`excludeOfficialAnthropic`) that drops every official
- * Anthropic account from selection regardless of their health. In the
+ * which is false for Codex CLI traffic when the SDK bridge is unavailable: the
+ * floor for non-Claude-Code clients (`officialAnthropicExcluded`) then drops
+ * every official Anthropic account from selection regardless of their health. In the
  * 2026-08-20 incident the message blamed availability while all four Anthropic
  * accounts sat at 14-75% headroom.
  */
@@ -40,7 +40,7 @@ async function messageOf(res: Response): Promise<string> {
 describe("context_window_exceeded terminal reason", () => {
 	const excluded = [{ account: codexAccount(), model: "claude-opus-4-8" }];
 
-	it("names the Codex CLI floor when official Anthropic accounts are barred", async () => {
+	it("names the SDK bridge floor when official Anthropic accounts are barred", async () => {
 		const res = createContextWindowExceededResponse(
 			430_847,
 			excluded,
@@ -49,7 +49,7 @@ describe("context_window_exceeded terminal reason", () => {
 		);
 
 		const message = await messageOf(res);
-		expect(message).toContain("Codex CLI");
+		expect(message).toContain("only through the SDK bridge");
 		// The old wording asserted a condition nobody had checked.
 		expect(message).not.toContain("rate-limited or paused");
 		// And do not swap one false claim for another: Anthropic's 200k window is

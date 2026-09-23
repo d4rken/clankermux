@@ -224,7 +224,11 @@ export function ensureSchema(db: Database): void {
 			-- persisted while a late usage patch was still possible. That is the
 			-- only value a later write can change, which is why a reader may treat
 			-- any non-NULL value as final.
-			usage_source TEXT
+			usage_source TEXT,
+			-- The Claude Agent SDK bridge turn (sdk_bridge_turns.id) this row
+			-- is an inner model call of. Deliberately NOT a foreign key: turns
+			-- and requests are pruned independently, so either may go first.
+			sdk_bridge_turn_id TEXT
 		)
 	`);
 
@@ -250,6 +254,14 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_correlation_tag
 			ON requests(correlation_tag, api_key_id, timestamp, id)
 			WHERE correlation_tag IS NOT NULL`,
+	);
+
+	// Turn-detail reads sum a turn's inner rows. Partial: only bridge inner
+	// calls carry a turn id.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_requests_sdk_bridge_turn
+			ON requests(sdk_bridge_turn_id)
+			WHERE sdk_bridge_turn_id IS NOT NULL`,
 	);
 
 	// NOTE: do NOT add a partial index over failed rows here for the
@@ -1068,6 +1080,80 @@ export function ensureSchema(db: Database): void {
 			last_used_at INTEGER NOT NULL
 		)
 	`);
+
+	// Claude Agent SDK bridge: one row per logical turn (one Claude Code query).
+	// Token and cost truth is NOT stored here; it is summed at read time from
+	// the inner `requests` rows carrying sdk_bridge_turn_id. The sdk_* columns
+	// are only the SDK result's own figures, kept as a cross-check. account_id
+	// is the outer-selected account and, like requests.account_used, not a
+	// foreign key. Retention (request cutoff by started_at, legs cascading) is
+	// pinned by sdk-bridge-retention.test.ts.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_turns (
+			id TEXT PRIMARY KEY,
+			started_at INTEGER NOT NULL,
+			finished_at INTEGER,
+			status TEXT NOT NULL,
+			http_status INTEGER,
+			error_type TEXT,
+			error_message TEXT,
+			api_key_id TEXT,
+			api_key_name TEXT,
+			account_id TEXT,
+			model TEXT,
+			client_harness TEXT,
+			client_user_agent TEXT,
+			project TEXT,
+			conversation_key_hash TEXT,
+			cc_session_id TEXT,
+			history_mode TEXT NOT NULL,
+			rebuild_reason TEXT,
+			system_prompt_policy TEXT NOT NULL,
+			stop_reason TEXT,
+			leg_count INTEGER NOT NULL DEFAULT 0,
+			tool_round_count INTEGER NOT NULL DEFAULT 0,
+			inner_call_count INTEGER NOT NULL DEFAULT 0,
+			inner_error_count INTEGER NOT NULL DEFAULT 0,
+			spawn_ms INTEGER,
+			first_event_ms INTEGER,
+			duration_ms INTEGER,
+			sdk_num_turns INTEGER,
+			sdk_input_tokens INTEGER,
+			sdk_output_tokens INTEGER,
+			sdk_cache_read_input_tokens INTEGER,
+			sdk_cache_creation_input_tokens INTEGER,
+			ignored_fields TEXT
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turns_started ON sdk_bridge_turns(started_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turns_api_key ON sdk_bridge_turns(api_key_id, started_at)`,
+	);
+
+	// One row per outer HTTP request of a turn. id is the leg's request id, the
+	// one returned to the client as x-clankermux-request-id. A leg has no
+	// `requests` row, so it is the parent of its routing_attempts rows.
+	// tool_use_ids is a JSON array.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_turn_legs (
+			id TEXT PRIMARY KEY,
+			turn_id TEXT NOT NULL REFERENCES sdk_bridge_turns(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (kind IN ('start','continue')),
+			started_at INTEGER NOT NULL,
+			finished_at INTEGER,
+			http_status INTEGER,
+			error_phase TEXT,
+			stop_reason TEXT,
+			error_type TEXT,
+			error_message TEXT,
+			tool_use_ids TEXT
+		)
+	`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
+	);
 
 	// Performance indexes (covering/partial indexes for hot query paths)
 	// Routing policy is additive: retired combo/mapping storage remains inert.
@@ -1895,6 +1981,20 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "client_profiles",
 		column: "global_state",
 		ddl: "ALTER TABLE client_profiles ADD COLUMN global_state TEXT DEFAULT NULL",
+	},
+	// The SDK bridge turn an inner model call belongs to. Plain column, not a
+	// foreign key; NULL on every request that is not a bridge inner call.
+	{
+		table: "requests",
+		column: "sdk_bridge_turn_id",
+		ddl: "ALTER TABLE requests ADD COLUMN sdk_bridge_turn_id TEXT",
+	},
+	// JSON array of the request fields a bridged turn accepted but Claude Code
+	// cannot apply (temperature, top_p); NULL when there were none.
+	{
+		table: "sdk_bridge_turns",
+		column: "ignored_fields",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN ignored_fields TEXT",
 	},
 ];
 

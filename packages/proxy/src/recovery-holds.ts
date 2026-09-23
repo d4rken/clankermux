@@ -382,11 +382,14 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	// The cache-affinity-pinned account id recorded by the routing strategy (set
 	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
 	// The burst-hold only ever serves an OAuth-Anthropic account, so for a
-	// Codex-CLI (excludeOfficialAnthropic) request it MUST be disabled — otherwise
-	// the hold could serve a Claude account that selection deliberately excluded.
-	const burstHeldId = requestMeta.excludeOfficialAnthropic
-		? null
-		: (requestMeta.routing?.heldAccountId ?? null);
+	// request from a non-Claude-Code client it MUST be disabled: without the SDK
+	// bridge the hold could serve a Claude account selection deliberately
+	// excluded, and with it the hold would re-probe an account whose 429s only
+	// the bridge's inner calls ever see.
+	const burstHeldId =
+		requestMeta.officialAnthropicVia === "sdk-bridge"
+			? null
+			: (requestMeta.routing?.heldAccountId ?? null);
 
 	// The affinity-first preflight attempts the held account OUTSIDE any hold, so
 	// its double-attempt bookkeeping cannot be written by the hold itself. This is
@@ -644,8 +647,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		// flat 180s base idleTimeout no matter how long we would like to wait, so
 		// it gets the shorter no-re-arm budget. The capability comes from ingress
 		// (derived from the adapter's unspoofable per-request context) rather
-		// than from `excludeOfficialAnthropic`: that flag is ROUTING policy read
-		// from a client-visible header, so it is both forgeable and not
+		// than from `officialAnthropicVia`: that is ROUTING policy and not
 		// equivalent — a future synthetic dispatch could be un-re-armable without
 		// carrying it.
 		const holdBudgetMs = getOverloadHoldBudgetMs(canRearmIdleTimeout);

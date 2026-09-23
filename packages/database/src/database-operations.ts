@@ -106,6 +106,7 @@ import {
 	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { RoutingRepository } from "./repositories/routing.repository";
+import { SdkBridgeTurnRepository } from "./repositories/sdk-bridge-turn.repository";
 import { SessionAffinityPinRepository } from "./repositories/session-affinity-pin.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
@@ -528,6 +529,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	// Repositories
 	readonly routing: RoutingRepository;
 	readonly modelAliases: ModelAliasRepository;
+	readonly sdkBridgeTurns: SdkBridgeTurnRepository;
 	private accounts: AccountRepository;
 	private requests: RequestRepository;
 	private oauth: OAuthRepository;
@@ -645,6 +647,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.modelAliases = retrying(
 			new ModelAliasRepository(this.adapter),
 			"modelAliases",
+		);
+		this.sdkBridgeTurns = retrying(
+			new SdkBridgeTurnRepository(this.adapter),
+			"sdkBridgeTurns",
 		);
 		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
 		this.requests = retrying(new RequestRepository(this.adapter), "requests");
@@ -1997,7 +2003,8 @@ OAuth tokens will need to be re-authenticated.
 
 	// Cleanup operations — six explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
-	// Pass 2: delete request metadata older than requestRetentionMs
+	// Pass 2: delete request metadata older than requestRetentionMs, and SDK
+	//         bridge turns (with their legs) on the same cutoff
 	// Pass 3: delete usage snapshots older than snapshotRetentionMs
 	// Pass 4: delete memory snapshots older than memorySnapshotRetentionMs
 	// Pass 5: delete claim observations older than the FIXED

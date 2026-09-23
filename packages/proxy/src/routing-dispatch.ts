@@ -7,6 +7,8 @@ import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	getChatContext,
 	readReasoningEffortAdaptation,
+	SdkBridgeCapacityError,
+	SdkBridgeUnavailableError,
 } from "@clankermux/types";
 import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
@@ -20,6 +22,7 @@ import {
 } from "./resolved-route";
 import { observeRoutingResponse } from "./routing-response-audit";
 import { getModelPermissionService } from "./routing-service";
+import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 
 /** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
 export interface RoutingAttemptAudit {
@@ -87,6 +90,14 @@ export async function sendAuthorizedRequest(
 		request,
 	),
 	prepareResponse?: (response: Response) => Promise<Response>,
+	/**
+	 * An in-process transport that replaces the network send, for an attempt
+	 * the SDK bridge serves. Authorization, the outgoing-model check and the
+	 * attempt row are exactly those of a network send. Its response is the
+	 * turn's final answer: this function never classifies it (no model
+	 * suppression), and the attempt row finishes when its body ends.
+	 */
+	transport?: (request: Request) => Promise<Response>,
 ): Promise<Response> {
 	const target = getAttemptTarget(meta, account);
 	const route = getResolvedRoute(meta);
@@ -120,10 +131,13 @@ export async function sendAuthorizedRequest(
 	try {
 		// A mismatch here is an internal authorization invariant failure (403);
 		// client field incompatibilities were already rejected during route building.
+		// Only the bridge's own transport may carry Chat to an official
+		// Anthropic account.
 		const chat = getChatContext(meta);
+		const bridged = transport !== undefined;
 		if (
 			chat &&
-			(!supportsChatIngress(account.provider) ||
+			(!supportsChatIngress(account.provider, bridged) ||
 				unsupportedChatField(account.provider, chat.requirements))
 		)
 			throw new RoutingPolicyError(
@@ -213,6 +227,8 @@ export async function sendAuthorizedRequest(
 				throw new RoutingPolicyError("Unexpected Devin local response");
 			}
 		}
+		if (synthetic && transport)
+			throw new RoutingPolicyError("Unexpected local inference response");
 		if (synthetic) {
 			if (
 				!(
@@ -242,22 +258,36 @@ export async function sendAuthorizedRequest(
 		await ctx.dbOps.routing.recordAttempt(attempt);
 		recorded = true;
 		if (audit) audit.id = attempt.id;
-		response = await makeProxyRequest(
-			request,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			signal,
-		);
+		noteSdkBridgeInnerSend(meta, account.id);
+		response = transport
+			? await transport(request)
+			: await makeProxyRequest(
+					request,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					signal,
+				);
 		if (prepareResponse) response = await prepareResponse(response);
 	} catch (error) {
 		attempt.finished_at = Date.now();
-		attempt.status = error instanceof RoutingPolicyError ? 403 : 502;
+		attempt.status =
+			error instanceof RoutingPolicyError
+				? 403
+				: error instanceof SdkBridgeCapacityError
+					? error.status
+					: error instanceof SdkBridgeUnavailableError
+						? 503
+						: 502;
 		attempt.error =
 			error instanceof RoutingPolicyError
 				? error.message
-				: "Upstream transport failed";
+				: error instanceof SdkBridgeCapacityError
+					? `SDK bridge at capacity: ${error.message}`
+					: error instanceof SdkBridgeUnavailableError
+						? `SDK bridge unavailable: ${error.message}`
+						: "Upstream transport failed";
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else
@@ -291,6 +321,17 @@ export async function sendAuthorizedRequest(
 		);
 		return response;
 	}
+
+	if (transport)
+		return observeRoutingResponse(response, async ({ reportedModel, error }) =>
+			ctx.dbOps.routing.finishAttempt(
+				attempt.id,
+				Date.now(),
+				response.status,
+				error ?? (response.ok ? null : `SDK bridge HTTP ${response.status}`),
+				reportedModel,
+			),
+		);
 
 	return observeRoutingResponse(
 		response,

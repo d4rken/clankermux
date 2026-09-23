@@ -81,6 +81,9 @@ export const queryKeys = {
 	requestById: (id: string) =>
 		[...queryKeys.all, "requests", "by-id", { id }] as const,
 	requestProjects: () => [...queryKeys.all, "requests", "projects"] as const,
+	// An SDK bridge turn, by turn id or by a leg's request id.
+	sdkBridgeTurn: (id: string) =>
+		[...queryKeys.all, "sdk-bridge-turns", { id }] as const,
 	// Options for the analytics filter dropdowns. Unkeyed: the lists are global
 	// by design, so scoping them to the active filters would make a filter
 	// un-clearable once it excluded its own option.

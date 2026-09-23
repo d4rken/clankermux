@@ -155,14 +155,19 @@ describe("handleResponsesRequest", () => {
 		expect(body.output[0].type).toBe("message");
 	});
 
-	test("Test 2b: sets the no-official-Anthropic floor header on the synthetic request", async () => {
+	test("Test 2b: marks the floor in the in-process context, not in a header", async () => {
 		// See the note on `captured` above: assigned from inside the callback.
-		const observed: { denyHeader: string | null } = { denyHeader: null };
+		const observed: { denyHeader: string | null; floor: unknown } = {
+			denyHeader: null,
+			floor: undefined,
+		};
 
 		const mockHandleProxy: HandleProxyFn = async (req) => {
 			observed.denyHeader = req.headers.get(
 				"x-clankermux-deny-official-anthropic",
 			);
+			observed.floor =
+				getNativeResponsesRequestContext(req)?.denyDirectOfficialAnthropic;
 			return new Response(ANTHROPIC_MESSAGE_BODY, {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -187,9 +192,11 @@ describe("handleResponsesRequest", () => {
 
 		await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
 
-		// Codex CLI traffic must be marked so the proxy never routes it to a
-		// Claude account — independent of any API-key pin or auth config.
-		expect(observed.denyHeader).toBe("1");
+		// Responses traffic may reach a Claude account only through the SDK
+		// bridge. The mark rides the unforgeable context; a header would be
+		// something a client could send itself.
+		expect(observed.floor).toBe(true);
+		expect(observed.denyHeader).toBeNull();
 	});
 
 	test("Test 3: error passthrough → if handleProxy returns 429, handler returns 429", async () => {

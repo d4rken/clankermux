@@ -16,6 +16,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { SdkBridgeStatusLine } from "./system-status/SdkBridgeStatusLine";
 import {
 	formatUptime,
 	statusColor,
@@ -196,6 +197,8 @@ export function SystemStatus() {
 						<dd className="font-medium tabular-nums">{pool.paused}</dd>
 					</div>
 				</dl>
+
+				{data.sdkBridge && <SdkBridgeStatusLine status={data.sdkBridge} />}
 			</>
 		);
 	}

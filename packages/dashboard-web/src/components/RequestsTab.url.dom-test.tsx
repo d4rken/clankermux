@@ -8,6 +8,7 @@ import {
 	spyOn,
 } from "bun:test";
 import { HttpError } from "@clankermux/http-common";
+import type { SdkBridgeTurnView } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -109,6 +110,8 @@ interface Stubs {
 	accounts?: Account[];
 	/** What the by-id lookup does. */
 	byId?: () => Promise<RequestSummary | null>;
+	/** What the SDK bridge turn lookup does; by default no id names a turn. */
+	sdkBridgeTurn?: (id: string) => Promise<SdkBridgeTurnView | null>;
 }
 
 async function mount(initialEntry: string, stubs: Stubs = {}): Promise<void> {
@@ -119,6 +122,9 @@ async function mount(initialEntry: string, stubs: Stubs = {}): Promise<void> {
 		stubs.byId ?? (async () => null),
 	);
 	spyOn(api, "getRequestsCount").mockImplementation(async () => 0);
+	spyOn(api, "getSdkBridgeTurn").mockImplementation(
+		stubs.sdkBridgeTurn ?? (async () => null),
+	);
 	spyOn(api, "getAccounts").mockImplementation(
 		async () => stubs.accounts ?? [],
 	);
@@ -321,6 +327,136 @@ describe("RequestsTab — ?request=", () => {
 
 		expect(modalIsOpen()).toBe(false);
 		expect(api.getRequestById).not.toHaveBeenCalled();
+	});
+});
+
+describe("RequestsTab — SDK bridge turns", () => {
+	const LEG_ID = "leg-request";
+	const turnView = (): SdkBridgeTurnView => ({
+		turn: {
+			id: "turn-1",
+			startedAt: 1_700_000_000_000,
+			finishedAt: 1_700_000_004_000,
+			status: "completed",
+			httpStatus: 200,
+			errorType: null,
+			errorMessage: null,
+			apiKeyId: KEY_ID,
+			apiKeyName: KEY_NAME,
+			accountId: "acct-a",
+			model: "claude-opus-5-5",
+			clientHarness: "pi",
+			clientUserAgent: null,
+			project: "clankermux",
+			conversationKeyHash: null,
+			ccSessionId: null,
+			historyMode: "rebuild_transcript",
+			rebuildReason: "account_change",
+			systemPromptPolicy: "drop",
+			stopReason: "end_turn",
+			legCount: 1,
+			toolRoundCount: 0,
+			innerCallCount: 1,
+			innerErrorCount: 0,
+			spawnMs: 1_200,
+			firstEventMs: 1_800,
+			durationMs: 4_000,
+			sdkNumTurns: 1,
+			sdkInputTokens: null,
+			sdkOutputTokens: null,
+			sdkCacheReadInputTokens: null,
+			sdkCacheCreationInputTokens: null,
+			ignoredFields: ["temperature"],
+		},
+		legs: [
+			{
+				id: LEG_ID,
+				turnId: "turn-1",
+				kind: "start",
+				startedAt: 1_700_000_000_000,
+				finishedAt: 1_700_000_004_000,
+				httpStatus: 200,
+				errorPhase: null,
+				stopReason: "end_turn",
+				errorType: null,
+				errorMessage: null,
+				toolUseIds: null,
+			},
+		],
+		inner: {
+			requestCount: 1,
+			inputTokens: 10,
+			outputTokens: 20,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+			costUsd: 0.01,
+		},
+		accountName: "Claude A",
+		innerRequests: [
+			{
+				id: LOADED_ID,
+				timestamp: 1_700_000_001_000,
+				accountId: "acct-a",
+				accountName: "Claude A",
+				model: "claude-opus-5-5",
+				statusCode: 200,
+				success: true,
+				inputTokens: 10,
+				outputTokens: 20,
+				cacheReadInputTokens: 0,
+				cacheCreationInputTokens: 0,
+				costUsd: 0.01,
+			},
+		],
+		prunedInnerCalls: 0,
+		matchedLegId: null,
+	});
+	const turnIsOpen = () => pageText().includes("Agent SDK turn");
+
+	it("opens the turn from an inner call's chip, and closes it again", async () => {
+		await mount("/requests", {
+			loaded: [summary({ sdkBridgeTurnId: "turn-1" })],
+			sdkBridgeTurn: async () => turnView(),
+		});
+		expect(turnIsOpen()).toBe(false);
+
+		await clickButton("Agent SDK");
+
+		expect(currentSearch).toContain("turn=turn-1");
+		expect(api.getSdkBridgeTurn).toHaveBeenCalledWith("turn-1");
+		expect(turnIsOpen()).toBe(true);
+		expect(modalIsOpen()).toBe(false);
+		const text = pageText();
+		expect(text).toContain("Rebuilt from history (account change)");
+		expect(text).toContain("drop");
+		expect(text).toContain("temperature");
+		expect(text).toContain("Claude A");
+
+		await act(async () => {
+			document.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+			);
+		});
+		await settle();
+		expect(turnIsOpen()).toBe(false);
+		expect(currentSearch).not.toContain("turn=");
+	});
+
+	it("shows no chip on a request the bridge did not serve", async () => {
+		await mount("/requests", { loaded: [summary()] });
+		expect(findButton("Agent SDK")).toBeUndefined();
+	});
+
+	it("opens a leg's turn for a request id that has no row", async () => {
+		await mount(`/requests?request=${LEG_ID}`, {
+			loaded: [summary()],
+			byId: async () => null,
+			sdkBridgeTurn: async () => ({ ...turnView(), matchedLegId: LEG_ID }),
+		});
+
+		expect(api.getSdkBridgeTurn).toHaveBeenCalledWith(LEG_ID);
+		expect(turnIsOpen()).toBe(true);
+		expect(pageText()).not.toContain("has not been recorded yet");
 	});
 });
 

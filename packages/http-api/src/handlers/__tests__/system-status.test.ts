@@ -158,3 +158,38 @@ describe("system status handler — usage-exhaustion consistency with /health", 
 		}
 	});
 });
+
+describe("system status handler — SDK bridge", () => {
+	it("reports the injected bridge status", async () => {
+		const handler = createSystemStatusHandler(makeDbOps(), makeConfig(), {
+			getSdkBridgeStatus: () => ({
+				availability: { state: "unavailable", reason: "binary missing" },
+				live: 0,
+				parked: 0,
+				cap: 8,
+				counters: {
+					turnsStarted: 0,
+					turnsCompleted: 0,
+					turnsFailed: 0,
+					continuations: 0,
+					rejected: {},
+					resumes: 0,
+					rebuilds: 0,
+				},
+				peakRssBytes: null,
+			}),
+		});
+		const body = (await (await handler()).json()) as SystemStatusResponse;
+		expect(body.sdkBridge?.availability).toEqual({
+			state: "unavailable",
+			reason: "binary missing",
+		});
+		expect(body.sdkBridge?.cap).toBe(8);
+	});
+
+	it("omits the field when no bridge is wired", async () => {
+		const handler = createSystemStatusHandler(makeDbOps(), makeConfig());
+		const body = (await (await handler()).json()) as SystemStatusResponse;
+		expect(body.sdkBridge).toBeUndefined();
+	});
+});

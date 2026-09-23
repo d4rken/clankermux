@@ -11,6 +11,7 @@ import type {
 	IntegrityStatus,
 	PricingGap,
 	ProviderOverloadStatus,
+	SdkBridgeStatus,
 	SystemStatusResponse,
 } from "@clankermux/types";
 import {
@@ -29,6 +30,7 @@ type IntegrityStatusFn = () => IntegrityStatus;
 type EventLoopLagFn = () => EventLoopLagStats;
 type PricingGapsFn = () => PricingGap[];
 type ProviderOverloadFn = () => ProviderOverloadStatus[];
+type SdkBridgeStatusFn = () => SdkBridgeStatus | null;
 
 /**
  * `GET /api/system/status` — live operational snapshot for the dashboard's
@@ -58,6 +60,7 @@ export interface SystemStatusHandlerOptions {
 	getEventLoopLag?: EventLoopLagFn;
 	getPricingGaps?: PricingGapsFn;
 	getProviderOverload?: ProviderOverloadFn;
+	getSdkBridgeStatus?: SdkBridgeStatusFn;
 }
 
 export function createSystemStatusHandler(
@@ -71,6 +74,7 @@ export function createSystemStatusHandler(
 		getEventLoopLag,
 		getPricingGaps: getPricingGapsFn,
 		getProviderOverload,
+		getSdkBridgeStatus,
 	} = options;
 	return async (): Promise<Response> => {
 		try {
@@ -94,6 +98,7 @@ export function createSystemStatusHandler(
 			const pricingGaps = (getPricingGapsFn ?? getPricingGaps)();
 			const status = computeHealthStatus(runtimeHealthy, pool);
 
+			const sdkBridge = getSdkBridgeStatus?.() ?? null;
 			const rss = process.memoryUsage.rss();
 			const response: SystemStatusResponse = {
 				status,
@@ -120,6 +125,7 @@ export function createSystemStatusHandler(
 				// Absent injection — bare handler in tests — reports no live buckets,
 				// which is also the honest steady state.
 				providerOverload: getProviderOverload ? getProviderOverload() : [],
+				...(sdkBridge ? { sdkBridge } : {}),
 				strategy: config.getStrategy(),
 				timestamp: new Date().toISOString(),
 			};

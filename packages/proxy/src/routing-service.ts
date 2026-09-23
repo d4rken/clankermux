@@ -12,8 +12,14 @@ import type {
 	AccountModelPermissions,
 	RequestMeta,
 	RoutingRule,
+	SdkBridgeInnerContext,
 } from "@clankermux/types";
-import { claudeCodeTarget, getChatContext } from "@clankermux/types";
+import {
+	claudeCodeTarget,
+	getChatContext,
+	getSdkBridgeInnerMetaContext,
+	sdkBridgeCandidatesForModel,
+} from "@clankermux/types";
 import {
 	AccountIdentityChangedError,
 	AccountModelPermissionService,
@@ -51,6 +57,7 @@ import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	type BuildRouteInput,
 	buildResolvedRoute,
+	type DestinationRestrictions,
 	destinationExclusionReason,
 	getResolvedRoute,
 	installAliasRoutes,
@@ -198,6 +205,15 @@ export async function initializeRequestRoute(
 	const model = meta.requestedModel;
 	if (!model)
 		throw new RoutingPolicyError("Inference requests require a model");
+	const sdkBridgeInner = getSdkBridgeInnerMetaContext(meta);
+	if (sdkBridgeInner)
+		return initializeSdkBridgeInnerRoute(
+			meta,
+			ctx,
+			sdkBridgeInner,
+			model,
+			apiKeyId,
+		);
 	let application: string | null = null;
 	if (apiKeyId && !meta.internal) {
 		const pin = await ctx.dbOps.getApiKeyPin(apiKeyId);
@@ -232,11 +248,22 @@ export async function initializeRequestRoute(
 		ctx.dbOps.getAllAccounts(),
 		ctx.dbOps.routing.listRules(),
 	]);
+	// Read once, here: whether official Anthropic accounts are candidates at
+	// all. A bridged attempt re-checks before it starts a turn, and fails over
+	// if the bridge has begun shutting down since.
+	meta.officialAnthropicExcluded =
+		meta.officialAnthropicVia === "sdk-bridge"
+			? sdkBridgeExclusionReason(ctx)
+			: null;
 	const restrictions = {
 		pin: meta.pin ?? null,
 		forcedAccountId,
 		headerAccountId,
-		excludeOfficialAnthropic: meta.excludeOfficialAnthropic === true,
+		officialAnthropicExclusion: meta.officialAnthropicExcluded,
+		bridgesOfficialAnthropic:
+			meta.officialAnthropicVia === "sdk-bridge" &&
+			meta.officialAnthropicExcluded === null,
+		sdkBridgeRefusal: meta.sdkBridgeRefusedField ?? null,
 		maintenance,
 	};
 	/** The model the routing table decides for; the requested one stays on record. */
@@ -373,11 +400,47 @@ export async function initializeRequestRoute(
 		installAliasRoutes(meta, stages);
 		return;
 	}
+	await installPooledRoute(meta, ctx, {
+		restrictions,
+		pool,
+		rules,
+		winning,
+		target,
+		model,
+		routingModel,
+		apiKeyId,
+		priorExclusions,
+	});
+}
+
+/**
+ * Read permissions and suppressions for a pre-filtered pool and install the
+ * route. Shared by ordinary requests and bridge inner calls, so both admit a
+ * destination on the same evidence.
+ */
+async function installPooledRoute(
+	meta: RequestMeta,
+	ctx: ProxyContext,
+	input: {
+		restrictions: DestinationRestrictions;
+		pool: Account[];
+		rules: readonly RoutingRule[];
+		winning: RoutingRule | null;
+		target: string;
+		model: string;
+		/** The name the routing table decided for, when it differs from `model`. */
+		routingModel?: string;
+		apiKeyId: string | null;
+		priorExclusions: Map<string, string>;
+		sdkBridgeTurnId?: string;
+	},
+): Promise<void> {
+	const { restrictions, pool, winning, target, priorExclusions } = input;
 	const service = getModelPermissionService(ctx);
 	const permissions = new Map<string, AccountModelPermissions>();
 	const stale = new Set<string>();
 	const read = () => readPermissions(service, pool, permissions, stale);
-	if (!maintenance) {
+	if (!restrictions.maintenance) {
 		await read();
 		const missing = pool.filter(
 			(a) =>
@@ -411,17 +474,111 @@ export async function initializeRequestRoute(
 		buildResolvedRoute({
 			...restrictions,
 			accounts: routed,
-			rules,
-			requestedModel: model,
-			routingModel,
-			apiKeyId,
+			rules: input.rules,
+			requestedModel: input.model,
+			routingModel: input.routingModel,
+			apiKeyId: input.apiKeyId,
 			permissions,
 			priorExclusions,
 			chatRequirements: getChatContext(meta)?.requirements,
 			suppressedPairs,
 			substitutedPairs,
+			...(input.sdkBridgeTurnId
+				? { sdkBridgeTurnId: input.sdkBridgeTurnId }
+				: {}),
 		}),
 	);
+}
+
+/**
+ * Why an SDK bridge request cannot use official Anthropic accounts right now,
+ * or null when the bridge can serve it.
+ */
+function sdkBridgeExclusionReason(ctx: ProxyContext): string | null {
+	const availability = ctx.sdkBridge?.availability() ?? {
+		state: "unavailable" as const,
+		reason: "not configured",
+	};
+	if (availability.state === "available") return null;
+	const why =
+		availability.state === "shutting_down"
+			? "is shutting down"
+			: `is unavailable (${availability.reason})`;
+	return `official Anthropic accounts serve this client only through the SDK bridge, which ${why}`;
+}
+
+/**
+ * The route of a bridge inner call: exactly the frozen plan's candidates for
+ * the model Claude Code asked for. The key's pin, routing rules, forced
+ * accounts and the account header were all applied when the outer request
+ * built the plan, and none of them is consulted again here.
+ *
+ * The literal rule mirrors an alias stage's: it pools the planned accounts and
+ * lets `isModelPermitted` admit an account the outer route admitted through an
+ * account-pool rule while its discovery was still unknown.
+ */
+async function initializeSdkBridgeInnerRoute(
+	meta: RequestMeta,
+	ctx: ProxyContext,
+	inner: SdkBridgeInnerContext,
+	model: string,
+	apiKeyId: string | null,
+): Promise<void> {
+	if (Date.now() > inner.deadlineAt)
+		throw new RoutingPolicyError("The SDK bridge turn's deadline has passed");
+	// A plan model with a `[1m]` suffix arrives bare: Claude Code resolved the
+	// suffix into its beta header. The call routes on the model it names, as a
+	// direct Claude Code request for the same catalogue entry does.
+	const planned = sdkBridgeCandidatesForModel(inner.plan, model);
+	if (!planned.length)
+		throw new RoutingPolicyError(
+			`Model "${model}" is not a destination model of this SDK bridge turn`,
+		);
+	const byId = new Map(planned.map((c) => [c.accountId, c]));
+	const priorExclusions = new Map<string, string>();
+	const restrictions: DestinationRestrictions = {
+		pin: null,
+		forcedAccountId: null,
+		headerAccountId: null,
+		officialAnthropicExclusion: null,
+	};
+	const pool = (await ctx.dbOps.getAllAccounts()).filter((a) => {
+		const candidate = byId.get(a.id);
+		if (!candidate) return false;
+		const blocked =
+			candidate.provider !== a.provider
+				? "provider changed since the SDK bridge turn was planned"
+				: destinationExclusionReason(a, restrictions, null);
+		if (blocked)
+			priorExclusions.set(a.id, `${routeAccountLabel(a)}: ${blocked}`);
+		return !blocked;
+	});
+	const accountIds = planned.map((c) => c.accountId);
+	const rule: RoutingRule = {
+		id: `sdk-bridge:${inner.turnId}`,
+		name: "SDK bridge turn",
+		enabled: true,
+		position: 0,
+		match_api_key_id: null,
+		match_model_kind: "exact",
+		match_model_value: model,
+		pool_kind: "accounts",
+		pool_provider: null,
+		pool_account_ids: accountIds,
+		target_kind: "literal",
+		target_model: model,
+	};
+	await installPooledRoute(meta, ctx, {
+		restrictions,
+		pool,
+		rules: [rule],
+		winning: rule,
+		target: model,
+		model,
+		apiKeyId,
+		priorExclusions,
+		sdkBridgeTurnId: inner.turnId,
+	});
 }
 /** Re-evaluate admission against the frozen policy; never re-read routing rules. */
 export async function eligibleRouteAccounts(

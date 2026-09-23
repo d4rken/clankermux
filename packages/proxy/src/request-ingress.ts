@@ -9,10 +9,15 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	defaultProjectRules,
+	getChatContext,
 	getNativeResponsesRequestContext,
+	getSdkBridgeInnerRequestContext,
 	type ProjectAttributionSource,
 	type RequestMeta,
+	type SdkBridgeInnerContext,
+	sdkBridgeRefusedField,
 	setNativeResponsesMetaContext,
+	setSdkBridgeInnerMetaContext,
 	transferChatContext,
 } from "@clankermux/types";
 import { computeCachePrefixHashes } from "./cache-prefix-hash";
@@ -32,7 +37,12 @@ import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
 } from "./identity-bound-paths";
-import { isAnchoredSource, resolveProject } from "./project-extraction";
+import {
+	extractSessionId,
+	isAnchoredSource,
+	type ResolvedProject,
+	resolveProject,
+} from "./project-extraction";
 import { parseReasoningEffort } from "./reasoning-effort";
 import {
 	hashCreditToken,
@@ -180,20 +190,27 @@ export async function ingestProxyRequest(
 		typeof rawCreditToken === "string" && rawCreditToken.length > 0
 			? rawCreditToken
 			: null;
-	const resolved = resolveProject(
-		req.method,
-		url.pathname,
-		req.headers,
-		parsedBody,
-		apiKeyId ?? null,
-		sessionProjectCache,
-		// Optional call with an honest fallback, the same shape as
-		// `ctx.config.getStorePayloads?.() ?? true` in response-handler. A Config
-		// that predates this method (or a test stub that does not mock it) gets
-		// the built-in defaults, which is exactly what an unconfigured deployment
-		// gets — not an empty rule set, which would attribute nothing at all.
-		ctx.config.getProjectRules?.() ?? defaultProjectRules(),
-	);
+	// A bridge inner call is Claude Code working on the outer request's behalf.
+	// Its working directory is the bridge's scratch space, so the project is the
+	// outer request's and nothing is attributed or seeded from this body.
+	const sdkBridgeInner = getSdkBridgeInnerRequestContext(req);
+	const resolved: ResolvedProject = sdkBridgeInner
+		? innerResolvedProject(sdkBridgeInner, parsedBody, apiKeyId ?? null)
+		: resolveProject(
+				req.method,
+				url.pathname,
+				req.headers,
+				parsedBody,
+				apiKeyId ?? null,
+				sessionProjectCache,
+				// Optional call with an honest fallback, the same shape as
+				// `ctx.config.getStorePayloads?.() ?? true` in response-handler. A
+				// Config that predates this method (or a test stub that does not
+				// mock it) gets the built-in defaults, which is exactly what an
+				// unconfigured deployment gets — not an empty rule set, which would
+				// attribute nothing at all.
+				ctx.config.getProjectRules?.() ?? defaultProjectRules(),
+			);
 	// A working directory that matched no rule is the operator's cue to add a
 	// project root; without this the new "return nothing rather than guess"
 	// behaviour would be correct but invisible.
@@ -271,7 +288,8 @@ export async function ingestProxyRequest(
 	// so promotion bookkeeping for it is pointless. The HEADER force-route
 	// (x-clankermux-account-id) is unaffected — it goes through proxyWithAccount,
 	// which DOES stage, so injection + staging still happen for it.
-	const globalForcedActive = !isInternal && getForcedAccount() !== null;
+	const globalForcedActive =
+		!isInternal && !sdkBridgeInner && getForcedAccount() !== null;
 	if (
 		ctx.config.getCacheWarmingEnabled() &&
 		affinity.key &&
@@ -330,7 +348,12 @@ export async function ingestProxyRequest(
 	// 3c. Tier-4 seed commit: the request survived validation (can no longer be
 	// 400-rejected above), so it's safe to remember session → project for
 	// signal-less sibling requests (sidechains, title generation, count_tokens).
-	if (isAnchoredSource(resolved.source) && resolved.sessionKey && project) {
+	if (
+		!sdkBridgeInner &&
+		isAnchoredSource(resolved.source) &&
+		resolved.sessionKey &&
+		project
+	) {
 		const previousProject = sessionProjectCache.set(
 			resolved.sessionKey,
 			project,
@@ -407,7 +430,11 @@ export async function ingestProxyRequest(
 	// that inference indistinguishable from a measurement forever after.
 	const harness = detectHarness(req.headers);
 	requestMeta.clientUserAgent = harness.userAgent;
-	requestMeta.clientHarness = harness.harness;
+	// An inner call's user agent is Claude Code's own and is recorded as
+	// observed; the harness is the outer client's, which Claude Code serves.
+	requestMeta.clientHarness = sdkBridgeInner
+		? sdkBridgeInner.clientHarness
+		: harness.harness;
 	requestMeta.claudeDeviceId = isInternal
 		? null
 		: extractClaudeCliDeviceId(req.headers, parsedBody);
@@ -418,12 +445,24 @@ export async function ingestProxyRequest(
 		parseReasoningEffort(parsedBody) ??
 		nativeResponsesCtx?.reasoningEffort ??
 		null;
-	// Unconditional floor for Codex-CLI traffic: the /v1/responses adapter sets
-	// this header on every request it forwards. When set, the request may never
-	// be routed to (or burst-held on) an official Claude account — independent of
-	// any API-key pin or auth config.
-	requestMeta.excludeOfficialAnthropic =
-		req.headers.get("x-clankermux-deny-official-anthropic") === "1";
+	// The floor for clients that are not Claude Code: the Responses and Chat
+	// adapters mark it in their in-process contexts, so a client cannot set or
+	// clear it. Such a request reaches an official Anthropic account only
+	// through the SDK bridge, independent of any API-key pin. A bridge inner call
+	// IS Claude Code, so it goes direct and can never be bridged again.
+	const floored =
+		nativeResponsesCtx?.denyDirectOfficialAnthropic === true ||
+		getChatContext(requestMeta)?.denyDirectOfficialAnthropic === true;
+	requestMeta.officialAnthropicVia =
+		floored && !sdkBridgeInner ? "sdk-bridge" : "direct";
+	requestMeta.sdkBridgeRefusedField =
+		requestMeta.officialAnthropicVia === "sdk-bridge"
+			? sdkBridgeRefusedField(parsedBody)
+			: null;
+	if (sdkBridgeInner) {
+		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);
+		requestMeta.sdkBridgeTurnId = sdkBridgeInner.turnId;
+	}
 
 	return {
 		kind: "context",
@@ -438,9 +477,36 @@ export async function ingestProxyRequest(
 			requestMeta,
 			bumpIdleTimeout,
 			// The adapter's context is set from an in-process WeakMap keyed on the
-			// Request object, so unlike the deny-official-anthropic header it
-			// cannot be forged by a client to change its own hold budget.
+			// Request object, so a client cannot forge it to change its own hold
+			// budget.
 			canRearmIdleTimeout: nativeResponsesCtx === undefined,
 		},
+	};
+}
+
+/**
+ * The project of a bridge inner call: the outer request's, with a session key
+ * derived the way {@link resolveProject} derives it, so cache measurement still
+ * groups inner calls by Claude Code session.
+ */
+function innerResolvedProject(
+	inner: SdkBridgeInnerContext,
+	body: Parameters<typeof extractSessionId>[0],
+	apiKeyId: string | null,
+): ResolvedProject {
+	const sessionId = extractSessionId(body);
+	const sessionKey = sessionId ? `${apiKeyId ?? "anon"}:${sessionId}` : null;
+	const source = inner.projectAttributionSource ?? null;
+	if (
+		inner.project !== null &&
+		source !== null &&
+		source !== "none" &&
+		source !== "session_ambiguous"
+	)
+		return { project: inner.project, source, sessionKey };
+	return {
+		project: null,
+		source: source === "session_ambiguous" ? source : "none",
+		sessionKey,
 	};
 }

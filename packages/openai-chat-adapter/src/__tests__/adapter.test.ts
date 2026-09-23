@@ -97,10 +97,11 @@ async function run(
 			expect(name).toBe("key-name");
 			expect(
 				synthetic.headers.get("x-clankermux-deny-official-anthropic"),
-			).toBe("1");
+			).toBeNull();
 			expect((await synthetic.clone().json()).stream).toBe(true);
 			const ctx = getChatContext(synthetic);
 			if (!ctx) throw new Error("Missing Chat context");
+			expect(ctx.denyDirectOfficialAnthropic).toBe(true);
 			ctx.outgoingModel = "verified-target";
 			ctx.provider = "openrouter";
 			return upstream;

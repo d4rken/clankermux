@@ -3,6 +3,7 @@ import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import type { RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import type { RecordMeta } from "./request-recorder";
+import { noteSdkBridgeInnerRequestStarted } from "./sdk-bridge-inner-outcome";
 import { shouldRecordRequest } from "./should-record-request";
 export function createSyntheticTerminalRecorder(
 	req: Request,
@@ -85,6 +86,7 @@ export function createSyntheticTerminalRecorder(
 			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 			clientUserAgent: requestMeta.clientUserAgent ?? null,
 			clientHarness: requestMeta.clientHarness ?? null,
+			sdkBridgeTurnId: requestMeta.sdkBridgeTurnId ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,
@@ -109,5 +111,6 @@ export function createSyntheticTerminalRecorder(
 		ctx.requestRecorder.recordSynthetic(meta, "error", error, {
 			responseBody,
 		});
+		noteSdkBridgeInnerRequestStarted(requestMeta);
 	};
 }

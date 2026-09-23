@@ -6,6 +6,7 @@ import type {
 	IntegrityStatus,
 	LoadBalancingStrategy,
 	ProviderOverloadStatus,
+	SdkBridgeStatus,
 } from "@clankermux/types";
 import type { SessionAuthService } from "./services/session-auth-service";
 import type { SetupCodeService } from "./services/setup-code";
@@ -61,6 +62,8 @@ export interface APIContext {
 	 * in @clankermux/proxy and this package must not depend on it.
 	 */
 	getProviderOverload?: () => ProviderOverloadStatus[];
+	/** The Claude Agent SDK bridge's live state; null before it is built. */
+	getSdkBridgeStatus?: () => SdkBridgeStatus | null;
 }
 
 // Re-export all types from the centralized types package

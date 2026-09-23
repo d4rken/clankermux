@@ -124,6 +124,7 @@ import {
 	createRoutingHandler,
 } from "./handlers/routing";
 import { createRunwayHandler } from "./handlers/runway";
+import { createSdkBridgeTurnHandler } from "./handlers/sdk-bridge-turns";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import { createStopsHistoryHandler } from "./handlers/stops-history";
 import {
@@ -185,6 +186,7 @@ export class APIRouter {
 			getStrategy,
 			getEventLoopLag,
 			getProviderOverload,
+			getSdkBridgeStatus,
 		} = this.context;
 
 		// The management login. Built from `dbOps` when the caller did not inject
@@ -306,6 +308,7 @@ export class APIRouter {
 			getIntegrityStatus,
 			getEventLoopLag,
 			getProviderOverload,
+			getSdkBridgeStatus,
 		});
 		const versionCheckHandler = createVersionCheckHandler();
 
@@ -732,6 +735,16 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+		}
+
+		// An SDK bridge turn, by turn id or by one of its legs' request ids
+		if (path.startsWith("/api/sdk-bridge-turns/") && method === "GET") {
+			const parts = path.split("/");
+			const id = parts[3];
+			if (id && parts.length === 4) {
+				const turnHandler = createSdkBridgeTurnHandler(this.context.dbOps);
+				return await this.wrapHandler(() => turnHandler(id))(req, url);
 			}
 		}
 
