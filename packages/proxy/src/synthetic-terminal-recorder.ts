@@ -1,8 +1,8 @@
+import { hashRoutingAffinityKey } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import type { RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import type { RecordMeta } from "./request-recorder";
-import { hashRoutingAffinityKey } from "./routing-telemetry";
 import { shouldRecordRequest } from "./should-record-request";
 export function createSyntheticTerminalRecorder(
 	req: Request,

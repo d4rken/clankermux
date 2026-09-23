@@ -74,7 +74,7 @@ export interface IntegrityStatus {
  * ACTIVE_SESSION_WINDOW_MS. Split by affinity scope.
  *
  * The scope buckets are disjoint by construction — the affinity scope is
- * embedded in the pre-hash key (see routing-telemetry.ts), so a given hash only
+ * embedded in the pre-hash key (see SessionStrategy.getAffinityKey), so a given hash only
  * ever appears under one scope — but `total` is computed independently server-
  * side (COUNT(DISTINCT) across all scopes) so it stays correct even if a future
  * scope value is added without updating every consumer.

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { hashRoutingAffinityKey as hashNullable } from "@clankermux/core";
 import { SessionStrategy } from "@clankermux/load-balancer";
 import { logBus } from "@clankermux/logger";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
@@ -8,6 +9,8 @@ import type {
 	RequestMeta,
 	StrategyStore,
 } from "@clankermux/types";
+
+const hashRoutingAffinityKey = (key: string) => hashNullable(key) as string;
 
 /**
  * Capture INFO/WARN/DEBUG log messages emitted on the shared logBus during `fn`.
@@ -2048,7 +2051,9 @@ describe("SessionStrategy", () => {
 
 			expect(order).toEqual([...order].sort((a, b) => a - b));
 			expect(new Set(order).size).toBeGreaterThan(1); // stamps really differ
-			expect([...affinityByKey.keys()].at(-1)).toContain("first");
+			expect([...affinityByKey.keys()].at(-1)).toBe(
+				hashRoutingAffinityKey("project:first"),
+			);
 		});
 
 		it("keeps stamps non-decreasing even if the wall clock steps backwards", () => {
@@ -2085,7 +2090,9 @@ describe("SessionStrategy", () => {
 
 			strategy.select([account], { ...meta, id: "r-3", project: "third" });
 
-			expect([...affinityByKey.keys()]).toContain("project:trailing");
+			expect([...affinityByKey.keys()]).toContain(
+				hashRoutingAffinityKey("project:trailing"),
+			);
 		});
 
 		it("evicts entries older than the session duration", () => {
@@ -2108,10 +2115,11 @@ describe("SessionStrategy", () => {
 			}
 			strategy.select([account], { ...meta, id: "r-new", project: "new" });
 
-			// Keys are prefixed ("project:old") — asserting the bare name here
-			// would pass no matter what.
-			expect([...affinityByKey.keys()]).not.toContain("project:old");
-			expect([...affinityByKey.keys()]).toEqual(["project:new"]);
+			// Keys are hashes of the prefixed key ("project:old") — asserting the
+			// bare name here would pass no matter what.
+			expect([...affinityByKey.keys()]).toEqual([
+				hashRoutingAffinityKey("project:new"),
+			]);
 		});
 	});
 
