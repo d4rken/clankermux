@@ -278,6 +278,61 @@ describe("rotation invalidates sessions", () => {
 	});
 });
 
+describe("claiming the first password", () => {
+	function insertRawSession(tokenHash: string) {
+		// Written straight into the table: with no password stored there is no
+		// binding a real mint could carry, and a leftover row from an earlier
+		// clear is exactly the case this has to survive.
+		db.run(
+			`INSERT INTO auth_sessions (token_hash, created_at, expires_at, last_seen_at)
+			 VALUES (?, 1, 100000, 1)`,
+			[tokenHash],
+		);
+	}
+
+	it("stores the verifier when no password exists and revokes leftover sessions", async () => {
+		insertRawSession("left-a");
+		insertRawSession("left-b");
+
+		const inserted = await repo.setPasswordIfAbsent("first", '{"n":1}', 7);
+
+		expect(inserted).toBe(true);
+		expect(await repo.getPassword()).toEqual({
+			verifier: "first",
+			params: '{"n":1}',
+			updatedAt: 7,
+		});
+		expect(db.query(`SELECT COUNT(*) AS n FROM auth_sessions`).get()).toEqual({
+			n: 0,
+		});
+	});
+
+	it("changes nothing when a password is already stored", async () => {
+		await repo.setPassword("existing", '{"n":2}', 3);
+		await mintSession(session("live"));
+
+		const inserted = await repo.setPasswordIfAbsent("intruder", "{}", 9);
+
+		expect(inserted).toBe(false);
+		expect(await repo.getPassword()).toEqual({
+			verifier: "existing",
+			params: '{"n":2}',
+			updatedAt: 3,
+		});
+		expect(await repo.getSession("live")).not.toBeNull();
+	});
+
+	it("lets exactly one of two concurrent claims win", async () => {
+		const results = await Promise.all([
+			repo.setPasswordIfAbsent("one", "{}", 1),
+			repo.setPasswordIfAbsent("two", "{}", 2),
+		]);
+		expect(results.filter(Boolean)).toHaveLength(1);
+		const winner = results[0] ? "one" : "two";
+		expect((await repo.getPassword())?.verifier).toBe(winner);
+	});
+});
+
 describe("a session is bound to the password that authorized it", () => {
 	it("inserts when the stored password is still the one that was verified", async () => {
 		await repo.setPassword("v1", '{"n":1}', 1);
