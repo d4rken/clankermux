@@ -1,10 +1,6 @@
 import { Logger } from "@clankermux/logger";
-import {
-	CODEX_DEFAULT_ENDPOINT,
-	CODEX_PING_MODEL,
-	CODEX_USER_AGENT,
-	CODEX_VERSION,
-} from "./provider";
+import { codexNativePingHeaders } from "./client-identity";
+import { CODEX_DEFAULT_ENDPOINT, CODEX_PING_MODEL } from "./provider";
 
 const log = new Logger("CodexNativePing");
 
@@ -74,15 +70,7 @@ export async function sendCodexNativePing(
 		upstream = await fetch(endpoint, {
 			method: "POST",
 			signal: controller.signal,
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-				"Content-Type": "application/json",
-				Version: CODEX_VERSION,
-				"Openai-Beta": "responses=experimental",
-				"User-Agent": CODEX_USER_AGENT,
-				originator: "codex_cli_rs",
-				Accept: "text/event-stream",
-			},
+			headers: codexNativePingHeaders(accessToken),
 			body,
 		});
 	} finally {

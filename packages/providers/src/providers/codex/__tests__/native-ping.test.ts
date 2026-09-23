@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { CODEX_USER_AGENT, CODEX_VERSION } from "../client-identity";
 import { sendCodexNativePing } from "../native-ping";
-import { CODEX_PING_MODEL, CODEX_USER_AGENT, CODEX_VERSION } from "../provider";
+import { CODEX_PING_MODEL } from "../provider";
 
 describe("sendCodexNativePing", () => {
 	let originalFetch: typeof fetch;

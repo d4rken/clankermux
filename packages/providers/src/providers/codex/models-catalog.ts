@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
+import { CODEX_VERSION, codexSideCallHeaders } from "./client-identity";
 
 const log = new Logger("CodexModelCatalog");
 
@@ -69,22 +69,6 @@ export type CodexModelCatalogResult =
 	| { ok: true; bodyText: string; etag: string | null }
 	| { ok: false; status: number | null };
 
-function buildHeaders(
-	accessToken: string,
-	chatgptAccountId: string | null,
-): Headers {
-	const headers = new Headers({
-		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
-		Version: CODEX_VERSION,
-		"User-Agent": CODEX_USER_AGENT,
-		originator: "codex_cli_rs",
-	});
-	const accountId = chatgptAccountId?.trim();
-	if (accountId) headers.set("ChatGPT-Account-ID", accountId);
-	return headers;
-}
-
 /**
  * True when the body is the envelope Codex's deserializer expects.
  *
@@ -153,7 +137,7 @@ export async function fetchCodexModelCatalog(
 			// but say so structurally rather than relying on that: this bearer has
 			// exactly one valid destination.
 			redirect: "error",
-			headers: buildHeaders(accessToken, chatgptAccountId),
+			headers: codexSideCallHeaders(accessToken, chatgptAccountId?.trim()),
 		});
 
 		if (!response.ok) {

@@ -5,7 +5,7 @@ import type {
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
 import { decodeJwtPayloadSafe } from "../../oauth/jwt";
-import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
+import { codexSideCallHeaders } from "./client-identity";
 
 const log = new Logger("CodexRateLimitResetCredits");
 
@@ -190,16 +190,7 @@ export function parseCodexRateLimitResetCreditConsumeResult(
 }
 
 function createResetCreditsHeaders(accessToken: string): Headers {
-	const headers = new Headers({
-		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
-		Version: CODEX_VERSION,
-		"User-Agent": CODEX_USER_AGENT,
-		originator: "codex_cli_rs",
-	});
-	const accountId = readChatgptAccountId(accessToken);
-	if (accountId) headers.set("ChatGPT-Account-ID", accountId);
-	return headers;
+	return codexSideCallHeaders(accessToken, readChatgptAccountId(accessToken));
 }
 
 /**

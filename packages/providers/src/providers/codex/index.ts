@@ -1,3 +1,4 @@
+export { CODEX_USER_AGENT, CODEX_VERSION } from "./client-identity";
 export type { CodexDeviceFlowResult, CodexTokenResponse } from "./device-oauth";
 export {
 	initiateCodexDeviceFlow,
@@ -17,8 +18,6 @@ export { CodexOAuthProvider } from "./oauth";
 export {
 	CODEX_DEFAULT_ENDPOINT,
 	CODEX_PING_MODEL,
-	CODEX_USER_AGENT,
-	CODEX_VERSION,
 	CodexProvider,
 	targetsChatGptCodexBackend,
 } from "./provider";

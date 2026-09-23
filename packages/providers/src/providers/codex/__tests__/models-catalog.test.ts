@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { CODEX_USER_AGENT, CODEX_VERSION } from "../client-identity";
 import {
 	CODEX_MODEL_CATALOG_URL,
 	fetchCodexModelCatalog,
 } from "../models-catalog";
-import { CODEX_USER_AGENT, CODEX_VERSION } from "../provider";
 
 // A payload shaped like the real thing: one field, `models`, whose entries
 // carry far more keys than anything here reads. The point of every assertion

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { CODEX_USER_AGENT, CodexProvider } from "../provider";
+import { CODEX_USER_AGENT } from "../client-identity";
+import { CodexProvider } from "../provider";
 
 const provider = new CodexProvider();
 

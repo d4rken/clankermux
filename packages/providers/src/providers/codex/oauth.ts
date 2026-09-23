@@ -6,30 +6,27 @@ import type {
 	PKCEChallenge,
 	TokenResult,
 } from "../../types";
+import {
+	CODEX_CLIENT_ID,
+	CODEX_OAUTH_SCOPES,
+	codexAuthorizeUrlParams,
+	codexTokenEndpointHeaders,
+} from "./client-identity";
 import { extractCodexIdentity } from "./identity";
 
 const oauthLog = new Logger("CodexOAuthProvider");
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI = "http://localhost:1455/auth/callback";
-const SCOPES = [
-	"openid",
-	"profile",
-	"email",
-	"offline_access",
-	"api.connectors.read",
-	"api.connectors.invoke",
-];
 
 export class CodexOAuthProvider implements OAuthProvider {
 	getOAuthConfig(): OAuthProviderConfig {
 		return {
 			authorizeUrl: AUTHORIZE_URL,
 			tokenUrl: TOKEN_URL,
-			clientId: CLIENT_ID,
-			scopes: SCOPES,
+			clientId: CODEX_CLIENT_ID,
+			scopes: [...CODEX_OAUTH_SCOPES],
 			redirectUri: REDIRECT_URI,
 		};
 	}
@@ -47,9 +44,7 @@ export class CodexOAuthProvider implements OAuthProvider {
 			`code_challenge=${encodeURIComponent(pkce.challenge)}`,
 			`code_challenge_method=S256`,
 			`state=${encodeURIComponent(state)}`,
-			`id_token_add_organizations=true`,
-			`codex_cli_simplified_flow=true`,
-			`originator=codex_cli_rs`,
+			...codexAuthorizeUrlParams(),
 		].join("&");
 
 		return `${config.authorizeUrl}?${params}`;
@@ -72,7 +67,7 @@ export class CodexOAuthProvider implements OAuthProvider {
 
 		const response = await fetch(config.tokenUrl, {
 			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			headers: codexTokenEndpointHeaders(),
 			body: body.toString(),
 		});
 
