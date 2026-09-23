@@ -20,6 +20,7 @@ import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 export interface ActiveSessionScopeCounts {
 	claude: number;
 	codex: number;
+	client: number;
 	other: number;
 	total: number;
 }
@@ -155,12 +156,14 @@ export class StatsRepository {
 		const row = await this.adapter.get<{
 			claude: unknown;
 			codex: unknown;
+			client: unknown;
 			other: unknown;
 			total: unknown;
 		}>(
 			`SELECT
 				COUNT(DISTINCT CASE WHEN affinity_scope = 'claude_session' THEN affinity_key_hash END) as claude,
 				COUNT(DISTINCT CASE WHEN affinity_scope = 'codex_thread'  THEN affinity_key_hash END) as codex,
+				COUNT(DISTINCT CASE WHEN affinity_scope = 'client_session' THEN affinity_key_hash END) as client,
 				COUNT(DISTINCT CASE WHEN affinity_scope = 'project'       THEN affinity_key_hash END) as other,
 				COUNT(DISTINCT affinity_key_hash) as total
 			FROM request_routing
@@ -171,6 +174,7 @@ export class StatsRepository {
 		return {
 			claude: Number(row?.claude) || 0,
 			codex: Number(row?.codex) || 0,
+			client: Number(row?.client) || 0,
 			other: Number(row?.other) || 0,
 			total: Number(row?.total) || 0,
 		};

@@ -25,6 +25,11 @@ export interface ActiveSessionScope {
 export const SCOPE_ORDER: readonly ActiveSessionScope[] = [
 	{ scope: "claude_session", key: "scope:claude_session", label: "Claude" },
 	{ scope: "codex_thread", key: "scope:codex_thread", label: "Codex" },
+	{
+		scope: "client_session",
+		key: "scope:client_session",
+		label: "Other (session)",
+	},
 	{ scope: "project", key: "scope:project", label: "Other (project)" },
 ] as const;
 
@@ -37,6 +42,7 @@ export const SCOPE_ORDER: readonly ActiveSessionScope[] = [
 export const SESSION_SCOPE_COLORS: Record<string, string> = {
 	"scope:claude_session": CHART_TOKENS.primary,
 	"scope:codex_thread": CHART_TOKENS.blue,
+	"scope:client_session": CHART_TOKENS.cyan,
 	"scope:project": CHART_TOKENS.purple,
 };
 

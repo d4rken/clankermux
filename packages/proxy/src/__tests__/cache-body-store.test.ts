@@ -226,6 +226,7 @@ describe("CacheBodyStore", () => {
 			"x-claude-code-session-id": "claude-session-id",
 			"thread-id": "codex-thread-id",
 			"session-id": "codex-session-id",
+			session_id: "pi-session-id",
 			"x-client-request-id": "client-request-id",
 			"x-codex-installation-id": "codex-installation-id",
 			"x-codex-window-id": "codex-thread-id:1",
