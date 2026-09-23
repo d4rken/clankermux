@@ -11,6 +11,7 @@ import {
 	GATE_OUTPUT_RESERVE_CAP,
 	NETWORK,
 } from "@clankermux/core";
+import { setNativeResponsesRequestContext } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
 import {
@@ -386,6 +387,60 @@ describe("ingestProxyRequest", () => {
 			expect(meta.affinityScope).toBe("claude_session");
 			expect(meta.affinityPartition).toBe(`api_key:${apiKeyId}`);
 			expect(meta.excludeOfficialAnthropic).toBe(true);
+		});
+
+		function responsesRequest(
+			headers: Record<string, string>,
+			promptCacheKey: string,
+		): Request {
+			const req = jsonRequest("/v1/messages", contextBody(), headers);
+			setNativeResponsesRequestContext(req, {
+				nativeBody: JSON.stringify({
+					model: "gpt-5.5",
+					prompt_cache_key: promptCacheKey,
+				}),
+				reasoningEffort: null,
+				promptCacheKey,
+			});
+			return req;
+		}
+
+		it("keys a Pi Responses request on its prompt_cache_key", async () => {
+			const sessionId = uniqueId("pi-session");
+			const result = await ingestProxyRequest(
+				responsesRequest(
+					{
+						"user-agent": "pi (linux 6.12.101+deb13-amd64; x64)",
+						"x-client-request-id": sessionId,
+					},
+					sessionId,
+				),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.affinityKey).toBe(sessionId);
+			expect(result.context.requestMeta.affinityScope).toBe("client_session");
+		});
+
+		it("keeps a Codex Responses request on its thread id", async () => {
+			const result = await ingestProxyRequest(
+				responsesRequest(
+					{ originator: "codex-tui", "thread-id": "codex-thread" },
+					"codex-cache-key",
+				),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.affinityKey).toBe("codex-thread");
+			expect(result.context.requestMeta.affinityScope).toBe("codex_thread");
 		});
 
 		it("leaves the affinity partition and the official-Anthropic floor unset without them", async () => {

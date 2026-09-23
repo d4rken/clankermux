@@ -398,6 +398,8 @@ async function respondToResponsesRequest(
 		// arbitrary string.
 		reasoningEffort:
 			typeof body.reasoning?.effort === "string" ? body.reasoning.effort : null,
+		promptCacheKey:
+			typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : null,
 	});
 
 	// 6. Forward to proxy
