@@ -1,14 +1,18 @@
 import { Logger } from "@clankermux/logger";
 import { generatePKCE } from "../../oauth/pkce";
 import type { PKCEChallenge } from "../../types";
+import {
+	QWEN_OAUTH_CLIENT_ID,
+	QWEN_OAUTH_SCOPE,
+	qwenDeviceAuthorizationHeaders,
+	qwenTokenHeaders,
+} from "./client-identity";
 
 const log = new Logger("QwenDeviceOAuth");
 
 // Qwen OAuth constants (verified against qwen-code repo)
 const DEVICE_CODE_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/device/code";
 const TOKEN_ENDPOINT = "https://chat.qwen.ai/api/v1/oauth2/token";
-const CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56";
-const SCOPE = "openid profile email model.completion";
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 
 export interface DeviceFlowResult {
@@ -39,15 +43,15 @@ export async function initiateDeviceFlow(): Promise<DeviceFlowResult> {
 	const pkce = await generatePKCE();
 
 	const body = new URLSearchParams({
-		client_id: CLIENT_ID,
-		scope: SCOPE,
+		client_id: QWEN_OAUTH_CLIENT_ID,
+		scope: QWEN_OAUTH_SCOPE,
 		code_challenge: pkce.challenge,
 		code_challenge_method: "S256",
 	});
 
 	const response = await fetch(DEVICE_CODE_ENDPOINT, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: qwenDeviceAuthorizationHeaders(),
 		body: body.toString(),
 	});
 
@@ -103,14 +107,14 @@ export async function pollForToken(
 
 		const body = new URLSearchParams({
 			grant_type: DEVICE_CODE_GRANT_TYPE,
-			client_id: CLIENT_ID,
+			client_id: QWEN_OAUTH_CLIENT_ID,
 			device_code: deviceCode,
 			code_verifier: pkce.verifier,
 		});
 
 		const response = await fetch(TOKEN_ENDPOINT, {
 			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			headers: qwenTokenHeaders(),
 			body: body.toString(),
 		});
 
@@ -166,13 +170,13 @@ export async function refreshQwenTokens(
 ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
 	const body = new URLSearchParams({
 		grant_type: "refresh_token",
-		client_id: CLIENT_ID,
+		client_id: QWEN_OAUTH_CLIENT_ID,
 		refresh_token: refreshToken,
 	});
 
 	const response = await fetch(TOKEN_ENDPOINT, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: qwenTokenHeaders(),
 		body: body.toString(),
 	});
 
