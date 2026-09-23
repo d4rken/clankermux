@@ -3226,3 +3226,229 @@ describe("active affinity is independent of quota session age", () => {
 		}
 	});
 });
+
+describe("SessionStrategy — per-model pins", () => {
+	let strategy: SessionStrategy;
+	let store: MockStrategyStore;
+	let a: Account;
+	let b: Account;
+	let c: Account;
+
+	const conversation = "claude_session:conversation-one";
+	const anchorKey = hashRoutingAffinityKey(conversation);
+	const modelKey = (model: string) =>
+		hashRoutingAffinityKey(`${conversation}\u0000${model}`);
+
+	function turn(model: string | null): RequestMeta {
+		return {
+			id: "turn",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: Date.now(),
+			affinityKey: "conversation-one",
+			affinityScope: "claude_session",
+			affinityModel: model,
+		};
+	}
+
+	function pins() {
+		return (
+			strategy as unknown as {
+				affinityByKey: Map<string, { accountId: string; lastUsedAt: number }>;
+			}
+		).affinityByKey;
+	}
+
+	/** Make `preferred` the account a fresh pick lands on. */
+	function prefer(preferred: Account) {
+		for (const account of [a, b, c])
+			store.setUtilization(account.id, account === preferred ? 10 : 80);
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		store = new MockStrategyStore();
+		strategy.initialize(store);
+		a = makeAccount({ id: "model-a", name: "model-a" });
+		b = makeAccount({ id: "model-b", name: "model-b" });
+		c = makeAccount({ id: "model-c", name: "model-c" });
+	});
+
+	it("keeps routing telemetry on the conversation key", () => {
+		prefer(a);
+		const meta = turn("claude-fable-5-1");
+		strategy.select([a, b, c], meta);
+		expect(meta.routing?.affinityKey).toBe(conversation);
+		expect(meta.routing?.affinityScope).toBe("claude_session");
+	});
+
+	it("writes the anchor and the model pin on the first model-keyed turn", () => {
+		prefer(a);
+		const meta = turn("claude-fable-5-1");
+		expect(strategy.select([a, b, c], meta)[0]).toBe(a);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(pins().get(anchorKey)?.accountId).toBe(a.id);
+		expect(pins().get(modelKey("claude-fable-5-1"))?.accountId).toBe(a.id);
+		expect(pins().size).toBe(2);
+	});
+
+	it("seeds a new model from the conversation anchor", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+
+		prefer(b);
+		const side = turn("claude-haiku-4-5");
+		expect(strategy.select([a, b, c], side)[0]).toBe(a);
+		expect(side.routing?.decision).toBe("affinity_hit");
+		expect(side.routing?.previousAccountId).toBe(a.id);
+		expect(side.routing?.heldAccountId).toBe(a.id);
+		expect(pins().get(modelKey("claude-haiku-4-5"))?.accountId).toBe(a.id);
+	});
+
+	it("keeps separate pins per model, and reassigning one leaves the rest alone", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+		const side = turn("claude-haiku-4-5");
+		strategy.select([a, b, c], side);
+		strategy.reassignAffinity(side, b);
+
+		const main = turn("claude-fable-5-1");
+		expect(strategy.select([a, b, c], main)[0]).toBe(a);
+		expect(main.routing?.decision).toBe("affinity_hit");
+		const sideAgain = turn("claude-haiku-4-5");
+		expect(strategy.select([a, b, c], sideAgain)[0]).toBe(b);
+		expect(sideAgain.routing?.decision).toBe("affinity_hit");
+
+		// The anchor still names the account the conversation started on.
+		expect(pins().get(anchorKey)?.accountId).toBe(a.id);
+		prefer(c);
+		expect(strategy.select([a, b, c], turn("claude-sonnet-4-5"))[0]).toBe(a);
+	});
+
+	it("follows only the current model's pin", () => {
+		prefer(a);
+		const main = turn("claude-fable-5-1");
+		strategy.select([a, b, c], main);
+		strategy.select([a, b, c], turn("claude-haiku-4-5"));
+
+		strategy.followAffinity(main, a.id, b);
+
+		expect(strategy.select([a, b, c], turn("claude-fable-5-1"))[0]).toBe(b);
+		expect(strategy.select([a, b, c], turn("claude-haiku-4-5"))[0]).toBe(a);
+		expect(pins().get(anchorKey)?.accountId).toBe(a.id);
+	});
+
+	it("takes the miss path for a new model when the anchor's account is unavailable", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+
+		a.rate_limited_until = Date.now() + 60 * 60 * 1000;
+		prefer(b);
+		const side = turn("claude-haiku-4-5");
+		expect(strategy.select([a, b, c], side)[0]).toBe(b);
+		expect(side.routing?.decision).toBe("affinity_miss");
+		expect(side.routing?.previousAccountId).toBeNull();
+		// Skipped as a seed, neither dropped nor re-pointed.
+		expect(pins().get(anchorKey)?.accountId).toBe(a.id);
+	});
+
+	it("keeps an anchor whose account is outside this model's route", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+
+		prefer(b);
+		const side = turn("claude-haiku-4-5");
+		expect(strategy.select([b, c], side)[0]).toBe(b);
+		expect(side.routing?.decision).toBe("affinity_miss");
+		expect(pins().get(anchorKey)?.accountId).toBe(a.id);
+
+		const later = turn("claude-sonnet-5");
+		expect(strategy.select([a, b, c], later)[0]).toBe(a);
+		expect(later.routing?.decision).toBe("affinity_hit");
+	});
+
+	it("applies a hold to the model pin alone", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+		const side = turn("claude-haiku-4-5");
+		strategy.select([a, b, c], side);
+		strategy.reassignAffinity(side, b);
+
+		b.rate_limited_until = Date.now() + 60_000;
+		const held = turn("claude-haiku-4-5");
+		strategy.select([a, b, c], held);
+		expect(held.routing?.decision).toBe("affinity_hold");
+		expect(held.routing?.heldAccountId).toBe(b.id);
+
+		const main = turn("claude-fable-5-1");
+		expect(strategy.select([a, b, c], main)[0]).toBe(a);
+		expect(main.routing?.decision).toBe("affinity_hit");
+	});
+
+	it("never re-points the anchor, but keeps it alive at the LRU tail", () => {
+		const real = Date.now;
+		let now = real();
+		Date.now = () => now;
+		try {
+			prefer(a);
+			strategy.select([a, b, c], turn("claude-fable-5-1"));
+			now += 10;
+			strategy.select([a, b, c], { ...turn(null), affinityKey: "other" });
+			now += 10;
+			const main = turn("claude-fable-5-1");
+			strategy.select([a, b, c], main);
+			strategy.reassignAffinity(main, c);
+
+			const anchor = pins().get(anchorKey);
+			expect(anchor?.accountId).toBe(a.id);
+			expect(anchor?.lastUsedAt).toBe(now);
+			const stamps = [...pins().values()].map((entry) => entry.lastUsedAt);
+			expect(stamps).toEqual([...stamps].sort((x, y) => x - y));
+			expect([...pins().keys()].slice(-2).sort()).toEqual(
+				[anchorKey, modelKey("claude-fable-5-1")].sort(),
+			);
+		} finally {
+			Date.now = real;
+		}
+	});
+
+	it("seeds models from an imported conversation-level pin", () => {
+		strategy.importAffinity(
+			[{ keyHash: anchorKey, accountId: c.id, lastUsedAt: Date.now() }],
+			Date.now(),
+		);
+		prefer(a);
+		const meta = turn("claude-fable-5-1");
+		expect(strategy.select([a, b, c], meta)[0]).toBe(c);
+		expect(meta.routing?.decision).toBe("affinity_hit");
+	});
+
+	it("keeps the conversation-level pin for requests without a model stamp", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn(null));
+		expect([...pins().keys()]).toEqual([anchorKey]);
+
+		const next = turn(null);
+		strategy.select([a, b, c], next);
+		strategy.reassignAffinity(next, b);
+		expect(pins().get(anchorKey)?.accountId).toBe(b.id);
+		expect(pins().size).toBe(1);
+	});
+
+	it("clears anchors and model pins pointing at an account", () => {
+		prefer(a);
+		strategy.select([a, b, c], turn("claude-fable-5-1"));
+		const side = turn("claude-haiku-4-5");
+		strategy.select([a, b, c], side);
+		strategy.reassignAffinity(side, b);
+
+		expect(strategy.clearAffinityForAccount(a.id)).toBe(2);
+		expect([...pins().keys()]).toEqual([modelKey("claude-haiku-4-5")]);
+
+		prefer(c);
+		const main = turn("claude-fable-5-1");
+		expect(strategy.select([a, b, c], main)[0]).toBe(c);
+		expect(main.routing?.decision).toBe("affinity_miss");
+	});
+});

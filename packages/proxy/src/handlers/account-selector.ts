@@ -79,7 +79,8 @@ export async function ensureUsageFreshForSelection(
 	}
 }
 
-function getRoutingAffinity(meta: RequestMeta): {
+/** The request's conversation key, the same composite the session strategy uses. */
+export function getRoutingAffinity(meta: RequestMeta): {
 	key: string | null;
 	scope: RequestMeta["affinityScope"] | null;
 } {
@@ -108,6 +109,11 @@ export async function getOrderedAccounts(
 			"No account retains permission for this request's resolved model",
 		);
 	await ensureUsageFreshForSelection(accounts, ctx, Date.now());
+	// Stamped per selection because an alias stage installs a different route.
+	// The model we send, not the one upstream reports: a relabelled response is
+	// still cached under the model it was asked for.
+	meta.affinityModel =
+		getResolvedRoute(meta).upstreamModel?.trim().toLowerCase() || null;
 	const selected = await ctx.strategy.select(accounts, meta);
 	const allowed = new Set(accounts.map((a) => a.id));
 	return selected.filter(

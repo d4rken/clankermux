@@ -34,6 +34,13 @@ export { LeastUsedStrategy } from "./least-used";
  */
 const AFFINITY_REASSIGN_MIN_COOLDOWN_MS = 15 * 60 * 1000;
 const MAX_AFFINITY_ENTRIES = 10_000;
+/**
+ * Joins a conversation key to a model in a model pin's key. A control
+ * character, so it cannot occur in a conversation key and a model pin cannot
+ * collide with a conversation-level entry (request-affinity.test.ts pins the
+ * stripping for session headers).
+ */
+const MODEL_PIN_SEPARATOR = "\u0000";
 
 const HEADROOM_EPS = 5; // percent; min meaningful headroom
 
@@ -266,8 +273,30 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		return `${prefix}project:${project}`;
 	}
 
-	private getAffinityMapKey(meta: RequestMeta): string | null {
-		return hashRoutingAffinityKey(this.getAffinityKey(meta));
+	private getAffinityModel(meta: RequestMeta): string | null {
+		return meta.affinityModel?.trim() || null;
+	}
+
+	/**
+	 * Map keys for a request. Prompt caches are per account and model, so a
+	 * model-stamped request is pinned under its conversation AND model, and the
+	 * conversation's own key becomes its anchor: the account a model with no pin
+	 * of its own starts on. Without a stamp the conversation key is the pin.
+	 */
+	private getAffinityMapKeys(
+		meta: RequestMeta,
+	): { pin: string; anchor: string | null } | null {
+		const conversation = this.getAffinityKey(meta);
+		const conversationKey = hashRoutingAffinityKey(conversation);
+		if (!conversation || !conversationKey) return null;
+		const model = this.getAffinityModel(meta);
+		if (!model) return { pin: conversationKey, anchor: null };
+		return {
+			pin: hashRoutingAffinityKey(
+				`${conversation}${MODEL_PIN_SEPARATOR}${model}`,
+			) as string,
+			anchor: conversationKey,
+		};
 	}
 
 	private getAffinityScope(
@@ -280,7 +309,9 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	}
 
 	private getAffinityLabel(meta: RequestMeta): string {
-		return this.getAffinityScope(meta) ?? "request";
+		const scope = this.getAffinityScope(meta) ?? "request";
+		const model = this.getAffinityModel(meta);
+		return model ? `${scope} ${model}` : scope;
 	}
 
 	private setRoutingMeta(
@@ -320,8 +351,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		account: Account,
 		now: number,
 	): void {
-		const key = this.getAffinityMapKey(meta);
-		if (!key) return;
+		const keys = this.getAffinityMapKeys(meta);
+		if (!keys) return;
 		// Clamp the stamp to be non-decreasing. `now` comes from the wall clock,
 		// which can step backwards; without this a later entry could carry an
 		// older stamp than one already in the map, breaking the ordering that
@@ -331,16 +362,32 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// pin surviving and producing an affinity hit.
 		const stamp = now > this.lastAffinityStamp ? now : this.lastAffinityStamp;
 		this.lastAffinityStamp = stamp;
-		this.affinityByKey.delete(key);
-		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: stamp });
+		this.affinityByKey.delete(keys.pin);
+		this.affinityByKey.set(keys.pin, {
+			accountId: account.id,
+			lastUsedAt: stamp,
+		});
+		if (keys.anchor) {
+			// The anchor is written once and only kept alive after that: a model's
+			// reassign or follow says nothing about where the conversation's other
+			// models are cached.
+			const anchorAccountId =
+				this.affinityByKey.get(keys.anchor)?.accountId ?? account.id;
+			this.affinityByKey.delete(keys.anchor);
+			this.affinityByKey.set(keys.anchor, {
+				accountId: anchorAccountId,
+				lastUsedAt: stamp,
+			});
+		}
 		this.affinityChanges++;
 		this.pruneAffinity(now);
 	}
 
 	/**
-	 * Clear every affinity pin currently pointing at the given account, so the
-	 * projects/sessions that were stuck to it re-pick a fresh account on their
-	 * next request. Returns the number of pins removed.
+	 * Clear every affinity pin currently pointing at the given account, model
+	 * pins and conversation anchors alike, so the projects/sessions that were
+	 * stuck to it re-pick a fresh account on their next request. Returns the
+	 * number of pins removed.
 	 *
 	 * This is the manual lever behind the dashboard "Reset session stickiness"
 	 * action — used to migrate sessions off an account after a priority change.
@@ -380,8 +427,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		account: Account,
 	): void {
 		if (meta.routing?.strategy !== "session") return;
-		const key = this.getAffinityMapKey(meta);
-		if (!key || this.affinityByKey.get(key)?.accountId !== fromAccountId)
+		const keys = this.getAffinityMapKeys(meta);
+		if (!keys || this.affinityByKey.get(keys.pin)?.accountId !== fromAccountId)
 			return;
 		this.rememberAffinity(meta, account, Date.now());
 		this.log.info(
@@ -513,6 +560,24 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// affinity snaps back to this account (and its warmed prompt cache)
 		// once the cooldown lifts.
 		return { kind: "hold", heldAccountId: entry.accountId };
+	}
+
+	/**
+	 * The conversation anchor's account, when a model without a pin of its own
+	 * can start there: it must pass the same availability test as a hit.
+	 * `accounts` is this model's route, which can exclude an account the
+	 * conversation's other models still use, so an anchor missing from it is
+	 * only skipped, never dropped.
+	 */
+	private resolveAnchor(
+		accounts: Account[],
+		anchorKey: string,
+		isAvailable: (account: Account) => boolean,
+	): Account | null {
+		const entry = this.affinityByKey.get(anchorKey);
+		if (!entry) return null;
+		const account = accounts.find((a) => a.id === entry.accountId);
+		return account && isAvailable(account) ? account : null;
 	}
 
 	/**
@@ -859,16 +924,29 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 		if (!bypassSession) {
 			const affinityKey = this.getAffinityKey(meta);
-			const affinityMapKey = hashRoutingAffinityKey(affinityKey);
-			const previousAccountId = affinityMapKey
-				? (this.affinityByKey.get(affinityMapKey)?.accountId ?? null)
+			const affinityMapKeys = this.getAffinityMapKeys(meta);
+			let previousAccountId = affinityMapKeys
+				? (this.affinityByKey.get(affinityMapKeys.pin)?.accountId ?? null)
 				: null;
-			const resolution = this.resolveAffinity(
+			let resolution = this.resolveAffinity(
 				accounts,
-				affinityMapKey,
+				affinityMapKeys?.pin ?? null,
 				now,
 				getCachedAvailability,
 			);
+			let seeded = false;
+			if (resolution.kind === "miss" && affinityMapKeys?.anchor) {
+				const anchored = this.resolveAnchor(
+					accounts,
+					affinityMapKeys.anchor,
+					getCachedAvailability,
+				);
+				if (anchored) {
+					resolution = { kind: "hit", account: anchored };
+					previousAccountId = anchored.id;
+					seeded = true;
+				}
+			}
 
 			if (resolution.kind === "hit") {
 				const affinedAccount = resolution.account;
@@ -879,7 +957,9 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				this.resetSessionIfExpired(affinedAccount);
 				this.rememberAffinity(meta, affinedAccount, now);
 				this.log.info(
-					`Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
+					seeded
+						? `Starting ${this.getAffinityLabel(meta)} affinity on its conversation's account ${affinedAccount.name}`
+						: `Continuing ${this.getAffinityLabel(meta)} affinity on account ${affinedAccount.name} (${affinedAccount.session_request_count} requests in session)`,
 				);
 				// FEFO-consistent fallback tail: order the non-sticky candidates
 				// through the capacity comparator, not bare priority. The sticky

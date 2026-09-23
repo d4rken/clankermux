@@ -16,6 +16,16 @@ describe("extractRequestAffinity", () => {
 		});
 	});
 
+	// The session strategy joins a conversation key to a model with U+0000, so
+	// a key must never carry a control character.
+	it("strips control characters from the session key", () => {
+		const result = extractRequestAffinity(
+			new Headers({ "x-claude-code-session-id": "claude\tsession\u007f" }),
+		);
+
+		expect(result.key).toBe("claudesession");
+	});
+
 	it("uses Codex thread id when Claude Code session id is absent", () => {
 		const result = extractRequestAffinity(
 			new Headers({

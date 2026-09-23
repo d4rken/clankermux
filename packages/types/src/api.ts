@@ -17,6 +17,13 @@ export interface RequestMeta {
 	affinityScope?: RequestAffinityScope | null;
 	/** Optional tenant partition for affinity keys, e.g. authenticated API key id */
 	affinityPartition?: string | null;
+	/**
+	 * The upstream model the current route sends, trimmed and lowercased.
+	 * Prompt caches are per account and model, so the session strategy pins a
+	 * conversation per model when this is set. Stamped before every selection;
+	 * null/absent pins the conversation as a whole.
+	 */
+	affinityModel?: string | null;
 	project?: string | null;
 	/**
 	 * Which attribution tier produced `project` (see ProjectAttributionSource).

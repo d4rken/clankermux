@@ -97,6 +97,30 @@ describe("GrokSubscriptionProvider", () => {
 		});
 	});
 
+	describe("applyConversationId", () => {
+		const conversationId = `${"a".repeat(24)}0123456789abcdef0123456789abcdef`;
+
+		it("sets x-grok-conv-id from the conversation id", () => {
+			const headers = new Headers();
+			provider.applyConversationId(headers, conversationId);
+			const sent = headers.get("x-grok-conv-id");
+			expect(sent).toBe(`conv_${conversationId.slice(0, 32)}`);
+			// Stable, so every turn of the conversation reaches the same server.
+			const again = new Headers();
+			provider.applyConversationId(again, conversationId);
+			expect(again.get("x-grok-conv-id")).toBe(sent);
+			const other = new Headers();
+			provider.applyConversationId(other, "b".repeat(64));
+			expect(other.get("x-grok-conv-id")).not.toBe(sent);
+		});
+
+		it("keeps a conversation id the client sent", () => {
+			const headers = new Headers({ "x-grok-conv-id": "client-conversation" });
+			provider.applyConversationId(headers, conversationId);
+			expect(headers.get("x-grok-conv-id")).toBe("client-conversation");
+		});
+	});
+
 	describe("the 426 version gate", () => {
 		it("recognizes a 426 and nothing else", () => {
 			expect(isGrokUpgradeRequired(new Response("", { status: 426 }))).toBe(
