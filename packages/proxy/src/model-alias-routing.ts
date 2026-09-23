@@ -156,6 +156,7 @@ export async function handleAliasProxy(
 			gates.applySoftDemotionReorder(gates.applyContextWindowGate(family)),
 		);
 		gates.reconcileAffinity(accounts);
+		gates.noteConversationTier(accounts);
 		const followServedAccount = gates.prepareSoftDemotionFollow(accounts);
 		setPoolHeadroomCandidates(meta, accounts);
 		if (meta.routing) {

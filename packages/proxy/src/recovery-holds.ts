@@ -819,6 +819,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					),
 				);
 				gates.reconcileAffinity(candidates);
+				gates.noteConversationTier(candidates);
 				// The pooled headroom figure follows the same replacement: a hold that
 				// admits accounts the initial gating rejected has a different pool
 				// behind it, and leaving the earlier list in place would advertise the
@@ -1113,6 +1114,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				),
 			);
 			gates.reconcileAffinity(candidates);
+			gates.noteConversationTier(candidates);
 			// See the wake pass above: the pooled headroom figure has to describe the
 			// candidate set that is actually about to be attempted.
 			setPoolHeadroomCandidates(requestMeta, candidates);

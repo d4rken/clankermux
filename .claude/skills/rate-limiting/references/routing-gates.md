@@ -64,9 +64,12 @@ and returned when the 60s memo expired.
 that moves the pin, compare-and-set, to the reorder's head once THAT account
 has served a 2xx. It stays unarmed for:
 
-- family reservation, or a liveness reserve that holds only at the request's
-  own tier: both depend on the model, and a Sonnet side request shares its
-  conversation key with the Fable turns;
+- family reservation, which depends on the request's model;
+- a liveness reserve that would not also hold Fable back (the 10-20% headroom
+  band), when the conversation sent a Fable-tier request within the last hour.
+  A Sonnet side request shares its conversation key with the Fable turns. After
+  an hour without one there is no warm Fable prefix left to protect. Pi and
+  Codex conversations on gpt models therefore follow the ordinary 20% reserve;
 - a head a failure memo pushed back: memos and failover never move a pin;
 - `affinity_hold` and hold wakes: a hold keeps its target;
 - another provider, synthetic probes, and `count_tokens`, which the proxy may

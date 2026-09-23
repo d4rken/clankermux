@@ -645,6 +645,7 @@ async function handleIngestedProxy(
 		),
 	);
 	gates.reconcileAffinity(accounts);
+	gates.noteConversationTier(accounts);
 	const followServedAccount = gates.prepareSoftDemotionFollow(accounts);
 	// The pool this request could actually have landed on, for restating the
 	// client-facing rate-limit headers as pool headroom. Stashed here because
