@@ -488,6 +488,30 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	anthropic_banked_reset_events: {
+		shipped: "2026-09-22",
+		commit: "unreleased",
+		columns: [
+			"id",
+			"account_id",
+			"account_name",
+			"grant_id",
+			"trigger",
+			"cause",
+			"attempt_seq",
+			"request_id",
+			"status",
+			"reason",
+			"cleared",
+			"resets_left",
+			"error_message",
+			"grant_ends_at",
+			"next_attempt_at",
+			"created_at",
+			"resolved_at",
+		],
+		source: "create-table-at-intro",
+	},
 };
 
 /**

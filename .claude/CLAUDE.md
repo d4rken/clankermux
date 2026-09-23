@@ -17,8 +17,18 @@ One sanctioned exception, approved 2026-08-25: the server's own
 (`AnthropicModelCatalogCache`). It costs no tokens and starts no quota
 window. Since the shared-catalogue page was removed it is demand-driven
 and reached only by the one-shot `client_profiles` backfill, so on a
-database created after 2026.9.52 it never runs at all. Everything else
-stays forbidden, including curling that endpoint by hand.
+database created after 2026.9.52 it never runs at all.
+
+A second one, approved 2026-09-22: Claude Code's banked resets
+(`cedar_ember`), reached only through `AnthropicBankedResetCoordinator`.
+That covers the status read
+`GET api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1` and the
+claim `POST api.anthropic.com/api/organizations/<org>/reset_rate_limits`.
+The claim spends a grant, so it fires only from a dashboard click or a
+per-account auto-apply toggle that is off by default.
+
+Everything else stays forbidden, including curling either exception's
+endpoints by hand.
 
 ## This directory builds the deployment; it is not the deployment
 

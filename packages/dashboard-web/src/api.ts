@@ -5,6 +5,9 @@ import type {
 	AnalyticsFilterOptionsResponse,
 	AnalyticsResponse,
 	AnalyticsSection,
+	AnthropicBankedResetClaimRequest,
+	AnthropicBankedResetClaimResponse,
+	AnthropicBankedResetEventResponse,
 	CacheEffectivenessResponse,
 	CacheKeepaliveHistoryResponse,
 	CacheKeepaliveLiveResponse,
@@ -2500,6 +2503,104 @@ class API extends HttpClient {
 		try {
 			const response = await this.get<{
 				events: CodexResetCreditEventResponse[];
+			}>(url);
+			this.logger.debug(`← GET ${url} - 200`);
+			return response.events;
+		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async updateAccountAutoApplyBankedResets(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const url = `/api/accounts/${accountId}/banked-resets/auto-apply`;
+		this.logger.debug(`→ POST ${url}`, { enabled });
+		try {
+			await this.post(url, { enabled: enabled ? 1 : 0 });
+			this.logger.debug(`← POST ${url} - 200`);
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async updateAccountAutoApplyBankedResetOnWeeklyLimit(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const url = `/api/accounts/${accountId}/banked-resets/auto-apply-on-weekly-limit`;
+		this.logger.debug(`→ POST ${url}`, { enabled });
+		try {
+			await this.post(url, { enabled: enabled ? 1 : 0 });
+			this.logger.debug(`← POST ${url} - 200`);
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	/**
+	 * Claim one Anthropic banked reset. Callers own `requestId` and must reuse it
+	 * while the claim is unconfirmed (a network failure, a 5xx, or a `pending`
+	 * status). An `HttpError` is rethrown as-is so the caller can tell a
+	 * rejection (4xx) from a failure whose outcome is unknown.
+	 */
+	async claimAccountBankedReset(
+		accountId: string,
+		request: Pick<AnthropicBankedResetClaimRequest, "grantId" | "requestId">,
+	): Promise<AnthropicBankedResetClaimResponse> {
+		const url = `/api/accounts/${accountId}/banked-resets/claim`;
+		this.logger.debug(`→ POST ${url}`, { grantId: request.grantId });
+		try {
+			const response = await this.post<AnthropicBankedResetClaimResponse>(url, {
+				grantId: request.grantId,
+				requestId: request.requestId,
+			});
+			this.logger.debug(`← POST ${url} - 200`, { status: response.status });
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			throw error;
+		}
+	}
+
+	/** Force a banked-reset status read; the accounts list serves the result. */
+	async refreshAccountBankedResets(
+		accountId: string,
+	): Promise<{ success: boolean; message: string }> {
+		const url = `/api/accounts/${accountId}/banked-resets/refresh`;
+		this.logger.debug(`→ POST ${url}`);
+		try {
+			const response = await this.post<{ success: boolean; message: string }>(
+				url,
+				{},
+			);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async getAccountBankedResetEvents(
+		accountId: string,
+		limit?: number,
+	): Promise<AnthropicBankedResetEventResponse[]> {
+		const url = `/api/accounts/${accountId}/banked-resets/events${
+			typeof limit === "number" ? `?limit=${limit}` : ""
+		}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<{
+				events: AnthropicBankedResetEventResponse[];
 			}>(url);
 			this.logger.debug(`← GET ${url} - 200`);
 			return response.events;

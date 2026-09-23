@@ -1,6 +1,7 @@
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
+import { hoistConversationEffortUpdates } from "../../conversation-effort";
 import {
 	localTokenCountUrl,
 	supportsLocalTokenCounting,
@@ -52,38 +53,8 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 			!Array.isArray(body.messages)
 		)
 			return request;
-		// Preserve invalid controls for upstream validation rather than silently
-		// replacing them (or spreading string/array indices into an object).
-		if (
-			"output_config" in body &&
-			(!body.output_config ||
-				typeof body.output_config !== "object" ||
-				Array.isArray(body.output_config))
-		)
-			return request;
-		let updates = 0;
-		const messages = body.messages.map((message: Record<string, unknown>) => {
-			const config = message.output_config;
-			if (
-				message.role !== "system" ||
-				!config ||
-				typeof config !== "object" ||
-				Array.isArray(config) ||
-				Object.keys(config).length !== 1 ||
-				!("effort" in config) ||
-				typeof config.effort !== "string"
-			)
-				return message;
-			body.output_config = {
-				...(body.output_config as Record<string, unknown> | undefined),
-				effort: config.effort,
-			};
-			const { output_config: _config, ...rest } = message;
-			updates++;
-			return rest;
-		});
+		const updates = hoistConversationEffortUpdates(body);
 		if (!updates) return request;
-		body.messages = messages;
 		log.info(
 			`Normalized ${updates} conversation effort update(s) for ${body.model}`,
 		);

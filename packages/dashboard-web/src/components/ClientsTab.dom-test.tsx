@@ -347,14 +347,16 @@ it("keeps the bulk panel open on the committed catalogues, then closes with the 
 	await act(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 	});
-	await clickLabelled("input", "Select kept-model");
-	await clickLabelled("button", "Remove from all selected");
+	await clickLabelled("button", "Remove kept-model");
+	await clickLabelled("button", "Review changes");
 	await clickLabelled("button", "Apply to 1 client");
 	expect(container.textContent).toContain("Applied to 1 client.");
 	expect(
-		[...container.querySelectorAll("[data-candidate]")].map((n) =>
-			n.getAttribute("data-candidate"),
-		),
+		[
+			...container.querySelectorAll(
+				'section[aria-label="In catalogues"] [data-model-id]',
+			),
+		].map((n) => n.getAttribute("data-model-id")),
 	).toEqual(["added-model", "kept-model"]);
 	expect(listRequests).toBe(1);
 	await clickLabelled("button", "Close");

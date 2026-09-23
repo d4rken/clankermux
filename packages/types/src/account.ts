@@ -257,10 +257,9 @@ export interface GrokSubscriptionUsageData {
 	/**
 	 * Weekly pool utilization percent (0-100), or null for UNKNOWN.
 	 *
-	 * Null is NOT zero. `config.creditUsagePercent` was absent from the live
-	 * billing probe, and proto3 omits zero-valued scalars — but that explains how
-	 * a zero COULD vanish, not that the endpoint ever populates the field for
-	 * this billing mode. A fabricated 0% reads as actionable headroom and could
+	 * Null is NOT zero. The parser reads an absent `creditUsagePercent` as 0
+	 * only inside a period that is running now; every other unreadable case is
+	 * null, because a fabricated 0% reads as actionable headroom and could
 	 * release a cooldown on an account that is in fact exhausted.
 	 */
 	weeklyUtilization: number | null;
@@ -332,6 +331,11 @@ export interface AccountIdentity {
 	externalAccountId: string | null;
 	email: string | null;
 	organizationName: string | null;
+	/**
+	 * Anthropic `organization.uuid`, the path segment of the banked-reset claim
+	 * URL. OPTIONAL because only Anthropic payloads carry it.
+	 */
+	organizationUuid?: string | null;
 	planTier: string | null;
 	/**
 	 * Anthropic rate-limit multiplier token (e.g. "20x", "5x", "1x") derived from
@@ -405,6 +409,11 @@ export interface AccountRow {
 	peak_hours_pause_enabled?: boolean | number | null;
 	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
 	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
+	anthropic_auto_apply_banked_resets_enabled?: boolean | number | null;
+	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled?:
+		| boolean
+		| number
+		| null;
 	custom_endpoint?: string | null;
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
@@ -420,6 +429,7 @@ export interface AccountRow {
 	identity_external_id?: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email?: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name?: string | null; // Organization/workspace name captured from profile
+	identity_organization_uuid?: string | null; // Anthropic organization.uuid; path segment of the banked-reset claim URL
 	identity_plan_tier?: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier?: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_subscription_status?: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
@@ -464,6 +474,8 @@ export interface Account {
 	peak_hours_pause_enabled: boolean;
 	codex_auto_apply_reset_credits_enabled: boolean;
 	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
+	anthropic_auto_apply_banked_resets_enabled: boolean;
+	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
@@ -479,6 +491,7 @@ export interface Account {
 	identity_external_id: string | null; // Provider-side account/user id captured from token claims or profile endpoint
 	identity_email: string | null; // Account email captured from token claims or profile endpoint
 	identity_organization_name: string | null; // Organization/workspace name captured from profile
+	identity_organization_uuid: string | null; // Anthropic organization.uuid; path segment of the banked-reset claim URL
 	identity_plan_tier: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
 	identity_subscription_status: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
@@ -585,6 +598,10 @@ export interface AccountResponse {
 	autoApplyResetCreditsEnabled?: boolean;
 	/** Codex-only: auto-consume at the weekly limit with no usable Codex alternative; respects account pins and manual pauses (opt-in). */
 	autoApplyResetOnWeeklyLimitEnabled?: boolean;
+	/** Anthropic-OAuth-only: claim a banked reset grant before it expires unused (opt-in). */
+	autoApplyBankedResetsEnabled?: boolean;
+	/** Anthropic-OAuth-only: claim a banked reset grant when the account hits a weekly limit it clears (opt-in). */
+	autoApplyBankedResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
@@ -617,6 +634,8 @@ export interface AccountResponse {
 		}> | null;
 		fetchedAt: string;
 	} | null;
+	/** Anthropic-OAuth-only banked-reset grants; null when never read. */
+	anthropicBankedResets?: AnthropicBankedResetsInfo | null;
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	/**
 	 * When the LIVE reading in `usageData` was sampled (ISO). Null when
@@ -808,6 +827,242 @@ export interface CodexResetCreditEventResponse {
 	resolvedAt: string | null; // ISO
 }
 
+/**
+ * Limit windows an Anthropic banked-reset grant can clear or report on, as
+ * Claude Code's `cedar_ember` program names them. Anything else on the wire is
+ * filtered out.
+ */
+export const ANTHROPIC_BANKED_RESET_WINDOWS = [
+	"five_hour",
+	"seven_day",
+	"seven_day_overage_included",
+	"seven_day_opus",
+	"seven_day_sonnet",
+	"seven_day_cowork",
+	"seven_day_omelette",
+	"seven_day_oauth_apps",
+] as const;
+
+export type AnthropicBankedResetWindow =
+	(typeof ANTHROPIC_BANKED_RESET_WINDOWS)[number];
+
+/** Why an account cannot use banked resets. An unrecognised value reads as `unknown`. */
+export const ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS = [
+	"config_off",
+	"tier",
+	"seat",
+	"mobile",
+	"surface",
+	"cli_version",
+	"no_grant",
+	"tenure",
+	"other_experiment",
+	"unavailable",
+	"unknown",
+] as const;
+
+export type AnthropicBankedResetIneligibleReason =
+	(typeof ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS)[number];
+
+/** `reason` on a claim response. An unrecognised value reads as `unknown`. */
+export const ANTHROPIC_BANKED_RESET_CLAIM_REASONS = [
+	...ANTHROPIC_BANKED_RESET_INELIGIBLE_REASONS,
+	"paused",
+	"expired",
+	"unknown_grant",
+	"not_next_grant",
+	"grant_id_required",
+	"not_limited",
+	"already_used",
+	"cooldown",
+	"stamp_indeterminate",
+	"reset_unconfirmed",
+] as const;
+
+export type AnthropicBankedResetClaimReason =
+	(typeof ANTHROPIC_BANKED_RESET_CLAIM_REASONS)[number];
+
+/** One banked-reset grant: N resets, a use-by date, and the windows it refills. */
+export interface AnthropicBankedResetGrant {
+	id: string;
+	label: string | null;
+	resetsTotal: number;
+	resetsLeft: number;
+	/** ms epoch; null when unreported. */
+	startsAt: number | null;
+	/** ms epoch use-by date; null when unreported. */
+	endsAt: number | null;
+	clears: AnthropicBankedResetWindow[];
+	paused: boolean;
+	usableNow: boolean;
+	/** Claimable only while a window in `clears` is exhausted (`not_limited` otherwise). */
+	useRequiresLimit: boolean;
+	/** Integer 0..100 per known window; windows the server omitted are absent. */
+	percentUsed: Partial<Record<AnthropicBankedResetWindow, number>>;
+	blocking: AnthropicBankedResetWindow[];
+}
+
+/** The `cedar_ember` block of the OAuth usage response. */
+export interface AnthropicBankedResetStatus {
+	eligible: boolean;
+	ineligibleReason: AnthropicBankedResetIneligibleReason | null;
+	atLimit: boolean | null;
+	exhausted: AnthropicBankedResetWindow[];
+	grants: AnthropicBankedResetGrant[];
+	/** The only claimable grant; null unless it names a grant in `grants`. */
+	nextGrantId: string | null;
+	/** ms epoch */
+	weeklyResetsAt: number | null;
+	/** ms epoch before which the server refuses a claim with `cooldown`. */
+	cooldownUntil: number | null;
+}
+
+/** What the server answered to a claim. An unrecognised `result` reads as `unavailable`. */
+export type AnthropicBankedResetClaimServerResult =
+	| "reset"
+	| "already_used"
+	| "not_limited"
+	| "cooldown"
+	| "ineligible"
+	| "unavailable";
+
+/**
+ * A claim that got no usable answer: a 429, a 401/403, or any other non-2xx,
+ * network failure, timeout or unparseable body (`error`).
+ */
+export type AnthropicBankedResetClaimTransportResult =
+	| "rate_limited"
+	| "auth_error"
+	| "error";
+
+export interface AnthropicBankedResetClaimResult {
+	result:
+		| AnthropicBankedResetClaimServerResult
+		| AnthropicBankedResetClaimTransportResult;
+	reason: AnthropicBankedResetClaimReason | null;
+	resetsLeft: number | null;
+	cleared: AnthropicBankedResetWindow[];
+	/** ms epoch */
+	weeklyResetsAt: number | null;
+	/** ms epoch */
+	cooldownUntil: number | null;
+	/** HTTP status received; null when no response arrived or no request was made. */
+	httpStatus: number | null;
+	/** From `Retry-After` on a 429; null otherwise. */
+	retryAfterMs: number | null;
+	/** Set on transport results. */
+	errorMessage: string | null;
+}
+
+/**
+ * Lifecycle status of an `anthropic_banked_reset_events` ledger row. Every
+ * claim is written `pending` before its POST; the rest are resolutions, with
+ * `failed` for a claim that stayed unconfirmed for an hour.
+ */
+export type AnthropicBankedResetEventStatus =
+	| "pending"
+	| "reset"
+	| "already_used"
+	| "not_limited"
+	| "cooldown"
+	| "ineligible"
+	| "unavailable"
+	| "failed";
+
+/**
+ * One logical claim of an Anthropic banked reset. Retries of the same claim
+ * must reuse `requestId`; a request id already bound to another grant is
+ * rejected.
+ */
+export interface AnthropicBankedResetClaimRequest {
+	grantId: string;
+	requestId: string;
+	/**
+	 * Set only by the auto-apply scheduler: resolve this pre-claimed ledger row
+	 * (`anthropic_banked_reset_events.id`). `replay` marks a row that was
+	 * already pending before this dispatch, so an earlier POST may have landed.
+	 */
+	autoApply?: {
+		ledgerRowId: string;
+		cause: "expiry" | "weekly-limit";
+		replay: boolean;
+	};
+}
+
+/** An account's banked-reset status as served in the accounts list. */
+export interface AnthropicBankedResetsInfo {
+	eligible: boolean;
+	ineligibleReason: AnthropicBankedResetIneligibleReason | null;
+	/** Windows the server reports at their limit. */
+	exhausted: AnthropicBankedResetWindow[];
+	cooldownUntil: string | null; // ISO
+	weeklyResetsAt: string | null; // ISO
+	nextGrantId: string | null;
+	grants: Array<{
+		id: string;
+		label: string | null;
+		resetsLeft: number;
+		resetsTotal: number;
+		endsAt: string | null; // ISO
+		startsAt: string | null; // ISO
+		clears: AnthropicBankedResetWindow[];
+		paused: boolean;
+		usableNow: boolean;
+		useRequiresLimit: boolean;
+		/** The only grant a claim may name. */
+		isNext: boolean;
+	}>;
+	resetsLeftTotal: number;
+	fetchedAt: string; // ISO
+}
+
+/** Response of POST /api/accounts/:id/banked-resets/claim. */
+export interface AnthropicBankedResetClaimResponse {
+	/** True when the ledger row resolved `reset` or `already_used`. */
+	success: boolean;
+	message: string;
+	eventId: string;
+	/** The ledger row's status after this call; `pending` means retry with the same requestId. */
+	status: AnthropicBankedResetEventStatus;
+	/** What the server or transport answered; null when a resolved row was returned without a new request. */
+	result: AnthropicBankedResetClaimResult["result"] | null;
+	/** `not_sent` on a claim refused before its request was ever sent. */
+	reason: string | null;
+	/** The ledger row's recorded error, e.g. why a claim was not sent. */
+	errorMessage?: string | null;
+	resetsLeft: number | null;
+	cleared: AnthropicBankedResetWindow[];
+	cooldownUntil: string | null; // ISO
+	/** When a pending claim may be retried; null once resolved. */
+	nextAttemptAt: string | null; // ISO
+	/** Whether the banked-reset status was re-read after a restoring claim. */
+	statusRefreshed: boolean;
+}
+
+/** One banked-reset ledger event as served over the API boundary. */
+export interface AnthropicBankedResetEventResponse {
+	id: string;
+	grantId: string;
+	trigger: "manual" | "auto";
+	/** Why an auto attempt was claimed; null on manual rows. */
+	cause: "expiry" | "weekly-limit" | null;
+	attemptSeq: number | null;
+	status: AnthropicBankedResetEventStatus;
+	reason: string | null;
+	cleared: AnthropicBankedResetWindow[];
+	resetsLeft: number | null;
+	errorMessage: string | null;
+	grantEndsAt: string | null; // ISO
+	nextAttemptAt: string | null; // ISO
+	createdAt: string; // ISO
+	resolvedAt: string | null; // ISO
+	/**
+	 * Present only on a pending manual claim, so the dashboard can retry it
+	 * with the same request id after a reload.
+	 */
+	requestId?: string;
+}
+
 // UI display type - used in CLI and web dashboard
 export interface AccountDisplay {
 	id: string;
@@ -958,6 +1213,10 @@ export function toAccount(row: AccountRow): Account {
 			!!row.codex_auto_apply_reset_credits_enabled,
 		codex_auto_apply_reset_on_weekly_limit_enabled:
 			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
+		anthropic_auto_apply_banked_resets_enabled:
+			!!row.anthropic_auto_apply_banked_resets_enabled,
+		anthropic_auto_apply_banked_reset_on_weekly_limit_enabled:
+			!!row.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
@@ -973,6 +1232,7 @@ export function toAccount(row: AccountRow): Account {
 		identity_external_id: row.identity_external_id ?? null,
 		identity_email: row.identity_email ?? null,
 		identity_organization_name: row.identity_organization_name ?? null,
+		identity_organization_uuid: row.identity_organization_uuid ?? null,
 		identity_plan_tier: row.identity_plan_tier ?? null,
 		identity_rate_limit_tier: row.identity_rate_limit_tier ?? null,
 		identity_subscription_status: row.identity_subscription_status ?? null,
@@ -1054,6 +1314,10 @@ export function toAccountResponse(account: Account): AccountResponse {
 			account.codex_auto_apply_reset_credits_enabled,
 		autoApplyResetOnWeeklyLimitEnabled:
 			account.codex_auto_apply_reset_on_weekly_limit_enabled,
+		autoApplyBankedResetsEnabled:
+			account.anthropic_auto_apply_banked_resets_enabled,
+		autoApplyBankedResetOnWeeklyLimitEnabled:
+			account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 		customEndpoint: account.custom_endpoint,
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache

@@ -4,7 +4,7 @@ import {
 } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type { Account } from "@clankermux/types";
+import { type Account, transferChatContext } from "@clankermux/types";
 import type { TokenRefreshResult } from "../../types";
 import { BaseAnthropicCompatibleProvider } from "../base-anthropic-compatible";
 import {
@@ -13,6 +13,8 @@ import {
 } from "./client-identity";
 import { XAI_CLIENT_ID, XAI_TOKEN_ENDPOINT } from "./device-oauth";
 import { extractGrokSubscriptionIdentity } from "./identity";
+import { normalizeGrokRequestBody } from "./request-body";
+import { numberContentBlocks } from "./response-stream";
 import {
 	describeGrokUpgradeRequired,
 	isGrokUpgradeRequired,
@@ -193,6 +195,34 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 		return prepared;
 	}
 
+	override async transformRequestBody(
+		request: Request,
+		_account?: Account,
+	): Promise<Request> {
+		if (request.method !== "POST") return request;
+		let body: unknown;
+		try {
+			body = await request.clone().json();
+		} catch {
+			return request;
+		}
+		if (
+			!body ||
+			typeof body !== "object" ||
+			Array.isArray(body) ||
+			!normalizeGrokRequestBody(body as Record<string, unknown>)
+		)
+			return request;
+		const headers = new Headers(request.headers);
+		headers.delete("content-length");
+		const rebuilt = new Request(request, {
+			headers,
+			body: JSON.stringify(body),
+		});
+		transferChatContext(request, rebuilt);
+		return rebuilt;
+	}
+
 	/**
 	 * True, but no `getOAuthProvider`: like qwen, the device flow lives in the
 	 * HTTP handler layer rather than the registry's OAuth map, and the registry
@@ -207,7 +237,14 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 		_account: Account | null,
 	): Promise<Response> {
 		if (!isGrokUpgradeRequired(response)) {
-			return new Response(response.body, {
+			const streamed = (response.headers.get("content-type") ?? "").includes(
+				"text/event-stream",
+			);
+			const body =
+				streamed && response.body
+					? numberContentBlocks(response.body)
+					: response.body;
+			return new Response(body, {
 				status: response.status,
 				statusText: response.statusText,
 				headers: sanitizeGrokResponseHeaders(response.headers),

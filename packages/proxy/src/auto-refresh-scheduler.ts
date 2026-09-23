@@ -26,6 +26,10 @@ import {
 } from "./codex-spend-coordinator";
 import { TOKEN_SAFETY_WINDOW_MS } from "./constants";
 import { dispatchProxyRequest } from "./dispatch";
+import {
+	captureGrokSubscription,
+	GROK_SUBSCRIPTION_CHECK_INTERVAL_MS,
+} from "./grok-subscription-capture";
 import { getValidAccessToken } from "./handlers";
 import { refreshProactiveAccountToken } from "./proactive-token-refresh";
 import type { ProxyContext } from "./proxy";
@@ -308,6 +312,7 @@ export class AutoRefreshScheduler {
 			await this.checkAndRefreshQwenTokens();
 			await this.checkAndRefreshCodexTokens();
 			await this.checkAndRefreshGrokSubscriptionTokens();
+			await this.checkGrokSubscriptionState();
 
 			// Get all accounts with auto-refresh enabled that have reset windows OR need immediate refresh
 			const accounts = await this.db.query<{
@@ -741,6 +746,8 @@ export class AutoRefreshScheduler {
 				peak_hours_pause_enabled: false,
 				codex_auto_apply_reset_credits_enabled: false,
 				codex_auto_apply_reset_on_weekly_limit_enabled: false,
+				anthropic_auto_apply_banked_resets_enabled: false,
+				anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: false,
 				custom_endpoint: accountRow.custom_endpoint,
 				billing_type: null,
 				pause_reason: null,
@@ -756,6 +763,7 @@ export class AutoRefreshScheduler {
 				identity_external_id: null,
 				identity_email: null,
 				identity_organization_name: null,
+				identity_organization_uuid: null,
 				identity_plan_tier: null,
 				identity_rate_limit_tier: null,
 				identity_subscription_status: null,
@@ -1397,6 +1405,45 @@ export class AutoRefreshScheduler {
 				providerLabel: "Grok subscription",
 				proxyContext: this.proxyContext,
 			});
+		}
+	}
+
+	/**
+	 * Re-read the plan, renewal date and cancellation state of grok-subscription
+	 * accounts that are due. Runs after the token refresh so a just-renewed token
+	 * is the one used; an account whose token is still expired waits for the
+	 * next tick rather than spending a request that can only fail.
+	 */
+	private async checkGrokSubscriptionState(): Promise<void> {
+		if (!this.db) return;
+
+		const now = Date.now();
+		const accounts = await this.db.query<{
+			id: string;
+			name: string;
+			access_token: string;
+		}>(
+			`
+			SELECT id, name, access_token
+			FROM accounts
+			WHERE disabled = 0
+				AND provider = 'grok-subscription'
+				AND access_token IS NOT NULL
+				AND expires_at > ?
+				AND (
+					identity_subscription_checked_at IS NULL
+					OR identity_subscription_checked_at <= ?
+				)
+		`,
+			[now, now - GROK_SUBSCRIPTION_CHECK_INTERVAL_MS],
+		);
+
+		for (const row of accounts) {
+			await captureGrokSubscription(
+				this.proxyContext.dbOps,
+				row,
+				row.access_token,
+			);
 		}
 	}
 

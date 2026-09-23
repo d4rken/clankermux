@@ -101,8 +101,9 @@ describe("client service integration", () => {
 			clientIds: [client.apiKeyId],
 			operation: {
 				format: "openai",
-				mode: "add",
-				models: [
+				mode: "edit",
+				remove: [],
+				add: [
 					{
 						id: "other",
 						displayName: "Other",
@@ -706,7 +707,12 @@ describe("client service integration", () => {
 		const c = await makeClient("Charlie");
 		const review = await service.bulkReview({
 			clientIds: [a.apiKeyId, b.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: [],
+			},
 		});
 		expect(review.clients.map((r) => r.apiKeyId)).toEqual([
 			a.apiKeyId,
@@ -744,8 +750,9 @@ describe("client service integration", () => {
 			clientIds: [a.apiKeyId, b.apiKeyId],
 			operation: {
 				format: "openai",
-				mode: "add",
-				models: [
+				mode: "edit",
+				remove: [],
+				add: [
 					{
 						id: "shared",
 						displayName: "Rewritten",
@@ -779,8 +786,9 @@ describe("client service integration", () => {
 			clientIds: [a.apiKeyId],
 			operation: {
 				format: "openai",
-				mode: "remove",
-				models: [{ id: "drop" }],
+				mode: "edit",
+				add: [],
+				remove: ["drop"],
 			},
 		});
 		const result = review.clients[0];
@@ -796,6 +804,65 @@ describe("client service integration", () => {
 			.openai;
 		expect(catalogue?.models.map((m) => m.id)).toEqual(["keep"]);
 		expect(catalogue?.defaultModel).toBeNull();
+	});
+
+	it("adds and removes in one review, adding only where a client lacks the ID", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [plain("old"), plain("shared")];
+		});
+		const b = await makeClient("Bravo", (d) => {
+			d.catalogues.openai.models = [plain("old")];
+		});
+		const c = await makeClient("Charlie");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId, c.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: ["old"],
+			},
+		});
+		expect(review.clients.map((r) => [r.status, r.added, r.removed])).toEqual([
+			["changed", [], ["old"]],
+			["changed", ["shared"], ["old"]],
+			["changed", ["shared"], []],
+		]);
+		await service.bulkCommit(review.token);
+		for (const client of [a, b, c]) {
+			const profile = await dbOps.clients.getProfile(client.apiKeyId);
+			expect(profile?.catalogues.openai.models.map((m) => m.id)).toEqual([
+				"shared",
+			]);
+			expect(profile?.revision).toBe(2);
+		}
+	});
+
+	it("keeps a default model the edit leaves in place", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [plain("keep"), plain("drop")];
+			d.catalogues.openai.defaultModel = "keep";
+		});
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("fresh")],
+				remove: ["drop"],
+			},
+		});
+		expect(review.clients[0]?.defaultModelChange).toBeNull();
+		expect(review.clients[0]?.notices).not.toContain(
+			"Default model cleared: keep is no longer in this catalogue.",
+		);
+		await service.bulkCommit(review.token);
+		const catalogue = (await dbOps.clients.getProfile(a.apiKeyId))?.catalogues
+			.openai;
+		expect(catalogue?.models.map((m) => m.id)).toEqual(["keep", "fresh"]);
+		expect(catalogue?.defaultModel).toBe("keep");
 	});
 
 	it("replaces one format wholesale and leaves the other two alone", async () => {
@@ -876,7 +943,12 @@ describe("client service integration", () => {
 		const before = await dbOps.clients.getProfile(pinned.apiKeyId);
 		const review = await service.bulkReview({
 			clientIds: [pinned.apiKeyId, open.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: [],
+			},
 		});
 		expect(review.clients[0]?.status).toBe("rejected");
 		expect(review.clients[0]?.reason).toContain(
@@ -904,8 +976,9 @@ describe("client service integration", () => {
 			clientIds: [cc.apiKeyId, generic.apiKeyId],
 			operation: {
 				format: "anthropic",
-				mode: "add",
-				models: [plain("gpt-fast")],
+				mode: "edit",
+				remove: [],
+				add: [plain("gpt-fast")],
 			},
 		});
 		expect(review.clients[0]?.status).toBe("rejected");
@@ -938,7 +1011,12 @@ describe("client service integration", () => {
 		expect(rules()).toEqual([]);
 		const review = await service.bulkReview({
 			clientIds: [short.apiKeyId, long.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [alias(longId)] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [alias(longId)],
+				remove: [],
+			},
 		});
 		expect(review.clients[0]?.status).toBe("changed");
 		expect(review.clients[1]?.status).toBe("rejected");
@@ -949,9 +1027,9 @@ describe("client service integration", () => {
 
 	it("rejects malformed bulk requests before touching any client", async () => {
 		const a = await makeClient("Alpha");
-		const operation = (models: unknown) => ({
+		const operation = (add: unknown, remove: unknown = []) => ({
 			clientIds: [a.apiKeyId],
-			operation: { format: "openai", mode: "add", models },
+			operation: { format: "openai", mode: "edit", add, remove },
 		});
 		expect(await bulkStatus(operation([null]))).toBe(400);
 		expect(
@@ -963,22 +1041,43 @@ describe("client service integration", () => {
 		).toBe(400);
 		expect(await bulkStatus(operation([plain("dup"), plain("dup")]))).toBe(400);
 		expect(await bulkStatus(operation("not-an-array"))).toBe(400);
+		expect(await bulkStatus(operation([], "not-an-array"))).toBe(400);
+		expect(await bulkStatus(operation([], [""]))).toBe(400);
+		expect(await bulkStatus(operation([], [" padded "]))).toBe(400);
+		expect(await bulkStatus(operation([], [42]))).toBe(400);
+		expect(await bulkStatus(operation([], ["dup", "dup"]))).toBe(400);
+		// One ID cannot be both dropped and published by the same edit.
+		expect(await bulkStatus(operation([plain("both")], ["both"]))).toBe(400);
+		expect(
+			await bulkStatus(
+				operation(
+					Array.from({ length: 300 }, (_, i) => plain(`add-${i}`)),
+					Array.from({ length: 201 }, (_, i) => `drop-${i}`),
+				),
+			),
+		).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [a.apiKeyId],
+				operation: { format: "openai", mode: "add", models: [] },
+			}),
+		).toBe(400);
 		expect(
 			await bulkStatus({
 				clientIds: [],
-				operation: { format: "openai", mode: "add", models: [] },
+				operation: { format: "openai", mode: "edit", add: [], remove: [] },
 			}),
 		).toBe(400);
 		expect(
 			await bulkStatus({
 				clientIds: [a.apiKeyId, a.apiKeyId],
-				operation: { format: "openai", mode: "add", models: [] },
+				operation: { format: "openai", mode: "edit", add: [], remove: [] },
 			}),
 		).toBe(400);
 		expect(
 			await bulkStatus({
 				clientIds: [a.apiKeyId],
-				operation: { format: "sideways", mode: "add", models: [] },
+				operation: { format: "sideways", mode: "edit", add: [], remove: [] },
 			}),
 		).toBe(400);
 		expect(
@@ -999,14 +1098,14 @@ describe("client service integration", () => {
 					d.catalogues.openai.models = ids.map(plain);
 				}),
 			);
-		// The remove contract reads only `id`, so no entry carries a target model
-		// and no alias is involved anywhere in this batch.
+		// A remove names IDs only, so no alias is involved anywhere in this batch.
 		const review = await service.bulkReview({
 			clientIds: clients.map((c) => c.apiKeyId),
 			operation: {
 				format: "openai",
-				mode: "remove",
-				models: ids.map((id) => ({ id })),
+				mode: "edit",
+				add: [],
+				remove: ids,
 			},
 		});
 		expect(review.clients.map((r) => r.status)).toEqual(
@@ -1031,21 +1130,17 @@ describe("client service integration", () => {
 				}),
 			);
 		expect(rules().length).toBe(510);
-		// Every entry has id === targetModel, so the request declares no aliases.
-		// Hiding the entries keeps all 510 owned rules alive as retained alias
+		// A remove names IDs only, so the request declares no aliases. Hiding
+		// the entries keeps all 510 owned rules alive as retained alias
 		// rules, so each client still renumbers the whole table twice.
 		await expect(
 			service.bulkReview({
 				clientIds: clients.map((c) => c.apiKeyId),
 				operation: {
 					format: "openai",
-					mode: "remove",
-					models: ids.map((id) => ({
-						id,
-						targetModel: id,
-						displayName: id,
-						accountIds: null,
-					})),
+					mode: "edit",
+					add: [],
+					remove: ids,
 				},
 			}),
 		).rejects.toThrow("too many routing rules");
@@ -1159,7 +1254,12 @@ describe("client service integration", () => {
 		const b = await makeClient("Bravo");
 		const review = await service.bulkReview({
 			clientIds: [a.apiKeyId, b.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [alias("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [alias("shared")],
+				remove: [],
+			},
 		});
 		expect(review.clients.map((r) => r.status)).toEqual(["changed", "changed"]);
 		const before = {
@@ -1195,7 +1295,12 @@ describe("client service integration", () => {
 		const a = await makeClient("Alpha");
 		const review = await service.bulkReview({
 			clientIds: [a.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: [],
+			},
 		});
 		await dbOps.routing.saveRule(broad);
 		await expect(service.bulkCommit(review.token)).rejects.toThrow("changed");
@@ -1209,7 +1314,12 @@ describe("client service integration", () => {
 		const a = await makeClient("Alpha");
 		const expired = await service.bulkReview({
 			clientIds: [a.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: [],
+			},
 		});
 		const pending = (
 			service as unknown as { pending: Map<string, { expires: number }> }
@@ -1222,7 +1332,12 @@ describe("client service integration", () => {
 
 		const bulk = await service.bulkReview({
 			clientIds: [a.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [plain("shared")],
+				remove: [],
+			},
 		});
 		await expect(service.commit(bulk.token)).rejects.toThrow("Review expired");
 		const single = await service.review(edit(a));
@@ -1238,7 +1353,12 @@ describe("client service integration", () => {
 		const b = await makeClient("Bravo");
 		const review = await service.bulkReview({
 			clientIds: [a.apiKeyId, b.apiKeyId],
-			operation: { format: "openai", mode: "add", models: [alias("shared")] },
+			operation: {
+				format: "openai",
+				mode: "edit",
+				add: [alias("shared")],
+				remove: [],
+			},
 		});
 		await service.bulkCommit(review.token);
 		const owners = aliasOwners();

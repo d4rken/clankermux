@@ -18,15 +18,22 @@ import { api } from "../../api";
 import {
 	type AccountStatus,
 	deriveAccountStatus,
-	type ResetCreditUrgency,
 } from "../../lib/account-status";
 import { randomUUID } from "../../lib/uuid";
-import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { AccountPolicyChips } from "./AccountPolicyChips";
+import { AnthropicBankedResetChip } from "./AnthropicBankedResetChip";
 import { DegradedChip } from "./DegradedChip";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
 import { StatusChip } from "./StatusChip";
+import {
+	RESET_CREDIT_URGENCY_CLASSES,
+	ResetApplyConfirmPanel,
+	type ResetApplyState,
+	ResetEventsPanel,
+	type ResetEventsState,
+	URGENCY_BASE_CLASSES,
+} from "./UsageResetPanels";
 
 /**
  * Codex sells credits at a flat €0.04 each — the rate card is perfectly linear
@@ -95,24 +102,6 @@ interface AccountStatusChipsProps {
 	degraded?: DegradedAccount;
 }
 
-/**
- * Shared amber/red urgency palette for time-pressure chips — spread into both
- * the reset-credit and renewal chip class maps so the two stay in sync.
- */
-const URGENCY_BASE_CLASSES = {
-	imminent: "bg-destructive/15 text-destructive-strong",
-	soon: "bg-warning/15 text-warning-strong",
-} as const;
-
-/**
- * Chip color by reset-credit urgency — same amber/red Tailwind palette as the
- * renewal chip (`RENEWAL_URGENCY_CLASSES`), sky when nothing expires soon.
- */
-const RESET_CREDIT_URGENCY_CLASSES: Record<ResetCreditUrgency, string> = {
-	...URGENCY_BASE_CLASSES,
-	none: "bg-info/15 text-info",
-};
-
 const RESET_EVENT_STATUS_LABELS: Record<
 	CodexResetCreditEventResponse["status"],
 	string
@@ -123,18 +112,6 @@ const RESET_EVENT_STATUS_LABELS: Record<
 	noCredit: "No credit available",
 	alreadyRedeemed: "Already redeemed",
 	failed: "Failed",
-};
-
-/** Cap on the inline error text per event row; full message stays in `title`. */
-const MAX_EVENT_ERROR_CHARS = 120;
-
-/** Human label for why an auto reset attempt was claimed. */
-const RESET_EVENT_CAUSE_LABELS: Record<
-	NonNullable<CodexResetCreditEventResponse["cause"]>,
-	string
-> = {
-	expiry: "expiry",
-	"weekly-limit": "weekly limit",
 };
 
 /** Inline outcome copy for the manual Apply-now flow, keyed by API outcome. */
@@ -150,92 +127,26 @@ const CONSUME_OUTCOME_LABELS: Record<
 
 /** Lazy-load lifecycle of the reset-credit event history in the popover. */
 export type ResetCreditEventsState =
-	| { kind: "idle" }
-	| { kind: "loading" }
-	| { kind: "error"; message: string }
-	| { kind: "loaded"; events: CodexResetCreditEventResponse[] };
+	ResetEventsState<CodexResetCreditEventResponse>;
 
-function formatEventTime(iso: string): string {
-	return new Date(iso).toLocaleString(undefined, {
-		month: "short",
-		day: "numeric",
-		hour: "2-digit",
-		minute: "2-digit",
-	});
+function codexEventDetail(event: CodexResetCreditEventResponse): string | null {
+	// windowsReset of 0 is noise next to "Nothing to reset".
+	if (event.windowsReset == null || event.windowsReset <= 0) return null;
+	return `${event.windowsReset} window${event.windowsReset === 1 ? "" : "s"} reset`;
 }
 
-/**
- * Presentational body of the reset-credit history popover. Exported (pure,
- * state-in) so the loading / error / empty / list states are unit-testable
- * with static markup.
- */
+/** Body of the Codex reset-credit history popover. */
 export function ResetCreditEventsPanel({
 	state,
 }: {
 	state: ResetCreditEventsState;
 }) {
-	if (state.kind === "idle" || state.kind === "loading") {
-		return (
-			<p className="text-xs text-muted-foreground">Loading reset events…</p>
-		);
-	}
-	if (state.kind === "error") {
-		return (
-			<p className="text-xs text-destructive-strong">
-				Failed to load reset events: {state.message}
-			</p>
-		);
-	}
-	if (state.events.length === 0) {
-		return (
-			<p className="text-xs text-muted-foreground">
-				No reset events yet. Manual and automatic reset attempts will appear
-				here.
-			</p>
-		);
-	}
 	return (
-		<ul className="space-y-item">
-			{state.events.map((event) => (
-				<li key={event.id} className="text-xs space-y-tight">
-					<div className="flex flex-wrap items-center gap-item">
-						<span className="text-muted-foreground whitespace-nowrap">
-							{formatEventTime(event.createdAt)}
-						</span>
-						{/* `px-1.5` stays numeric: 0.375rem maps to no step on the
-						    rhythm scale, and this micro-pill sits tighter than the
-						    0.5rem `item` step would allow. */}
-						<span
-							className={`px-1.5 py-0 rounded-md label-caps ${
-								event.trigger === "auto"
-									? "bg-info/15 text-info"
-									: "bg-secondary text-secondary-foreground"
-							}`}
-						>
-							{event.trigger === "auto" && event.cause
-								? `auto · ${RESET_EVENT_CAUSE_LABELS[event.cause]}`
-								: event.trigger}
-						</span>
-						<span className="font-medium">
-							{RESET_EVENT_STATUS_LABELS[event.status]}
-						</span>
-						{event.windowsReset != null && event.windowsReset > 0 && (
-							<span className="text-muted-foreground">
-								{event.windowsReset} window
-								{event.windowsReset === 1 ? "" : "s"} reset
-							</span>
-						)}
-					</div>
-					{event.errorMessage && (
-						<p className="text-destructive-strong" title={event.errorMessage}>
-							{event.errorMessage.length > MAX_EVENT_ERROR_CHARS
-								? `${event.errorMessage.slice(0, MAX_EVENT_ERROR_CHARS)}…`
-								: event.errorMessage}
-						</p>
-					)}
-				</li>
-			))}
-		</ul>
+		<ResetEventsPanel
+			state={state}
+			statusLabel={(event) => RESET_EVENT_STATUS_LABELS[event.status]}
+			detail={codexEventDetail}
+		/>
 	);
 }
 
@@ -255,13 +166,26 @@ export type ResetCreditApplyState =
 	  }
 	| { kind: "error"; message: string };
 
-/**
- * Presentational Apply-now confirm/outcome flow rendered inside the
- * reset-credit popover. Exported (pure, state-in) so every step — hidden at
- * zero credits, armed confirm, in-flight, business outcomes and the transport
- * error with its Retry affordance — is unit-testable with static markup,
- * mirroring `ResetCreditEventsPanel`.
- */
+function toResetApplyState(state: ResetCreditApplyState): ResetApplyState {
+	switch (state.kind) {
+		case "done":
+			return {
+				kind: "done",
+				success: state.outcome === "reset",
+				message: state.message,
+			};
+		case "error":
+			return {
+				kind: "retry",
+				message: `Failed to apply reset: ${state.message}`,
+				detail: state.message,
+			};
+		default:
+			return state;
+	}
+}
+
+/** The Codex Apply-now confirm/outcome flow rendered inside the reset-credit popover. */
 export function ResetCreditApplyPanel({
 	accountName,
 	availableCount,
@@ -282,91 +206,23 @@ export function ResetCreditApplyPanel({
 	/** Dismiss a terminal outcome — the parent resets the flow back to idle. */
 	onDismiss: () => void;
 }) {
-	if (state.kind === "idle") {
-		// The button only appears while a reset credit is actually available.
-		if (availableCount <= 0) return null;
-		return (
-			<Button
-				variant="outline"
-				size="sm"
-				className="h-7 text-xs"
-				onClick={onArm}
-				title="Consume one banked usage reset now to clear this account's usage windows"
-			>
-				Apply now
-			</Button>
-		);
-	}
-	if (state.kind === "confirm") {
-		return (
-			<div className="space-y-item">
-				<p className="text-xs">
+	return (
+		<ResetApplyConfirmPanel
+			available={availableCount > 0}
+			state={toResetApplyState(state)}
+			armTitle="Consume one banked usage reset now to clear this account's usage windows"
+			confirmPrompt={
+				<>
 					Consume 1 reset for <span className="font-medium">{accountName}</span>
 					?
-				</p>
-				<div className="flex items-center gap-item">
-					<Button size="sm" className="h-7 text-xs" onClick={onConfirm}>
-						Confirm
-					</Button>
-					<Button
-						variant="outline"
-						size="sm"
-						className="h-7 text-xs"
-						onClick={onCancel}
-					>
-						Cancel
-					</Button>
-				</div>
-			</div>
-		);
-	}
-	if (state.kind === "applying") {
-		return <p className="text-xs text-muted-foreground">Applying reset…</p>;
-	}
-	if (state.kind === "error") {
-		return (
-			<div className="space-y-item">
-				<p className="text-xs text-destructive-strong" title={state.message}>
-					Failed to apply reset: {state.message}
-				</p>
-				<div className="flex items-center gap-item">
-					<Button size="sm" className="h-7 text-xs" onClick={onRetry}>
-						Retry
-					</Button>
-					<Button
-						variant="outline"
-						size="sm"
-						className="h-7 text-xs"
-						onClick={onCancel}
-					>
-						Cancel
-					</Button>
-				</div>
-			</div>
-		);
-	}
-	// "done" — show the outcome plus a way back to idle, so the Apply-now
-	// button doesn't disappear permanently after a single use.
-	return (
-		<div className="space-y-item">
-			<p
-				className={`text-xs ${
-					state.outcome === "reset"
-						? "text-success-strong"
-						: "text-muted-foreground"
-				}`}
-			>
-				{state.message}
-			</p>
-			<Button
-				variant="outline"
-				size="sm"
-				className="h-7 text-xs"
-				onClick={onDismiss}
-			>
-				Done
-			</Button>
-		</div>
+				</>
+			}
+			onArm={onArm}
+			onConfirm={onConfirm}
+			onCancel={onCancel}
+			onRetry={onRetry}
+			onDismiss={onDismiss}
+		/>
 	);
 }
 
@@ -755,6 +611,10 @@ export function AccountStatusChips({
 			{(!isUsage ||
 				(account.codexRateLimitResetCredits?.availableCount ?? 0) > 0) && (
 				<CodexUsageResetChip account={account} status={status} />
+			)}
+			{(!isUsage ||
+				(account.anthropicBankedResets?.resetsLeftTotal ?? 0) > 0) && (
+				<AnthropicBankedResetChip account={account} status={status} />
 			)}
 			{status.showPeakChip && (!isUsage || status.isPeak) && (
 				<StatusChip

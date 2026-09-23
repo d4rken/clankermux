@@ -10,6 +10,7 @@ describe("extractAnthropicIdentity", () => {
 					email_address: "Owner@Example.com",
 				},
 				organization: {
+					uuid: "0b6f3c52-8f4e-4a57-9a36-2f9d5c1e7a10",
 					name: "Acme Inc",
 					organization_type: "claude_max",
 					rate_limit_tier: "default_claude_max_20x",
@@ -19,6 +20,7 @@ describe("extractAnthropicIdentity", () => {
 			externalAccountId: "acct-uuid-1",
 			email: "owner@example.com",
 			organizationName: "Acme Inc",
+			organizationUuid: "0b6f3c52-8f4e-4a57-9a36-2f9d5c1e7a10",
 			planTier: "max",
 			rateLimitTier: "20x",
 			subscriptionStatus: null,
@@ -93,6 +95,22 @@ describe("extractAnthropicIdentity", () => {
 		expect(identity?.rateLimitTier).toBeNull();
 	});
 
+	it("reads organization.uuid, ignoring blank and non-string values", () => {
+		expect(
+			extractAnthropicIdentity({ organization: { uuid: " org-uuid-2 " } })
+				?.organizationUuid,
+		).toBe("org-uuid-2");
+		for (const uuid of ["", "   ", 42, null, undefined]) {
+			expect(
+				extractAnthropicIdentity({ organization: { uuid } })?.organizationUuid,
+			).toBeNull();
+		}
+		// The account uuid is a different identifier and never fills this field.
+		expect(
+			extractAnthropicIdentity({ account: { uuid: "acct" } })?.organizationUuid,
+		).toBeNull();
+	});
+
 	it("falls back to `email` when `email_address` is absent", () => {
 		const identity = extractAnthropicIdentity({
 			account: { uuid: "u2", email: "Fallback@Example.com" },
@@ -138,6 +156,7 @@ describe("extractAnthropicIdentity", () => {
 			externalAccountId: null,
 			email: null,
 			organizationName: null,
+			organizationUuid: null,
 			planTier: null,
 			rateLimitTier: null,
 			subscriptionStatus: null,

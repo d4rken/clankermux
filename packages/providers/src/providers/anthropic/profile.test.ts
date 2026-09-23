@@ -12,6 +12,7 @@ describe("fetchAnthropicProfile", () => {
 				JSON.stringify({
 					account: { uuid: "acct-1", email_address: "User@Example.com" },
 					organization: {
+						uuid: "org-uuid-profile",
 						name: "Acme",
 						organization_type: "claude_pro",
 						rate_limit_tier: "default_claude_max_5x",
@@ -25,6 +26,7 @@ describe("fetchAnthropicProfile", () => {
 			externalAccountId: "acct-1",
 			email: "user@example.com",
 			organizationName: "Acme",
+			organizationUuid: "org-uuid-profile",
 			planTier: "pro",
 			rateLimitTier: "5x",
 			subscriptionStatus: null,

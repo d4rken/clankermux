@@ -44,6 +44,13 @@ import {
 } from "./handlers/analytics";
 import { createIsolatedToolErrorsHandler } from "./handlers/analytics-runner";
 import {
+	createAnthropicBankedResetAutoApplyHandler,
+	createAnthropicBankedResetAutoApplyOnWeeklyLimitHandler,
+	createAnthropicBankedResetClaimHandler,
+	createAnthropicBankedResetEventsHandler,
+	createAnthropicBankedResetRefreshHandler,
+} from "./handlers/anthropic-banked-resets";
+import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
 	createApiKeyEnableHandler,
@@ -723,8 +730,9 @@ export class APIRouter {
 				(["force", "refresh-usage", "force-reset-rate-limit"].includes(
 					parts[4] ?? "",
 				) ||
-					(parts[4] === "rate-limit-reset-credits" &&
-						parts[5] === "consume")) &&
+					(parts[4] === "rate-limit-reset-credits" && parts[5] === "consume") ||
+					(parts[4] === "banked-resets" &&
+						(parts[5] === "claim" || parts[5] === "refresh"))) &&
 				method === "POST"
 			) {
 				if ((await this.context.dbOps.getAccount(accountId))?.disabled)
@@ -790,6 +798,58 @@ export class APIRouter {
 				return await this.wrapHandler((_req, url) =>
 					resetCreditEventsHandler(url, accountId),
 				)(req, url);
+			}
+
+			// Anthropic banked resets (Claude Code's cedar_ember program). The
+			// caller owns the claim's request id and reuses it for retries.
+			if (parts.length === 6 && parts[4] === "banked-resets") {
+				const action = parts[5];
+				if (action === "claim" && method === "POST") {
+					const handler = createAnthropicBankedResetClaimHandler(
+						this.context.dbOps,
+					);
+					return await this.wrapHandler((req) => handler(req, accountId))(
+						req,
+						url,
+					);
+				}
+				if (action === "refresh" && method === "POST") {
+					const handler = createAnthropicBankedResetRefreshHandler(
+						this.context.dbOps,
+					);
+					return await this.wrapHandler((req) => handler(req, accountId))(
+						req,
+						url,
+					);
+				}
+				if (action === "auto-apply" && method === "POST") {
+					const handler = createAnthropicBankedResetAutoApplyHandler(
+						this.context.dbOps,
+					);
+					return await this.wrapHandler((req) => handler(req, accountId))(
+						req,
+						url,
+					);
+				}
+				if (action === "auto-apply-on-weekly-limit" && method === "POST") {
+					const handler =
+						createAnthropicBankedResetAutoApplyOnWeeklyLimitHandler(
+							this.context.dbOps,
+						);
+					return await this.wrapHandler((req) => handler(req, accountId))(
+						req,
+						url,
+					);
+				}
+				if (action === "events" && method === "GET") {
+					const handler = createAnthropicBankedResetEventsHandler(
+						this.context.dbOps,
+					);
+					return await this.wrapHandler((_req, url) => handler(url, accountId))(
+						req,
+						url,
+					);
+				}
 			}
 
 			if (

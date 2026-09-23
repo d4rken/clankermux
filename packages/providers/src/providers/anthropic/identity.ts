@@ -24,6 +24,13 @@ function nullableString(value: unknown): string | null {
 	return typeof value === "string" ? value : null;
 }
 
+function trimmedString(value: unknown): string | null {
+	const raw = nullableString(value);
+	if (raw === null) return null;
+	const trimmed = raw.trim();
+	return trimmed === "" ? null : trimmed;
+}
+
 function normalizeEmail(value: unknown): string | null {
 	const raw = nullableString(value);
 	if (raw === null) return null;
@@ -105,6 +112,7 @@ export function extractAnthropicIdentity(
 	const email = normalizeEmail(account?.email_address ?? account?.email);
 
 	const organizationName = nullableString(organization?.name);
+	const organizationUuid = trimmedString(organization?.uuid);
 	const rawTier = nullableString(
 		organization?.organization_type ?? organization?.type,
 	);
@@ -139,6 +147,7 @@ export function extractAnthropicIdentity(
 		externalAccountId,
 		email,
 		organizationName,
+		organizationUuid,
 		planTier,
 		rateLimitTier,
 		subscriptionStatus,

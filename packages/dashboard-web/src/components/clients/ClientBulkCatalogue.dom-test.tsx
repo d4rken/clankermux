@@ -63,6 +63,13 @@ const bravo = client("bravo", [
 		accountIds: ["a"],
 	},
 ]);
+const charlie = client("charlie", []);
+const newModel: ClientModel = {
+	id: "new",
+	displayName: "New model",
+	targetModel: "new",
+	accountIds: null,
+};
 
 /** The one "changed" preview the review tests reuse. */
 const previewWithEverything = {
@@ -137,6 +144,12 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 							accountIds: ["a"],
 							codexMetadataAvailable: false,
 						},
+						{
+							id: "glm",
+							displayName: "GLM",
+							accountIds: ["z"],
+							codexMetadataAvailable: false,
+						},
 					],
 					accounts: [],
 				},
@@ -180,6 +193,7 @@ async function rerender(clients: ClientView[]) {
 				clients={clients}
 				accounts={[
 					{ id: "a", name: "Account A", provider: "openai-compatible" },
+					{ id: "z", name: "Account Z", provider: "zai" },
 				]}
 				onCancel={() => {}}
 				onApplied={(clients) => {
@@ -240,7 +254,8 @@ async function typeInto(selector: string, value: string) {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 	});
 }
-const filterModels = (value: string) => typeInto('input[type="search"]', value);
+const filterPane = (pane: "available" | "selected", value: string) =>
+	typeInto(`input[type="search"][aria-label$=" ${pane} models"]`, value);
 async function stageCustom(fields: {
 	id: string;
 	target?: string;
@@ -262,12 +277,22 @@ async function stageCustom(fields: {
 	}
 	await click("Add to list");
 }
-const rows = () =>
-	[...document.querySelectorAll("[data-candidate]")].map((n) =>
-		n.getAttribute("data-candidate"),
-	);
-const rowText = (id: string) =>
-	document.querySelector(`[data-candidate="${id}"]`)?.textContent ?? "";
+const IN = "In catalogues";
+const OUT = "Not in every catalogue";
+const rows = (pane: string) =>
+	[
+		...(document
+			.querySelector(`section[aria-label="${pane}"]`)
+			?.querySelectorAll("[data-model-id]") ?? []),
+	].map((n) => n.getAttribute("data-model-id"));
+const rowText = (pane: string, id: string) =>
+	document
+		.querySelector(`section[aria-label="${pane}"]`)
+		?.querySelector(`[data-model-id="${id}"]`)?.textContent ?? "";
+const summary = () =>
+	[...document.querySelectorAll('[role="status"]')]
+		.map((n) => n.textContent)
+		.join(" ");
 
 afterEach(async () => {
 	await act(async () => root?.unmount());
@@ -278,8 +303,8 @@ afterEach(async () => {
 });
 
 describe("bulk catalogue editing", () => {
-	it("unions the selected clients' entries with suggestions and counts coverage", async () => {
-		await mount();
+	it("places each model by how many selected clients publish it", async () => {
+		await mount([alpha, bravo, charlie]);
 		expect(posted).toEqual([
 			{
 				path: "/api/clients/suggestions",
@@ -289,80 +314,140 @@ describe("bulk catalogue editing", () => {
 				},
 			},
 		]);
-		expect(rows()).toEqual(["fast", "new", "shared"]);
-		expect(rowText("shared")).toContain("In 2 of 2");
-		expect(rowText("new")).toContain("In 0 of 2");
+		expect(rows(IN)).toEqual(["fast", "shared"]);
+		// Two of three clients publish these, so they are also still addable.
+		expect(rows(OUT)).toEqual(["fast", "glm", "new", "shared"]);
+		expect(rowText(IN, "shared")).toContain("In 2 of 3");
+		expect(rowText(OUT, "new")).toContain("In 0 of 3");
 		expect(document.body.textContent).toContain("Edit catalogues");
 		expect(document.body.textContent).toContain("Client alpha");
 	});
 
-	it("refuses to add an ID the selected clients define differently, but still removes it", async () => {
-		await mount();
-		expect(rowText("fast")).toContain("Defined differently in 2 clients");
-		await check("Select fast");
-		expect(button("Add to all selected").disabled).toBe(true);
-		expect(button("Remove from all selected").disabled).toBe(false);
-		await check("Select fast");
-		await check("Select shared");
-		expect(button("Add to all selected").disabled).toBe(false);
+	it("stages one intent per model and moves it out of the other column", async () => {
+		await mount([alpha, bravo, charlie]);
+		await click("Add shared");
+		expect(rows(OUT)).not.toContain("shared");
+		expect(rowText(IN, "shared")).toContain("Adding to 1 client");
+		await click("Remove shared");
+		expect(rows(IN)).not.toContain("shared");
+		expect(rowText(OUT, "shared")).toContain("Removing from 2 clients");
+		await click("Undo shared");
+		expect(rows(IN)).toContain("shared");
+		expect(rows(OUT)).toContain("shared");
+		expect(summary()).toContain("Move models between the columns");
 	});
 
-	it("posts the checked entries as an add operation", async () => {
+	it("moving a row back to where every client already has it undoes the intent", async () => {
 		await mount();
-		expect(button("Add to all selected").disabled).toBe(true);
-		await check("Select new");
-		await click("Add to all selected");
+		await click("Remove shared");
+		expect(rows(IN)).toEqual(["fast"]);
+		await click("Add shared");
+		expect(rows(IN)).toEqual(["fast", "shared"]);
+		expect(rowText(IN, "shared")).not.toContain("Adding");
+		expect(button("Review changes").disabled).toBe(true);
+	});
+
+	it("refuses to add an ID the selected clients define differently, but still removes it", async () => {
+		await mount([alpha, bravo, charlie]);
+		expect(rowText(OUT, "fast")).toContain("Defined differently in 2 clients");
+		expect(button("Add fast").disabled).toBe(true);
+		expect(
+			document
+				.querySelector(`section[aria-label="${OUT}"]`)
+				?.querySelector<HTMLInputElement>('input[aria-label="Check fast"]')
+				?.disabled,
+		).toBe(true);
+		await check("Check all shown available models");
+		await click("Add checked (3)");
+		expect(rows(IN)).toEqual(["fast", "glm", "new", "shared"]);
+		expect(rows(OUT)).toEqual(["fast"]);
+		await click("Remove fast");
+		expect(rowText(OUT, "fast")).toContain("Removing from 2 clients");
+	});
+
+	it("reviews every staged add and remove as one edit", async () => {
+		await mount();
+		expect(button("Review changes").disabled).toBe(true);
+		await click("Add new");
+		await click("Remove shared");
+		expect(summary()).toContain("1 to add · 1 to remove");
+		await click("Review changes");
 		expect(posted.at(-1)).toEqual({
 			path: "/api/clients/bulk/review",
 			body: {
 				clientIds: ["alpha", "bravo"],
 				operation: {
 					format: "openai",
-					mode: "add",
-					models: [
-						{
-							id: "new",
-							displayName: "New model",
-							targetModel: "new",
-							accountIds: null,
-						},
-					],
+					mode: "edit",
+					add: [newModel],
+					remove: ["shared"],
 				},
 			},
 		});
 	});
 
-	it("narrows the rendered rows to the filter and reports how many it shows", async () => {
+	it("narrows both columns to one provider so its models can be checked at once", async () => {
 		await mount();
-		await filterModels("FAST");
-		expect(rows()).toEqual(["fast"]);
-		expect(document.body.textContent).toContain("1 of 3 shown");
-		await filterModels("no such model");
-		expect(rows()).toEqual([]);
-		expect(document.body.textContent).toContain("No models match this filter.");
-		await click("Clear");
-		expect(rows()).toEqual(["fast", "new", "shared"]);
+		await click("Show z.ai models, 1 model");
+		expect(rows(OUT)).toEqual(["glm"]);
+		expect(rows(IN)).toEqual([]);
+		await check("Check all shown available models");
+		await click("Add checked (1)");
+		expect(rows(IN)).toEqual(["glm"]);
+		await click("Clear filters");
+		expect(rows(IN)).toEqual(["fast", "glm", "shared"]);
+		expect(rows(OUT)).toEqual(["new"]);
 	});
 
-	it("keeps a checked entry the filter hides in the posted operation", async () => {
+	it("keeps a staged change the filters hide in the reviewed edit", async () => {
 		await mount();
-		await check("Select new");
-		await filterModels("shared");
-		expect(rows()).toEqual(["shared"]);
-		expect(document.body.textContent).toContain(
-			"1 selected · 1 hidden by the filter",
-		);
-		await click("Add to all selected");
+		await click("Add new");
+		await filterPane("selected", "shared");
+		await click("Show z.ai models, 1 model");
+		expect(rows(IN)).toEqual([]);
+		expect(summary()).toContain("1 to add · 0 to remove");
+		await click("Review changes");
 		expect(posted.at(-1)?.body).toMatchObject({
-			operation: { mode: "add", models: [{ id: "new" }] },
+			operation: { mode: "edit", add: [{ id: "new" }], remove: [] },
 		});
+	});
+
+	it("drops a staged add the refreshed clients already all publish", async () => {
+		await mount();
+		await click("Add new");
+		await rerender([
+			client("alpha", [...alpha.catalogues.openai.models, newModel]),
+			client("bravo", [...bravo.catalogues.openai.models, newModel]),
+		]);
+		expect(rowText(IN, "new")).not.toContain("Adding");
+		expect(button("Review changes").disabled).toBe(true);
+		expect(summary()).toContain("Move models between the columns");
+		// A client losing it again must not revive the add nobody staged anew.
+		await rerender([
+			client("alpha", [...alpha.catalogues.openai.models, newModel]),
+			bravo,
+		]);
+		expect(rowText(IN, "new")).not.toContain("Adding");
+		expect(button("Review changes").disabled).toBe(true);
+	});
+
+	it("holds the format while changes are staged", async () => {
+		await mount();
+		await click("Add new");
+		const tab = [...document.querySelectorAll('[role="tab"]')].find((t) =>
+			t.textContent?.startsWith("Anthropic"),
+		) as HTMLButtonElement | undefined;
+		expect(tab?.disabled).toBe(true);
+		expect(button("Replace catalogue for 2 clients").disabled).toBe(true);
+		await click("Discard changes");
+		expect(tab?.disabled).toBe(false);
 	});
 
 	it("previews every outcome and applies only when something changes", async () => {
 		reviewResponse = previewWithEverything;
 		await mount();
-		await check("Select shared");
-		await click("Remove from all selected");
+		await click("Remove shared");
+		await click("Review changes");
 		expect(document.body.textContent).toContain("1 of 3 clients will change");
 		const preview = document.querySelector('[aria-label="Bulk edit preview"]');
 		expect(preview?.textContent).toContain("added-one");
@@ -383,25 +468,25 @@ describe("bulk catalogue editing", () => {
 			body: { token: "bulk-token" },
 		});
 		expect(done).toBe(1);
-		// Still open, ready for the second half of a remove-then-add swap.
+		// Still open, with nothing left staged.
 		expect(document.body.textContent).toContain("Applied to 1 client.");
-		expect(rows()).toEqual(["fast", "new", "shared"]);
-		expect(checkbox("Select shared").checked).toBe(false);
+		expect(rows(IN)).toEqual(["fast", "shared"]);
+		expect(button("Review changes").disabled).toBe(true);
 	});
 
 	it("hands the committed clients to the caller", async () => {
 		commitResponse = [client("alpha", [shared])];
 		await mount();
-		await check("Select shared");
-		await click("Add to all selected");
+		await click("Add new");
+		await click("Review changes");
 		await click("Apply to 2 clients");
 		expect(appliedWith).toEqual(commitResponse);
 	});
 
-	it("disables apply when no client would change, and goes back with the selection intact", async () => {
+	it("disables apply when no client would change, and goes back with the changes intact", async () => {
 		reviewResponse = {
 			token: "bulk-token",
-			operation: { format: "openai", mode: "add", models: [] },
+			operation: { format: "openai", mode: "edit", add: [], remove: [] },
 			clients: [
 				{
 					apiKeyId: "alpha",
@@ -417,11 +502,11 @@ describe("bulk catalogue editing", () => {
 			],
 		};
 		await mount();
-		await check("Select shared");
-		await click("Add to all selected");
+		await click("Add new");
+		await click("Review changes");
 		expect(button("Apply to 0 clients").disabled).toBe(true);
 		await click("Back");
-		expect(checkbox("Select shared").checked).toBe(true);
+		expect(rowText(IN, "new")).toContain("Adding to 2 clients");
 	});
 
 	it("sends no replace until the confirmation, and starts from that client's own entries", async () => {
@@ -456,7 +541,7 @@ describe("bulk catalogue editing", () => {
 });
 
 describe("custom batch entries", () => {
-	it("stages an alias no client publishes, checks it, and posts it whole", async () => {
+	it("stages an alias no client publishes as an addition and posts it whole", async () => {
 		await mount();
 		await stageCustom({
 			id: "shared[1m]",
@@ -464,19 +549,19 @@ describe("custom batch entries", () => {
 			name: "Shared long context",
 			destination: "Account A",
 		});
-		expect(rows()).toEqual(["fast", "new", "shared", "shared[1m]"]);
-		expect(checkbox("Select shared[1m]").checked).toBe(true);
-		expect(rowText("shared[1m]")).toContain("Custom");
-		expect(rowText("shared[1m]")).toContain("In 0 of 2");
-		await click("Add to all selected");
+		expect(rows(IN)).toEqual(["fast", "shared", "shared[1m]"]);
+		expect(rowText(IN, "shared[1m]")).toContain("Custom");
+		expect(rowText(IN, "shared[1m]")).toContain("In 0 of 2");
+		expect(rowText(IN, "shared[1m]")).toContain("Adding to 2 clients");
+		await click("Review changes");
 		expect(posted.at(-1)).toEqual({
 			path: "/api/clients/bulk/review",
 			body: {
 				clientIds: ["alpha", "bravo"],
 				operation: {
 					format: "openai",
-					mode: "add",
-					models: [
+					mode: "edit",
+					add: [
 						{
 							id: "shared[1m]",
 							displayName: "Shared long context",
@@ -484,18 +569,29 @@ describe("custom batch entries", () => {
 							accountIds: ["a"],
 						},
 					],
+					remove: [],
 				},
 			},
 		});
 	});
 
-	it("takes a staged entry back out of the list and the selection", async () => {
+	it("takes a staged entry back out of the list and the changes", async () => {
 		await mount();
 		await stageCustom({ id: "typo" });
-		expect(checkbox("Select typo").checked).toBe(true);
-		await click("Remove typo from the list");
-		expect(rows()).toEqual(["fast", "new", "shared"]);
-		expect(button("Add to all selected").disabled).toBe(true);
+		expect(rows(IN)).toContain("typo");
+		await click("Discard typo");
+		expect(rows(IN)).not.toContain("typo");
+		expect(rows(OUT)).not.toContain("typo");
+		expect(button("Review changes").disabled).toBe(true);
+	});
+
+	it("discards a staged entry moved back out of the catalogues column", async () => {
+		await mount();
+		await stageCustom({ id: "typo" });
+		await click("Remove typo");
+		expect(rows(IN)).not.toContain("typo");
+		expect(rows(OUT)).not.toContain("typo");
+		expect(button("Review changes").disabled).toBe(true);
 	});
 
 	it("refuses a colliding ID and an alias with no destination", async () => {
@@ -509,7 +605,8 @@ describe("custom batch entries", () => {
 		expect(document.body.textContent).toContain(
 			"Choose at least one destination for an alias",
 		);
-		expect(rows()).toEqual(["fast", "new", "shared"]);
+		expect(rows(IN)).toEqual(["fast", "shared"]);
+		expect(rows(OUT)).toEqual(["glm", "new"]);
 		expect(posted.length).toBe(requests);
 	});
 
@@ -532,9 +629,9 @@ describe("custom batch entries", () => {
 			]),
 			bravo,
 		]);
-		expect(rowText("late")).toContain("late → late-target");
-		expect(rowText("late")).toContain("In 1 of 2");
-		expect(rowText("late")).toContain("Defined differently in 1 client");
-		expect(button("Add to all selected").disabled).toBe(true);
+		expect(rowText(IN, "late")).toContain("late-target");
+		expect(rowText(IN, "late")).toContain("In 1 of 2");
+		expect(rowText(IN, "late")).toContain("Defined differently in 1 client");
+		expect(button("Review changes").disabled).toBe(true);
 	});
 });

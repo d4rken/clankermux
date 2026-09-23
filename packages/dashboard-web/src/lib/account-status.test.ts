@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { AccountResponse } from "@clankermux/types";
-import { deriveAccountStatus } from "./account-status";
+import {
+	deriveAccountStatus,
+	RESET_CREDIT_IMMINENT_THRESHOLD_MS,
+	RESET_CREDIT_SOON_THRESHOLD_MS,
+	resetCreditUrgencyFor,
+} from "./account-status";
 
 // Wednesday 2024-01-03, noon UTC — a fixed, predictable default for the
 // assertions below, none of which depend on a peak window.
@@ -1189,6 +1194,98 @@ describe("deriveAccountStatus — reset-credit urgency", () => {
 		);
 		expect(status.resetCreditAutoApplyArmed).toBe(true);
 		expect(status.resetCreditAutoApplyOnWeeklyLimitArmed).toBe(false);
+	});
+});
+
+describe("resetCreditUrgencyFor", () => {
+	it("is red under an hour, amber under a day and none beyond or without a date", () => {
+		const at = (ms: number) => resetCreditUrgencyFor(new Date(NOW + ms), NOW);
+		expect(at(RESET_CREDIT_IMMINENT_THRESHOLD_MS - 1)).toBe("imminent");
+		expect(at(RESET_CREDIT_IMMINENT_THRESHOLD_MS)).toBe("soon");
+		expect(at(RESET_CREDIT_SOON_THRESHOLD_MS - 1)).toBe("soon");
+		expect(at(RESET_CREDIT_SOON_THRESHOLD_MS)).toBe("none");
+		expect(resetCreditUrgencyFor(null, NOW)).toBe("none");
+	});
+});
+
+describe("deriveAccountStatus — Anthropic banked resets", () => {
+	function makeBankedAccount(
+		grants: Array<{ resetsLeft: number; endsAt: string | null }>,
+		overrides: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return makeAccount({
+			provider: "anthropic",
+			hasRefreshToken: true,
+			anthropicBankedResets: {
+				eligible: true,
+				ineligibleReason: null,
+				exhausted: [],
+				cooldownUntil: null,
+				weeklyResetsAt: null,
+				nextGrantId: "g0",
+				grants: grants.map((grant, index) => ({
+					id: `g${index}`,
+					label: null,
+					resetsLeft: grant.resetsLeft,
+					resetsTotal: 2,
+					endsAt: grant.endsAt,
+					startsAt: null,
+					clears: ["seven_day"],
+					paused: false,
+					usableNow: true,
+					useRequiresLimit: true,
+					isNext: index === 0,
+				})),
+				resetsLeftTotal: grants.reduce((sum, g) => sum + g.resetsLeft, 0),
+				fetchedAt: new Date(NOW).toISOString(),
+			},
+			...overrides,
+		});
+	}
+
+	it("takes the soonest future use-by date among grants with resets left", () => {
+		const status = deriveAccountStatus(
+			makeBankedAccount([
+				{ resetsLeft: 1, endsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+				// Spent: its sooner date must not color the chip.
+				{ resetsLeft: 0, endsAt: new Date(NOW + 30 * MINUTE).toISOString() },
+				// Already past its use-by date.
+				{ resetsLeft: 1, endsAt: new Date(NOW - MINUTE).toISOString() },
+				{
+					resetsLeft: 1,
+					endsAt: new Date(NOW + 5 * 60 * MINUTE).toISOString(),
+				},
+				{ resetsLeft: 1, endsAt: null },
+			]),
+			NOW,
+		);
+		expect(status.bankedResetNextExpiry?.getTime()).toBe(NOW + 5 * 60 * MINUTE);
+		expect(status.bankedResetUrgency).toBe("soon");
+	});
+
+	it("reports none without grants or dates", () => {
+		expect(deriveAccountStatus(makeAccount(), NOW).bankedResetUrgency).toBe(
+			"none",
+		);
+		const undated = deriveAccountStatus(
+			makeBankedAccount([{ resetsLeft: 1, endsAt: null }]),
+			NOW,
+		);
+		expect(undated.bankedResetNextExpiry).toBeNull();
+		expect(undated.bankedResetUrgency).toBe("none");
+	});
+
+	it("passes both auto-apply flags through independently of the Codex ones", () => {
+		const status = deriveAccountStatus(
+			makeBankedAccount([], {
+				autoApplyBankedResetsEnabled: false,
+				autoApplyBankedResetOnWeeklyLimitEnabled: true,
+				autoApplyResetCreditsEnabled: true,
+			}),
+			NOW,
+		);
+		expect(status.bankedResetAutoApplyArmed).toBe(false);
+		expect(status.bankedResetAutoApplyOnWeeklyLimitArmed).toBe(true);
 	});
 });
 

@@ -76,7 +76,7 @@ interface Deps {
 	permissions: AccountModelPermissionService;
 	codexCatalog: CodexModelCatalogCache;
 }
-const BULK_MODES: ClientBulkMode[] = ["add", "remove", "replace"];
+const BULK_MODES: ClientBulkMode[] = ["edit", "replace"];
 /** How long a review token stays redeemable. */
 const PENDING_TTL_MS = 600000;
 /** Prepared client records held across all pending reviews. */
@@ -1409,23 +1409,29 @@ export class ClientService {
 			mode?: unknown;
 			models?: unknown;
 			defaultModel?: unknown;
+			add?: unknown;
+			remove?: unknown;
 		};
 		if (!FORMATS.includes(operation.format as ClientFormat))
 			throw BadRequest("Unknown catalogue format");
 		if (!BULK_MODES.includes(operation.mode as ClientBulkMode))
 			throw BadRequest("Unknown bulk operation");
-		const models = operation.models;
-		if (!Array.isArray(models) || models.length > BULK_MAX_MODELS)
+		const format = operation.format as ClientFormat;
+		const entries =
+			operation.mode === "edit" ? operation.add : operation.models;
+		const removals = operation.mode === "edit" ? operation.remove : [];
+		if (
+			!Array.isArray(entries) ||
+			!Array.isArray(removals) ||
+			entries.length + removals.length > BULK_MAX_MODELS
+		)
 			throw BadRequest(`Choose at most ${BULK_MAX_MODELS} models`);
-		// Only `id` is checked here: all three modes read it while merging and
-		// while diffing, so a malformed entry would throw out of the request
-		// before any validation ran. The rest of an entry is per-client and
-		// stays prepareDraft's job.
+		// Only `id` is checked here: every mode reads it while merging and while
+		// diffing, so a malformed entry would throw out of the request before any
+		// validation ran. The rest of an entry is per-client and stays
+		// prepareDraft's job.
 		const seen = new Set<string>();
-		for (const value of models) {
-			if (!value || typeof value !== "object" || Array.isArray(value))
-				throw BadRequest("Invalid model entry");
-			const id = (value as ClientModel).id;
+		const claim = (id: unknown) => {
 			if (
 				typeof id !== "string" ||
 				!id.trim() ||
@@ -1435,15 +1441,31 @@ export class ClientService {
 				throw BadRequest("Invalid model ID");
 			if (seen.has(id)) throw BadRequest(`Duplicate model ${id}`);
 			seen.add(id);
+		};
+		for (const value of entries) {
+			if (!value || typeof value !== "object" || Array.isArray(value))
+				throw BadRequest("Invalid model entry");
+			claim((value as ClientModel).id);
 		}
+		// Sharing `seen` with the entries also refuses an ID that one edit both
+		// adds and removes.
+		for (const id of removals) claim(id);
 		return {
 			clientIds: clientIds as string[],
-			operation: {
-				format: operation.format as ClientFormat,
-				mode: operation.mode as ClientBulkMode,
-				models: models as ClientModel[],
-				defaultModel: (operation.defaultModel ?? null) as string | null,
-			},
+			operation:
+				operation.mode === "edit"
+					? {
+							format,
+							mode: "edit",
+							add: entries as ClientModel[],
+							remove: removals as string[],
+						}
+					: {
+							format,
+							mode: "replace",
+							models: entries as ClientModel[],
+							defaultModel: (operation.defaultModel ?? null) as string | null,
+						},
 		};
 	}
 	/**
@@ -1457,7 +1479,6 @@ export class ClientService {
 		const { clientIds, operation } = this.bulkRequest(input);
 		const { dbOps } = this.deps;
 		const fingerprintBefore = this.fingerprint();
-		const operationIds = new Set(operation.models.map((m) => m.id));
 		const clients: ClientBulkClientResult[] = [];
 		const records: PreparedDraft[] = [];
 		for (const id of clientIds) {
@@ -1498,13 +1519,11 @@ export class ClientService {
 				after.models = structuredClone(operation.models);
 				after.defaultModel = operation.defaultModel ?? null;
 			} else {
-				if (operation.mode === "add") {
-					const present = new Set(after.models.map((m) => m.id));
-					for (const model of operation.models)
-						if (!present.has(model.id))
-							after.models.push(structuredClone(model));
-				} else
-					after.models = after.models.filter((m) => !operationIds.has(m.id));
+				const dropped = new Set(operation.remove);
+				after.models = after.models.filter((m) => !dropped.has(m.id));
+				const present = new Set(after.models.map((m) => m.id));
+				for (const model of operation.add)
+					if (!present.has(model.id)) after.models.push(structuredClone(model));
 				if (
 					after.defaultModel !== null &&
 					!after.models.some((m) => m.id === after.defaultModel)

@@ -215,4 +215,220 @@ describe("GrokSubscriptionProvider", () => {
 			expect(registry.listOAuthProviders()).not.toContain("grok-subscription");
 		});
 	});
+
+	describe("transformRequestBody", () => {
+		async function transformed(body: unknown): Promise<Request> {
+			return provider.transformRequestBody(
+				new Request("https://cli-chat-proxy.grok.com/v1/messages", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"content-length": "999",
+					},
+					body: JSON.stringify(body),
+				}),
+			);
+		}
+
+		// The proxy answers a tool whose input_schema omits `required` with
+		// 400 `/required: null is not of type "array"`; the same request with
+		// `required: []` answers 200. Nested object schemas are accepted as-is.
+		it("gives every tool schema a top-level required list", async () => {
+			const nested = {
+				type: "object",
+				properties: { a: { type: "string" } },
+			};
+			const request = await transformed({
+				model: "grok-4.6",
+				messages: [{ role: "user", content: "hi" }],
+				tools: [
+					{
+						name: "omits",
+						input_schema: { type: "object", properties: { opts: nested } },
+					},
+					{
+						name: "null",
+						input_schema: { type: "object", properties: {}, required: null },
+					},
+					{
+						name: "keeps",
+						input_schema: { type: "object", properties: {}, required: ["q"] },
+					},
+				],
+			});
+			const body = await request.json();
+			expect(
+				body.tools.map((t: { input_schema: unknown }) => t.input_schema),
+			).toEqual([
+				{ type: "object", properties: { opts: nested }, required: [] },
+				{ type: "object", properties: {}, required: [] },
+				{ type: "object", properties: {}, required: ["q"] },
+			]);
+			expect(request.headers.get("content-length")).toBeNull();
+		});
+
+		it("passes a request whose tools already comply through untouched", async () => {
+			const original = new Request(
+				"https://cli-chat-proxy.grok.com/v1/messages",
+				{
+					method: "POST",
+					body: JSON.stringify({
+						model: "grok-4.6",
+						messages: [],
+						tools: [
+							{ name: "t", input_schema: { type: "object", required: [] } },
+						],
+					}),
+				},
+			);
+			expect(await provider.transformRequestBody(original)).toBe(original);
+		});
+
+		it("leaves server tools without an input_schema and non-JSON bodies alone", async () => {
+			const request = await transformed({
+				model: "grok-4.6",
+				messages: [],
+				tools: [{ type: "web_search_20250305", name: "web_search" }],
+			});
+			expect((await request.json()).tools).toEqual([
+				{ type: "web_search_20250305", name: "web_search" },
+			]);
+			const raw = new Request("https://cli-chat-proxy.grok.com/v1/messages", {
+				method: "POST",
+				body: "not json",
+			});
+			expect(await provider.transformRequestBody(raw)).toBe(raw);
+		});
+	});
+
+	// The proxy intermittently answers a request holding any `role: "system"`
+	// message with 400 "Invalid message role" (7 of 60 live sends), while the
+	// same text inside a user message passed 50 of 50.
+	describe("system-role messages", () => {
+		async function messagesAfter(
+			messages: unknown[],
+			extra: Record<string, unknown> = {},
+		) {
+			const request = await provider.transformRequestBody(
+				new Request("https://cli-chat-proxy.grok.com/v1/messages", {
+					method: "POST",
+					body: JSON.stringify({ model: "grok-4.6", messages, ...extra }),
+				}),
+			);
+			return request.json();
+		}
+		const reminder = (text: string) => ({
+			type: "text",
+			text: `<system-reminder>\n${text}\n</system-reminder>`,
+		});
+
+		it("appends a system message to the user turn before it", async () => {
+			const toolResult = {
+				type: "tool_result",
+				tool_use_id: "toolu_1",
+				content: "ok",
+			};
+			const body = await messagesAfter([
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "toolu_1", name: "Bash", input: {} },
+					],
+				},
+				{ role: "user", content: [toolResult] },
+				{ role: "system", content: [{ type: "text", text: "Date changed." }] },
+			]);
+			expect(body.messages.at(-1)).toEqual({
+				role: "user",
+				content: [toolResult, reminder("Date changed.")],
+			});
+			expect(body.messages).toHaveLength(3);
+		});
+
+		it("prepends to the next user turn when the previous turn is the assistant's", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{ role: "system", content: "Be brief." },
+				{ role: "user", content: "again" },
+			]);
+			expect(body.messages).toEqual([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{
+					role: "user",
+					content: [reminder("Be brief."), { type: "text", text: "again" }],
+				},
+			]);
+		});
+
+		it("keeps tool results first when prepending to the next user turn", async () => {
+			const toolResult = {
+				type: "tool_result",
+				tool_use_id: "toolu_1",
+				content: "ok",
+			};
+			const body = await messagesAfter([
+				{ role: "user", content: "run it" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "toolu_1", name: "Bash", input: {} },
+					],
+				},
+				{ role: "system", content: "Date changed." },
+				{ role: "user", content: [toolResult, { type: "text", text: "go" }] },
+			]);
+			expect(body.messages.at(-1).content).toEqual([
+				toolResult,
+				reminder("Date changed."),
+				{ type: "text", text: "go" },
+			]);
+		});
+
+		it("becomes its own user turn when no user turn is adjacent", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+				{ role: "system", content: "Be brief." },
+			]);
+			expect(body.messages.at(-1)).toEqual({
+				role: "user",
+				content: [reminder("Be brief.")],
+			});
+		});
+
+		it("moves an effort update to the request instead of dropping it", async () => {
+			const body = await messagesAfter([
+				{ role: "user", content: "hi" },
+				{
+					role: "system",
+					content: "Effort changed.",
+					output_config: { effort: "low" },
+				},
+			]);
+			expect(body.output_config).toEqual({ effort: "low" });
+			expect(body.messages).toEqual([
+				{
+					role: "user",
+					content: [{ type: "text", text: "hi" }, reminder("Effort changed.")],
+				},
+			]);
+		});
+
+		it("leaves a conversation without system messages untouched", async () => {
+			const original = new Request(
+				"https://cli-chat-proxy.grok.com/v1/messages",
+				{
+					method: "POST",
+					body: JSON.stringify({
+						model: "grok-4.6",
+						messages: [{ role: "user", content: "hi" }],
+					}),
+				},
+			);
+			expect(await provider.transformRequestBody(original)).toBe(original);
+		});
+	});
 });

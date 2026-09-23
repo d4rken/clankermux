@@ -774,6 +774,32 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAutoApplyBankedResetsToggle = async (account: Account) => {
+		try {
+			await api.updateAccountAutoApplyBankedResets(
+				account.id,
+				!account.autoApplyBankedResetsEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
+	const handleAutoApplyBankedResetOnWeeklyLimitToggle = async (
+		account: Account,
+	) => {
+		try {
+			await api.updateAccountAutoApplyBankedResetOnWeeklyLimit(
+				account.id,
+				!account.autoApplyBankedResetOnWeeklyLimitEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleUpdateCustomEndpoint = async (
 		accountId: string,
 		customEndpoint: string | null,
@@ -949,6 +975,10 @@ export function AccountsTab() {
 						onAutoApplyResetCreditsToggle={handleAutoApplyResetCreditsToggle}
 						onAutoApplyResetOnWeeklyLimitToggle={
 							handleAutoApplyResetOnWeeklyLimitToggle
+						}
+						onAutoApplyBankedResetsToggle={handleAutoApplyBankedResetsToggle}
+						onAutoApplyBankedResetOnWeeklyLimitToggle={
+							handleAutoApplyBankedResetOnWeeklyLimitToggle
 						}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelPermissionsChange={handleModelPermissionsChange}

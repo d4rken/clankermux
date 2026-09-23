@@ -1,13 +1,29 @@
 export { AlibabaCodingPlanProvider } from "./alibaba-coding-plan/index";
+export type {
+	AnthropicBankedResetCacheEntry,
+	AnthropicBankedResetStatusFetchResult,
+} from "./anthropic/index";
 export {
+	ANTHROPIC_BANKED_RESET_GRANT_ID_PATTERN,
+	ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS,
+	ANTHROPIC_BANKED_RESET_REFRESH_MS,
+	ANTHROPIC_BANKED_RESET_REQUEST_ID_PATTERN,
+	ANTHROPIC_BANKED_RESET_RETRY_MS,
+	ANTHROPIC_BANKED_RESET_STATUS_ENDPOINT,
 	AnthropicOAuthProvider,
 	AnthropicProvider,
+	anthropicBankedResetCache,
+	anthropicBankedResetClaimEndpoint,
 	canFetchAnthropicProfile,
+	claimAnthropicBankedReset,
+	fetchAnthropicBankedResetStatus,
 	fetchAnthropicProfile,
 	HARD_LIMIT_STATUSES,
 	isAnthropicHardLimitStatus,
 	isAnthropicOutOfCredits,
 	OUT_OF_CREDITS_REASON,
+	parseAnthropicBankedResetClaimResponse,
+	parseCedarEmberBlock,
 	SOFT_WARNING_STATUSES,
 } from "./anthropic/index";
 export { isAnthropicOrgPermissionDenied } from "./anthropic/org-permission-denied";

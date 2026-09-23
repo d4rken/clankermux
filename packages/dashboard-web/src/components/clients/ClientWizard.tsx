@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import { CatalogueSelector } from "./CatalogueSelector";
 import { ClientLabel, clientLabelText } from "./ClientLabel";
+import { NO_DESTINATION_FILTER, servingAccounts } from "./destination-filter";
 import {
 	APPLICATIONS,
 	destinationsLabel,
@@ -174,6 +175,7 @@ export function ClientWizard({
 	});
 	/** Kept across format tabs: narrowing the list is a view, not catalogue data. */
 	const [queries, setQueries] = useState({ available: "", selected: "" });
+	const [filter, setFilter] = useState(NO_DESTINATION_FILTER);
 	const [removedModels, setRemovedModels] = useState<
 		Record<ClientFormat, ClientModel[]>
 	>({
@@ -1028,14 +1030,11 @@ export function ClientWizard({
 								onQueryChange={(side, value) =>
 									setQueries((current) => ({ ...current, [side]: value }))
 								}
+								filter={filter}
+								onFilterChange={setFilter}
 								busy={busy}
-								accountNames={(model) =>
-									(
-										model.accountIds ??
-										suggestions?.models.find((m) => m.id === model.targetModel)
-											?.accountIds ??
-										[]
-									).map((id) => accounts.find((a) => a.id === id)?.name ?? id)
+								modelAccounts={(model) =>
+									servingAccounts(model, suggestions, accounts)
 								}
 								onAdd={(models) => {
 									const ids = new Set(models.map((m) => m.id));

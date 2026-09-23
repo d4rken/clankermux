@@ -134,15 +134,22 @@ describe("a grok-subscription account is polled and cached", () => {
 		});
 	});
 
-	it("caches an absent percentage as unknown rather than as 0%", async () => {
+	it("caches an absent percentage in the current period as 0%", async () => {
 		serveBilling(() => billingResponse());
 
 		startUsagePollingFor(grokAccount(), starters());
 		expect(await usageCache.refreshNow(ACCOUNT_ID)).toBe(true);
 
-		const entry = cached();
-		expect(entry?.weeklyUtilization).toBeNull();
-		expect(entry?.weeklyUtilization).not.toBe(0);
+		expect(cached()?.weeklyUtilization).toBe(0);
+	});
+
+	it("caches an explicit null percentage as unknown rather than as 0%", async () => {
+		serveBilling(() => billingResponse({ creditUsagePercent: null }));
+
+		startUsagePollingFor(grokAccount(), starters());
+		expect(await usageCache.refreshNow(ACCOUNT_ID)).toBe(true);
+
+		expect(cached()?.weeklyUtilization).toBeNull();
 	});
 
 	it("starts from a refresh token alone", async () => {

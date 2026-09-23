@@ -15,6 +15,17 @@ export {
 	NATIVE_DISCOVERY_PROVIDERS,
 } from "./account-model-permissions";
 export {
+	AnthropicBankedResetApplyScheduler,
+	type BankedResetApplyDeps,
+	createAnthropicBankedResetApplyScheduler,
+	decideBankedResetAction,
+} from "./anthropic-banked-reset-applier";
+export {
+	AnthropicBankedResetCoordinator,
+	type AnthropicBankedResetCoordinatorDeps,
+	bankedResetsLeftTotal,
+} from "./anthropic-banked-reset-coordinator";
+export {
 	ANTHROPIC_BUNDLED_MODEL_CREATED_AT,
 	ANTHROPIC_MODEL_CATALOG_LOOKUP_BUDGET_MS,
 	ANTHROPIC_MODEL_CATALOG_RETRY_AFTER_MS,
@@ -81,11 +92,14 @@ export {
 	recordFamilyWeeklyExhausted,
 } from "./family-weekly-memo";
 export {
+	type AnthropicBankedResetClaimDispatchOutcome,
+	type AnthropicBankedResetRefreshOutcome,
 	type CapacityProbeReservation,
 	type CodexResetCreditConsumeDispatchOutcome,
 	type CodexUsageRefreshOutcome,
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
+	claimAnthropicBankedResetForAccount,
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearAllPendingRotationsForTests,
@@ -114,9 +128,12 @@ export {
 	type PendingRotationWriter,
 	recordPendingRotation,
 	recordRecentRefresh,
+	refreshAnthropicBankedResetsForAccount,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
+	registerAnthropicBankedResetClaimer,
+	registerAnthropicBankedResetRefresher,
 	registerCodexResetCreditConsumer,
 	registerCodexResetCreditsRefresher,
 	registerCodexUsageRefresher,
@@ -129,6 +146,8 @@ export {
 	stopGlobalTokenHealthChecks,
 	type TokenHealthReport,
 	type TokenHealthStatus,
+	unregisterAnthropicBankedResetClaimer,
+	unregisterAnthropicBankedResetRefresher,
 	unregisterCodexResetCreditConsumer,
 	unregisterCodexResetCreditsRefresher,
 	unregisterCodexUsageRefresher,
