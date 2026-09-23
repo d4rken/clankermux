@@ -206,6 +206,15 @@ export function clearedSessionCookieHeader(): string {
 /** The persistence this service needs. `DatabaseOperations` satisfies it. */
 export interface SessionAuthStore {
 	getManagementPassword(): Promise<StoredPasswordVerifier | null>;
+	/**
+	 * Store the verifier only when no password exists; false when one does.
+	 * Revokes every session when it stores.
+	 */
+	setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean>;
 	createManagementSession(
 		record: AuthSessionRecord,
 		boundTo: PasswordBinding,
@@ -281,6 +290,26 @@ export class SessionAuthService {
 			stored.params,
 		);
 		return ok ? { verifier: stored.verifier, params: stored.params } : null;
+	}
+
+	/**
+	 * Store `password` as the FIRST management password. Returns the binding a
+	 * session can be minted against, or null when a password already existed —
+	 * the write is a compare-and-set in the store, so a claim cannot overwrite a
+	 * password set by the CLI or another claim meanwhile.
+	 *
+	 * Does not validate `password`; the caller does, before paying for the hash.
+	 */
+	async claimInitialPassword(
+		password: string,
+	): Promise<PasswordBinding | null> {
+		const { verifier, params } = await this.hasher.hash(password);
+		const inserted = await this.store.setManagementPasswordIfAbsent(
+			verifier,
+			params,
+			this.now(),
+		);
+		return inserted ? { verifier, params } : null;
 	}
 
 	/**

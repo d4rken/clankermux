@@ -8,6 +8,7 @@ import type {
 	ProviderOverloadStatus,
 } from "@clankermux/types";
 import type { SessionAuthService } from "./services/session-auth-service";
+import type { SetupCodeService } from "./services/setup-code";
 
 /**
  * Request-scoped context handed to every HTTP handler in this package.
@@ -31,6 +32,13 @@ export interface APIContext {
 	 * production always passes one.
 	 */
 	sessionAuth?: SessionAuthService;
+	/**
+	 * The first-run setup code behind `POST /api/auth/setup`. Optional for the
+	 * same reason as `sessionAuth`; when absent the router builds one that prints
+	 * to stdout without a dashboard URL. The server injects the instance its
+	 * startup announcement uses, so startup and status checks share one code.
+	 */
+	setupCode?: SetupCodeService;
 	auth?: {
 		isAuthenticated: boolean;
 		apiKey?: ApiKey;

@@ -99,6 +99,13 @@ export {
 	createSessionStreamGuard,
 	type StreamSessionGuard,
 } from "./services/session-stream-registry";
+export {
+	issueSetupCodeAtStartup,
+	printSetupCodeAnnouncement,
+	SETUP_CODE_ALPHABET,
+	SETUP_CODE_LENGTH,
+	SetupCodeService,
+} from "./services/setup-code";
 // Export SSE shutdown registry (used by server shutdown to close endless
 // dashboard streams before the HTTP drain)
 export { closeAllSseStreams, registerSseCloser } from "./sse-registry";

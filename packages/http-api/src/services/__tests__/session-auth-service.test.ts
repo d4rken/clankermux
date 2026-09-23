@@ -46,6 +46,16 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword(): Promise<StoredPasswordVerifier | null> {
 		return this.password;
 	}
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean> {
+		if (this.password) return false;
+		this.password = { verifier, params, updatedAt };
+		this.sessions.clear();
+		return true;
+	}
 	async createManagementSession(
 		record: AuthSessionRecord,
 		boundTo: PasswordBinding,
@@ -193,6 +203,27 @@ describe("fail-open until a password is set", () => {
 		const { svc, store, hasher } = makeService();
 		await configure(store, hasher, "hunter2");
 		expect(await svc.authorizeRequest(requestWithCookie())).toBe(false);
+	});
+});
+
+describe("claiming the first password", () => {
+	it("stores the hash and returns a binding a session can be minted against", async () => {
+		const { svc, store, hasher } = makeService();
+		const binding = await svc.claimInitialPassword("first password");
+		expect(binding).not.toBeNull();
+		expect(store.password?.verifier).toBe(binding?.verifier ?? "");
+		expect(store.password?.updatedAt).toBe(1_000_000);
+		expect(await svc.verifyPassword("first password")).not.toBeNull();
+		expect(hasher.hashCalls).toBe(1);
+		if (!binding) throw new Error("claim failed");
+		expect(await svc.createSession(binding)).not.toBeNull();
+	});
+
+	it("returns null and keeps the stored password when one already exists", async () => {
+		const { svc, store, hasher } = makeService();
+		const existing = await configure(store, hasher, "hunter2");
+		expect(await svc.claimInitialPassword("usurper password")).toBeNull();
+		expect(store.password?.verifier).toBe(existing.verifier);
 	});
 });
 

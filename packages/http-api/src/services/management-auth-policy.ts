@@ -23,6 +23,7 @@ const PUBLIC_AUTH_PATHS = new Set([
 	"/api/auth/login",
 	"/api/auth/logout",
 	"/api/auth/status",
+	"/api/auth/setup",
 ]);
 
 /**
