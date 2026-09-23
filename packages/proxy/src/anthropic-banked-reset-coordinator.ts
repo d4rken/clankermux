@@ -448,6 +448,13 @@ export class AnthropicBankedResetCoordinator {
 		}
 		account = gate.account;
 
+		// The awaits since the ledger sweep may have carried the row past its
+		// replay window; checked with no await before the POST it guards.
+		const replayUntil =
+			target.createdAt + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
+		if (this.now() >= replayUntil) {
+			return this.giveUpUnsent(account, request);
+		}
 		const claimStartedAt = this.now();
 		const ids = { grantId: request.grantId, requestId: request.requestId };
 		let result = await this.claimReset(accessToken, orgUuid, ids);
@@ -460,6 +467,10 @@ export class AnthropicBankedResetCoordinator {
 			if (retryGate && "message" in retryGate) {
 				log.warn(
 					`Banked-reset claim for '${account.name}' not retried after an auth error: ${retryGate.message}`,
+				);
+			} else if (refreshed && this.now() >= replayUntil) {
+				log.warn(
+					`Banked-reset claim for '${account.name}' not retried after an auth error: its replay window closed`,
 				);
 			} else if (refreshed) {
 				result = await this.claimReset(refreshed, orgUuid, ids);
@@ -775,6 +786,33 @@ export class AnthropicBankedResetCoordinator {
 				},
 			};
 		}
+	}
+
+	/**
+	 * A claim whose replay window closed before its POST could leave: give its
+	 * row up as the ledger sweep would, and answer with the settled row.
+	 */
+	private async giveUpUnsent(
+		account: Account,
+		request: AnthropicBankedResetClaimRequest,
+	): Promise<AnthropicBankedResetClaimDispatchOutcome> {
+		try {
+			await this.ctx.dbOps.expireStaleAnthropicBankedResetAttempts(this.now());
+			const row = await this.ctx.dbOps.getAnthropicBankedResetEventByRequestId(
+				account.id,
+				request.requestId,
+			);
+			if (row) return this.settledOutcome(account, row);
+		} catch (error) {
+			log.warn(
+				`Could not give up the expired banked-reset claim for '${account.name}': ${errorMessage(error)}`,
+			);
+		}
+		return {
+			status: "failed",
+			code: "error",
+			message: `Not sent: the banked-reset claim for '${account.name}' reached the end of its replay window.`,
+		};
 	}
 
 	private settledOutcome(

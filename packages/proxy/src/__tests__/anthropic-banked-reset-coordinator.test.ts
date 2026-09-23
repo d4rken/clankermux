@@ -1254,4 +1254,49 @@ describe("the replay window", () => {
 			)?.reason,
 		).toBe("unconfirmed");
 	});
+
+	it("sends nothing when the window closes between the ledger sweep and the POST", async () => {
+		await openUnconfirmed("req-slow");
+		clock = NOW + WINDOW - 1;
+		dbOverrides = {
+			getAccountPauseMarker: async () => {
+				clock = NOW + WINDOW;
+				return {
+					paused: false,
+					pauseReason: null,
+					autoPauseOnOverageEnabled: false,
+					pauseEpoch: PAUSE_EPOCH,
+					pauseChangedAt: null,
+				};
+			},
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-slow",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
+	it("does not retry after an auth error once the window has closed", async () => {
+		await openUnconfirmed("req-401-late");
+		clock = NOW + WINDOW - 1;
+		claimImpl = async () => {
+			clock = NOW + WINDOW;
+			return claimResult({
+				result: "auth_error",
+				httpStatus: 401,
+				errorMessage: "401",
+			});
+		};
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-401-late",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+	});
 });
