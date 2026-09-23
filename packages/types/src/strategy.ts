@@ -135,4 +135,14 @@ export interface LoadBalancingStrategy {
 	clearAffinityForAccount?(accountId: string): number;
 	/** Rebind a conversation after a durable request-specific exclusion. */
 	reassignAffinity?(meta: RequestMeta, account: Account): void;
+	/**
+	 * Move a conversation's pin from `fromAccountId` to the account that just
+	 * served it, unless a concurrent request has moved the pin since. Leaves the
+	 * request's routing telemetry as the strategy recorded it.
+	 */
+	followAffinity?(
+		meta: RequestMeta,
+		fromAccountId: string,
+		account: Account,
+	): void;
 }
