@@ -199,19 +199,13 @@ describe("worker lanes", () => {
 	});
 
 	it("light-lane traffic does not keep a wedged heavy worker alive", async () => {
-		const created = trackWorkers(() => {
-			// Burn the rest of the current millisecond, so the lane's activity
-			// clock — stamped after construction returns — is strictly later than
-			// the instant the watchdog timers were armed. A real Worker always
-			// takes that long to spawn; this fake does not, and without the gap
-			// the wedge this case asserts on is not the one production sees.
-			const startedAt = Date.now();
-			while (Date.now() === startedAt) {}
-			return new FakeDashboardWorker({
-				shouldReply: repliesExcept("analytics"),
-				replyDelayMs: 2,
-			});
-		});
+		const created = trackWorkers(
+			() =>
+				new FakeDashboardWorker({
+					shouldReply: repliesExcept("analytics"),
+					replyDelayMs: 2,
+				}),
+		);
 		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 60 });
 
 		const analyticsPromise = createIsolatedAnalyticsHandler(fakeContext)(
@@ -429,8 +423,8 @@ describe("one worker job per request key", () => {
 		expect((await analytics(HUNG)).status).toBe(503);
 		const [heavy] = created;
 		heavy.reply(heavy.posted[0].id);
-		// Queued behind the job's own continuation, so it lands after the
-		// result reached the cache writer and before the write.
+		// Runs in the microtasks that follow the reply, before the job's
+		// cache write completes.
 		queueMicrotask(() => invalidateDashboardCache("analytics"));
 		await Bun.sleep(5);
 

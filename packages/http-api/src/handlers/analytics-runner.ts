@@ -148,8 +148,8 @@ type PendingWorkerRequest = {
 	resolve: (response: Response) => void;
 	reject: (error: Error) => void;
 	// Tears the worker down if the lane stays silent for a whole hard deadline
-	// while this read is outstanding (a genuine wedge).
-	hardTimeoutHandle: ReturnType<typeof setTimeout>;
+	// while this read is outstanding (a genuine wedge). Armed once posted.
+	hardTimeoutHandle?: ReturnType<typeof setTimeout>;
 };
 
 /**
@@ -575,10 +575,9 @@ function runDashboardWorker(
 
 	return new Promise<Response>((resolve, reject) => {
 		// The hard watchdog asks "has this lane said anything SINCE `since`?",
-		// which an elapsed-duration comparison cannot answer: creating the worker
-		// writes `lastActivityAt` after the first timer is armed, so
-		// `now - lastActivityAt` is always short of `hardMs` by however long the
-		// spawn took. `since` starts as the instant of this request's postMessage.
+		// which an elapsed-duration comparison cannot answer: a message for any
+		// read refreshes `lastActivityAt`. `since` starts as the instant of this
+		// request's postMessage, and the first deadline is armed from it.
 		let since = 0;
 
 		// Only a lane that stayed silent for a whole hard deadline is wedged, and
@@ -598,7 +597,9 @@ function runDashboardWorker(
 				pending.hardTimeoutHandle = watch();
 			}, hardMs);
 
-		state.pending.set(id, { resolve, reject, hardTimeoutHandle: watch() });
+		// Registered before the post so a reply can never outrun its entry.
+		const entry: PendingWorkerRequest = { resolve, reject };
+		state.pending.set(id, entry);
 
 		try {
 			getDashboardWorker(lane).postMessage({
@@ -609,6 +610,7 @@ function runDashboardWorker(
 				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
 			} satisfies AnalyticsWorkerRequest);
 			since = Date.now();
+			if (state.pending.get(id) === entry) entry.hardTimeoutHandle = watch();
 		} catch (error) {
 			const pending = state.pending.get(id);
 			if (pending) {
