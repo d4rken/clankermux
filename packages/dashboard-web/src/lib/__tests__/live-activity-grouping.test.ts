@@ -21,10 +21,14 @@ describe("loadLaneDimension", () => {
 		expect(loadLaneDimension(fakeStorage())).toBe(DEFAULT_LANE_DIMENSION);
 	});
 
-	it("round-trips a chosen dimension", () => {
+	it.each([
+		"project",
+		"client",
+		"account",
+	] as const)("round-trips the %s dimension", (dimension) => {
 		const storage = fakeStorage();
-		saveLaneDimension("client", storage);
-		expect(loadLaneDimension(storage)).toBe("client");
+		saveLaneDimension(dimension, storage);
+		expect(loadLaneDimension(storage)).toBe(dimension);
 	});
 
 	it("ignores a stored value that is not a dimension", () => {
@@ -59,7 +63,12 @@ describe("loadLaneDimension", () => {
 });
 
 describe("dimension option set", () => {
-	it("offers the default as a selectable option", () => {
+	it("keeps the persisted dimensions and selector options exhaustive", () => {
+		expect(LANE_DIMENSION_OPTIONS.map((option) => option.value)).toEqual([
+			"project",
+			"client",
+			"account",
+		]);
 		expect(
 			LANE_DIMENSION_OPTIONS.some((o) => o.value === DEFAULT_LANE_DIMENSION),
 		).toBe(true);

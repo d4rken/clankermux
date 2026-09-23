@@ -30,6 +30,10 @@ export interface RequestFilters {
 	to?: number;
 	/** Account name (falls back to matching the raw account id). */
 	account?: string;
+	/** Exact recorded account id. Preferred over the legacy name filter. */
+	accountId?: string;
+	/** Restrict to requests with a SQL NULL account_used value. */
+	noAccount?: boolean;
 	/**
 	 * API key id. Preferred over {@link RequestFilters.apiKey}: two keys may
 	 * carry the same name, and a name filter cannot tell them apart. The id is
@@ -151,7 +155,12 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		params.push(filters.to);
 	}
 
-	if (filters.account) {
+	if (filters.noAccount) {
+		clauses.push("r.account_used IS NULL");
+	} else if (filters.accountId) {
+		clauses.push("r.account_used = ?");
+		params.push(filters.accountId);
+	} else if (filters.account) {
 		// The dashboard filters by the friendly account name, but fall back to the
 		// raw id so rows from since-deleted accounts (name JOIN is null) still match.
 		clauses.push("(a.name = ? OR r.account_used = ?)");
@@ -231,8 +240,14 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 		filters.to = to;
 	}
 
+	const noAccount = params.get("noAccount") === "1";
+	const accountId = params.get("accountId");
 	const account = params.get("account");
-	if (account) {
+	if (noAccount) {
+		filters.noAccount = true;
+	} else if (accountId) {
+		filters.accountId = accountId;
+	} else if (account) {
 		filters.account = account;
 	}
 

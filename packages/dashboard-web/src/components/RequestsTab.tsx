@@ -197,6 +197,12 @@ interface SelectableClient {
 	application: ClientApplication | null;
 }
 
+/** An account option is identified by id; names are display labels only. */
+interface SelectableAccount {
+	id: string;
+	name: string;
+}
+
 /** What a name-valued filter is currently selecting. */
 interface NameSelection {
 	/** Literal name, or null when no name is selected. */
@@ -224,7 +230,7 @@ export function decodeNameSelectValue(value: string): NameSelection {
 
 export function RequestsTab() {
 	// ── URL-addressable state ─────────────────────────────────────────────────
-	// The project filter, the API key filter and the open request live in the
+	// The account, project and API key filters and the open request live in the
 	// URL: they are what Live Activity links to. Every setter clones the current
 	// params first, so none of them can drop a parameter it does not own.
 	const [searchParams, setSearchParams] = useSearchParams();
@@ -241,6 +247,18 @@ export function RequestsTab() {
 	const projectFilter = noProjectFilter
 		? null
 		: searchParams.get("project") || null;
+
+	// Account links are ID-valued so duplicate names stay separable and renamed
+	// or deleted accounts keep their historical rows addressable. `account` is
+	// read only as a legacy inbound URL form; new writes use accountId.
+	const noAccountFilter = searchParams.get("noAccount") === "1";
+	const accountIdFilter = noAccountFilter
+		? null
+		: searchParams.get("accountId") || null;
+	const legacyAccountFilter =
+		noAccountFilter || accountIdFilter !== null
+			? null
+			: searchParams.get("account") || null;
 
 	// The client filter is id-valued, never name-valued: two clients can carry
 	// the same name, and a name would select both of them. The empty bucket wins
@@ -270,8 +288,27 @@ export function RequestsTab() {
 		[setSearchParams],
 	);
 
-	// `selection.name` carries the key's ID here — the dropdown's option values
-	// are ids, and `NameSelection` is the shape both selects speak.
+	// `selection.name` carries the account/key ID for these two selectors;
+	// the shared selection codec namespaces IDs just like project names.
+	const setAccountSelection = useCallback(
+		(selection: NameSelection) => {
+			setSearchParams(
+				(prev) => {
+					const next = new URLSearchParams(prev);
+					next.delete("account");
+					next.delete("accountId");
+					next.delete("noAccount");
+					if (selection.none) next.set("noAccount", "1");
+					else if (selection.name !== null)
+						next.set("accountId", selection.name);
+					return next;
+				},
+				{ replace: true },
+			);
+		},
+		[setSearchParams],
+	);
+
 	const setApiKeySelection = useCallback(
 		(selection: NameSelection) => {
 			setSearchParams(
@@ -317,7 +354,6 @@ export function RequestsTab() {
 	}, [setSearchParams]);
 
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
-	const [accountFilter, setAccountFilter] = useState<string | null>(null);
 	const [dateFrom, setDateFrom] = useState<string>("");
 	const [dateTo, setDateTo] = useState<string>("");
 	const [showFilters, setShowFilters] = useState(false);
@@ -332,7 +368,9 @@ export function RequestsTab() {
 		() => ({
 			status: statusCategory,
 			codes: Array.from(statusCodeFilters),
-			account: accountFilter,
+			account: legacyAccountFilter,
+			accountId: accountIdFilter,
+			noAccount: noAccountFilter,
 			apiKeyId: apiKeyIdFilter,
 			noApiKey: noApiKeyFilter,
 			project: projectFilter,
@@ -343,7 +381,9 @@ export function RequestsTab() {
 		[
 			statusCategory,
 			statusCodeFilters,
-			accountFilter,
+			legacyAccountFilter,
+			accountIdFilter,
+			noAccountFilter,
 			apiKeyIdFilter,
 			noApiKeyFilter,
 			projectFilter,
@@ -474,13 +514,52 @@ export function RequestsTab() {
 	// Filter dropdown options come from dedicated endpoints (not from the loaded
 	// requests slice) so every configured account/API key is selectable, even
 	// when it doesn't appear in the most recent N requests.
-	const uniqueAccounts = useMemo(() => {
-		const fromConfig = (accounts ?? []).map((a) => a.name).filter(Boolean);
-		const fromRequests = (data?.requests ?? [])
-			.map((r) => r.meta.accountName || r.meta.accountId)
-			.filter((v): v is string => Boolean(v));
-		return Array.from(new Set([...fromConfig, ...fromRequests])).sort();
+	const accountsById = useMemo(() => {
+		const byId = new Map<string, SelectableAccount>();
+		for (const request of data?.requests ?? []) {
+			const id = request.meta.accountId;
+			if (id) byId.set(id, { id, name: request.meta.accountName || id });
+		}
+		// Current configuration wins over historical labels after a rename.
+		// A name without an ID cannot safely become an ID-valued option.
+		for (const account of accounts ?? []) {
+			if (account.id)
+				byId.set(account.id, {
+					id: account.id,
+					name: account.name || account.id,
+				});
+		}
+		return byId;
 	}, [accounts, data]);
+
+	const selectedAccount = useMemo((): SelectableAccount | null => {
+		if (accountIdFilter !== null) {
+			return (
+				accountsById.get(accountIdFilter) ?? {
+					id: accountIdFilter,
+					name: accountIdFilter,
+				}
+			);
+		}
+		if (legacyAccountFilter !== null) {
+			return { id: legacyAccountFilter, name: legacyAccountFilter };
+		}
+		return null;
+	}, [accountIdFilter, accountsById, legacyAccountFilter]);
+
+	const uniqueAccounts = useMemo(() => {
+		const options = Array.from(accountsById.values());
+		if (
+			accountIdFilter !== null &&
+			selectedAccount &&
+			!accountsById.has(accountIdFilter)
+		) {
+			options.push(selectedAccount);
+		}
+		return options.sort(
+			(a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+		);
+	}, [accountsById, accountIdFilter, selectedAccount]);
 
 	// Status codes for the specific-code picker: the curated common set (so error
 	// codes are always selectable even when the loaded rows are all 200s) unioned
@@ -597,17 +676,15 @@ export function RequestsTab() {
 
 	const clearAllFilters = () => {
 		setStatusCategory("all");
-		setAccountFilter(null);
-		// One callback for both URL filters, not `setApiKeySelection` followed by
-		// `setProjectSelection`: each callback is handed the params captured for
-		// the render it was created in, so the second would clone a query string
-		// that still carries what the first deleted, and navigate it back. The
-		// four keys are the only ones deleted — `request` survives, so clearing
-		// filters cannot close an open details modal. Both halves are held by the
-		// Clear-all test in RequestsTab.url.dom-test.tsx.
+		// One callback for all URL filters: separate setters would each clone the
+		// same render's params and resurrect the previous setter's deleted keys.
+		// The request link and every unrelated URL key stay.
 		setSearchParams(
 			(prev) => {
 				const next = new URLSearchParams(prev);
+				next.delete("account");
+				next.delete("accountId");
+				next.delete("noAccount");
 				next.delete("apiKeyId");
 				next.delete("noApiKey");
 				next.delete("project");
@@ -728,11 +805,13 @@ export function RequestsTab() {
 									onClear={() => setStatusCodeFilters(new Set())}
 								/>
 							)}
-							{accountFilter !== null && (
+							{(noAccountFilter || selectedAccount !== null) && (
 								<FilterChip
 									icon={<User className="h-3 w-3" />}
-									label={accountFilter}
-									onClear={() => setAccountFilter(null)}
+									label={noAccountFilter ? "No Account" : selectedAccount?.name}
+									onClear={() =>
+										setAccountSelection({ name: null, none: false })
+									}
 								/>
 							)}
 							{(noApiKeyFilter || selectedApiKey !== null) && (
@@ -994,34 +1073,44 @@ export function RequestsTab() {
 										<User className="h-3 w-3" />
 										Account
 									</Label>
-									{/* Namespaced values, like the API key and project selects: a
-									    bare account name of "all" would otherwise be read back as
-									    the any-account sentinel and silently show everything.
-									    There is no "recorded without one" bucket for accounts, so
-									    `none` is always false here. */}
+									{/* Account option values are IDs; names are labels only. */}
 									<Select
-										value={nameSelectValue({
-											name: accountFilter,
-											none: false,
-										})}
+										value={
+											legacyAccountFilter !== null
+												? `legacy:${legacyAccountFilter}`
+												: nameSelectValue({
+														name: accountIdFilter,
+														none: noAccountFilter,
+													})
+										}
 										onValueChange={(value) =>
-											setAccountFilter(decodeNameSelectValue(value).name)
+											setAccountSelection(decodeNameSelectValue(value))
 										}
 									>
-										<SelectTrigger className="h-9">
+										<SelectTrigger className="h-9" aria-label="Account">
 											<SelectValue placeholder="All accounts" />
 										</SelectTrigger>
 										<SelectContent>
 											<SelectItem value={SELECT_ALL}>All accounts</SelectItem>
+											<SelectItem value={SELECT_NONE}>No Account</SelectItem>
+											{/* Legacy names must not masquerade as an ID option. */}
+											{legacyAccountFilter !== null && (
+												<SelectItem
+													value={`legacy:${legacyAccountFilter}`}
+													disabled
+												>
+													{legacyAccountFilter} (legacy name)
+												</SelectItem>
+											)}
 											{uniqueAccounts.map((account) => (
 												<SelectItem
-													key={account}
+													key={account.id}
 													value={nameSelectValue({
-														name: account,
+														name: account.id,
 														none: false,
 													})}
 												>
-													{account}
+													{account.name}
 												</SelectItem>
 											))}
 										</SelectContent>

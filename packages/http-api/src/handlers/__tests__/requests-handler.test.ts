@@ -71,6 +71,7 @@ describe("createRequestsSummaryHandler", () => {
 			statusCode: number | null;
 			rateLimited: boolean;
 			accountUsed: string | null;
+			accountId?: string | null;
 			project?: string;
 			reasoningEffort?: string;
 			requestedModel?: string;
@@ -79,6 +80,7 @@ describe("createRequestsSummaryHandler", () => {
 		expect(body[0].statusCode).toBe(429);
 		expect(body[0].rateLimited).toBe(true);
 		expect(body[0].accountUsed).toBe("Primary");
+		expect(body[0].accountId).toBe("acc1");
 		expect(body[0].project).toBe("clankermux");
 		expect(body[0].reasoningEffort).toBe("thinking:2048");
 		expect(body[0].requestedModel).toBe("claude-haiku-4-5-20251001");

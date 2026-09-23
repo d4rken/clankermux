@@ -12,7 +12,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
-import { api, type RequestPayload, type RequestSummary } from "../api";
+import {
+	type Account,
+	api,
+	type RequestPayload,
+	type RequestSummary,
+} from "../api";
 import { API_LIMITS } from "../constants";
 import { queryKeys } from "../lib/query-keys";
 import { RequestsTab } from "./RequestsTab";
@@ -38,6 +43,8 @@ const LOADED_ID = "loaded-request";
 const REMOTE_ID = "remote-request";
 const KEY_ID = "key-9";
 const KEY_NAME = "workstation";
+const ACCOUNT_ID = "account-9";
+const ACCOUNT_NAME = "backup2-darken";
 
 function summary(over: Partial<RequestSummary> = {}): RequestSummary {
 	return {
@@ -63,6 +70,8 @@ let host: HTMLElement | null = null;
 let queryClient: QueryClient | null = null;
 let currentSearch = "";
 let goBack: (() => void) | null = null;
+let goForward: (() => void) | null = null;
+let goTo: ((url: string) => void) | null = null;
 
 /**
  * Reports the router's live query string so URL effects can be asserted, and
@@ -74,6 +83,8 @@ function SearchProbe() {
 	currentSearch = useLocation().search;
 	const navigate = useNavigate();
 	goBack = () => navigate(-1);
+	goForward = () => navigate(1);
+	goTo = (url) => navigate(url);
 	return null;
 }
 
@@ -95,6 +106,7 @@ async function settle(rounds = 4): Promise<void> {
 interface Stubs {
 	/** Rows the live tail returns. */
 	loaded?: RequestSummary[];
+	accounts?: Account[];
 	/** What the by-id lookup does. */
 	byId?: () => Promise<RequestSummary | null>;
 }
@@ -107,7 +119,9 @@ async function mount(initialEntry: string, stubs: Stubs = {}): Promise<void> {
 		stubs.byId ?? (async () => null),
 	);
 	spyOn(api, "getRequestsCount").mockImplementation(async () => 0);
-	spyOn(api, "getAccounts").mockImplementation(async () => []);
+	spyOn(api, "getAccounts").mockImplementation(
+		async () => stubs.accounts ?? [],
+	);
 	spyOn(api, "getRequestProjects").mockImplementation(async () => [
 		"clankermux",
 		"herdr",
@@ -195,6 +209,8 @@ afterEach(async () => {
 	queryClient = null;
 	currentSearch = "";
 	goBack = null;
+	goForward = null;
+	goTo = null;
 	// spyOn call counters live on the shared `api` object, so without this a
 	// "was never called" assertion would read the previous test's calls.
 	mock.restore();
@@ -355,6 +371,256 @@ describe("RequestsTab — ?project=", () => {
 			expect.any(Number),
 			expect.anything(),
 		);
+	});
+});
+
+function accountSelector(): HTMLElement {
+	const trigger = document.querySelector<HTMLElement>(
+		'[role="combobox"][aria-label="Account"]',
+	);
+	if (!trigger) throw new Error("Missing Account selector");
+	return trigger;
+}
+
+async function accountOptions(): Promise<HTMLElement[]> {
+	await act(async () => {
+		accountSelector().focus();
+		accountSelector().dispatchEvent(
+			new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+		);
+	});
+	return Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
+}
+
+async function chooseAccount(label: string, index = 0): Promise<void> {
+	const option = (await accountOptions()).filter(
+		(item) => item.textContent === label,
+	)[index];
+	if (!option) throw new Error(`Missing account option ${label}`);
+	await act(async () => {
+		option.dispatchEvent(
+			new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+		);
+	});
+	await settle();
+}
+
+function configuredAccount(id: string, name: string): Account {
+	return { id, name, provider: "ollama", disabled: false } as Account;
+}
+
+describe("RequestsTab — account URL filters", () => {
+	it("writes distinct IDs for duplicate names and preserves unrelated URL state", async () => {
+		await mount(
+			"/requests?account=old-name&noAccount=0&project=clankermux&keep=one&keep=two",
+			{
+				accounts: [
+					configuredAccount("account-a", "Same"),
+					configuredAccount("account-b", "Same"),
+				],
+			},
+		);
+		await clickButton("Filters");
+		await chooseAccount("Same", 1);
+		let params = new URLSearchParams(currentSearch);
+		expect(params.get("accountId")).toBe("account-b");
+		expect(params.has("account")).toBe(false);
+		expect(params.has("noAccount")).toBe(false);
+		expect(params.get("project")).toBe("clankermux");
+		expect(params.getAll("keep")).toEqual(["one", "two"]);
+		expect(api.getRequestsCount).toHaveBeenLastCalledWith({
+			accountId: "account-b",
+			project: "clankermux",
+		});
+		await chooseAccount("Same", 0);
+		expect(new URLSearchParams(currentSearch).get("accountId")).toBe(
+			"account-a",
+		);
+		await chooseAccount("No Account");
+		params = new URLSearchParams(currentSearch);
+		expect(params.get("noAccount")).toBe("1");
+		expect(params.has("accountId")).toBe(false);
+		await chooseAccount("All accounts");
+		expect(new URLSearchParams(currentSearch).has("noAccount")).toBe(false);
+		await act(async () => {
+			goBack?.();
+		});
+		await settle();
+		// Dropdown edits replace rather than filling browser history.
+		expect(new URLSearchParams(currentSearch).has("account")).toBe(false);
+	});
+
+	it("uses current configured names and never invents IDs from names", async () => {
+		await mount(`/requests?accountId=${ACCOUNT_ID}`, {
+			accounts: [configuredAccount(ACCOUNT_ID, "Renamed")],
+			loaded: [
+				summary({ accountId: ACCOUNT_ID, accountUsed: "Old name" }),
+				summary({
+					id: "unknown",
+					accountId: null,
+					accountUsed: "Name without ID",
+				}),
+				summary({ id: "deleted", accountId: "deleted-id", accountUsed: null }),
+			],
+		});
+		expect(activeFilterLabels()).toContain("Renamed");
+		await clickButton("Filters");
+		expect(accountSelector().textContent).toBe("Renamed");
+		const labels = (await accountOptions()).map((option) => option.textContent);
+		expect(labels).toContain("deleted-id");
+		expect(labels).not.toContain("Name without ID");
+		expect(labels).not.toContain("Old name");
+	});
+
+	it("keeps an unknown selected ID visible even with no matching rows", async () => {
+		await mount("/requests?accountId=ghost");
+		expect(activeFilterLabels()).toContain("ghost");
+		await clickButton("Filters");
+		expect(accountSelector().textContent).toBe("ghost");
+		expect(
+			(await accountOptions()).map((option) => option.textContent),
+		).toContain("ghost");
+	});
+
+	it("preserves legacy name filtering even when the name is another account's ID", async () => {
+		await mount("/requests?account=legacy-name", {
+			accounts: [configuredAccount("legacy-name", "Different account")],
+		});
+		expect(api.getRequestsCount).toHaveBeenLastCalledWith({
+			account: "legacy-name",
+		});
+		expect(activeFilterLabels()).toContain("legacy-name");
+		await clickButton("Filters");
+		expect(accountSelector().textContent).toContain("legacy-name");
+		await chooseAccount("Different account");
+		expect(new URLSearchParams(currentSearch).get("accountId")).toBe(
+			"legacy-name",
+		);
+		expect(new URLSearchParams(currentSearch).has("account")).toBe(false);
+	});
+
+	it("lets ID win over legacy name and ignores empty IDs or non-1 bucket flags", async () => {
+		await mount(
+			`/requests?accountId=${ACCOUNT_ID}&account=legacy&noAccount=true`,
+		);
+		expect(api.getRequestsCount).toHaveBeenLastCalledWith({
+			accountId: ACCOUNT_ID,
+		});
+		await act(async () => {
+			goTo?.("/requests?accountId=&account=legacy&noAccount=0");
+		});
+		await settle();
+		expect(api.getRequestsCount).toHaveBeenLastCalledWith({
+			account: "legacy",
+		});
+		await act(async () => {
+			goTo?.("/requests?accountId=&account=&noAccount=0");
+		});
+		await settle();
+		expect(pageText()).toContain("Live · latest");
+	});
+
+	it("restores account filter state on browser back and forward", async () => {
+		await mount(`/requests?accountId=${ACCOUNT_ID}&keep=yes`);
+		await act(async () => {
+			goTo?.("/requests?noAccount=1&keep=yes");
+		});
+		await settle();
+		expect(activeFilterLabels()).toContain("No Account");
+		await act(async () => {
+			goBack?.();
+		});
+		await settle();
+		expect(activeFilterLabels()).toEqual([ACCOUNT_ID]);
+		expect(new URLSearchParams(currentSearch).get("keep")).toBe("yes");
+		await act(async () => {
+			goForward?.();
+		});
+		await settle();
+		expect(activeFilterLabels()).toEqual(["No Account"]);
+	});
+
+	it("clears every account form from its chip without dropping other filters", async () => {
+		await mount(
+			`/requests?account=legacy&accountId=${ACCOUNT_ID}&noAccount=1&project=clankermux&keep=yes`,
+		);
+		const group = findButton("Clear all")?.parentElement;
+		const bar = group?.parentElement;
+		const chip = Array.from(bar?.children ?? []).find(
+			(element) => element.textContent?.trim() === "No Account",
+		);
+		const clear = chip?.querySelector("button");
+		expect(clear).toBeDefined();
+		await act(async () => {
+			clear?.click();
+		});
+		await settle();
+		expect(currentSearch).toBe("?project=clankermux&keep=yes");
+	});
+	it("reads accountId as the stable account identity", async () => {
+		await mount(`/requests?accountId=${ACCOUNT_ID}`, {
+			loaded: [summary({ accountId: ACCOUNT_ID, accountUsed: ACCOUNT_NAME })],
+		});
+
+		expect(activeFilterLabels()).toContain(ACCOUNT_NAME);
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ accountId: ACCOUNT_ID }),
+		);
+	});
+
+	it("lets noAccount win over accountId and legacy account", async () => {
+		await mount(
+			`/requests?account=legacy-name&accountId=${ACCOUNT_ID}&noAccount=1`,
+			{
+				loaded: [summary({ accountId: ACCOUNT_ID, accountUsed: ACCOUNT_NAME })],
+			},
+		);
+
+		expect(activeFilterLabels()).toContain("No Account");
+		expect(activeFilterLabels()).not.toContain(ACCOUNT_NAME);
+		expect(api.getRequestsSummary).toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ noAccount: true }),
+		);
+		expect(api.getRequestsSummary).not.toHaveBeenCalledWith(
+			expect.any(Number),
+			expect.objectContaining({ accountId: ACCOUNT_ID }),
+		);
+	});
+
+	it("keeps account when browser back closes a pushed request", async () => {
+		await mount(`/requests?accountId=${ACCOUNT_ID}`, {
+			loaded: [summary({ accountId: ACCOUNT_ID, accountUsed: ACCOUNT_NAME })],
+		});
+		await clickButton("View Details");
+		expect(new URLSearchParams(currentSearch).get("request")).toBe(LOADED_ID);
+		await act(async () => {
+			goBack?.();
+		});
+		await settle();
+		const params = new URLSearchParams(currentSearch);
+		expect(params.get("accountId")).toBe(ACCOUNT_ID);
+		expect(params.has("request")).toBe(false);
+	});
+
+	it("clears all URL filters while keeping the request and unrelated state", async () => {
+		await mount(
+			`/requests?account=legacy&accountId=${ACCOUNT_ID}&noAccount=0&apiKeyId=${KEY_ID}&noApiKey=0&project=clankermux&noProject=0&request=${LOADED_ID}&keep=yes`,
+			{
+				loaded: [summary({ accountId: ACCOUNT_ID, accountUsed: ACCOUNT_NAME })],
+			},
+		);
+		expect(activeFilterLabels()).toContain(ACCOUNT_NAME);
+		expect(modalIsOpen()).toBe(true);
+
+		await clickButton("Clear all");
+		const params = new URLSearchParams(currentSearch);
+		expect(params.has("accountId")).toBe(false);
+		expect(params.get("request")).toBe(LOADED_ID);
+		expect(params.toString()).toBe(`request=${LOADED_ID}&keep=yes`);
+		expect(activeFilterLabels()).toEqual([]);
+		expect(modalIsOpen()).toBe(true);
 	});
 });
 

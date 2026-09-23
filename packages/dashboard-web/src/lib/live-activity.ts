@@ -1,5 +1,5 @@
 import { getModelShortName, type RequestStreamEvt } from "@clankermux/core";
-import type { RequestResponse } from "@clankermux/types";
+import { normalizeAccountId, type RequestResponse } from "@clankermux/types";
 import { NO_PROJECT_LABEL } from "./project-donut";
 
 /**
@@ -31,7 +31,9 @@ export interface LiveEvent {
 	status: LiveStatus;
 	durationMs: number | null;
 	tokensPerSecond: number | null;
-	/** Account display name where resolvable, else whatever the source gave. */
+	/** Stable account identity; null is unknown while active or no-account at terminal. */
+	accountId: string | null;
+	/** Account display name where resolvable, else whatever the source recorded. */
 	account: string | null;
 	/** The API key the request presented. `null` is a real state, not a gap:
 	 *  unprotected mode admits traffic that carries no key at all. */
@@ -91,14 +93,15 @@ function finiteNonNegative(value: number | null | undefined): number | null {
 }
 
 function resolveAccount(
-	accountUsed: string | null | undefined,
+	accountId: string | null,
+	recorded: string | null | undefined,
 	ctx: NormalizeContext | undefined,
 ): string | null {
-	if (!accountUsed) return null;
-	// Live events carry the account ID, the backfill endpoint carries the NAME.
-	// A lookup miss means it was already a name (or an account since deleted),
-	// so the raw value is the best available label either way.
-	return ctx?.accountName?.(accountUsed) ?? accountUsed;
+	if (accountId === null) return recorded ?? null;
+	// Live events carry the account ID; history carries both the stable ID and
+	// the source-specific label. A lookup miss means the account was deleted or
+	// the recorded value is already the best available label.
+	return ctx?.accountName?.(accountId) ?? recorded ?? accountId;
 }
 
 /**
@@ -134,7 +137,12 @@ function upsert(
 		status: next.status,
 		durationMs: next.durationMs ?? prior?.durationMs ?? null,
 		tokensPerSecond: next.tokensPerSecond ?? prior?.tokensPerSecond ?? null,
-		account: next.account ?? prior?.account ?? null,
+		accountId:
+			next.accountId !== undefined
+				? next.accountId
+				: (prior?.accountId ?? null),
+		account:
+			next.account !== undefined ? next.account : (prior?.account ?? null),
 		apiKeyId: next.apiKeyId ?? prior?.apiKeyId ?? null,
 		apiKeyName: next.apiKeyName ?? prior?.apiKeyName ?? null,
 	});
@@ -163,7 +171,18 @@ function fromRequestResponse(
 		tokens: finiteNonNegative(payload.totalTokens),
 		durationMs: finiteNonNegative(payload.responseTimeMs),
 		tokensPerSecond: finiteNonNegative(payload.tokensPerSecond),
-		account: resolveAccount(payload.accountUsed, ctx),
+		accountId: normalizeAccountId(
+			payload.accountId !== undefined ? payload.accountId : payload.accountUsed,
+		),
+		account: resolveAccount(
+			normalizeAccountId(
+				payload.accountId !== undefined
+					? payload.accountId
+					: payload.accountUsed,
+			),
+			payload.accountUsed,
+			ctx,
+		),
 		apiKeyId: payload.apiKeyId ?? null,
 		apiKeyName: payload.apiKeyName ?? null,
 		status: classifyOutcome(payload),
@@ -198,6 +217,8 @@ export function applyStreamEvent(
 				ts: evt.timestamp,
 				project: evt.project,
 				model: evt.model,
+				accountId: null,
+				account: null,
 				apiKeyId: evt.apiKeyId,
 				apiKeyName: evt.apiKeyName,
 				status: "pending",
@@ -208,7 +229,8 @@ export function applyStreamEvent(
 				ts: evt.timestamp,
 				project: evt.project,
 				model: evt.model,
-				account: resolveAccount(evt.accountId, ctx),
+				accountId: normalizeAccountId(evt.accountId),
+				account: resolveAccount(normalizeAccountId(evt.accountId), null, ctx),
 				apiKeyId: evt.apiKeyId,
 				apiKeyName: evt.apiKeyName,
 				status: "streaming",
@@ -259,7 +281,8 @@ function applySnapshot(
 				ts: entry.timestamp,
 				project: entry.project,
 				model: entry.model,
-				account: resolveAccount(entry.accountId, ctx),
+				accountId: normalizeAccountId(entry.accountId),
+				account: resolveAccount(normalizeAccountId(entry.accountId), null, ctx),
 				apiKeyId: entry.apiKeyId,
 				apiKeyName: entry.apiKeyName,
 				status: entry.phase === "streaming" ? "streaming" : "pending",
@@ -388,12 +411,19 @@ export const OTHER_LANE_KEY = "other";
 export const NO_PROJECT_LANE_KEY = "none";
 /** Synthetic key for requests that carried no API key. */
 export const NO_CLIENT_LANE_KEY = "no-client";
+/** Synthetic key for active requests whose account has not been selected yet. */
+export const ACCOUNT_PENDING_LANE_KEY = "account-pending";
+/** Synthetic key for terminal requests with no account. */
+export const NO_ACCOUNT_LANE_KEY = "account-none";
 
 /** Label for the lane holding requests that carried no API key. */
 export const NO_CLIENT_LABEL = "(no API key)";
+/** Labels distinguish routing from a terminal request that used no account. */
+export const ACCOUNT_PENDING_LABEL = "(routing)";
+export const NO_ACCOUNT_LABEL = "(no account)";
 
-/** What one row of the card stands for: a project, or an API key. */
-export type LaneDimension = "project" | "client";
+/** What one row of the card stands for: a project, API key, or account. */
+export type LaneDimension = "project" | "client" | "account";
 
 /**
  * Stable lane key for one value in `dimension` — a project name or a key id.
@@ -409,6 +439,9 @@ export function laneKeyOf(
 ): string {
 	if (dimension === "client") {
 		return value === null ? NO_CLIENT_LANE_KEY : `client:${value}`;
+	}
+	if (dimension === "account") {
+		return value === null ? NO_ACCOUNT_LANE_KEY : `account:${value}`;
 	}
 	return value === null ? NO_PROJECT_LANE_KEY : `project:${value}`;
 }
@@ -426,6 +459,9 @@ export type LaneScope =
 	| { kind: "no-project" }
 	| { kind: "client"; apiKeyId: string }
 	| { kind: "no-client" }
+	| { kind: "account"; accountId: string }
+	| { kind: "account-pending" }
+	| { kind: "no-account" }
 	| { kind: "other" };
 
 export interface Lane {
@@ -494,7 +530,25 @@ const LANE_DIMENSIONS: Record<LaneDimension, LaneDimensionSpec> = {
 		scopeOf: (apiKeyId) => ({ kind: "client", apiKeyId }),
 		noun: "client",
 	},
+	account: {
+		valueOf: (event) => event.accountId ?? null,
+		nameOf: (event) => event.account ?? null,
+		emptyKey: NO_ACCOUNT_LANE_KEY,
+		emptyLabel: NO_ACCOUNT_LABEL,
+		emptyScope: { kind: "no-account" },
+		scopeOf: (accountId) => ({ kind: "account", accountId }),
+		noun: "account",
+	},
 };
+
+function accountLaneKeyOf(event: LiveEvent): string {
+	// Presence, not truthiness, is the identity test: the empty string is still
+	// a recorded account id and must not be relabelled as routing/no-account.
+	if (event.accountId !== null) return laneKeyOf("account", event.accountId);
+	return isActiveStatus(event.status)
+		? ACCOUNT_PENDING_LANE_KEY
+		: NO_ACCOUNT_LANE_KEY;
+}
 
 /**
  * Group events into lanes, one per project or per API key.
@@ -532,6 +586,7 @@ export function buildLanes(
 	windowMs: number,
 	maxLanes: number,
 	previousOrder: readonly string[] = [],
+	resolveAccount?: (accountId: string) => string | null,
 ): BuildLanesResult {
 	const spec = LANE_DIMENSIONS[dimension];
 	const cutoff = now - windowMs;
@@ -543,7 +598,10 @@ export function buildLanes(
 	for (const event of events) {
 		if (event.ts < cutoff && !isActiveStatus(event.status)) continue;
 		const value = spec.valueOf(event);
-		const key = laneKeyOf(dimension, value);
+		const key =
+			dimension === "account"
+				? accountLaneKeyOf(event)
+				: laneKeyOf(dimension, value);
 		let bucket = byKey.get(key);
 		if (!bucket) {
 			bucket = { value, events: [] };
@@ -575,7 +633,10 @@ export function buildLanes(
 	const overflow: string[] = [];
 	let namedTaken = 0;
 	for (const key of order) {
-		if (key === spec.emptyKey) {
+		if (
+			key === spec.emptyKey ||
+			(dimension === "account" && key === ACCOUNT_PENDING_LANE_KEY)
+		) {
 			direct.push(key);
 			continue;
 		}
@@ -593,12 +654,30 @@ export function buildLanes(
 			events: LiveEvent[];
 		};
 		const events = sortByTime(bucket.events);
+		const isPendingAccount =
+			dimension === "account" && key === ACCOUNT_PENDING_LANE_KEY;
+		const value = bucket.value;
+		const isEmpty = value === null;
+		const accountLabel =
+			dimension === "account" && value !== null
+				? (resolveAccount?.(value) ?? latestName(events, spec) ?? value)
+				: null;
+		const scope = isPendingAccount
+			? { kind: "account-pending" as const }
+			: key === NO_ACCOUNT_LANE_KEY && dimension === "account"
+				? { kind: "no-account" as const }
+				: isEmpty
+					? spec.emptyScope
+					: spec.scopeOf(value as string);
 		return toLane(
 			key,
-			bucket.value === null
-				? spec.emptyLabel
-				: (latestName(events, spec) ?? bucket.value),
-			bucket.value === null ? spec.emptyScope : spec.scopeOf(bucket.value),
+			isPendingAccount
+				? ACCOUNT_PENDING_LABEL
+				: (accountLabel ??
+						(isEmpty
+							? spec.emptyLabel
+							: (latestName(events, spec) ?? (value as string)))),
+			scope,
 			events,
 			cutoff,
 		);
