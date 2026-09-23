@@ -172,6 +172,8 @@ const rejectedClient = (
 	removed: [],
 	modified: [],
 	defaultModelChange: null,
+	droppedRoutes: [],
+	keptRoutes: [],
 	notices: [],
 });
 
@@ -1421,9 +1423,16 @@ export class ClientService {
 			defaultModel?: unknown;
 			add?: unknown;
 			remove?: unknown;
+			dropRoutes?: unknown;
 		};
 		if (!FORMATS.includes(operation.format as ClientFormat))
 			throw BadRequest("Unknown catalogue format");
+		if (
+			operation.dropRoutes !== undefined &&
+			typeof operation.dropRoutes !== "boolean"
+		)
+			throw BadRequest("dropRoutes must be a boolean");
+		const dropRoutes = operation.dropRoutes ? { dropRoutes: true } : {};
 		if (!BULK_MODES.includes(operation.mode as ClientBulkMode))
 			throw BadRequest("Unknown bulk operation");
 		const format = operation.format as ClientFormat;
@@ -1469,12 +1478,14 @@ export class ClientService {
 							mode: "edit",
 							add: entries as ClientModel[],
 							remove: removals as string[],
+							...dropRoutes,
 						}
 					: {
 							format,
 							mode: "replace",
 							models: entries as ClientModel[],
 							defaultModel: (operation.defaultModel ?? null) as string | null,
+							...dropRoutes,
 						},
 		};
 	}
@@ -1491,6 +1502,7 @@ export class ClientService {
 		const fingerprintBefore = this.fingerprint();
 		const clients: ClientBulkClientResult[] = [];
 		const records: PreparedDraft[] = [];
+		const allRules = await dbOps.routing.listRules();
 		for (const id of clientIds) {
 			const key = await dbOps.getApiKey(id);
 			if (!key) {
@@ -1546,6 +1558,10 @@ export class ClientService {
 			}
 			const beforeById = new Map(before.models.map((m) => [m.id, m]));
 			const afterById = new Map(after.models.map((m) => [m.id, m]));
+			if (operation.dropRoutes)
+				draft.droppedAliasRoutes = before.models
+					.filter((m) => m.id !== m.targetModel && !afterById.has(m.id))
+					.map((m) => m.id);
 			const added = [...afterById.keys()].filter((k) => !beforeById.has(k));
 			const removed = [...beforeById.keys()].filter((k) => !afterById.has(k));
 			const result: ClientBulkClientResult = {
@@ -1557,6 +1573,8 @@ export class ClientService {
 				removed,
 				modified: [],
 				defaultModelChange: null,
+				droppedRoutes: [],
+				keptRoutes: [],
 				notices,
 			};
 			// An identical raw draft prepares to an identical record for every
@@ -1579,6 +1597,15 @@ export class ClientService {
 					continue;
 				}
 				const preparedById = new Map(prepared.models.map((m) => [m.id, m]));
+				const owned = new Set(await dbOps.clients.ownedRuleIds(id));
+				const routed = new Set(
+					record.review.aliasRules.map((r) => r.match_model_value),
+				);
+				const published = new Set(
+					FORMATS.flatMap((f) => record.profile.catalogues[f].models)
+						.filter((m) => m.id !== m.targetModel)
+						.map((m) => m.id),
+				);
 				records.push(record);
 				clients.push({
 					...result,
@@ -1600,6 +1627,12 @@ export class ClientService {
 						before.defaultModel === prepared.defaultModel
 							? null
 							: { from: before.defaultModel, to: prepared.defaultModel },
+					droppedRoutes: allRules
+						.filter((r) => owned.has(r.id) && !routed.has(r.match_model_value))
+						.map((r) => r.match_model_value ?? ""),
+					keptRoutes: [...routed]
+						.filter((v): v is string => !!v && !published.has(v))
+						.sort(),
 					notices: [...notices, ...record.review.notices],
 				});
 			} catch (error) {
