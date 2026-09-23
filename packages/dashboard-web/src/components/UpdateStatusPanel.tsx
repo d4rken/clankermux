@@ -39,6 +39,8 @@ export interface UpdateInfo {
 export interface UpdateStatusPanelProps {
 	status: UpdateCheckStatus;
 	info: UpdateInfo | null;
+	/** Repository URL used by the commit relationship link. */
+	repoUrl: string;
 	/** Transport-level failure of the check itself (status === "error"). */
 	error: string | null;
 	onCheck: () => void;
@@ -68,6 +70,7 @@ function behindLabel(behindBy: number): string {
 export function UpdateStatusPanel({
 	status,
 	info,
+	repoUrl,
 	error,
 	onCheck,
 }: UpdateStatusPanelProps) {
@@ -197,12 +200,17 @@ export function UpdateStatusPanel({
 					<p className="text-xs text-muted-foreground font-mono">
 						{info?.currentSha ?? version.replace(/^v/, "")}
 					</p>
-					<p className="text-xs text-muted-foreground">
+					<a
+						href={repoUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						className="text-xs text-muted-foreground hover:text-foreground underline block"
+					>
 						{commitRelationshipLabel(
 							info?.aheadBy ?? null,
 							info?.behindBy ?? null,
 						)}
-					</p>
+					</a>
 					{info?.dirty && (
 						<p className="text-xs italic text-muted-foreground/70">
 							local uncommitted changes
