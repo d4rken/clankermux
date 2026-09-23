@@ -640,7 +640,7 @@ export function AccountStatusChips({
 			    with the configuration flags: it describes what the provider is
 			    doing to this account right now, not how the account is set up. */}
 			{!isUsage && <DegradedChip degraded={degraded} />}
-			{/* The account's automation-flag inventory, always last: the pills above
+			{/* The account's enabled automation flags, always last: the pills above
 			    are transient state, these are configuration. A fragment, so they
 			    wrap as individual flex items of this row rather than as a block. */}
 			{!isUsage && <AccountPolicyChips account={account} />}
