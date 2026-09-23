@@ -367,6 +367,99 @@ describe("UsageSnapshotRepository", () => {
 		});
 	});
 
+	describe("getLatestSnapshots — last known usage", () => {
+		it("returns the latest row of each requested account only", async () => {
+			insertAccount(db, "acct-c");
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000, fiveHourPct: 1 }),
+				row({ accountId: "acct-a", sampledAt: 3_000, fiveHourPct: 3 }),
+				row({ accountId: "acct-a", sampledAt: 2_000, fiveHourPct: 2 }),
+				row({ accountId: "acct-b", sampledAt: 1_500, sevenDayPct: 55 }),
+				row({ accountId: "acct-c", sampledAt: 9_000, fiveHourPct: 9 }),
+			]);
+
+			const read = await repo.getLatestSnapshots(["acct-a", "acct-b"]);
+
+			expect(
+				read
+					.map((r) => [r.accountId, r.ts, r.fiveHourPct, r.sevenDayPct])
+					.sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+			).toEqual([
+				["acct-a", 3_000, 3, 20],
+				["acct-b", 1_500, 10, 55],
+			]);
+		});
+
+		it("returns one row per account when an id is repeated", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000 }),
+				row({ accountId: "acct-a", sampledAt: 2_000 }),
+			]);
+
+			const read = await repo.getLatestSnapshots(["acct-a", "acct-a"]);
+
+			expect(read.map((r) => [r.accountId, r.ts])).toEqual([["acct-a", 2_000]]);
+		});
+
+		it("omits accounts without snapshots and short-circuits an empty list", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000 }),
+			]);
+
+			expect(
+				(await repo.getLatestSnapshots(["acct-b", "acct-a"])).map(
+					(r) => r.accountId,
+				),
+			).toEqual(["acct-a"]);
+			expect(await repo.getLatestSnapshots([])).toEqual([]);
+		});
+
+		it("seeks each account's newest row instead of ranking its history", async () => {
+			class RecordingAdapter extends BunSqlAdapter {
+				readonly sent: Array<{ sql: string; params: unknown[] }> = [];
+
+				override async query<R>(
+					sql: string,
+					params: unknown[] = [],
+				): Promise<R[]> {
+					this.sent.push({ sql, params });
+					return super.query<R>(sql, params);
+				}
+			}
+			const recorder = new RecordingAdapter(db);
+			await new UsageSnapshotRepository(recorder).getLatestSnapshots([
+				"acct-a",
+				"acct-b",
+			]);
+			const sent = recorder.sent[0];
+			if (!sent) throw new Error("the repository sent no query");
+
+			const details = (
+				db
+					.query(`EXPLAIN QUERY PLAN ${sent.sql}`)
+					.all(...(sent.params as string[])) as Array<{ detail: string }>
+			).map((step) => step.detail);
+			// Every table access goes through the primary-key index, and the row
+			// read is a point lookup on both key columns. A search on account_id
+			// alone walks that account's whole history.
+			const snapshotAccesses = details.filter((d) =>
+				d.includes("sqlite_autoindex_usage_snapshots_1"),
+			);
+
+			expect(snapshotAccesses.length).toBeGreaterThan(0);
+			for (const access of snapshotAccesses) {
+				expect(access).toStartWith("SEARCH");
+				expect(access).toContain("account_id=?");
+			}
+			expect(
+				snapshotAccesses.some((d) =>
+					d.includes("account_id=? AND sampled_at=?"),
+				),
+			).toBe(true);
+			expect(details.some((d) => d.includes("TEMP B-TREE"))).toBe(false);
+		});
+	});
+
 	describe("getLatestSnapshotsBefore — carry-forward seed", () => {
 		it("returns the single latest row per account strictly before the cutoff", async () => {
 			await repo.insertSnapshots([
