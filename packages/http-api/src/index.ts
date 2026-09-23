@@ -1,5 +1,19 @@
 // Export router - the main public API
 
+// The management-password command behind `bun run auth:password` and
+// `clankermux-server auth password`
+export {
+	type AuthPasswordAction,
+	type AuthPasswordIo,
+	type AuthPasswordOptions,
+	authPasswordUsage,
+	findSchemaProblem,
+	type ParsedAuthPasswordArgs,
+	parseAuthPasswordArgs,
+	readPasswordFromTty,
+	runAuthPasswordCli,
+	runAuthPasswordCommand,
+} from "./cli/auth-password";
 // Export handlers
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 // Management session auth: the app-level login behind /api/*
