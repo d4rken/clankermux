@@ -137,7 +137,6 @@ export async function startGateway(opts: {
 	if (!provider) throw new Error("anthropic provider missing");
 	const strategy = new SessionStrategy(5 * 3600_000);
 	strategy.initialize?.(dbOps as unknown as StrategyStore);
-	// biome-ignore lint/style/useConst: assigned once the context exists
 	let proxyContext: ProxyContext;
 	const modelPermissions = new AccountModelPermissionService({
 		repository: dbOps.routing,

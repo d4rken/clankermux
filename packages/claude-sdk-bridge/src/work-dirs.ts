@@ -240,15 +240,3 @@ export function sweepGenerations(
 	}
 	return removed;
 }
-
-/** Make existing directories private; a missing path or a symlink is skipped. */
-export function makePrivateIfPresent(paths: readonly string[]): void {
-	for (const path of paths) {
-		const stat = lstatOrNull(path);
-		if (!stat?.isDirectory()) continue;
-		if ((stat.mode & 0o777) !== PRIVATE_DIR_MODE)
-			try {
-				chmodSync(path, PRIVATE_DIR_MODE);
-			} catch {}
-	}
-}

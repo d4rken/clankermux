@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
 import { Logger } from "@clankermux/logger";
 import {
 	type SdkBridgeAvailability,
@@ -80,7 +79,6 @@ import {
 import {
 	claimGeneration,
 	ensurePrivateDir,
-	makePrivateIfPresent,
 	removeTree,
 	sweepGenerations,
 } from "./work-dirs";
@@ -88,15 +86,6 @@ import {
 /** Claude Code version the bundled binary reports; written into rebuilt transcripts. */
 const CLAUDE_CODE_VERSION = "2.1.280";
 const SYSTEM_PROMPT_POLICY = "drop";
-/** Directories an earlier layout kept directly under the work root. */
-const LEGACY_WORK_DIRS = [
-	"bin",
-	"home",
-	"claude-config",
-	"tmp",
-	"cwd",
-	"sessions",
-];
 
 export type { SdkBridgeCounters, SdkBridgeStatus };
 
@@ -184,9 +173,6 @@ export function createClaudeSdkBridge(
 			generationRoot = claimGeneration(
 				deps.workRoot,
 				`${now().toString(36)}-${process.pid}-${randomBytes(4).toString("hex")}`,
-			);
-			makePrivateIfPresent(
-				LEGACY_WORK_DIRS.map((name) => join(deps.workRoot, name)),
 			);
 			const swept = sweepGenerations(deps.workRoot, generationRoot);
 			if (swept.length)
