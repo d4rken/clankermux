@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react";
-import { useCacheWarming, useSetCacheWarming } from "../../hooks/queries";
+import { useCacheWarming } from "../../hooks/queries";
 import {
-	clampBridgeHours,
 	FALLBACK_BRIDGE_HOURS,
 	FALLBACK_HOURS_PER_RISK_UNIT,
 	FALLBACK_MAX_BRIDGE_HOURS,
@@ -67,33 +65,18 @@ const MODE_HELP: Record<
 	},
 };
 
+/**
+ * Read-only while cache warming is re-evaluated: the card shows the current
+ * settings but owns no mutation, so nothing here can change them. The
+ * management API (`POST /api/config/cache-warming`) still can.
+ */
 export function CacheWarmingCard() {
-	const { data, isLoading } = useCacheWarming();
-	const setCacheWarming = useSetCacheWarming();
+	const { data } = useCacheWarming();
 
 	const mode: CacheWarmingMode = data?.mode ?? "off";
-	const [minTokens, setMinTokens] = useState<number>(
-		data?.minTokens ?? DEFAULT_MIN_TOKENS,
-	);
-	const [hours, setHours] = useState<number>(
-		data?.bridgeHours ?? round1(FALLBACK_BRIDGE_HOURS),
-	);
-
-	// Keep the local inputs in sync once the server values load/change. The server's
-	// bridgeHours is a derived float (e.g. 6.3333…); round to 1 decimal for a clean
-	// input — the tiny precision loss on save is economically negligible.
-	useEffect(() => {
-		if (typeof data?.minTokens === "number") setMinTokens(data.minTokens);
-	}, [data?.minTokens]);
-	useEffect(() => {
-		if (typeof data?.bridgeHours === "number")
-			setHours(round1(data.bridgeHours));
-	}, [data?.bridgeHours]);
-
-	const busy = isLoading || setCacheWarming.isPending;
-	const validMinTokens = Number.isFinite(minTokens) && minTokens >= 0;
-	const dirty = data != null && minTokens !== data.minTokens;
-	const offMode = mode === "off";
+	const minTokens = data?.minTokens ?? DEFAULT_MIN_TOKENS;
+	// The server's bridgeHours is a derived float (e.g. 6.3333…).
+	const hours = round1(data?.bridgeHours ?? FALLBACK_BRIDGE_HOURS);
 
 	// Bridge-horizon conversion constants are owned by the server (bridge-policy);
 	// the fallbacks restate its derivation and apply only until the first load.
@@ -101,10 +84,6 @@ export function CacheWarmingCard() {
 	const hoursPerRiskUnit =
 		data?.hoursPerRiskUnit ?? FALLBACK_HOURS_PER_RISK_UNIT;
 	const refreshMinutes = data?.refreshMinutes ?? FALLBACK_REFRESH_MINUTES;
-	const validHours =
-		Number.isFinite(hours) && hours >= 0 && hours <= maxBridgeHours + 1e-6;
-	const hoursDirty =
-		data != null && Math.abs(hours - round1(data.bridgeHours)) > 1e-6;
 	const previewRiskFactor = hoursToRiskFactor(hours, hoursPerRiskUnit);
 	const previewKeepalives = Math.round(
 		keepalivesForHours(hours, refreshMinutes),
@@ -122,16 +101,15 @@ export function CacheWarmingCard() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-row">
+				<p className="text-xs text-muted-foreground">
+					Cache warming is being re-evaluated. These settings can only be
+					changed through the management API.
+				</p>
+
 				<SettingRow
 					label="Mode"
 					control={
-						<Select
-							value={mode}
-							disabled={busy}
-							onValueChange={(value) =>
-								setCacheWarming.mutate({ mode: value as CacheWarmingMode })
-							}
-						>
+						<Select value={mode} disabled>
 							<SelectTrigger className="w-36">
 								<SelectValue />
 							</SelectTrigger>
@@ -159,10 +137,10 @@ export function CacheWarmingCard() {
 							unit="tokens"
 							min={0}
 							step={1000}
-							disabled={busy || offMode}
-							canSave={validMinTokens && dirty}
-							onChange={(raw) => setMinTokens(parseInt(raw || "0", 10))}
-							onSave={() => setCacheWarming.mutate({ minTokens })}
+							disabled
+							canSave={false}
+							onChange={() => {}}
+							onSave={() => {}}
 							inputClassName="w-28"
 						/>
 					}
@@ -179,14 +157,10 @@ export function CacheWarmingCard() {
 							min={0}
 							max={maxBridgeHours}
 							step={0.5}
-							disabled={busy || offMode}
-							canSave={validHours && hoursDirty}
-							onChange={(raw) =>
-								setHours(
-									clampBridgeHours(parseFloat(raw || "0"), maxBridgeHours),
-								)
-							}
-							onSave={() => setCacheWarming.mutate({ bridgeHours: hours })}
+							disabled
+							canSave={false}
+							onChange={() => {}}
+							onSave={() => {}}
 							inputClassName="w-28"
 						/>
 					}
@@ -199,16 +173,6 @@ export function CacheWarmingCard() {
 					summary="How long an idle, promoted (1-hour) session is kept warm."
 					detail={`Longer recovers older idle sessions (an overnight gap, say) cheaply on return, since a refresh costs ~20× less than rebuilding the cache — but you pay that hold cost on every session you never come back to. Max ~${maxBridgeHours.toFixed(1)}h: beyond the break-even point it is cheaper to let the cache rebuild.`}
 				/>
-
-				{/* The mode selector and both numeric saves share one mutation, so
-				    this reports only that the last attempt failed. No claim about
-				    what is displayed: the numeric rows keep the operator's draft
-				    after a rejection, the selector reads back from the query. */}
-				{setCacheWarming.isError && (
-					<p role="alert" className="text-xs text-destructive-strong">
-						Could not save that change. Please try again.
-					</p>
-				)}
 			</CardContent>
 		</Card>
 	);

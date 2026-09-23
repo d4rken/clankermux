@@ -2,7 +2,7 @@
 // for the dashboard's "Cache Keep-Alive" monitoring panel.
 //
 // Two surfaces:
-//  - LIVE: current in-memory gauges + cumulative-since-restart counters, read on
+//  - LIVE: current in-memory gauges + cumulative counters, read on
 //    the main thread straight from the proxy singletons. GET /api/analytics/cache-keepalive.
 //  - HISTORY: a bucketed time-series from the cache_keepalive_snapshots table.
 //    GET /api/analytics/cache-keepalive-history?range=…. Counter fields are
@@ -10,8 +10,9 @@
 
 /**
  * Live snapshot of the cache-keepalive bridge. Gauges are point-in-time; the
- * counter fields (keepalivesSent..savedUsd) are cumulative since the last process
- * restart (they reset to 0 on restart). `netUsd = savedUsd - spentUsd`;
+ * counter fields (keepalivesSent..savedUsd) are cumulative, seeded at boot from
+ * the newest stored snapshot so they carry across restarts.
+ * `netUsd = savedUsd - spentUsd`;
  * `hitRate = hits / (hits + misses)` (0 when none decided).
  */
 export interface CacheKeepaliveLiveResponse {

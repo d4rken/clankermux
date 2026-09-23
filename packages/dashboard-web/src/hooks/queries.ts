@@ -911,7 +911,7 @@ export const useSetCacheWarming = () => {
 };
 
 /**
- * Live cache-keepalive bridge gauges + cumulative-since-restart counters for the
+ * Live cache-keepalive bridge gauges + cumulative counters for the
  * Analytics-tab "Cache Keep-Alive" headline tiles. Read off the proxy singletons
  * on the main thread, so it's cheap — short staleness + a 15s poll like the
  * other live stat hooks. Paused in the background.

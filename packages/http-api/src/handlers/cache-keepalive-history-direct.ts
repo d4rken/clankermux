@@ -62,14 +62,39 @@ export interface CacheKeepaliveHistorySources {
  * honest about "activity during this bucket". GAUGE fields are passed through
  * as-is. `hitRate` is hitsDelta / (hitsDelta + missesDelta), 0 when the
  * denominator is 0.
+ *
+ * The sampler writes no row while the bridge state is unchanged, so a bucket
+ * missing between two rows had no activity: it is emitted with zero counter
+ * deltas and the previous bucket's gauges, rather than left for the chart to
+ * interpolate across.
  */
 function toDeltaPoints(
 	rows: CacheKeepaliveHistoryPoint[],
+	bucketMs: number,
 ): CacheKeepaliveHistoryPointDelta[] {
 	const points: CacheKeepaliveHistoryPointDelta[] = [];
 	for (let i = 0; i < rows.length; i++) {
 		const cur = rows[i];
 		const prev = i > 0 ? rows[i - 1] : null;
+		if (prev) {
+			for (let ts = prev.ts + bucketMs; ts < cur.ts; ts += bucketMs) {
+				points.push({
+					ts,
+					warmSessions: prev.warmSessions,
+					promotedSessions: prev.promotedSessions,
+					totalBytes: prev.totalBytes,
+					keepalivesSent: 0,
+					hits: 0,
+					misses: 0,
+					failures: 0,
+					spentUsd: 0,
+					savedUsd: 0,
+					savedUsdConservative: 0,
+					warmResumes: 0,
+					hitRate: 0,
+				});
+			}
+		}
 		const delta = (curVal: number, prevVal: number | undefined): number => {
 			if (prev === null || prevVal === undefined) return 0;
 			return curVal >= prevVal ? curVal - prevVal : curVal;
@@ -132,7 +157,7 @@ export function createCacheKeepaliveHistoryHandlerFromSources(
 			const response: CacheKeepaliveHistoryResponse = {
 				range,
 				bucketMs,
-				points: toDeltaPoints(rows),
+				points: toDeltaPoints(rows, bucketMs),
 			};
 			return jsonResponse(response);
 		} catch (error) {

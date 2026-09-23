@@ -5,14 +5,15 @@
  *
  * Design notes:
  *  - Each tick captures GAUGEs (warm / promoted sessions and total bytes held,
- *    read live from `sessionCacheStore`) plus the CUMULATIVE-since-restart
- *    counters from `bridgeStats.snapshot()` (keepalives, hits, misses, failures,
- *    spent/saved USD). The pure `buildCacheKeepaliveSnapshotRow` mapper turns
- *    those into one write-ready row stamped with a single `now`.
- *  - We ALWAYS sample on tick (mirrors UsageSnapshotSampler, which always writes
- *    its batch). The capture is cheap and gauges/counters may legitimately be 0
- *    when the bridge is idle or the cache-warming mode is off — recording the
- *    zero keeps the series continuous so the chart never has phantom gaps.
+ *    read live from `sessionCacheStore`) plus the CUMULATIVE counters from
+ *    `bridgeStats.snapshot()` (keepalives, hits, misses, failures, spent/saved
+ *    USD), which the server seeds from the newest stored row at boot. The pure
+ *    `buildCacheKeepaliveSnapshotRow` mapper turns those into one write-ready row
+ *    stamped with a single `now`.
+ *  - A tick whose state equals the last written row is held back instead of
+ *    written, so an idle or disabled bridge adds no rows. When the state next
+ *    changes, the held row is written ahead of the new one: the idle run keeps
+ *    an end point one tick before the change, and window totals anchor on it.
  *  - Runs on the SAME 2-minute cadence as the usage-snapshot sampler
  *    (`SAMPLE_INTERVAL_MS`, env-overridable via the shared resolver) and uses the
  *    same deferred/staggered first tick so it lines up with the startup poll wave.
@@ -76,22 +77,49 @@ export interface CacheKeepaliveSnapshotSamplerDeps {
 	 * startup poll-stagger wave.
 	 */
 	getPollIntervalMs: () => number;
+	/** The newest stored row at boot (the one `bridgeStats` was seeded from), if any. */
+	lastSnapshot?: CacheKeepaliveSnapshotRow | null;
+}
+
+/** True when two rows carry the same gauges and counters, ignoring `sampledAt`. */
+function sameState(
+	a: CacheKeepaliveSnapshotRow,
+	b: CacheKeepaliveSnapshotRow,
+): boolean {
+	return (
+		a.warmSessions === b.warmSessions &&
+		a.promotedSessions === b.promotedSessions &&
+		a.totalBytes === b.totalBytes &&
+		a.keepalivesSent === b.keepalivesSent &&
+		a.hits === b.hits &&
+		a.misses === b.misses &&
+		a.failures === b.failures &&
+		a.spentUsd === b.spentUsd &&
+		a.savedUsd === b.savedUsd &&
+		a.warmResumes === b.warmResumes &&
+		a.savedUsd5m === b.savedUsd5m
+	);
 }
 
 /**
  * Periodic sampler. Each tick stamps one shared `now`, reads the live gauges +
  * cumulative bridge stats, projects them via `buildCacheKeepaliveSnapshotRow`,
- * and writes the row (DB errors are logged, never thrown). Registered through
- * `intervalManager` with `maxConcurrent: 1`.
+ * and writes the row when it differs from the last written one (DB errors are
+ * logged, never thrown). Registered through `intervalManager` with
+ * `maxConcurrent: 1`.
  */
 export class CacheKeepaliveSnapshotSampler {
 	private readonly deps: CacheKeepaliveSnapshotSamplerDeps;
 	private stopInterval: (() => void) | null = null;
 	private startupTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly intervalId = "cache-keepalive-snapshot-sampler";
+	private lastWritten: CacheKeepaliveSnapshotRow | null;
+	/** Newest tick that matched `lastWritten` and was not written. */
+	private held: CacheKeepaliveSnapshotRow | null = null;
 
 	constructor(deps: CacheKeepaliveSnapshotSamplerDeps) {
 		this.deps = deps;
+		this.lastWritten = deps.lastSnapshot ?? null;
 	}
 
 	/**
@@ -143,13 +171,33 @@ export class CacheKeepaliveSnapshotSampler {
 			this.deps.getStats(),
 		);
 
+		if (this.lastWritten && sameState(row, this.lastWritten)) {
+			this.held = row;
+			return;
+		}
+
+		// The new row goes first: it is the checkpoint the next boot seeds from,
+		// so a failure between the two writes must never leave the older held row
+		// as the newest one. A lost held row only costs the change its baseline.
 		try {
 			await this.deps.insertSnapshot(row);
+			this.lastWritten = row;
 			log.debug("Cache keepalive snapshot recorded");
 		} catch (err) {
 			// A DB error must not kill the interval — log and move on.
 			log.error(
 				`Cache keepalive snapshot sampler: failed to persist snapshot: ${err}`,
+			);
+			return;
+		}
+		const held = this.held;
+		this.held = null;
+		if (!held) return;
+		try {
+			await this.deps.insertSnapshot(held);
+		} catch (err) {
+			log.error(
+				`Cache keepalive snapshot sampler: failed to persist held snapshot: ${err}`,
 			);
 		}
 	}

@@ -2006,7 +2006,7 @@ class API extends HttpClient {
 		}
 	}
 
-	// Live cache-keepalive bridge gauges + cumulative-since-restart counters for
+	// Live cache-keepalive bridge gauges + cumulative counters for
 	// the Analytics-tab "Cache Keep-Alive" panel. Read straight off the proxy
 	// singletons on the main thread (fast).
 	async getCacheKeepalive(): Promise<CacheKeepaliveLiveResponse> {

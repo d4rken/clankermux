@@ -263,14 +263,28 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 	});
 
 	describe("sumCounterDeltas (window-total fold)", () => {
-		it("with no anchor, counts the first sample in full + later increments", () => {
+		it("with no anchor, the first sample is the baseline and counts nothing", () => {
 			const t = sumCounterDeltas(null, [
 				counter({ hits: 3, saved_usd_5m: 1.5 }),
 				counter({ hits: 8, saved_usd_5m: 4.0 }),
 			]);
-			// 3 (full first) + (8-3)=5 → 8; 1.5 + 2.5 → 4.0
-			expect(t.hits).toBe(8);
-			expect(t.savedUsd5m).toBeCloseTo(4.0, 10);
+			// last - first: 8-3=5; 4.0-1.5=2.5
+			expect(t.hits).toBe(5);
+			expect(t.savedUsd5m).toBeCloseTo(2.5, 10);
+		});
+
+		it("a frozen series with no anchor is zero activity, not its absolute totals", () => {
+			const frozen = counter({
+				keepalives_sent: 899,
+				hits: 800,
+				spent_usd: 182.15,
+				saved_usd_5m: 40,
+			});
+			const t = sumCounterDeltas(null, [frozen, frozen, frozen]);
+			expect(t.keepalivesSent).toBe(0);
+			expect(t.hits).toBe(0);
+			expect(t.spentUsd).toBe(0);
+			expect(t.savedUsd5m).toBe(0);
 		});
 
 		it("with an anchor, the first in-window sample counts only its increment", () => {
@@ -285,13 +299,13 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 
 		it("clamps a restart reset within the window (counts the post-reset value)", () => {
 			const t = sumCounterDeltas(null, [
-				counter({ hits: 5 }),
+				counter({ hits: 5 }), // baseline
 				counter({ hits: 9 }), // +4
 				counter({ hits: 2 }), // reset → +2 (not negative)
 				counter({ hits: 6 }), // +4
 			]);
-			// 5 + 4 + 2 + 4 = 15
-			expect(t.hits).toBe(15);
+			// 4 + 2 + 4 = 10
+			expect(t.hits).toBe(10);
 		});
 
 		it("returns all-zero for an empty window", () => {
@@ -318,11 +332,25 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 			expect(t.warmResumes).toBe(4);
 		});
 
-		it("counts the first-ever sample in full when there is no anchor", async () => {
+		it("measures from the first in-window sample when there is no anchor", async () => {
 			await repo.insertSnapshot(row({ sampledAt: 1_000, hits: 7 }));
 			await repo.insertSnapshot(row({ sampledAt: 2_000, hits: 12 }));
 			const t = await repo.getWindowCounterTotals(0);
-			expect(t.hits).toBe(12); // 7 (full) + 5
+			expect(t.hits).toBe(5); // 12 - 7
+		});
+
+		it("reports zero for a window holding only frozen samples", async () => {
+			for (const sampledAt of [1_000, 2_000, 3_000]) {
+				await repo.insertSnapshot(
+					row({ sampledAt, keepalivesSent: 899, spentUsd: 182.15 }),
+				);
+			}
+			const t = await repo.getWindowCounterTotals(1_500);
+			expect(t.keepalivesSent).toBe(0);
+			expect(t.spentUsd).toBe(0);
+			const all = await repo.getWindowCounterTotals(0);
+			expect(all.keepalivesSent).toBe(0);
+			expect(all.spentUsd).toBe(0);
 		});
 	});
 
@@ -342,6 +370,17 @@ describe("CacheKeepaliveSnapshotRepository", () => {
 				)
 				.all() as Array<{ sampled_at: number }>;
 			expect(remaining.map((r) => r.sampled_at)).toEqual([1_000, 2_000]);
+		});
+
+		it("keeps the newest row even when it is older than the cutoff", async () => {
+			// The newest row seeds the bridge counters at boot, and the sampler writes
+			// nothing while the bridge is idle, so it can age past retention.
+			await repo.insertSnapshot(row({ sampledAt: 100 }));
+			await repo.insertSnapshot(row({ sampledAt: 500, keepalivesSent: 899 }));
+
+			const deleted = await repo.deleteOlderThan(1_000);
+			expect(deleted).toBe(1);
+			expect((await repo.getLatestSnapshot())?.keepalivesSent).toBe(899);
 		});
 
 		it("returns 0 when nothing matches", async () => {
