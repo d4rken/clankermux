@@ -162,6 +162,41 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	staleToolResults(): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			message:
+				"These tool results do not answer the tool calls this turn is waiting on (stale tool results)",
+			retryAfter: null,
+		};
+	},
+	otherOwner(): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			message:
+				"These tool results answer a turn that belongs to another API key",
+			retryAfter: null,
+		};
+	},
+	superseded(): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			message:
+				"A new turn of this conversation arrived while this one waited on tool results",
+			retryAfter: null,
+		};
+	},
+	tooDeep(): BridgeError {
+		return {
+			status: 400,
+			type: "invalid_request_error",
+			message: "The request is nested too deeply to hand to Claude Code",
+			retryAfter: null,
+		};
+	},
 	parkedTimeout(ms: number): BridgeError {
 		return {
 			status: 504,

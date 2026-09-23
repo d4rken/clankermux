@@ -38,6 +38,7 @@ export type TeardownReason =
 	| "idle"
 	| "shutdown"
 	| "limit"
+	| "superseded"
 	| "error";
 
 const TEARDOWN_STATUS: Record<TeardownReason, SdkBridgeTurnStatus> = {
@@ -47,6 +48,7 @@ const TEARDOWN_STATUS: Record<TeardownReason, SdkBridgeTurnStatus> = {
 	idle: "failed",
 	shutdown: "shutdown",
 	limit: "failed",
+	superseded: "aborted",
 	error: "failed",
 };
 
@@ -54,6 +56,8 @@ const TEARDOWN_STATUS: Record<TeardownReason, SdkBridgeTurnStatus> = {
 const OUTCOME_GRACE_MS = 250;
 /** SIGTERM to SIGKILL, for a child that ignores the polite signal. */
 const KILL_GRACE_MS = 2_000;
+/** From a prompt message's read to the tool results that must follow it. */
+const PROMPT_WRITE_MS = 20;
 
 export interface Leg {
 	id: string;
@@ -90,8 +94,12 @@ export interface LiveQueryInit {
 	now: () => number;
 	log: BridgeLog;
 	isShuttingDown: () => boolean;
+	/** The conversation this query holds a claim on, if any. */
+	conversationKey: string | null;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
+	/** Claude Code's own copy of the session, which nothing resumes from. */
+	discardClaudeCodeTranscripts: (sessionId: string) => void;
 	onPeakRss: (bytes: number) => void;
 	onClosed: (live: LiveQuery) => void;
 }
@@ -111,7 +119,12 @@ export class LiveQuery {
 	readonly ownerApiKeyId: string | null;
 	readonly sessionId: string;
 	readonly startedAt: number;
+	readonly conversationKey: string | null;
 	private leg: Leg | null = null;
+	/** The tool calls the client must answer now: the last ended leg's. */
+	private awaiting: ReadonlySet<string> = new Set();
+	private readonly innerRequestsStarted = new Set<string>();
+	private readonly innerOutcomesSeen = new Set<string>();
 	private idleTimer: ReturnType<typeof setTimeout> | null = null;
 	private parkedTimer: ReturnType<typeof setTimeout> | null = null;
 	private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
@@ -158,6 +171,7 @@ export class LiveQuery {
 		this.ownerApiKeyId = init.ownerApiKeyId;
 		this.sessionId = init.sessionId;
 		this.startedAt = init.startedAt;
+		this.conversationKey = init.conversationKey;
 		this.clientMessages = init.clientMessages;
 		let settled = false;
 		this.done = new Promise((resolve) => {
@@ -175,6 +189,18 @@ export class LiveQuery {
 
 	get awaitingClient(): boolean {
 		return this.state === "awaiting_client";
+	}
+
+	/** Ids of the tool calls the client must answer now; empty unless parked. */
+	get awaitingToolUseIds(): ReadonlySet<string> {
+		return this.state === "awaiting_client" ? this.awaiting : new Set();
+	}
+
+	/** Whether `ids` answer every call the query waits on now. */
+	answersAwaiting(ids: readonly string[]): boolean {
+		const given = new Set(ids);
+		const awaiting = this.awaitingToolUseIds;
+		return awaiting.size > 0 && [...awaiting].every((id) => given.has(id));
 	}
 
 	get historyMode(): SdkBridgeHistoryMode {
@@ -231,13 +257,25 @@ export class LiveQuery {
 				: null;
 	}
 
+	/** An inner call's `requests` row began: that is what `inner_call_count` counts. */
+	onInnerRequestStarted(requestId: string): void {
+		if (!requestId || this.innerRequestsStarted.has(requestId)) return;
+		this.innerRequestsStarted.add(requestId);
+		void this.init.recorder.bump({ innerCalls: 1 });
+	}
+
+	/**
+	 * How an inner call ended. A refusal before dispatch has no request id and
+	 * no row, so it counts as an error only.
+	 */
 	onInnerOutcome(outcome: SdkBridgeInnerOutcome): void {
+		if (outcome.requestId) {
+			if (this.innerOutcomesSeen.has(outcome.requestId)) return;
+			this.innerOutcomesSeen.add(outcome.requestId);
+		}
 		this.lastOutcome = outcome;
 		this.outcomeSeq++;
-		void this.init.recorder.bump({
-			innerCalls: 1,
-			innerErrors: outcome.status >= 400 ? 1 : 0,
-		});
+		if (outcome.status >= 400) void this.init.recorder.bump({ innerErrors: 1 });
 	}
 
 	/** A forwarded client tool_use: counted against the per-turn parked-call limit. */
@@ -276,21 +314,49 @@ export class LiveQuery {
 		return this.init.parked.wait(toolUseId);
 	}
 
-	/** A continuation leg delivering the client's tool results. */
+	/**
+	 * A continuation leg delivering the client's tool results, which the caller
+	 * checked answer every call awaited ({@link answersAwaiting}). `alongside`
+	 * is the rest of the same user message (text the user typed with the
+	 * results, images), sent to Claude Code as one user message.
+	 *
+	 * It goes first, while Claude Code still waits on the tool calls, which
+	 * makes Claude Code send it after the results in the same model request
+	 * (real-claude.integration.test.ts pins this).
+	 */
 	continueWith(
 		leg: Leg,
 		toolResults: Block[],
 		clientMessages: ClientMessage[],
+		alongside: Block[] = [],
 	): void {
 		if (this.parkedTimer) clearTimeout(this.parkedTimer);
 		this.parkedTimer = null;
+		const awaiting = this.awaiting;
+		this.awaiting = new Set();
 		this.state = "running";
 		this.clientMessages = clientMessages;
 		void this.init.recorder.insertLeg(leg.id, leg.kind, leg.startedAt);
 		this.attach(leg);
 		void this.init.recorder.bump({ toolRounds: 1 });
-		for (const block of toolResults)
-			this.init.parked.deliver(String(block.tool_use_id), toMcpResult(block));
+		const parked = this.init.parked;
+		const deliver = () => {
+			for (const block of toolResults) {
+				const id = String(block.tool_use_id);
+				if (awaiting.has(id)) parked.deliver(id, toMcpResult(block));
+			}
+		};
+		if (!alongside.length) {
+			deliver();
+			return;
+		}
+		// Read off the prompt stream, the message is still to be written to
+		// Claude Code's stdin; a macrotask lets the SDK write it before the
+		// MCP answers travel the same pipe.
+		void this.prompt()
+			.enqueue(alongside)
+			.then(() => Bun.sleep(PROMPT_WRITE_MS))
+			.then(deliver);
 	}
 
 	onClientGone(leg: Leg): void {
@@ -330,8 +396,16 @@ export class LiveQuery {
 		const composer = this.init.composer;
 		const toolUseIds = [...composer.legToolUseIds];
 		const content = composer.legContent();
-		composer.finish(stopReason);
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";
+		const parks = finalReason === "tool_use" && toolUseIds.length > 0;
+		// Tool calls handed out now could never be answered: the query dies
+		// with the bridge. The leg fails instead, with the shutdown 503 while
+		// nothing went out, or a closing SSE error once the stream is open.
+		if (parks && this.init.isShuttingDown()) {
+			this.teardown("shutdown", bridgeErrors.shutdown());
+			return;
+		}
+		composer.finish(stopReason);
 		this.stopReason = finalReason;
 		leg.response.end();
 		this.finishLeg(leg, {
@@ -340,16 +414,11 @@ export class LiveQuery {
 			toolUseIds,
 		});
 		this.leg = null;
-		if (finalReason === "tool_use" && toolUseIds.length) {
+		if (parks) {
 			this.state = "awaiting_client";
+			this.awaiting = new Set(toolUseIds);
 			if (this.idleTimer) clearTimeout(this.idleTimer);
 			this.idleTimer = null;
-			if (this.init.isShuttingDown()) {
-				queueMicrotask(() =>
-					this.teardown("shutdown", bridgeErrors.shutdown()),
-				);
-				return;
-			}
 			this.parkedTimer = setTimeout(
 				() =>
 					this.teardown(
@@ -371,11 +440,22 @@ export class LiveQuery {
 	 */
 	private register(conversation: ClientMessage[]): void {
 		if (this.registered || !this.init.claim) return;
+		let digests: string[];
+		try {
+			digests = messageDigests(conversation);
+		} catch (error) {
+			// Unregistered, the session is discarded at close and the next turn rebuilds.
+			this.init.log.warn(
+				`SDK bridge turn ${this.turnId}: conversation not digestible`,
+				error,
+			);
+			return;
+		}
 		this.registered = true;
 		this.init.claim.register(
 			{
 				sessionId: this.sessionId,
-				digests: messageDigests(conversation),
+				digests,
 				accountId: this.init.accountId,
 			},
 			this.done,
@@ -547,6 +627,26 @@ export class LiveQuery {
 		}
 	}
 
+	/**
+	 * Delete Claude Code's own transcript now, and once more after the kill
+	 * grace: a child still exiting can write it again.
+	 */
+	private discardClaudeCodeTranscripts(): void {
+		const discard = () => {
+			try {
+				this.init.discardClaudeCodeTranscripts(this.sessionId);
+			} catch (error) {
+				this.init.log.warn(
+					`SDK bridge turn ${this.turnId}: could not delete Claude Code's transcript`,
+					error,
+				);
+			}
+		};
+		discard();
+		if ([...this.init.pids].some((pid) => this.init.isAlive(pid)))
+			setTimeout(discard, KILL_GRACE_MS + 500).unref?.();
+	}
+
 	/** Peak RSS of this query's live Claude Code processes. */
 	samplePeakRss(): void {
 		for (const pid of this.init.pids) {
@@ -626,6 +726,7 @@ export class LiveQuery {
 			this.init.claim?.release();
 			this.init.discardSession(this.sessionId);
 		}
+		this.discardClaudeCodeTranscripts();
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
 		void this.init.recorder.finishTurn({

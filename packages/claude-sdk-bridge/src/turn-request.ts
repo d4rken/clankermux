@@ -28,7 +28,7 @@ export interface TurnRequest {
 	messages: ClientMessage[];
 	/** The conversation before the final user message. */
 	history: ClientMessage[];
-	/** The final user message. */
+	/** The final user message: the trailing user messages, merged. */
 	last: ClientMessage & { role: "user" };
 	/** tool_result blocks of the final user message: a continuation when non-empty. */
 	toolResults: Block[];
@@ -199,11 +199,24 @@ export function parseTurnRequest(
 	// the history; the turn's own final message is the last non-system one.
 	let lastIndex = messages.length - 1;
 	while (lastIndex >= 0 && messages[lastIndex]?.role === "system") lastIndex--;
-	const last = messages[lastIndex];
-	if (!last || last.role !== "user")
+	const final = messages[lastIndex];
+	if (!final || final.role !== "user")
 		return fail(
 			bridgeErrors.invalid("The last message must be a user message"),
 		);
+	// Consecutive user messages are one message to the Messages API, and Chat
+	// sends text typed with tool results as a user message after them.
+	let firstIndex = lastIndex;
+	for (let i = lastIndex - 1; i >= 0; i--) {
+		const role = messages[i]?.role;
+		if (role === "user") firstIndex = i;
+		else if (role !== "system") break;
+	}
+	const run = messages
+		.slice(firstIndex, lastIndex + 1)
+		.filter((m) => m.role === "user");
+	const last: ClientMessage =
+		run.length === 1 ? final : { role: "user", content: run.flatMap(blocksOf) };
 	const tools = parseTools(body.tools);
 	if ("status" in tools) return fail(tools);
 	const fields = applyFieldPolicy(body, gaps);
@@ -216,7 +229,7 @@ export function parseTurnRequest(
 			stream: body.stream === true,
 			systemText: systemTextOf(body.system),
 			messages,
-			history: messages.slice(0, lastIndex),
+			history: messages.slice(0, firstIndex),
 			last: last as ClientMessage & { role: "user" },
 			toolResults,
 			tools: tools.tools,

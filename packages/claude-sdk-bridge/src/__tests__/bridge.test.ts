@@ -1,8 +1,21 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { readdirSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import {
+	SdkBridgeCapacityError,
 	type SdkBridgeInnerOutcome,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTurnMeta,
@@ -12,6 +25,7 @@ import { FileSessionStore } from "../session-store";
 import {
 	assistantMessage,
 	type FakeQuery,
+	fakeQueryFn,
 	foldReply,
 	type Harness,
 	initMessage,
@@ -28,6 +42,7 @@ import {
 } from "./fixtures/fake-sdk";
 
 type Msg = { role: string; content: unknown };
+type Block = { type: string; [key: string]: unknown };
 
 const harnesses: Harness[] = [];
 afterEach(async () => {
@@ -36,6 +51,17 @@ afterEach(async () => {
 		rmSync(h.workRoot, { recursive: true, force: true });
 	}
 });
+
+/** The bridge process's own directory under the work root. */
+function generationDir(h: Harness): string {
+	const [name] = readdirSync(h.workRoot).filter((n) => n.startsWith("gen-"));
+	if (!name) throw new Error("no generation directory");
+	return join(h.workRoot, name);
+}
+
+function sessionsDir(h: Harness): string {
+	return join(generationDir(h), "sessions");
+}
 
 function harness(overrides: Parameters<typeof makeHarness>[0] = {}): Harness {
 	const h = makeHarness(overrides);
@@ -114,8 +140,11 @@ function failInner(
 	outcome: Partial<SdkBridgeInnerOutcome> & { status: number },
 ) {
 	h.inner.respond = (_req, ctx) => {
+		const requestId = crypto.randomUUID();
+		// The proxy reports the row's start before the call's outcome.
+		ctx.onInnerRequestStarted?.(requestId);
 		const full: SdkBridgeInnerOutcome = {
-			requestId: "inner-1",
+			requestId,
 			errorType: null,
 			message: "upstream failed",
 			retryAfter: null,
@@ -464,7 +493,7 @@ describe("parked tool calls", () => {
 			];
 			const t = await start(h, { tools: aliasedTools, messages: history });
 			const [alias] = t.query.options.allowedTools ?? [];
-			const store = new FileSessionStore(join(h.workRoot, "sessions"));
+			const store = new FileSessionStore(sessionsDir(h));
 			const entries = store.read(t.query.options.resume as string) ?? [];
 			const names = entries.flatMap((e) =>
 				e.type === "assistant"
@@ -584,12 +613,10 @@ describe("parked tool calls", () => {
 		t.query.emit(initMessage(), ...events.slice(0, 4));
 		await Bun.sleep(10);
 		const call = t.query.callTool("toolu_s1", "read");
-		await waitFor(
-			() =>
-				h.bridge.status().parked === 0 &&
-				h.bridge.findContinuation(["toolu_s1"]) !== null,
-		);
-		await Bun.sleep(20);
+		await Bun.sleep(30);
+		// The call waits, but the reply is still open: nothing is parked yet.
+		expect(h.bridge.status().parked).toBe(0);
+		expect(h.bridge.findContinuation(["toolu_s1"])).toBeNull();
 		t.query.emit(...events.slice(4));
 		const r = await reply(t.response);
 		expect(r.content.map((b) => b.id)).toEqual(["toolu_s1", "toolu_s2"]);
@@ -714,6 +741,16 @@ describe("parked tool calls", () => {
 			{ apiKeyId: "key-2" },
 		);
 		expect((await c.response).status).toBe(409);
+		// Recorded once, as a refused continuation leg; the turn stays parked.
+		await waitFor(
+			() => h.repo.turns.get(t.plan.turnId)?.legs[1]?.finished === true,
+		);
+		expect(h.repo.turns.get(t.plan.turnId)?.legs[1]).toMatchObject({
+			kind: "continue",
+			httpStatus: 409,
+			errorPhase: "pre_head",
+		});
+		expect(h.bridge.status().parked).toBe(1);
 	});
 
 	it("tears a query down when the client never answers, and later results get 409", async () => {
@@ -752,33 +789,253 @@ describe("parked tool calls", () => {
 		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("timed_out");
 	});
 
-	it("refuses a start request that answers tool calls no live query issued", async () => {
-		const h = harness();
-		const res = await h.bridge.startTurn({
-			request: messagesRequest({
+	describe("tool results whose query is gone", () => {
+		const issued: Msg = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Reading." },
+				{ type: "tool_use", id: "gone", name: "read", input: { path: "a" } },
+			],
+		};
+		const answer: Msg = {
+			role: "user",
+			content: [
+				{ type: "tool_result", tool_use_id: "gone", content: "GONE-RESULT" },
+				{ type: "text", text: "and summarize" },
+			],
+		};
+
+		it("rebuild the history up to the calls, flattened with the results after it", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first, issued, answer] });
+			await t.query.nextPrompt();
+			const content = t.query.prompts[0]?.message.content as unknown as Block[];
+			expect(content.some((b) => b.type === "tool_result")).toBe(false);
+			expect(String(content[0]?.text)).toContain(
+				'[tool call read id=gone] {"path":"a"}',
+			);
+			expect(content.slice(1)).toEqual([
+				{ type: "text", text: "[tool result id=gone]\nGONE-RESULT" },
+				{ type: "text", text: "and summarize" },
+			]);
+			expect(t.query.options.resume).toBeUndefined();
+			await waitFor(() => h.repo.turns.has(t.plan.turnId));
+			expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+				historyMode: "rebuild_flattened",
+				rebuildReason: "dead_continuation",
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "summary" }]),
+				resultMessage(),
+			);
+			expect((await reply(t.response)).content).toEqual([
+				{ type: "text", text: "summary" },
+			]);
+		});
+
+		it("get 409 when the request does not carry the calls they answer", async () => {
+			const h = harness();
+			for (const messages of [
+				[first, answer],
+				[
+					first,
+					{ ...issued, content: [{ type: "text", text: "no calls" }] },
+					answer,
+				],
+			]) {
+				const res = await h.bridge.startTurn({
+					request: messagesRequest({ tools, messages }),
+					plan: makePlan(),
+					meta: makeMeta(),
+					signal: new AbortController().signal,
+				});
+				expect(res.status).toBe(409);
+			}
+			expect(h.sdk.queries).toHaveLength(0);
+		});
+	});
+
+	describe("stale tool results", () => {
+		/** A turn parked on its second round of calls, `r2-a` and `r2-b`. */
+		async function parkedTwice(h: Harness) {
+			const t = await start(h, { tools, messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{ type: "tool_use", id: "r1", name: "mcp__c__read", input: {} },
+				]),
+			);
+			const r1 = await reply(t.response);
+			const call1 = t.query.callTool("r1", "read");
+			const round1: Msg[] = [
+				first,
+				{ role: "assistant", content: r1.content },
+				{
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "r1", content: "1" }],
+				},
+			];
+			const c1 = continueTurn(h, t.plan.turnId, { tools, messages: round1 });
+			await call1;
+			t.query.emit(
+				...streamedMessage([
+					{ type: "tool_use", id: "r2-a", name: "mcp__c__read", input: {} },
+					{ type: "tool_use", id: "r2-b", name: "mcp__c__read", input: {} },
+				]),
+			);
+			const r2 = await reply(c1.response);
+			return { t, round1, r2 };
+		}
+
+		it("select a parked turn only by the calls it waits on now", async () => {
+			const h = harness();
+			const { t } = await parkedTwice(h);
+			expect(h.bridge.findContinuation(["r2-b"])?.turnId).toBe(t.plan.turnId);
+			expect(h.bridge.findContinuation(["r1"])).toBeNull();
+		});
+
+		it("replaying an earlier round gets 409, recorded, and the turn stays parked", async () => {
+			const h = harness();
+			const { t, round1 } = await parkedTwice(h);
+			const meta = makeMeta();
+			const res = await h.bridge.startTurn({
+				request: messagesRequest({ tools, messages: round1 }),
+				plan: makePlan(),
+				meta,
+				signal: new AbortController().signal,
+			});
+			expect(res.status).toBe(409);
+			expect(await res.text()).toContain("stale tool results");
+			expect(h.sdk.queries).toHaveLength(1);
+			await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
+			expect(h.repo.legs.get(meta.legId)).toMatchObject({
+				turnId: t.plan.turnId,
+				kind: "continue",
+				httpStatus: 409,
+			});
+			expect(h.bridge.status().parked).toBe(1);
+		});
+
+		it("answering only some of the awaited calls gets 409 and delivers nothing", async () => {
+			const h = harness();
+			const { t, round1, r2 } = await parkedTwice(h);
+			const partial = continueTurn(h, t.plan.turnId, {
 				tools,
 				messages: [
-					first,
-					{
-						role: "assistant",
-						content: [
-							{ type: "tool_use", id: "gone", name: "read", input: {} },
-						],
-					},
+					...round1,
+					{ role: "assistant", content: r2.content },
 					{
 						role: "user",
 						content: [
-							{ type: "tool_result", tool_use_id: "gone", content: "x" },
+							{ type: "tool_result", tool_use_id: "r2-a", content: "A" },
 						],
 					},
 				],
-			}),
-			plan: makePlan(),
-			meta: makeMeta(),
-			signal: new AbortController().signal,
+			});
+			expect((await partial.response).status).toBe(409);
+			expect(h.bridge.status().parked).toBe(1);
+			const callA = t.query.callTool("r2-a", "read");
+			const callB = t.query.callTool("r2-b", "read");
+			const full = continueTurn(h, t.plan.turnId, {
+				tools,
+				messages: [
+					...round1,
+					{ role: "assistant", content: r2.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "r2-a", content: "A" },
+							{ type: "tool_result", tool_use_id: "r2-b", content: "B" },
+						],
+					},
+				],
+			});
+			expect(
+				(await Promise.all([callA, callB])).map(
+					(r) => (r.content as Array<{ text: string }>)[0]?.text,
+				),
+			).toEqual(["A", "B"]);
+			t.query.emit(
+				...streamedMessage([{ type: "text", text: "ok" }]),
+				resultMessage(),
+			);
+			expect((await reply(full.response)).status).toBe(200);
 		});
-		expect(res.status).toBe(409);
-		expect(h.sdk.queries).toHaveLength(0);
+	});
+
+	it("hands text sent with the tool results to Claude Code while it still waits on them", async () => {
+		const h = harness();
+		const t = await start(h, { tools, messages: [first] });
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_t", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const r1 = await reply(t.response);
+		continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: [
+				first,
+				{ role: "assistant", content: r1.content },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_t", content: "T" },
+						{ type: "text", text: "  " },
+						{ type: "text", text: "also check b.txt" },
+					],
+				},
+			],
+		});
+		// The text is read first, as one message without the blank block...
+		await waitFor(() => t.query.prompts.length === 2);
+		expect(t.query.prompts[1]?.message.content).toEqual([
+			{ type: "text", text: "also check b.txt" },
+		]);
+		// ...and the result follows it.
+		expect(
+			((await t.query.callTool("toolu_t", "read")).content as Block[])[0],
+		).toMatchObject({ text: "T" });
+	});
+
+	it("delivers the results only after Claude Code has read the text", async () => {
+		const h = harness();
+		const t = await start(h, { tools, messages: [first] });
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_u", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const r1 = await reply(t.response);
+		// Claude Code already waits on the call.
+		let answered = false;
+		const call = t.query.callTool("toolu_u", "read").then((r) => {
+			answered = true;
+			return r;
+		});
+		await waitFor(() => h.bridge.status().parked === 1);
+		await Bun.sleep(20);
+		continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: [
+				first,
+				{ role: "assistant", content: r1.content },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_u", content: "U" },
+						{ type: "text", text: "note" },
+					],
+				},
+			],
+		});
+		await waitFor(() => t.query.prompts.length === 2);
+		expect(answered).toBe(false);
+		await call;
+		expect(answered).toBe(true);
 	});
 
 	it("stops a turn that issues more parallel calls than the limit", async () => {
@@ -867,7 +1124,7 @@ describe("conversations", () => {
 		expect(resumed).toBeTruthy();
 		expect(resumed).not.toBe(t.query.options.sessionId);
 		// The new session is a copy under its own id; the old one stays pristine.
-		const store = new FileSessionStore(join(h.workRoot, "sessions"));
+		const store = new FileSessionStore(sessionsDir(h));
 		expect(store.read(resumed)?.map((e) => [e.uuid, e.sessionId])).toEqual([
 			["u1", resumed],
 		]);
@@ -913,7 +1170,7 @@ describe("conversations", () => {
 		const b = await start(h, second(a.r));
 		const b2 = await start(h, second(a.r));
 		for (const q of [b.query, b2.query]) {
-			const store = new FileSessionStore(join(h.workRoot, "sessions"));
+			const store = new FileSessionStore(sessionsDir(h));
 			const entries = store.read(q.options.resume as string);
 			// A rebuilt transcript, not a copy of the first turn's session.
 			expect(entries?.map((e) => e.type)).toEqual(["user", "assistant"]);
@@ -1005,7 +1262,7 @@ describe("conversations", () => {
 		const { t } = await firstTurn(h, {});
 		t.query.emit(resultMessage());
 		await settled(h);
-		expect(readdirSync(join(h.workRoot, "sessions"))).toEqual([]);
+		expect(readdirSync(sessionsDir(h))).toEqual([]);
 	});
 });
 
@@ -1153,27 +1410,70 @@ describe("errors", () => {
 });
 
 describe("admission through the bridge", () => {
-	it("answers 529 once the process cap is reached", async () => {
+	it("refuses a turn at the process cap with a capacity error the proxy can fail over on", async () => {
 		const h = harness({ limits: () => ({ maxProcesses: 1 }) });
 		await start(h, { messages: [{ role: "user", content: "one" }] });
 		const plan = makePlan();
-		const res = await h.bridge.startTurn({
-			request: messagesRequest({
-				messages: [{ role: "user", content: "two" }],
-			}),
-			plan,
-			meta: makeMeta(),
-			signal: new AbortController().signal,
-		});
+		const meta = makeMeta();
+		const error = await h.bridge
+			.startTurn({
+				request: messagesRequest({
+					messages: [{ role: "user", content: "two" }],
+				}),
+				plan,
+				meta,
+				signal: new AbortController().signal,
+			})
+			.then(
+				() => null,
+				(e: unknown) => e,
+			);
+		expect(error).toBeInstanceOf(SdkBridgeCapacityError);
+		expect(error).toBeInstanceOf(SdkBridgeUnavailableError);
+		const res = (error as SdkBridgeCapacityError).terminalResponse();
 		expect(res.status).toBe(529);
-		expect(res.headers.get("retry-after")).toBeTruthy();
+		expect(res.headers.get("retry-after")).toBe("10");
+		expect(((await res.json()) as { error: { type: string } }).error.type).toBe(
+			"overloaded_error",
+		);
 		expect(h.sdk.queries).toHaveLength(1);
-		await Bun.sleep(10);
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
 		expect(h.repo.turns.get(plan.turnId)).toMatchObject({
 			status: "rejected",
 			httpStatus: 529,
 		});
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({ httpStatus: 529 });
 		expect(h.bridge.status().counters.rejected).toEqual({ process_cap: 1 });
+	});
+
+	it("refuses a rebuild at the rebuild cap the same way, and gives its conversation back", async () => {
+		const h = harness({ limits: () => ({ maxConcurrentRebuilds: 1 }) });
+		const history = [
+			{ role: "user", content: "q" },
+			{ role: "assistant", content: "a" },
+			{ role: "user", content: "again" },
+		];
+		await start(h, { messages: history });
+		const header = { affinityScope: "client_session", affinityKey: "rc" };
+		await expect(
+			h.bridge.startTurn({
+				request: messagesRequest({ messages: history }),
+				plan: makePlan(),
+				meta: makeMeta(header),
+				signal: new AbortController().signal,
+			}),
+		).rejects.toBeInstanceOf(SdkBridgeCapacityError);
+		// The conversation was released: a fresh turn in it starts at once.
+		const t0 = Date.now();
+		const fresh = h.bridge.startTurn({
+			request: messagesRequest({ messages: [{ role: "user", content: "q" }] }),
+			plan: makePlan(),
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+		await h.sdk.next();
+		expect(Date.now() - t0).toBeLessThan(400);
+		void fresh;
 	});
 
 	it("answers 503 for an empty plan and 413 for an oversized body", async () => {
@@ -1343,11 +1643,118 @@ describe("availability and shutdown", () => {
 				},
 			]),
 		);
-		expect((await reply(running.response)).stop).toBe("tool_use");
+		// The stream was open: the calls it would hand out end in an SSE error
+		// instead, since nobody could ever answer them.
+		const late = await reply(running.response);
+		expect(late.status).toBe(200);
+		expect(late.stop).toBeNull();
+		expect(late.events.some((e) => e.event === "message_stop")).toBe(false);
+		expect(late.errors[0]?.data).toMatchObject({
+			error: { message: "The SDK bridge is shutting down" },
+		});
 		await waitFor(() => running.query.closed);
 		await settled(h);
 		expect(h.repo.turns.get(parked.plan.turnId)?.status).toBe("shutdown");
 		expect(h.repo.turns.get(running.plan.turnId)?.status).toBe("shutdown");
+		expect(h.repo.turns.get(running.plan.turnId)?.legs[0]).toMatchObject({
+			httpStatus: 503,
+			errorPhase: "mid_stream",
+		});
+	});
+
+	it("fails a not-yet-sent reply that would park during shutdown with 503", async () => {
+		const h = harness();
+		const t = await start(h, {
+			stream: false,
+			tools: [READ_TOOL],
+			messages: [{ role: "user", content: "TOOL" }],
+		});
+		t.query.emit(initMessage());
+		h.bridge.beginShutdown();
+		t.query.emit(
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_n", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const res = await t.response;
+		expect(res.status).toBe(503);
+		expect(res.headers.get("retry-after")).toBeTruthy();
+		await settled(h);
+		expect(h.repo.turns.get(t.plan.turnId)?.legs[0]).toMatchObject({
+			httpStatus: 503,
+			errorPhase: "pre_head",
+		});
+		expect(h.bridge.findContinuation(["toolu_n"])).toBeNull();
+	});
+
+	it("answers a continuation during shutdown with 503, recorded on its turn", async () => {
+		const h = harness();
+		const t = await start(h, {
+			tools: [READ_TOOL],
+			messages: [{ role: "user", content: "TOOL" }],
+		});
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_d", name: "mcp__c__read", input: {} },
+			]),
+		);
+		await reply(t.response);
+		h.bridge.beginShutdown();
+		const meta = makeMeta();
+		const res = await h.bridge.continueTurn({
+			turnId: t.plan.turnId,
+			request: messagesRequest({
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_d", content: "x" },
+						],
+					},
+				],
+			}),
+			meta,
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(503);
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			turnId: t.plan.turnId,
+			kind: "continue",
+			httpStatus: 503,
+			errorPhase: "pre_head",
+		});
+	});
+
+	it("answers a continuation that fails unexpectedly with 502, recorded once", async () => {
+		const h = harness();
+		const t = await start(h, {
+			tools: [READ_TOOL],
+			messages: [{ role: "user", content: "TOOL" }],
+		});
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_e", name: "mcp__c__read", input: {} },
+			]),
+		);
+		await reply(t.response);
+		const meta = makeMeta();
+		const request = messagesRequest({ messages: [] });
+		// A body that cannot be read.
+		request.arrayBuffer = () => Promise.reject(new Error("socket reset"));
+		const res = await h.bridge.continueTurn({
+			turnId: t.plan.turnId,
+			request,
+			meta,
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(502);
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
+		expect(
+			h.repo.turns.get(t.plan.turnId)?.legs.filter((l) => l.id === meta.legId),
+		).toEqual([expect.objectContaining({ kind: "continue", httpStatus: 502 })]);
 	});
 
 	it("dispose aborts running queries with 503", async () => {
@@ -1360,5 +1767,305 @@ describe("availability and shutdown", () => {
 		expect(res.status).toBe(503);
 		expect(t.query.closed).toBe(true);
 		expect(h.bridge.status().live).toBe(0);
+	});
+});
+
+describe("inner call accounting", () => {
+	it("counts calls by their requests row and errors by their outcome, once each", async () => {
+		const h = harness();
+		const outcome = (requestId: string, status: number) => ({
+			requestId,
+			status,
+			errorType: null,
+			message: null,
+			retryAfter: null,
+			accountId: "acct-a",
+		});
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.("r1");
+			ctx.onInnerRequestStarted?.("r1");
+			ctx.onInnerOutcome?.(outcome("r1", 529));
+			ctx.onInnerOutcome?.(outcome("r1", 529));
+			ctx.onInnerRequestStarted?.("r2");
+			ctx.onInnerOutcome?.(outcome("r2", 200));
+			return new Response("ok");
+		};
+		const t = await start(h, { messages: [{ role: "user", content: "x" }] });
+		await innerCall(t.query);
+		// Refused by the listener: no row, so an error and no call.
+		expect((await innerCall(t.query, "claude-opus-5")).status).toBe(400);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		await reply(t.response);
+		await settled(h);
+		expect(h.repo.turns.get(t.plan.turnId)?.counters).toMatchObject({
+			innerCalls: 2,
+			innerErrors: 2,
+		});
+	});
+});
+
+describe("conversation ownership", () => {
+	const header = {
+		affinityScope: "client_session",
+		affinityKey: "own-1",
+	} as const;
+	const first: Msg = { role: "user", content: "TOOL read" };
+
+	it("a new turn supersedes one of its conversation parked on tool calls", async () => {
+		const h = harness({
+			timing: {
+				headHoldMs: 1_000,
+				pingIntervalMs: 100,
+				settleWaitMs: 5_000,
+				idleTimeoutMs: 5_000,
+				exitGraceMs: 50,
+			},
+		});
+		const t = await start(
+			h,
+			{ tools: [READ_TOOL], messages: [first] },
+			{ meta: header },
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_o", name: "mcp__c__read", input: {} },
+			]),
+		);
+		await reply(t.response);
+		const call = t.query.callTool("toolu_o", "read");
+		const t0 = Date.now();
+		const next = await start(
+			h,
+			{
+				tools: [READ_TOOL],
+				messages: [first, { role: "assistant", content: "never mind" }, first],
+			},
+			{ meta: header },
+		);
+		// No settle wait: the parked turn gave the conversation up at once.
+		expect(Date.now() - t0).toBeLessThan(1_000);
+		expect((await call).isError).toBe(true);
+		expect(t.query.closed).toBe(true);
+		await waitFor(() => h.repo.turns.get(t.plan.turnId)?.status === "aborted");
+		expect(String(h.repo.turns.get(t.plan.turnId)?.errorMessage)).toContain(
+			"A new turn of this conversation",
+		);
+		const late = continueTurn(h, t.plan.turnId, {
+			tools: [READ_TOOL],
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_o", content: "x" },
+					],
+				},
+			],
+		});
+		expect((await late.response).status).toBe(409);
+		expect(next.query.closed).toBe(false);
+	});
+});
+
+describe("a turn that fails to start", () => {
+	const header = {
+		affinityScope: "client_session",
+		affinityKey: "setup-1",
+	} as const;
+
+	it("gives back its conversation and deletes only its own session files", async () => {
+		let failNext = false;
+		const sdk = fakeQueryFn();
+		const h = harness({
+			queryFn: (params) => {
+				if (failNext) throw new Error("spawn failed");
+				return sdk.fn(params);
+			},
+		});
+		const t = h.bridge.startTurn({
+			request: messagesRequest({ messages: [{ role: "user", content: "hi" }] }),
+			plan: makePlan(),
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+		const q1 = await sdk.next();
+		const store = q1.options.sessionStore as SessionStore;
+		const kept = q1.options.sessionId as string;
+		await store.append({ projectKey: "p", sessionId: kept }, [
+			{ type: "user", uuid: "u1", sessionId: kept },
+		] as never);
+		q1.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "hello" }]),
+			resultMessage(),
+		);
+		const r1 = await reply(t);
+		await settled(h);
+
+		failNext = true;
+		const second = {
+			messages: [
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: r1.content },
+				{ role: "user", content: "again" },
+			],
+		};
+		await expect(
+			h.bridge.startTurn({
+				request: messagesRequest(second),
+				plan: makePlan(),
+				meta: makeMeta(header),
+				signal: new AbortController().signal,
+			}),
+		).rejects.toBeInstanceOf(SdkBridgeUnavailableError);
+		// Only the resumable session is left; the failed turn's copy is gone.
+		expect(readdirSync(sessionsDir(h))).toEqual([`${kept}.jsonl`]);
+
+		failNext = false;
+		const t0 = Date.now();
+		const third = h.bridge.startTurn({
+			request: messagesRequest(second),
+			plan: makePlan(),
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+		const q3 = await sdk.next();
+		expect(Date.now() - t0).toBeLessThan(400);
+		expect(q3.options.resume).toBeTruthy();
+		void third;
+	});
+
+	it("flattens a history too deeply nested for a transcript, rather than failing", async () => {
+		const h = harness();
+		// Written as text: JSON.stringify itself cannot produce this depth.
+		const deep = `${'{"a":'.repeat(100_000)}"leaf"${"}".repeat(100_000)}`;
+		const text = JSON.stringify({
+			model: MODEL,
+			stream: true,
+			tools: [READ_TOOL],
+			messages: [
+				{ role: "user", content: "go" },
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "d1", name: "read", input: {} }],
+				},
+				{
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "d1", content: "r" }],
+				},
+				{ role: "assistant", content: "done" },
+				{ role: "user", content: "next" },
+			],
+		}).replace('"input":{}', `"input":${deep}`);
+		const plan = makePlan();
+		const response = h.bridge.startTurn({
+			request: new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				body: text,
+			}),
+			plan,
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+		const q = await h.sdk.next();
+		await q.nextPrompt();
+		const content = q.prompts[0]?.message.content as unknown as Block[];
+		expect(String(content[0]?.text)).toContain("[input omitted");
+		await waitFor(() => h.repo.turns.has(plan.turnId));
+		expect(h.repo.turns.get(plan.turnId)?.historyMode).toBe(
+			"rebuild_flattened",
+		);
+		// No transcript was left behind by the attempt to write one.
+		expect(readdirSync(sessionsDir(h))).toEqual([]);
+		void response;
+	});
+});
+
+describe("work directories", () => {
+	it("keeps everything under a private directory of its own, removed at dispose", async () => {
+		const h = harness();
+		const gen = generationDir(h);
+		expect(statSync(h.workRoot).mode & 0o777).toBe(0o700);
+		expect(statSync(gen).mode & 0o777).toBe(0o700);
+		const t = await start(h, { messages: [{ role: "user", content: "hi" }] });
+		const store = t.query.options.sessionStore as SessionStore;
+		const id = t.query.options.sessionId as string;
+		await store.append({ projectKey: "p", sessionId: id }, [
+			{ type: "user", uuid: "u1", sessionId: id },
+		] as never);
+		for (const dir of ["sessions", "claude-config", "tmp", "home", "cwd"])
+			expect(statSync(join(gen, dir)).mode & 0o777).toBe(0o700);
+		expect(statSync(join(gen, "sessions", `${id}.jsonl`)).mode & 0o777).toBe(
+			0o600,
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		await reply(t.response);
+		await settled(h);
+		await h.bridge.dispose();
+		expect(existsSync(gen)).toBe(false);
+	});
+
+	it("deletes Claude Code's own transcript of a query once it closes", async () => {
+		const h = harness();
+		const t = await start(h, { messages: [{ role: "user", content: "hi" }] });
+		const id = t.query.options.sessionId as string;
+		const project = join(generationDir(h), "claude-config", "projects", "-cwd");
+		mkdirSync(join(project, id, "subagents"), { recursive: true });
+		writeFileSync(join(project, `${id}.jsonl`), "{}\n");
+		writeFileSync(join(project, id, "subagents", "agent-1.jsonl"), "{}\n");
+		writeFileSync(join(project, "other-session.jsonl"), "{}\n");
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		await reply(t.response);
+		await settled(h);
+		expect(readdirSync(project)).toEqual(["other-session.jsonl"]);
+	});
+
+	it("removes earlier processes' directories at startup, but not a live one's, and follows no symlink", async () => {
+		const root = mkdtempSync(join(tmpdir(), "sdk-bridge-gens-"));
+		const outside = mkdtempSync(join(tmpdir(), "sdk-bridge-outside-"));
+		try {
+			writeFileSync(join(outside, "keep.txt"), "keep");
+			const dead = join(root, "gen-dead");
+			mkdirSync(join(dead, "sessions"), { recursive: true });
+			writeFileSync(join(dead, "sessions", "s.jsonl"), "{}\n");
+			// A pid that cannot exist.
+			writeFileSync(
+				join(dead, "owner.json"),
+				JSON.stringify({ pid: 2 ** 22 + 7, startTime: null }),
+			);
+			symlinkSync(outside, join(dead, "sessions", "link"));
+			const alive = join(root, "gen-alive");
+			mkdirSync(alive);
+			writeFileSync(
+				join(alive, "owner.json"),
+				JSON.stringify({ pid: process.pid, startTime: null }),
+			);
+			symlinkSync(outside, join(root, "gen-symlinked"));
+			harness({ workRoot: root });
+			expect(existsSync(dead)).toBe(false);
+			expect(existsSync(alive)).toBe(true);
+			expect(lstatSync(join(root, "gen-symlinked")).isSymbolicLink()).toBe(
+				true,
+			);
+			expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("keep");
+			// The live one, the symlink, and the new bridge's own.
+			expect(
+				readdirSync(root).filter((n) => n.startsWith("gen-")),
+			).toHaveLength(3);
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
 	});
 });

@@ -55,6 +55,42 @@ describe("parseTurnRequest", () => {
 		).toEqual(["t1"]);
 	});
 
+	it("reads consecutive trailing user messages as the one final message", () => {
+		// How Chat Completions sends text typed alongside tool results: the
+		// results, then a user message of its own.
+		const parsed = parseTurnRequest(
+			{
+				...base,
+				messages: [
+					{ role: "user", content: "a" },
+					{
+						role: "assistant",
+						content: [{ type: "tool_use", id: "t1", name: "read", input: {} }],
+					},
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: "t1", content: "x" }],
+					},
+					{ role: "system", content: "effort changed" },
+					{ role: "user", content: "and also this" },
+				],
+			},
+			null,
+			1,
+		);
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		expect(parsed.turn.toolResults.map((b) => b.tool_use_id)).toEqual(["t1"]);
+		expect(parsed.turn.last.content).toEqual([
+			{ type: "tool_result", tool_use_id: "t1", content: "x" },
+			{ type: "text", text: "and also this" },
+		]);
+		expect(parsed.turn.history.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+		]);
+		expect(parsed.turn.messages).toHaveLength(5);
+	});
+
 	it("rejects a final assistant message", () => {
 		const parsed = parseTurnRequest(
 			{

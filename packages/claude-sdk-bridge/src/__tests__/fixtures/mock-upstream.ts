@@ -2,6 +2,7 @@
 // receives and answers /v1/messages with a scripted SSE stream:
 //
 //   last user turn carries tool_result      -> text "done: <first result text>"
+//   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
@@ -84,12 +85,15 @@ function script(body: ScriptBody): string {
 	)?.name;
 
 	const content: Block[] = [];
+	const flattenedResult = /\[tool result id=[^\]]*\]\n([^\n]*)/.exec(text);
 	if (toolResults.length > 0) {
 		const first = toolResults[0] as Block;
 		const inner = Array.isArray(first.content)
 			? textOf(first.content as Block[])
 			: String(first.content);
 		content.push({ type: "text", text: `done: ${inner}` });
+	} else if (flattenedResult) {
+		content.push({ type: "text", text: `done: ${flattenedResult[1]}` });
 	} else if (readTool && /PARALLEL/.test(text)) {
 		for (const path of ["a.txt", "b.txt"]) {
 			content.push({

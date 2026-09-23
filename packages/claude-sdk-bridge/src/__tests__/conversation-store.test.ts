@@ -117,4 +117,54 @@ describe("ConversationStore", () => {
 		expect((await store.claim("k", 10)).current?.sessionId).toBe("new");
 		expect(discarded).toContain("old");
 	});
+
+	it("reserves the conversation before waiting on a settle, so two waiters take turns", async () => {
+		const store = new ConversationStore({ now: Date.now, onDiscard: () => {} });
+		let settle!: (ok: boolean) => void;
+		(await store.claim("k", 1_000)).register(
+			session("s1"),
+			new Promise((resolve) => (settle = resolve)),
+		);
+		// Both arrive while s1 is still settling.
+		const order: string[] = [];
+		const a = store.claim("k", 1_000).then((c) => {
+			order.push("a");
+			return c;
+		});
+		const b = store.claim("k", 1_000).then((c) => {
+			order.push("b");
+			return c;
+		});
+		await Bun.sleep(20);
+		settle(true);
+		const first = await a;
+		await Bun.sleep(30);
+		// b waits on a's reservation, not on s1's settle.
+		expect(order).toEqual(["a"]);
+		expect(first.current?.sessionId).toBe("s1");
+		first.register(session("s2"), Promise.resolve(true));
+		expect((await b).current?.sessionId).toBe("s2");
+		expect(order).toEqual(["a", "b"]);
+	});
+
+	it("treats a settle that fails as a session never to resume", async () => {
+		const discarded: string[] = [];
+		const store = new ConversationStore({
+			now: Date.now,
+			onDiscard: (id) => discarded.push(id),
+		});
+		const first = await store.claim("k", 1_000);
+		first.register(
+			session("s1"),
+			Promise.reject(new Error("settle failed")) as Promise<boolean>,
+		);
+		// Neither stranded nor thrown: the next claim gets no session.
+		const next = await store.claim("k", 200);
+		expect(next.current).toBeNull();
+		expect(discarded).toEqual(["s1"]);
+		next.release();
+		const t0 = Date.now();
+		(await store.claim("k", 1_000)).release();
+		expect(Date.now() - t0).toBeLessThan(100);
+	});
 });

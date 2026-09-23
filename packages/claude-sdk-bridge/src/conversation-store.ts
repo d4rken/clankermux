@@ -81,57 +81,87 @@ export class ConversationStore {
 		return this.records.size;
 	}
 
+	private record(key: string): ConversationRecord {
+		let record = this.records.get(key);
+		if (!record) {
+			record = {
+				current: null,
+				currentSeq: 0,
+				nextSeq: 1,
+				pending: null,
+				busy: null,
+				lastUsed: this.opts.now(),
+			};
+			this.records.set(key, record);
+		}
+		return record;
+	}
+
 	/**
 	 * Take the conversation for one turn. Waits, at most `waitMs` in total, for
 	 * a turn already holding it and then for that turn's session to settle.
+	 *
+	 * The conversation is reserved before the settle wait, so a turn arriving
+	 * during that wait queues behind this one instead of claiming alongside it,
+	 * and every await is followed by a fresh look at the record.
 	 */
 	async claim(key: string, waitMs: number): Promise<ConversationClaim> {
 		this.prune();
 		// Waits run on the real clock; `now` only dates records.
 		const deadline = Date.now() + waitMs;
-		let record = this.records.get(key);
-		while (record?.busy) {
-			const left = deadline - Date.now();
-			if (left <= 0) break;
-			await Promise.race([record.busy, Bun.sleep(left)]);
-			record = this.records.get(key);
-		}
-		if (record?.pending) {
-			const left = Math.max(0, deadline - Date.now());
-			await Promise.race([record.pending.done, Bun.sleep(left)]);
-			await Promise.resolve();
-		}
-		record = this.records.get(key) ?? {
-			current: null,
-			currentSeq: 0,
-			nextSeq: 1,
-			pending: null,
-			busy: null,
-			lastUsed: this.opts.now(),
-		};
-		this.records.set(key, record);
-		record.lastUsed = this.opts.now();
-		// A turn still unsettled after the wait is ignored, not resumed.
-		const current = record.current;
 		let releaseBusy!: () => void;
 		const busy = new Promise<void>((resolve) => {
 			releaseBusy = resolve;
 		});
-		record.busy = busy;
-		const owned = record;
+		let owned: ConversationRecord | null = null;
 		let finished = false;
 		const finish = () => {
 			if (finished) return;
 			finished = true;
-			if (owned.busy === busy) owned.busy = null;
+			if (owned && owned.busy === busy) owned.busy = null;
 			releaseBusy();
 		};
+		try {
+			for (;;) {
+				let record = this.record(key);
+				while (record.busy && record.busy !== busy) {
+					const left = deadline - Date.now();
+					// A holder that outlives the wait loses the conversation to us.
+					if (left <= 0) break;
+					await Promise.race([record.busy, Bun.sleep(left)]);
+					record = this.record(key);
+				}
+				record.busy = busy;
+				owned = record;
+				const pending = record.pending;
+				if (!pending) break;
+				const left = Math.max(0, deadline - Date.now());
+				await Promise.race([pending.done.catch(() => false), Bun.sleep(left)]);
+				// Let the settle callback run before the record is read.
+				await Promise.resolve();
+				// Still ours, and still the record the key names: done waiting.
+				if (this.records.get(key) === record && record.busy === busy) break;
+				if (Date.now() >= deadline) {
+					record = this.record(key);
+					record.busy = busy;
+					owned = record;
+					break;
+				}
+			}
+		} catch (error) {
+			finish();
+			throw error;
+		}
+		const record = owned as ConversationRecord;
+		record.lastUsed = this.opts.now();
+		// A turn still unsettled after the wait is ignored, not resumed.
+		const current = record.current;
 		return {
 			current,
 			register: (session, done) => {
 				if (finished) return;
-				owned.pending = { session, done };
-				this.settle(owned, session, done, owned.nextSeq++);
+				record.pending = { session, done };
+				this.settle(record, session, done, record.nextSeq++);
 				finish();
 			},
 			release: finish,
@@ -144,18 +174,20 @@ export class ConversationStore {
 		done: Promise<boolean>,
 		seq: number,
 	): void {
-		void done.then((ok) => {
-			if (record.pending?.session === session) record.pending = null;
-			if (!ok || seq < record.currentSeq) {
-				this.opts.onDiscard(session.sessionId);
-				return;
-			}
-			const replaced = record.current;
-			record.current = session;
-			record.currentSeq = seq;
-			if (replaced && replaced.sessionId !== session.sessionId)
-				this.opts.onDiscard(replaced.sessionId);
-		});
+		void done
+			.catch(() => false)
+			.then((ok) => {
+				if (record.pending?.session === session) record.pending = null;
+				if (!ok || seq < record.currentSeq) {
+					this.opts.onDiscard(session.sessionId);
+					return;
+				}
+				const replaced = record.current;
+				record.current = session;
+				record.currentSeq = seq;
+				if (replaced && replaced.sessionId !== session.sessionId)
+					this.opts.onDiscard(replaced.sessionId);
+			});
 	}
 
 	private prune(): void {

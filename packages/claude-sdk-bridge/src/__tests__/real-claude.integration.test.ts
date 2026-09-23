@@ -38,6 +38,8 @@ type Results = Record<string, Record<string, unknown> & { ok?: boolean }> & {
 	egressBlocked?: unknown;
 	upstreamPaths?: unknown;
 	leftoverChildren?: unknown;
+	staleGenerationRemoved?: unknown;
+	filesAfterDispose?: unknown;
 };
 
 let pending: Promise<Results> | null = null;
@@ -241,6 +243,82 @@ describe.skipIf(reason !== null)(
 				expect(s.after).toBe(0);
 				expect(s.live).toBe(0);
 				expect(s.upstreamAborted).toBe(true);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"leaves no transcript behind a closed query, and nothing at all after dispose",
+			async () => {
+				const r = await results();
+				expect(r.staleGenerationRemoved).toBe(true);
+				expect(scenario(r, "plain").transcriptsAfter).toEqual([]);
+				expect(r.filesAfterDispose).toEqual([]);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"counts the plain turn's model call once, from its row",
+			async () => {
+				const s = scenario(await results(), "plain");
+				expect(s.innerCounters).toMatchObject({ innerErrors: 0 });
+				expect(
+					(s.innerCounters as { innerCalls: number }).innerCalls,
+				).toBeGreaterThanOrEqual(1);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"delivers text sent with tool results to the model, after the results",
+			async () => {
+				const s = scenario(await results(), "textWithToolResults");
+				expect(s.r2).toMatchObject({ status: 200 });
+				// One model call carries both, so the reply the client gets
+				// answers the text too.
+				expect(s.upstreamCalls).toBe(1);
+				expect(s.textReachedUpstream).toBe(true);
+				expect(s.resultBeforeText).toBe(true);
+				expect(s.turn).toBe("completed");
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"rebuilds a continuation whose query timed out and serves it",
+			async () => {
+				const s = scenario(await results(), "deadContinuation");
+				expect(s.firstStatus).toBe("timed_out");
+				expect(s.continued).toBeNull();
+				expect(s.r2).toMatchObject({
+					status: 200,
+					stop: "end_turn",
+					content: [{ type: "text", text: "done: DEAD-RESULT" }],
+				});
+				expect(s).toMatchObject({
+					historyMode: "rebuild_flattened",
+					rebuildReason: "dead_continuation",
+					turnStatus: "completed",
+					upstreamCarriesCall: true,
+					upstreamCarriesResult: true,
+					upstreamHasToolResultBlock: false,
+				});
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"refuses a model call larger than maxHistoryBytes with 413",
+			async () => {
+				const s = scenario(await results(), "oversizedInnerBody");
+				expect(s.reply).toMatchObject({ status: 413 });
+				expect(s.upstreamCalls).toBe(0);
+				expect(s.turnStatus).toBe("failed");
+				expect(s.innerCounters).toMatchObject({
+					innerCalls: 0,
+					innerErrors: 1,
+				});
 			},
 			TIMEOUT,
 		);

@@ -55,8 +55,58 @@ export class InnerListener {
 				ctx: SdkBridgeInnerContext,
 			) => Promise<Response>;
 			log: BridgeLog;
+			/** Largest body an inner call may send, read per call. */
+			maxBodyBytes: () => number;
 		},
 	) {}
+
+	/**
+	 * The request body, or null once it passes `limit`: reading stops there
+	 * and the rest of the upload is cancelled, never buffered.
+	 */
+	private async readBounded(
+		req: Request,
+		limit: number,
+	): Promise<Uint8Array | null> {
+		if (!req.body) return new Uint8Array();
+		const reader = req.body.getReader();
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) break;
+			total += next.value.byteLength;
+			if (total > limit) {
+				await reader.cancel().catch(() => {});
+				return null;
+			}
+			chunks.push(next.value);
+		}
+		const body = new Uint8Array(total);
+		let offset = 0;
+		for (const chunk of chunks) {
+			body.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return body;
+	}
+
+	private tooLarge(
+		entry: TokenEntry,
+		limit: number,
+		declared: number | null,
+	): Response {
+		const message = `SDK bridge limit maxHistoryBytes exceeded by a model call: ${declared ?? `more than ${limit}`} > ${limit}`;
+		this.report(entry, {
+			requestId: "",
+			status: 413,
+			errorType: "request_too_large",
+			message,
+			retryAfter: null,
+			accountId: null,
+		});
+		return jsonError(413, "request_too_large", message);
+	}
 
 	get liveTokens(): number {
 		let n = 0;
@@ -136,11 +186,31 @@ export class InnerListener {
 				"authentication_error",
 				"Unknown or revoked SDK bridge token",
 			);
-		const body = await req.text();
+		const limit = this.opts.maxBodyBytes();
+		const declared = Number(req.headers.get("content-length"));
+		if (Number.isFinite(declared) && declared > limit)
+			return this.tooLarge(entry, limit, declared);
+		let bytes: Uint8Array | null;
+		try {
+			bytes = await this.readBounded(req, limit);
+		} catch (error) {
+			if (req.signal.aborted) return new Response(null, { status: 499 });
+			throw error;
+		}
+		if (!bytes) return this.tooLarge(entry, limit, null);
+		const body = new TextDecoder().decode(bytes);
 		let model: unknown;
 		try {
 			model = (JSON.parse(body) as { model?: unknown }).model;
 		} catch {
+			this.report(entry, {
+				requestId: "",
+				status: 400,
+				errorType: "invalid_request_error",
+				message: "Body is not JSON",
+				retryAfter: null,
+				accountId: null,
+			});
 			return jsonError(400, "invalid_request_error", "Body is not JSON");
 		}
 		if (typeof model !== "string" || !entry.models.has(model)) {

@@ -53,11 +53,12 @@ describe("InnerListener", () => {
 	let listener: InnerListener | null = null;
 	afterEach(() => listener?.stop());
 
-	function setup() {
+	function setup(maxBodyBytes = 1024 * 1024) {
 		const inner = fakeInner();
 		listener = new InnerListener({
 			dispatchInner: inner.dispatch,
 			log: silentLog,
+			maxBodyBytes: () => maxBodyBytes,
 		});
 		return { inner, listener };
 	}
@@ -116,6 +117,7 @@ describe("InnerListener", () => {
 		const other = new InnerListener({
 			dispatchInner: inner.dispatch,
 			log: silentLog,
+			maxBodyBytes: () => 1024,
 		});
 		const foreign = other.register(context()).token;
 		other.stop();
@@ -197,6 +199,76 @@ describe("InnerListener", () => {
 		expect(await res.json()).toEqual({
 			type: "error",
 			error: { type: "invalid_request_error", message: "model not permitted" },
+		});
+	});
+
+	describe("a body over maxHistoryBytes", () => {
+		const big = JSON.stringify({ model: MODEL, messages: ["x".repeat(4096)] });
+
+		it("gets 413 on its declared length, before a byte is read", async () => {
+			const { inner, listener } = setup(1000);
+			const outcomes: SdkBridgeInnerOutcome[] = [];
+			const { token } = listener.register(context(outcomes));
+			const request = new Request("http://127.0.0.1:1/v1/messages", {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-length": String(big.length),
+				},
+				body: big,
+			});
+			const res = await listener.handle(request);
+			expect(res.status).toBe(413);
+			expect(await res.json()).toEqual({
+				type: "error",
+				error: {
+					type: "request_too_large",
+					message: `SDK bridge limit maxHistoryBytes exceeded by a model call: ${big.length} > 1000`,
+				},
+			});
+			expect(request.bodyUsed).toBe(false);
+			expect(inner.calls).toHaveLength(0);
+			expect(outcomes).toEqual([
+				expect.objectContaining({ requestId: "", status: 413 }),
+			]);
+		});
+
+		it("gets 413 while streaming without a length, and the upload is cancelled", async () => {
+			const { inner, listener } = setup(1000);
+			const { token } = listener.register(context());
+			let sent = 0;
+			let cancelled = false;
+			const chunk = new TextEncoder().encode("x".repeat(400));
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					sent++;
+					controller.enqueue(chunk);
+				},
+				cancel() {
+					cancelled = true;
+				},
+			});
+			const res = await listener.handle(
+				new Request("http://127.0.0.1:1/v1/messages", {
+					method: "POST",
+					headers: { authorization: `Bearer ${token}` },
+					body,
+				}),
+			);
+			expect(res.status).toBe(413);
+			expect(cancelled).toBe(true);
+			// Three chunks pass 1000 bytes; nothing after them is read.
+			expect(sent).toBeLessThanOrEqual(4);
+			expect(inner.calls).toHaveLength(0);
+		});
+
+		it("is served at the limit, with the body read once", async () => {
+			const exact = JSON.stringify({ model: MODEL, messages: [] });
+			const { inner, listener } = setup(exact.length);
+			const { token } = listener.register(context());
+			const res = await call(listener, token);
+			expect(res.status).toBe(200);
+			expect(inner.calls[0]?.body).toEqual({ model: MODEL, messages: [] });
 		});
 	});
 

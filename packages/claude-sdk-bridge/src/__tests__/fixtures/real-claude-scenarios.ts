@@ -7,11 +7,25 @@
  * It refuses to start when 1.1.1.1 is reachable.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SdkBridgeRoutePlan, SdkBridgeTurnMeta } from "@clankermux/types";
-import { createClaudeSdkBridge } from "../../bridge";
+import {
+	SdkBridgeCapacityError,
+	type SdkBridgeRoutePlan,
+	type SdkBridgeTurnMeta,
+} from "@clankermux/types";
+import { type ClaudeSdkBridge, createClaudeSdkBridge } from "../../bridge";
+import type { SdkBridgeLimits } from "../../types";
 import {
 	foldReply,
 	MODEL,
@@ -68,32 +82,78 @@ function memory(pid: number): { rss: number; hwm: number } | null {
 	}
 }
 
+/** Every file under `dir`, relative, without following symlinks. */
+function filesUnder(dir: string): string[] {
+	const out: string[] = [];
+	const walk = (path: string, rel: string) => {
+		let names: string[] = [];
+		try {
+			names = readdirSync(path);
+		} catch {
+			return;
+		}
+		for (const name of names) {
+			const child = join(path, name);
+			if (lstatSync(child).isDirectory()) walk(child, `${rel}${name}/`);
+			else out.push(`${rel}${name}`);
+		}
+	};
+	walk(dir, "");
+	return out;
+}
+
 const mock = startMockUpstream();
 const repo = memoryTurnRepo();
 const workRoot = mkdtempSync(join(tmpdir(), "sdk-bridge-real-"));
-const bridge = createClaudeSdkBridge({
-	dispatchInner: async (req, ctx) => {
-		const res = await mock.handle(req);
-		ctx.onInnerOutcome?.({
-			requestId: crypto.randomUUID(),
-			status: res.status,
-			errorType: null,
-			message: null,
-			retryAfter: res.headers.get("retry-after"),
-			accountId: ctx.plan.preferredAccountId,
-		});
-		return res;
-	},
-	turnRepo: repo,
-	workRoot,
-	log: silentLog,
-	limits: () => ({
-		maxProcesses: 4,
-		parkedTimeoutMs: 60_000,
-		turnDeadlineMs: 120_000,
-	}),
+
+// What an earlier bridge process left behind: its owner is long gone.
+const staleGeneration = join(workRoot, "gen-earlier-process");
+mkdirSync(join(staleGeneration, "claude-config", "projects", "-cwd"), {
+	recursive: true,
+});
+writeFileSync(
+	join(staleGeneration, "claude-config", "projects", "-cwd", "old.jsonl"),
+	"{}\n",
+);
+writeFileSync(
+	join(staleGeneration, "owner.json"),
+	JSON.stringify({ pid: 2 ** 22 + 7, startTime: null }),
+);
+
+function makeBridge(
+	limits: Partial<SdkBridgeLimits>,
+	root: string = workRoot,
+): ClaudeSdkBridge {
+	return createClaudeSdkBridge({
+		dispatchInner: async (req, ctx) => {
+			const requestId = crypto.randomUUID();
+			// As the proxy does: the row begins, then the call ends.
+			ctx.onInnerRequestStarted?.(requestId);
+			const res = await mock.handle(req);
+			ctx.onInnerOutcome?.({
+				requestId,
+				status: res.status,
+				errorType: null,
+				message: null,
+				retryAfter: res.headers.get("retry-after"),
+				accountId: ctx.plan.preferredAccountId,
+			});
+			return res;
+		},
+		turnRepo: repo,
+		workRoot: root,
+		log: silentLog,
+		limits: () => limits,
+	});
+}
+
+const bridge = makeBridge({
+	maxProcesses: 4,
+	parkedTimeoutMs: 60_000,
+	turnDeadlineMs: 120_000,
 });
 results.availability = bridge.availability();
+results.staleGenerationRemoved = !existsSync(staleGeneration);
 
 function plan(): SdkBridgeRoutePlan {
 	return {
@@ -156,7 +216,13 @@ interface Reply {
 
 async function read(response: Promise<Response>): Promise<Reply> {
 	const t0 = performance.now();
-	const res = await response;
+	// A capacity refusal is thrown for the proxy to fail over on; with no
+	// other candidate, its terminal response is what the client gets.
+	const res = await response.catch((error: unknown) => {
+		if (error instanceof SdkBridgeCapacityError)
+			return error.terminalResponse();
+		throw error;
+	});
 	if (!res.headers.get("content-type")?.includes("event-stream"))
 		return {
 			status: res.status,
@@ -175,11 +241,12 @@ async function turn(
 	messages: Msg[],
 	extra: Partial<SdkBridgeTurnMeta> = {},
 	signal?: AbortSignal,
+	on: ClaudeSdkBridge = bridge,
 ) {
 	const p = plan();
 	const m = meta(extra);
 	const r = await read(
-		bridge.startTurn({
+		on.startTurn({
 			request: request(messages),
 			plan: p,
 			meta: m,
@@ -189,9 +256,13 @@ async function turn(
 	return { ...r, turnId: p.turnId };
 }
 
-async function answer(turnId: string, messages: Msg[]) {
+async function answer(
+	turnId: string,
+	messages: Msg[],
+	on: ClaudeSdkBridge = bridge,
+) {
 	return read(
-		bridge.continueTurn({
+		on.continueTurn({
 			turnId,
 			request: request(messages),
 			meta: meta(),
@@ -200,10 +271,14 @@ async function answer(turnId: string, messages: Msg[]) {
 	);
 }
 
-async function settled() {
+async function settled(on: ClaudeSdkBridge = bridge) {
 	const until = Date.now() + 20_000;
-	while (bridge.status().live > 0 && Date.now() < until) await Bun.sleep(50);
+	while (on.status().live > 0 && Date.now() < until) await Bun.sleep(50);
 }
+
+/** Session transcripts on disk under the work root, Claude Code's own included. */
+const transcriptsOnDisk = () =>
+	filesUnder(workRoot).filter((f) => f.endsWith(".jsonl"));
 
 const lastUpstreamMessages = () =>
 	(
@@ -232,10 +307,15 @@ async function scenario(name: string, run: () => Promise<unknown>) {
 await scenario("plain", async () => {
 	const r = await turn([{ role: "user", content: "hello plain" }]);
 	await settled();
+	// Claude Code's own copy goes a moment after its process exits.
+	await Bun.sleep(3_000);
+	const transcriptsAfter = transcriptsOnDisk();
 	const row = repo.turns.get(r.turnId);
 	const upstream = mock.requests.find((q) => q.path.startsWith("/v1/messages"));
 	return {
 		reply: r,
+		transcriptsAfter,
+		innerCounters: row?.counters,
 		turnStatus: row?.status,
 		historyMode: row?.historyMode,
 		upstreamUserAgent: upstream?.headers["user-agent"],
@@ -486,6 +566,128 @@ await scenario("abortCleanup", async () => {
 	};
 });
 
+await scenario("textWithToolResults", async () => {
+	const history: Msg[] = [{ role: "user", content: "TOOL read a.txt" }];
+	const r1 = await turn(history);
+	const tu = (r1.content ?? []).find((b) => b.type === "tool_use");
+	history.push({ role: "assistant", content: r1.content as Block[] });
+	history.push({
+		role: "user",
+		content: [
+			{ type: "tool_result", tool_use_id: String(tu?.id), content: "TXT-A" },
+			{ type: "text", text: "ALSO-TYPED-BY-USER" },
+		],
+	});
+	const from = mock.requests.length;
+	const r2 = await answer(r1.turnId, history);
+	await settled();
+	const upstream = mock.requests
+		.slice(from)
+		.filter((q) => q.path.startsWith("/v1/messages"));
+	const carrying = upstream.filter((q) =>
+		JSON.stringify(q.body).includes("ALSO-TYPED-BY-USER"),
+	);
+	const last = (carrying.at(-1)?.body as { messages?: Msg[] })?.messages ?? [];
+	return {
+		r2,
+		upstreamCalls: upstream.length,
+		textReachedUpstream: carrying.length > 0,
+		// The result is in the conversation before the text, never after it.
+		resultBeforeText: (() => {
+			const text = JSON.stringify(last);
+			return (
+				text.indexOf("TXT-A") >= 0 &&
+				text.indexOf("TXT-A") < text.indexOf("ALSO-TYPED-BY-USER")
+			);
+		})(),
+		turn: repo.turns.get(r1.turnId)?.status,
+	};
+});
+
+await scenario("deadContinuation", async () => {
+	// A bridge whose parked calls time out fast, so the query is gone by the
+	// time the results come; the same holds after a restart.
+	const shortLived = makeBridge({
+		maxProcesses: 2,
+		parkedTimeoutMs: 1_500,
+		turnDeadlineMs: 120_000,
+	});
+	try {
+		const history: Msg[] = [{ role: "user", content: "TOOL read dead.txt" }];
+		const r1 = await turn(history, {}, undefined, shortLived);
+		const tu = (r1.content ?? []).find((b) => b.type === "tool_use");
+		await settled(shortLived);
+		const firstStatus = repo.turns.get(r1.turnId)?.status;
+		history.push({ role: "assistant", content: r1.content as Block[] });
+		history.push({
+			role: "user",
+			content: [
+				{
+					type: "tool_result",
+					tool_use_id: String(tu?.id),
+					content: "DEAD-RESULT",
+				},
+			],
+		});
+		// What the proxy does with results no live query waits on: a start.
+		const continued = shortLived.findContinuation([String(tu?.id)]);
+		const from = mock.requests.length;
+		const r2 = await turn(history, {}, undefined, shortLived);
+		await settled(shortLived);
+		const sent = (
+			mock.requests.slice(from).find((q) => q.path.startsWith("/v1/messages"))
+				?.body as {
+				messages?: Array<{ role: string; content: unknown }>;
+			}
+		)?.messages;
+		const row = repo.turns.get(r2.turnId);
+		const lastUser = JSON.stringify(
+			sent?.filter((m) => m.role === "user").at(-1) ?? null,
+		);
+		return {
+			firstStatus,
+			continued,
+			r2,
+			historyMode: row?.historyMode,
+			rebuildReason: row?.rebuildReason,
+			turnStatus: row?.status,
+			// One user message: the framed history, the call, then its result.
+			upstreamCarriesCall: lastUser.includes(`id=${String(tu?.id)}`),
+			upstreamCarriesResult: lastUser.includes("DEAD-RESULT"),
+			upstreamHasToolResultBlock: JSON.stringify(sent ?? []).includes(
+				'"tool_result"',
+			),
+		};
+	} finally {
+		await shortLived.dispose();
+	}
+});
+
+await scenario("oversizedInnerBody", async () => {
+	// The client's request fits; Claude Code's own model call, carrying its
+	// system prompt and tools, does not.
+	const small = makeBridge({ maxProcesses: 2, maxHistoryBytes: 8_000 });
+	try {
+		const from = mock.requests.length;
+		const r = await turn(
+			[{ role: "user", content: "hello small" }],
+			{},
+			undefined,
+			small,
+		);
+		await settled(small);
+		const row = repo.turns.get(r.turnId);
+		return {
+			reply: r,
+			upstreamCalls: mock.requests.slice(from).length,
+			turnStatus: row?.status,
+			innerCounters: row?.counters,
+		};
+	} finally {
+		await small.dispose();
+	}
+});
+
 await scenario("rssAtCap", async () => {
 	const turns = await Promise.all(
 		[1, 2, 3, 4].map((i) =>
@@ -518,6 +720,8 @@ await scenario("rssAtCap", async () => {
 });
 
 await bridge.dispose();
+// Every bridge disposed: nothing of theirs stays under the work root.
+results.filesAfterDispose = filesUnder(workRoot);
 results.upstreamPaths = [
 	...new Set(mock.requests.map((q) => `${q.method} ${q.path}`)),
 ];

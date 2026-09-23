@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	answersFinalToolCalls,
 	buildSyntheticTranscript,
 	classifyRebuild,
 	FLATTENED_HISTORY_NOTE,
@@ -306,5 +307,73 @@ describe("flattenHistory", () => {
 			name === "read" ? "t_0123456789abcdef" : name,
 		);
 		expect(text).toContain("[tool call t_0123456789abcdef id=t1]");
+	});
+});
+
+/** An object nested `depth` levels deep, built without recursion. */
+function nested(depth: number, leaf: unknown = "leaf"): unknown {
+	let value: unknown = leaf;
+	for (let i = 0; i < depth; i++) value = { a: value };
+	return value;
+}
+
+function deepHistory(depth: number, leaf: unknown = "leaf"): ClientMessage[] {
+	return [
+		{ role: "user", content: "go" },
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "tool_use",
+					id: "d1",
+					name: "read",
+					input: nested(depth, leaf),
+				},
+			],
+		},
+		{
+			role: "user",
+			content: [{ type: "tool_result", tool_use_id: "d1", content: "r" }],
+		},
+	];
+}
+
+describe("content nested deeper than any serializer's stack", () => {
+	// 100 000 levels overflow JSON.stringify and plain recursion in Bun.
+	const DEPTH = 100_000;
+
+	it("digests without recursing through the whole depth, and deterministically", () => {
+		const a = messageDigests(deepHistory(DEPTH));
+		expect(a).toHaveLength(3);
+		expect(messageDigests(deepHistory(DEPTH))).toEqual(a);
+		// What lies below the cap still counts, by its size.
+		expect(messageDigests(deepHistory(DEPTH + 1))[1]).not.toBe(a[1]);
+		// Shallow content digests in full.
+		expect(messageDigests(deepHistory(3))[1]).not.toBe(
+			messageDigests(deepHistory(3, "other"))[1],
+		);
+	});
+
+	it("flattens a call whose input cannot be serialized", () => {
+		const text = flattenHistory(normalizeHistory(deepHistory(DEPTH)));
+		expect(text).toContain("[tool call read id=d1] [input omitted");
+	});
+});
+
+describe("answersFinalToolCalls", () => {
+	const history = normalizeHistory(conversation.slice(0, 2));
+
+	it("holds when the prompt answers every call of the final assistant message", () => {
+		expect(answersFinalToolCalls(history, ["t1", "t2"])).toBe(true);
+		expect(answersFinalToolCalls(history, ["t2", "t1"])).toBe(true);
+	});
+
+	it("does not hold for a partial, a foreign or an earlier round's answer", () => {
+		expect(answersFinalToolCalls(history, ["t1"])).toBe(false);
+		expect(answersFinalToolCalls(history, ["t1", "t2", "t9"])).toBe(false);
+		expect(
+			answersFinalToolCalls(normalizeHistory(conversation), ["t1", "t2"]),
+		).toBe(false);
+		expect(answersFinalToolCalls([], ["t1"])).toBe(false);
 	});
 });

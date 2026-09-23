@@ -11,9 +11,26 @@ export class PromptStream implements AsyncIterable<SDKUserMessage> {
 	private waiter: ((result: IteratorResult<SDKUserMessage>) => void) | null =
 		null;
 	private ended = false;
+	/** Resolvers for messages Claude Code has not read yet, in queue order. */
+	private readonly unread: Array<() => void> = [];
+
+	/**
+	 * Push `content` and resolve once Claude Code has read it off the stream
+	 * (or the stream ended first). Messages are read in the order pushed.
+	 */
+	enqueue(content: string | Block[]): Promise<void> {
+		return new Promise((resolve) => this.add(content, resolve));
+	}
 
 	push(content: string | Block[]): void {
-		if (this.ended) return;
+		this.add(content, () => {});
+	}
+
+	private add(content: string | Block[], onRead: () => void): void {
+		if (this.ended) {
+			onRead();
+			return;
+		}
 		const message = {
 			type: "user",
 			message: { role: "user", content },
@@ -23,7 +40,11 @@ export class PromptStream implements AsyncIterable<SDKUserMessage> {
 		if (waiter) {
 			this.waiter = null;
 			waiter({ value: message, done: false });
-		} else this.queue.push(message);
+			onRead();
+			return;
+		}
+		this.queue.push(message);
+		this.unread.push(onRead);
 	}
 
 	end(): void {
@@ -32,6 +53,7 @@ export class PromptStream implements AsyncIterable<SDKUserMessage> {
 		const waiter = this.waiter;
 		this.waiter = null;
 		waiter?.({ value: undefined, done: true });
+		for (const resolve of this.unread.splice(0)) resolve();
 	}
 
 	get isEnded(): boolean {
@@ -42,7 +64,10 @@ export class PromptStream implements AsyncIterable<SDKUserMessage> {
 		return {
 			next: () => {
 				const next = this.queue.shift();
-				if (next) return Promise.resolve({ value: next, done: false });
+				if (next) {
+					this.unread.shift()?.();
+					return Promise.resolve({ value: next, done: false });
+				}
 				if (this.ended)
 					return Promise.resolve({ value: undefined, done: true });
 				return new Promise((resolve) => {

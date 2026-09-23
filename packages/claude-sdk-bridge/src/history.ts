@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
+import type { SdkBridgeRebuildReason as RebuildReason } from "@clankermux/types";
 import { type Block, blocksOf, type ClientMessage } from "./turn-request";
 
 export interface ApiMessage {
@@ -7,13 +8,7 @@ export interface ApiMessage {
 	content: Block[];
 }
 
-/** Why a turn could not resume its conversation's Claude Code session. */
-export type RebuildReason =
-	| "continuation"
-	| "compaction"
-	| "edit"
-	| "unknown"
-	| "account_change";
+export type { SdkBridgeRebuildReason as RebuildReason } from "@clankermux/types";
 
 function sha256(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
@@ -65,14 +60,36 @@ export function normalizeHistory(
 	return out;
 }
 
-function canonical(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonical);
+/**
+ * Nesting a digest follows before it stands a subtree in for its size. JSON
+ * that parses fine can be nested far past what recursion survives (100 000
+ * levels overflow Bun's stack), and a digest must never throw.
+ */
+const MAX_CANONICAL_DEPTH = 256;
+
+/** How many values a subtree holds, counted without recursion. */
+function nodeCount(value: unknown): number {
+	let count = 0;
+	const stack: unknown[] = [value];
+	while (stack.length) {
+		const next = stack.pop();
+		count++;
+		if (next && typeof next === "object")
+			for (const child of Object.values(next as object)) stack.push(child);
+	}
+	return count;
+}
+
+function canonical(value: unknown, depth = 0): unknown {
+	if (value && typeof value === "object" && depth >= MAX_CANONICAL_DEPTH)
+		return { $nestedBeyondDigest: nodeCount(value) };
+	if (Array.isArray(value)) return value.map((v) => canonical(v, depth + 1));
 	if (value && typeof value === "object") {
 		const record = value as Record<string, unknown>;
 		return Object.fromEntries(
 			Object.keys(record)
 				.sort()
-				.map((key) => [key, canonical(record[key])]),
+				.map((key) => [key, canonical(record[key], depth + 1)]),
 		);
 	}
 	return value;
@@ -178,6 +195,30 @@ export function classifyRebuild(
 		: "edit";
 }
 
+function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
+	const left = new Set(a);
+	const right = new Set(b);
+	return left.size === right.size && [...left].every((id) => right.has(id));
+}
+
+/**
+ * Whether `resultIds` answer exactly the tool calls the history's final
+ * message makes: the shape of a continuation whose query is gone, which the
+ * history alone can rebuild. The rebuild is flattened, calls and results as
+ * text: a transcript ending in those calls does not survive a resume.
+ */
+export function answersFinalToolCalls(
+	history: readonly ApiMessage[],
+	resultIds: readonly string[],
+): boolean {
+	const last = history.at(-1);
+	if (last?.role !== "assistant" || !resultIds.length) return false;
+	const issued = last.content
+		.filter((b) => b.type === "tool_use")
+		.map((b) => String(b.id));
+	return issued.length > 0 && sameIdSet(issued, resultIds);
+}
+
 /**
  * Whether the history can be replayed as a Claude Code transcript: user first,
  * strictly alternating, every tool_use answered in the next user message by id
@@ -195,8 +236,7 @@ export function transcriptEligible(
 			if (uses.some((b) => !toolNames.has(String(b.name)))) return false;
 			const next = history[i + 1];
 			if (!uses.length) continue;
-			// The final assistant message may leave calls unanswered only if the
-			// turn's prompt answers them, which a new turn never does.
+			// Calls left open at the end cannot be replayed (see answersFinalToolCalls).
 			if (!next) return false;
 			const answered = new Set(
 				next.content
@@ -294,8 +334,15 @@ function flattenBlock(
 	switch (block.type) {
 		case "text":
 			return String(block.text ?? "");
-		case "tool_use":
-			return `[tool call ${toolName(String(block.name))} id=${String(block.id)}] ${JSON.stringify(block.input ?? {})}`;
+		case "tool_use": {
+			let input: string;
+			try {
+				input = JSON.stringify(block.input ?? {});
+			} catch {
+				input = "[input omitted: nested too deeply to reproduce]";
+			}
+			return `[tool call ${toolName(String(block.name))} id=${String(block.id)}] ${input}`;
+		}
 		case "tool_result": {
 			const content = block.content;
 			const text =
@@ -318,6 +365,18 @@ function flattenBlock(
 		default:
 			return `[${block.type} omitted]`;
 	}
+}
+
+/**
+ * Blocks as the text a flattened prompt carries: a tool_result whose call is
+ * only in a flattened history cannot stay a tool_result, which the API accepts
+ * only right after the assistant message that made the call.
+ */
+export function flattenBlocks(blocks: readonly Block[]): Block[] {
+	return blocks.flatMap((block): Block[] => {
+		if (block.type !== "tool_result") return [block];
+		return [{ type: "text", text: flattenBlock(block, (name) => name) }];
+	});
 }
 
 export const FLATTENED_HISTORY_NOTE =
