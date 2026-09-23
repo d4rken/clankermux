@@ -452,6 +452,41 @@ describe("client catalogue editing", () => {
 			"Provider route",
 		);
 	});
+	it("lists kept alias routes and drops the ones marked for removal", async () => {
+		const client = structuredClone(existing);
+		client.aliasRules = ["kept", "stale"].map((value, position) => ({
+			id: value,
+			name: `Client: ${value}`,
+			position,
+			enabled: true,
+			match_api_key_id: "key",
+			match_model_kind: "exact" as const,
+			match_model_value: value,
+			pool_kind: "accounts" as const,
+			pool_account_ids: ["excluded"],
+			pool_provider: null,
+			target_kind: "literal" as const,
+			target_model: "upstream",
+		}));
+		client.key.pinnedAccountId = "a";
+		await mount(client);
+		const routes = document.querySelector('[aria-label="Kept alias routes"]');
+		expect(routes?.textContent).toContain("kept → upstream");
+		expect(routes?.textContent).toContain("stale → upstream");
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+			"Client: stale",
+		);
+		await click("Remove route stale");
+		expect(document.querySelector('[role="alert"]')?.textContent).not.toContain(
+			"Client: stale",
+		);
+		await click("Remove route kept");
+		await click("Keep route kept");
+		await click("Review changes");
+		expect(reviewed?.droppedAliasRoutes).toEqual(["stale"]);
+		expect(document.body.textContent).toContain("Routes removed on save");
+		expect(document.body.textContent).toContain("stale → upstream");
+	});
 	it("records no destinations for a model published under its own name", async () => {
 		await mount();
 		await type("model-id", "own-name");

@@ -248,10 +248,28 @@ export function ClientWizard({
 			.filter((m) => m.id !== m.targetModel)
 			.map((m) => m.id),
 	);
-	const retainedConflicts = (client?.aliasRules ?? []).filter(
+	/** Routes a save keeps for aliases the catalogues no longer publish. */
+	const keptRoutes = (client?.aliasRules ?? []).filter(
+		(r) => !replacedAliases.has(r.match_model_value ?? ""),
+	);
+	const dropped = new Set(draft.droppedAliasRoutes);
+	const droppedRoutes = keptRoutes.filter((r) =>
+		dropped.has(r.match_model_value ?? ""),
+	);
+	const toggleDropped = (value: string) =>
+		setDraft((d) => {
+			const current = d.droppedAliasRoutes ?? [];
+			return {
+				...d,
+				droppedAliasRoutes: current.includes(value)
+					? current.filter((v) => v !== value)
+					: [...current, value],
+			};
+		});
+	const retainedConflicts = keptRoutes.filter(
 		(r) =>
 			mode !== "all" &&
-			!replacedAliases.has(r.match_model_value ?? "") &&
+			!dropped.has(r.match_model_value ?? "") &&
 			(r.pool_kind === "accounts"
 				? !r.pool_account_ids?.some((id) => eligibleIds.has(id))
 				: r.pool_kind === "provider" &&
@@ -552,7 +570,22 @@ export function ClientWizard({
 						`Choose a default model for ${FORMATS[undecided]} before reviewing`,
 					);
 				}
-				setReview(await clientRequest<ClientReview>("/review", draft));
+				// Send only drops that still name a kept route: re-adding an alias
+				// to a catalogue supersedes its earlier removal.
+				const { droppedAliasRoutes: _, ...rest } = draft;
+				setReview(
+					await clientRequest<ClientReview>(
+						"/review",
+						droppedRoutes.length
+							? {
+									...rest,
+									droppedAliasRoutes: droppedRoutes.map(
+										(r) => r.match_model_value ?? "",
+									),
+								}
+							: rest,
+					),
+				);
 			}
 			setStep(target);
 		});
@@ -967,7 +1000,8 @@ export function ClientWizard({
 								{retainedConflicts.length > 0 && (
 									<>
 										<p>
-											Hidden aliases keep their routes. Update these rules in{" "}
+											Hidden aliases keep their routes. Remove them below, or
+											update these rules in{" "}
 											<a
 												href="/routing"
 												target="_blank"
@@ -976,7 +1010,7 @@ export function ClientWizard({
 											>
 												Routing
 											</a>
-											, then reopen this client, or restore the previous
+											and reopen this client, or restore the previous
 											destinations:
 										</p>
 										<ul className="list-disc pl-5 max-h-24 overflow-auto">
@@ -987,6 +1021,47 @@ export function ClientWizard({
 									</>
 								)}
 							</div>
+						)}
+						{keptRoutes.length > 0 && (
+							<section
+								aria-label="Kept alias routes"
+								className="rounded border p-3 text-sm space-y-2"
+							>
+								<p className="font-medium">
+									Routes kept for aliases outside the catalogues
+								</p>
+								<p className="text-muted-foreground">
+									These still serve requests that name the alias. Remove a route
+									once nothing sends that ID.
+								</p>
+								<ul className="space-y-1">
+									{keptRoutes.map((r) => {
+										const value = r.match_model_value ?? "";
+										const removing = dropped.has(value);
+										return (
+											<li
+												key={r.id}
+												className="flex items-center justify-between gap-2"
+											>
+												<span
+													className={`break-all ${removing ? "line-through text-muted-foreground" : ""}`}
+												>
+													{value} → {r.target_model}
+												</span>
+												<Button
+													size="sm"
+													variant="outline"
+													disabled={busy}
+													aria-label={`${removing ? "Keep" : "Remove"} route ${value}`}
+													onClick={() => toggleDropped(value)}
+												>
+													{removing ? "Keep" : "Remove"}
+												</Button>
+											</li>
+										);
+									})}
+								</ul>
+							</section>
 						)}
 						{suggestions && (
 							<details className="text-xs text-muted-foreground">
@@ -1343,6 +1418,16 @@ export function ClientWizard({
 										{review.precedingRules.join(", ")}.
 									</p>
 								)}
+							</div>
+						)}
+						{droppedRoutes.length > 0 && (
+							<div>
+								<h3 className="font-medium">Routes removed on save</h3>
+								{droppedRoutes.map((r) => (
+									<p key={r.id} className="text-sm break-all">
+										{r.match_model_value} → {r.target_model}
+									</p>
+								))}
 							</div>
 						)}
 						{review.notices.map((n) => (

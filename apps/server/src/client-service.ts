@@ -949,6 +949,13 @@ export class ClientService {
 		)
 			throw BadRequest("Unknown client application");
 		draft.destinations = this.destinations(draft.destinations);
+		if (
+			draft.droppedAliasRoutes !== undefined &&
+			(!Array.isArray(draft.droppedAliasRoutes) ||
+				draft.droppedAliasRoutes.some((id) => typeof id !== "string"))
+		)
+			throw BadRequest("Invalid dropped alias routes");
+		const dropped = new Set(draft.droppedAliasRoutes);
 		const accounts = await this.accounts(draft.destinations);
 		const scopeFor = this.scopeLookup(accounts);
 		const existing = draft.id
@@ -1150,10 +1157,13 @@ export class ClientService {
 			target_kind: "literal" as const,
 			target_model: model.targetModel,
 		}));
-		// Hiding a catalogue entry must not remove its working alias route.
+		// Hiding a catalogue entry must not remove its working alias route unless
+		// the draft drops it by name.
 		const retained = allRules.filter(
 			(r) =>
-				owned.includes(r.id) && !aliasModels.has(r.match_model_value ?? ""),
+				owned.includes(r.id) &&
+				!aliasModels.has(r.match_model_value ?? "") &&
+				!dropped.has(r.match_model_value ?? ""),
 		);
 		aliasRules.push(
 			...(retained.map((r, index) => ({

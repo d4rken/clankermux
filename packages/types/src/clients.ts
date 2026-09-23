@@ -124,6 +124,12 @@ export interface ClientDraft {
 	application: ClientApplication;
 	destinations: ClientDestinations;
 	catalogues: Record<ClientFormat, ClientCatalogue>;
+	/**
+	 * Alias IDs whose route this save deletes. Taking an alias out of the
+	 * catalogues otherwise keeps its routing rule, so a client that still sends
+	 * the ID keeps working.
+	 */
+	droppedAliasRoutes?: string[];
 }
 export interface ClientView extends ClientProfile {
 	key: ApiKeyResponse;
