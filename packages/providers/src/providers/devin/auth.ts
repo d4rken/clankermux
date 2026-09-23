@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { devinAuthHeaders } from "./client-identity";
 
 export type DevinFetch = (
 	input: string | URL | Request,
@@ -70,7 +71,7 @@ export async function exchangeDevinLogin(
 		throw new Error("Devin login has no valid authorization code");
 	const response = await fetcher("https://api.devin.ai/auth/cli/token", {
 		method: "POST",
-		headers: { "Content-Type": "application/json", Accept: "application/json" },
+		headers: devinAuthHeaders(),
 		body: JSON.stringify({ code, code_verifier: login.verifier }),
 		signal: AbortSignal.timeout(30_000),
 		redirect: "error",
