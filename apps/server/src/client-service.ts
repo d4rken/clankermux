@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+	ALIAS_ADVERTISED_EFFORTS,
 	CLAUDE_MODEL_IDS,
 	isAccountAllowedByPin,
 	isModelPermitted,
@@ -641,6 +642,13 @@ export class ClientService {
 					(result) => result.metadata,
 				);
 				const metadata = reduceClientModelMetadata(targetMetadata);
+				// Not the targets' intersection: the request path maps whichever level
+				// the client picks onto each target it tries, so every alias offers the
+				// same range.
+				if (alias) {
+					metadata.reasoning = true;
+					metadata.supportedReasoningEfforts = [...ALIAS_ADVERTISED_EFFORTS];
+				}
 				const cachePolicy = reduceModelCachePolicies(
 					targetMetadata.map((item) => item.cachePolicy),
 				);

@@ -4,6 +4,7 @@ import {
 	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	matchRoutingRule,
 	resolveRoutingTarget,
+	selectEffortVariant,
 } from "@clankermux/core";
 import type {
 	Account,
@@ -81,6 +82,24 @@ async function readPermissions(
 			}
 		}),
 	);
+}
+
+/**
+ * The model an alias stage sends: the target as written, or the sibling
+ * variant that serves the requested effort (Devin keeps the effort in the model
+ * id). The variants come from the first account in pool order that discovered
+ * the target, so every account in the stage is asked for the same model.
+ */
+function stageVariantModel(
+	target: string,
+	requestedEffort: string | null | undefined,
+	pool: readonly Account[],
+	permissions: ReadonlyMap<string, AccountModelPermissions>,
+): string {
+	const variants = pool
+		.map((a) => permissions.get(a.id)?.model_variants)
+		.find((map) => map && Object.hasOwn(map, target));
+	return selectEffortVariant(target, requestedEffort, variants ?? {});
 }
 
 /** Drop stale accounts for this request only; the next one reads the fresh row. */
@@ -188,6 +207,15 @@ export async function initializeRequestRoute(
 				(a) => !destination.accountIds || destination.accountIds.includes(a.id),
 			);
 			if (!stagePool.length) continue;
+			const permissions = new Map<string, AccountModelPermissions>();
+			const stale = new Set<string>();
+			await readPermissions(service, stagePool, permissions, stale);
+			let stageModel = stageVariantModel(
+				destination.model,
+				meta.reasoningEffort,
+				stagePool,
+				permissions,
+			);
 			const stageRule: RoutingRule = {
 				id: winning?.id ?? alias.id,
 				name: winning?.name ?? alias.displayName,
@@ -205,24 +233,29 @@ export async function initializeRequestRoute(
 				pool_account_ids:
 					destination.accountIds ?? winning?.pool_account_ids ?? null,
 				target_kind: "literal",
-				target_model: destination.model,
+				target_model: stageModel,
 			};
-			const permissions = new Map<string, AccountModelPermissions>();
-			const stale = new Set<string>();
-			await readPermissions(service, stagePool, permissions, stale);
 			const missing = stagePool.filter(
 				(a) =>
 					!stale.has(a.id) &&
 					!isModelPermitted(
 						permissions.get(a.id) ?? null,
 						a.id,
-						destination.model,
+						stageModel,
 						stageRule,
 					),
 			);
 			if (missing.length) {
 				await service.refreshMisses(missing);
 				await readPermissions(service, missing, permissions, stale);
+				// A first discovery is what brings the variants in.
+				stageModel = stageVariantModel(
+					destination.model,
+					meta.reasoningEffort,
+					stagePool,
+					permissions,
+				);
+				stageRule.target_model = stageModel;
 			}
 			const routedStage = withoutStale(stagePool, stale, priorExclusions);
 			const suppressedPairs = new Set<string>();
@@ -239,10 +272,10 @@ export async function initializeRequestRoute(
 						ctx,
 						a.id,
 						p.scope,
-						destination.model,
+						stageModel,
 					);
 					if (reason === null) return;
-					const key = JSON.stringify([a.id, destination.model]);
+					const key = JSON.stringify([a.id, stageModel]);
 					suppressedPairs.add(key);
 					if (reason === MODEL_SUBSTITUTION_SUPPRESSION_REASON)
 						substitutedPairs.add(key);

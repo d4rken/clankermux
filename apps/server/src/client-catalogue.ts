@@ -1,3 +1,4 @@
+import { ALIAS_ADVERTISED_EFFORTS } from "@clankermux/core";
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
 import type {
@@ -12,7 +13,9 @@ import type {
  * A reusable alias has no single model's prompt or optional API features.
  * Supply Codex's required ModelInfo fields using neutral client configuration;
  * only substantiated common limits/modalities describe the backends. Keep this
- * independent of cached metadata belonging to any one target.
+ * independent of cached metadata belonging to any one target: the effort
+ * levels are the fixed alias range, so they survive a metadata lookup that
+ * failed or overran its budget.
  * Wire schema: codex-rs/protocol/src/openai_models.rs, ModelInfo (0.149+).
  */
 export function aliasCodexMetadata(
@@ -24,19 +27,12 @@ export function aliasCodexMetadata(
 		display_name: model.displayName,
 		description: "Model alias with ordered availability fallbacks",
 		base_instructions: "You are a coding assistant.",
-		...(metadata?.supportedReasoningEfforts === undefined
-			? {}
-			: {
-					supported_reasoning_levels: metadata.supportedReasoningEfforts.map(
-						(effort) => ({
-							effort,
-							description:
-								"Accepted by the alias; mapped to the selected fallback target",
-						}),
-					),
-					default_reasoning_level:
-						metadata.supportedReasoningEfforts[0] ?? null,
-				}),
+		supported_reasoning_levels: ALIAS_ADVERTISED_EFFORTS.map((effort) => ({
+			effort,
+			description:
+				"Accepted by the alias; mapped to the selected fallback target",
+		})),
+		default_reasoning_level: "medium",
 		shell_type: "shell_command",
 		visibility: "list",
 		supported_in_api: true,

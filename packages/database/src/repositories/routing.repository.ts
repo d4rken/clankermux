@@ -6,6 +6,7 @@ import {
 } from "@clankermux/core";
 import type {
 	AccountModelPermissions,
+	ModelVariant,
 	RoutingAttempt,
 	RoutingRule,
 } from "@clankermux/types";
@@ -18,13 +19,33 @@ type RuleRow = Omit<RoutingRule, "enabled" | "pool_account_ids"> & {
 };
 type PermissionRow = Omit<
 	AccountModelPermissions,
-	"discovered_ids" | "manual_ids"
-> & { discovered_ids: string; manual_ids: string };
-const decodePermission = (r: PermissionRow): AccountModelPermissions => ({
-	...r,
-	discovered_ids: JSON.parse(r.discovered_ids),
-	manual_ids: JSON.parse(r.manual_ids),
-});
+	"discovered_ids" | "manual_ids" | "model_variants"
+> & { discovered_ids: string; manual_ids: string; model_variants: string };
+const decodePermission = (r: PermissionRow): AccountModelPermissions => {
+	const discovered: string[] = JSON.parse(r.discovered_ids);
+	return {
+		...r,
+		discovered_ids: discovered,
+		manual_ids: JSON.parse(r.manual_ids),
+		// A variant only describes a model the same discovery found. Databases
+		// created before model_variants keep an identity trigger that resets
+		// discovered_ids but not this column, so the filter is what makes a
+		// leftover map inert there.
+		model_variants: discoveredVariants(
+			discovered,
+			JSON.parse(r.model_variants),
+		),
+	};
+};
+function discoveredVariants(
+	discovered: readonly string[],
+	variants: Readonly<Record<string, ModelVariant>>,
+): Record<string, ModelVariant> {
+	const ids = new Set(discovered);
+	return Object.fromEntries(
+		Object.entries(variants).filter(([id]) => ids.has(id)),
+	);
+}
 function modelIds(ids: string[]): string[] {
 	if (
 		!Array.isArray(ids) ||
@@ -358,7 +379,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
 			db.query(`INSERT INTO account_model_permissions(account_id,scope,generation,completeness,discovered_ids,manual_ids) VALUES(?,?,1,'unknown','[]','[]')
-    ON CONFLICT(account_id) DO UPDATE SET scope=excluded.scope,generation=generation+1,completeness='unknown',discovered_ids='[]',manual_ids='[]',last_success_at=NULL,last_attempt_at=NULL,last_error=NULL WHERE scope<>excluded.scope AND (? IS NULL OR generation=?)`).run(
+    ON CONFLICT(account_id) DO UPDATE SET scope=excluded.scope,generation=generation+1,completeness='unknown',discovered_ids='[]',manual_ids='[]',model_variants='{}',last_success_at=NULL,last_attempt_at=NULL,last_error=NULL WHERE scope<>excluded.scope AND (? IS NULL OR generation=?)`).run(
 				accountId,
 				scope,
 				expectedGeneration ?? null,
@@ -412,13 +433,15 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		generation: number,
 		ids: string[],
 		now: number,
+		variants: Readonly<Record<string, ModelVariant>> = {},
 	): Promise<boolean> {
 		const discovered = modelIds(ids);
 		return (
 			(await this.runWithChanges(
-				`UPDATE account_model_permissions SET discovered_ids=?,completeness=?,last_success_at=?,last_attempt_at=?,last_error=NULL WHERE account_id=? AND scope=? AND generation=?`,
+				`UPDATE account_model_permissions SET discovered_ids=?,model_variants=?,completeness=?,last_success_at=?,last_attempt_at=?,last_error=NULL WHERE account_id=? AND scope=? AND generation=?`,
 				[
 					JSON.stringify(discovered),
+					JSON.stringify(discoveredVariants(discovered, variants)),
 					discovered.length ? "known-complete" : "known-empty",
 					now,
 					now,

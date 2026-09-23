@@ -1,6 +1,9 @@
 import {
 	AppError,
 	accountWideExhaustionFor,
+	aliasEffortClampsToClaudeFamily,
+	aliasEffortReachesProvider,
+	clampEffortToModel,
 	getModelFamily,
 	isCodexSubscriptionLapse,
 	isDebugEnabled,
@@ -73,10 +76,15 @@ import {
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 import { captureRawUpstreamObservation } from "../raw-response-observations";
+import {
+	clampOutputConfigEffort,
+	stripEffortControls,
+} from "../reasoning-effort";
 import { RequestBodyContext } from "../request-body-context";
 import { excludeModelForRequest } from "../request-model-exclusions";
 import {
 	getAttemptTarget,
+	getResolvedRoute,
 	RoutingPolicyError,
 	rejectModelSwitchFields,
 } from "../resolved-route";
@@ -1082,6 +1090,31 @@ function captureUpstreamAttempt(
 }
 
 /**
+ * An alias offers every effort whatever its targets accept, and an upstream 400
+ * on an alias is final. So an alias attempt to a provider not known to handle
+ * the requested effort sends none, and the target runs at its own default; an
+ * attempt to Claude sends the nearest level the model's family accepts. Other
+ * routes send what the client asked for.
+ */
+function adaptAliasEffort(
+	context: RequestBodyContext,
+	requestMeta: RequestMeta,
+	account: Account,
+): void {
+	if (!getResolvedRoute(requestMeta).alias) return;
+	if (!aliasEffortReachesProvider(account.provider))
+		context.mutateParsedJson(stripEffortControls);
+	else if (aliasEffortClampsToClaudeFamily(account.provider))
+		context.mutateParsedJson((body) => {
+			const model = body.model;
+			if (typeof model === "string")
+				clampOutputConfigEffort(body, (effort) =>
+					clampEffortToModel(model, effort),
+				);
+		});
+}
+
+/**
  * Attempts to proxy a request with a specific account
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -1322,6 +1355,7 @@ export async function proxyWithAccount(
 			baseBodyContext.withPatchedModel(modelOverride);
 		if (!effectiveBodyContext)
 			throw new RoutingPolicyError("Cannot apply resolved model");
+		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Stage the original request body + headers for cache keepalive replay.
@@ -3486,6 +3520,7 @@ export async function proxyForcedAccount(
 			baseBodyContext.withPatchedModel(modelOverride);
 		if (!effectiveBodyContext)
 			throw new RoutingPolicyError("Cannot apply resolved model");
+		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Get the provider for this account

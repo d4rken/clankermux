@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { describeModelVariant } from "@clankermux/core";
 import type {
 	AccountIdentity,
 	AccountSubscriptionState,
 	DevinGracePeriodStatus,
 	DevinUsageData,
+	ModelVariant,
 } from "@clankermux/types";
 import { decodeJwtPayloadSafe } from "../../oauth/jwt";
 import type { DevinFetch } from "./auth";
@@ -120,6 +122,8 @@ export interface DevinModel {
 	supportsThinking?: boolean;
 	defaultInFamily: boolean;
 	effort: string | null;
+	/** Where the model sits in its family; null outside any family. */
+	variant: ModelVariant | null;
 }
 export interface DevinAccountInfo {
 	userJwt: string;
@@ -275,6 +279,14 @@ function modelInfo(config: ClientModelConfig): DevinModel {
 		defaultInFamily:
 			config.isDefaultModelInFamily || family?.isDefaultModelInFamily === true,
 		effort,
+		variant: describeModelVariant(
+			family?.modelFamilyLabel ?? "",
+			(family?.entries ?? []).map((entry) => ({
+				key: entry.key,
+				name: entry.value?.name ?? "",
+				order: entry.value?.order ?? 0,
+			})),
+		),
 	};
 }
 

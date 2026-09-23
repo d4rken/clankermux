@@ -13,6 +13,9 @@ import {
 	GetCliModelConfigsResponseSchema,
 	GetUserJwtResponseSchema,
 	GetUserStatusResponseSchema,
+	ModelFamilyMetadataEntrySchema,
+	ModelFamilyMetadataSchema,
+	ModelFamilyMetadataValueSchema,
 	ModelFeaturesSchema,
 	ModelInfoSchema,
 } from "../../../providers/src/providers/devin/vendor/devin-proto";
@@ -483,6 +486,70 @@ it("discovers only enabled concrete Devin models from native account metadata", 
 	} finally {
 		clock.mockRestore();
 	}
+});
+
+it("persists the family variants of the Devin models it discovers", async () => {
+	const a = account("devin", { provider: "devin", custom_endpoint: null });
+	const member = (modelUid: string, effort: string, disabled = false) =>
+		create(ClientModelConfigSchema, {
+			modelUid,
+			disabled,
+			modelFamilyMetadata: create(ModelFamilyMetadataSchema, {
+				modelFamilyLabel: "SWE-2",
+				entries: [
+					create(ModelFamilyMetadataEntrySchema, {
+						key: "Reasoning Effort",
+						value: create(ModelFamilyMetadataValueSchema, {
+							name: effort,
+							order: 1,
+						}),
+					}),
+				],
+			}),
+		});
+	const { service } = setup([a], async (input) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("GetUserJwt"))
+			return new Response(
+				new Uint8Array(
+					toBinary(
+						GetUserJwtResponseSchema,
+						create(GetUserJwtResponseSchema, { userJwt: "jwt" }),
+					),
+				),
+			);
+		if (path.endsWith("GetCliModelConfigs"))
+			return new Response(
+				new Uint8Array(
+					toBinary(
+						GetCliModelConfigsResponseSchema,
+						create(GetCliModelConfigsResponseSchema, {
+							clientModelConfigs: [
+								member("swe-2-high", "High"),
+								member("swe-2-max", "Max", true),
+								create(ClientModelConfigSchema, { modelUid: "standalone" }),
+							],
+						}),
+					),
+				),
+			);
+		return new Response(
+			new Uint8Array(
+				toBinary(
+					GetUserStatusResponseSchema,
+					create(GetUserStatusResponseSchema),
+				),
+			),
+		);
+	});
+	await service.tick();
+	const permission = await service.permissions(a);
+	expect(permission.discovered_ids).toEqual(["standalone", "swe-2-high"]);
+	// Disabled members are not discovered, and a model outside any family has
+	// no variant to record.
+	expect(permission.model_variants).toEqual({
+		"swe-2-high": { family: "SWE-2", effort: "high", dimensions: "" },
+	});
 });
 
 /**

@@ -120,6 +120,11 @@ export {
 	REFRESH_TOKEN_REAUTH_WARNING_MS,
 	TIME_CONSTANTS,
 } from "./constants";
+export {
+	describeModelVariant,
+	selectEffortVariant,
+	variantEffort,
+} from "./effort-variants";
 export { isDebugEnabled, readEnv } from "./env";
 export {
 	AppError,
@@ -298,6 +303,10 @@ export { providerDisplayName } from "./provider-display";
 export * from "./quota-drift";
 export * from "./rate-limit-status";
 export {
+	ALIAS_ADVERTISED_EFFORTS,
+	aliasEffortClampsToClaudeFamily,
+	aliasEffortReachesProvider,
+	clampEffortToModel,
 	getAliasReasoningEfforts,
 	getModelReasoningEfforts,
 	resolveTargetReasoningProfile,

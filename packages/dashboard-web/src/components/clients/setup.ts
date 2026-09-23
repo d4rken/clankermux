@@ -89,9 +89,9 @@ function piFields(metadata: ClientModelMetadata | undefined) {
  * Pi keeps an unmapped level and passes its name through verbatim, except
  * `xhigh`/`max`, which need an explicit entry to be selectable at all. So the
  * whole canonical set has to be written out: an effort the route does NOT
- * accept is `null` (removed), not absent (kept). Without a substantiated list
- * there is no map — today that is every alias, whose Claude target contributes
- * no effort profile.
+ * accept is `null` (removed), not absent (kept). Every alias publishes the
+ * same fixed range and the gateway maps the chosen level onto each target; a
+ * model with no substantiated list gets no map.
  *
  * `off` is always `null`. Pi's own default for an unmapped `off` is to send
  * `reasoning: { effort: "none" }` on every non-thinking request, and `none` is
