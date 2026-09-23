@@ -20,6 +20,10 @@ import {
 	resetCodexTransientHealthForTests,
 } from "../codex-transient-health";
 import {
+	recordProtectedTierTurn,
+	resetConversationTierMemoryForTests,
+} from "../conversation-tier-memory";
+import {
 	recordFamilyWeeklyExhausted,
 	resetFamilyWeeklyMemoForTests,
 } from "../family-weekly-memo";
@@ -210,6 +214,7 @@ describe("createAdmissionGates", () => {
 		resetRateLimitProbeGatesForTests();
 		resetFamilyWeeklyMemoForTests();
 		resetCodexTransientHealthForTests();
+		resetConversationTierMemoryForTests();
 		for (const id of SEEDED_IDS) usageCache.delete(id);
 	};
 
@@ -627,6 +632,289 @@ describe("createAdmissionGates", () => {
 					second,
 				]),
 			).toEqual([first, second]);
+		});
+	});
+
+	describe("affinity follows a pool-liveness demotion once the peer serves", () => {
+		const sessionTurn = () =>
+			makeRequestMeta({
+				affinityKey: "pi-conversation",
+				affinityScope: "client_session",
+			});
+		// One request through the order the proxy applies: strategy, soft
+		// reorder, failure memos last, affinity reconciliation, then the follow
+		// callback for whichever account served.
+		const route = (
+			strategy: SessionStrategy,
+			accounts: Account[],
+			options: {
+				served?: string;
+				isSyntheticProbeRequest?: boolean;
+				path?: string;
+				model?: string;
+			} = {},
+		) => {
+			const meta = sessionTurn();
+			if (options.path) meta.path = options.path;
+			const gates = createAdmissionGates(
+				{
+					requestMeta: meta,
+					gateTokenEstimate: 1,
+					isSyntheticProbeRequest: options.isSyntheticProbeRequest ?? false,
+					config: makeConfig({ fiveHour: false, weekly: false }),
+					strategy,
+				},
+				options.model ?? MODEL,
+			);
+			const candidates = gates.applyFailureMemoDemotion(
+				gates.applySoftDemotionReorder(strategy.select(accounts, meta)),
+			);
+			gates.reconcileAffinity(candidates);
+			gates.noteConversationTier(candidates);
+			const follow = gates.prepareSoftDemotionFollow(candidates);
+			const served =
+				candidates.find((a) => a.id === options.served) ?? candidates[0];
+			follow?.(served);
+			return { meta, candidates, follow };
+		};
+		const pinnedTo = (strategy: SessionStrategy, accounts: Account[]) => {
+			const meta = sessionTurn();
+			const selected = strategy.select(accounts, meta);
+			expect(meta.routing?.decision).toBe("affinity_hit");
+			return selected[0].id;
+		};
+		const pool = () => [
+			makeAccount({ id: "acc-a", name: "a", priority: 0 }),
+			makeAccount({ id: "acc-b", name: "b", priority: 1 }),
+			makeAccount({ id: "acc-c", name: "c", priority: 2 }),
+		];
+		const reserveTheStrategysPick = () => {
+			seedUsage("acc-a", 0, 95);
+			seedUsage("acc-b", 20, 20);
+			seedUsage("acc-c", 20, 20);
+		};
+
+		it("moves the pin to the reorder's head once it serves, and keeps it there", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+
+			const first = route(strategy, accounts);
+			expect(first.candidates[0].id).toBe("acc-b");
+			// Telemetry keeps the strategy's own decision.
+			expect(first.meta.routing?.decision).toBe("affinity_miss");
+
+			// The reserve lifts: the conversation stays where its cache is.
+			seedUsage("acc-a", 0, 10);
+			expect(pinnedTo(strategy, accounts)).toBe("acc-b");
+		});
+
+		it("leaves the pin when another account served the request", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+
+			route(strategy, accounts, { served: "acc-c" });
+
+			seedUsage("acc-a", 0, 10);
+			expect(pinnedTo(strategy, accounts)).toBe("acc-a");
+		});
+
+		it("does not follow a head that a failure memo pushed back", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+			recordFamilyWeeklyExhausted(
+				"acc-b",
+				"sonnet",
+				Date.now() + HOUR,
+				Date.now(),
+			);
+
+			// acc-b serves only after acc-c and acc-a fail.
+			const { candidates, follow } = route(strategy, accounts, {
+				served: "acc-b",
+			});
+			expect(candidates.map((a) => a.id)).toEqual(["acc-c", "acc-a", "acc-b"]);
+			expect(follow).toBeNull();
+		});
+
+		it("leaves the pin when only a failure memo moved the request", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			seedUsage("acc-a", 0, 10);
+			seedUsage("acc-b", 20, 20);
+			recordFamilyWeeklyExhausted(
+				"acc-a",
+				"sonnet",
+				Date.now() + HOUR,
+				Date.now(),
+			);
+
+			const { candidates, follow } = route(strategy, accounts);
+			expect(candidates[0].id).toBe("acc-b");
+			expect(follow).toBeNull();
+		});
+
+		it("never follows a family reservation, which depends on the request's model", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			// A near-full shared 5h window reserves acc-a for Fable against this
+			// Sonnet request only.
+			seedUsage("acc-a", 99, 10);
+			seedUsage("acc-b", 20, 20);
+			seedUsage("acc-c", 20, 20);
+
+			const { candidates, follow } = route(strategy, accounts);
+			expect(candidates[0].id).toBe("acc-b");
+			expect(follow).toBeNull();
+		});
+
+		// 85% used: inside the ordinary 20% reserve, outside Fable's 10%.
+		const reserveOnlyForOrdinaryTraffic = () => {
+			seedUsage("acc-a", 0, 85);
+			seedUsage("acc-b", 20, 20);
+			seedUsage("acc-c", 20, 20);
+		};
+
+		it("follows the ordinary reserve for a conversation with no Fable turns", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveOnlyForOrdinaryTraffic();
+
+			const { candidates, follow } = route(strategy, accounts);
+			expect(candidates[0].id).toBe("acc-b");
+			expect(follow).not.toBeNull();
+
+			seedUsage("acc-a", 0, 10);
+			expect(pinnedTo(strategy, accounts)).toBe("acc-b");
+		});
+
+		it("does not let a side request move a conversation that just had a Fable turn", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveOnlyForOrdinaryTraffic();
+
+			// The Fable turn stays on acc-a: its own tier may spend down to 10%.
+			const fable = route(strategy, accounts, { model: "claude-fable-5-1" });
+			expect(fable.candidates[0].id).toBe("acc-a");
+
+			const side = route(strategy, accounts);
+			expect(side.candidates[0].id).toBe("acc-b");
+			expect(side.follow).toBeNull();
+		});
+
+		it("follows again once the last Fable turn is older than any prompt cache", () => {
+			const accounts = pool();
+			const key = "client_session:pi-conversation";
+
+			recordProtectedTierTurn(key, Date.now() - 1_000);
+			reserveOnlyForOrdinaryTraffic();
+			expect(route(new SessionStrategy(), accounts).follow).toBeNull();
+
+			resetConversationTierMemoryForTests();
+			recordProtectedTierTurn(key, Date.now() - HOUR - 1_000);
+			expect(route(new SessionStrategy(), accounts).follow).not.toBeNull();
+		});
+
+		it("ignores token counts, which the proxy may answer itself", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+
+			const { follow } = route(strategy, accounts, {
+				path: "/v1/messages/count_tokens",
+			});
+			expect(follow).toBeNull();
+		});
+
+		it("does not overwrite a pin that moved while the request was in flight", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+			const meta = sessionTurn();
+			const gates = createAdmissionGates(
+				{
+					requestMeta: meta,
+					gateTokenEstimate: 1,
+					isSyntheticProbeRequest: false,
+					config: makeConfig({ fiveHour: false, weekly: false }),
+					strategy,
+				},
+				MODEL,
+			);
+			const candidates = gates.applyFailureMemoDemotion(
+				gates.applySoftDemotionReorder(strategy.select(accounts, meta)),
+			);
+			const follow = gates.prepareSoftDemotionFollow(candidates);
+			expect(follow).not.toBeNull();
+
+			// A concurrent turn on the same conversation moves it to acc-c.
+			const concurrent = sessionTurn();
+			strategy.select(accounts, concurrent);
+			strategy.reassignAffinity(concurrent, accounts[2]);
+
+			follow?.(candidates[0]);
+			seedUsage("acc-a", 0, 10);
+			expect(pinnedTo(strategy, accounts)).toBe("acc-c");
+		});
+
+		it("never follows to another provider", () => {
+			const accounts = [
+				makeAccount({ id: "acc-a", name: "a", priority: 0 }),
+				makeAccount({
+					id: "codex-1",
+					name: "codex",
+					provider: "codex",
+					priority: 1,
+					resolvedModel: "gpt-6-astra",
+				}),
+				makeAccount({ id: "acc-c", name: "c", priority: 2 }),
+			];
+			const strategy = new SessionStrategy();
+			seedUsage("acc-a", 0, 95);
+			seedUsage("acc-c", 20, 20);
+
+			const { candidates, follow } = route(strategy, accounts);
+			expect(candidates[0].id).toBe("codex-1");
+			expect(follow).toBeNull();
+		});
+
+		it("does not follow while the pinned account is on a transient hold", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			seedUsage("acc-b", 20, 20);
+			seedUsage("acc-c", 20, 20);
+			route(strategy, accounts); // pins acc-a
+
+			accounts[0].rate_limited_until = Date.now() + 60_000;
+			seedUsage("acc-a", 0, 95);
+			const held = route(strategy, accounts);
+			expect(held.meta.routing?.decision).toBe("affinity_hold");
+			expect(held.follow).toBeNull();
+		});
+
+		it("ignores synthetic probe requests", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveTheStrategysPick();
+
+			const { follow } = route(strategy, accounts, {
+				isSyntheticProbeRequest: true,
+			});
+			expect(follow).toBeNull();
+		});
+
+		it("keeps the pin when no peer can absorb its traffic", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			seedUsage("acc-a", 0, 95);
+			seedUsage("acc-b", 0, 95);
+			seedUsage("acc-c", 0, 95);
+
+			const { candidates, follow } = route(strategy, accounts);
+			expect(candidates[0].id).toBe("acc-a");
+			expect(follow).toBeNull();
 		});
 	});
 });

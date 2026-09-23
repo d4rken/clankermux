@@ -14,6 +14,7 @@ import type {
 	AccountIdentity,
 	AccountPaymentRow,
 	AccountSubscriptionState,
+	AffinityPin,
 	ClientDestinations,
 	ClientProfile,
 	CodexWindowObservationRow,
@@ -104,6 +105,7 @@ import {
 	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { RoutingRepository } from "./repositories/routing.repository";
+import { SessionAffinityPinRepository } from "./repositories/session-affinity-pin.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-observation.repository";
@@ -551,6 +553,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private anthropicBankedResetEvents: AnthropicBankedResetEventRepository;
 	private quotaDriftResults: QuotaDriftResultRepository;
 	private modelOverrides: ModelOverrideRepository;
+	private sessionAffinityPins: SessionAffinityPinRepository;
 
 	constructor(
 		dbPath?: string,
@@ -704,6 +707,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.modelOverrides = retrying(
 			new ModelOverrideRepository(this.adapter),
 			"modelOverrides",
+		);
+		this.sessionAffinityPins = retrying(
+			new SessionAffinityPinRepository(this.adapter),
+			"sessionAffinityPins",
 		);
 	}
 
@@ -2967,6 +2974,18 @@ OAuth tokens will need to be re-authenticated.
 	/** Most-recent cache-keepalive snapshot (for seeding bridgeStats at boot), or null. */
 	async getLatestCacheKeepaliveSnapshot(): Promise<CacheKeepaliveSnapshotRow | null> {
 		return this.cacheKeepaliveSnapshots.getLatestSnapshot();
+	}
+
+	// ── Session affinity pin operations delegated to repository ───────────────
+
+	async replaceSessionAffinityPins(
+		pins: readonly AffinityPin[],
+	): Promise<void> {
+		await this.sessionAffinityPins.replaceAll(pins);
+	}
+
+	async getSessionAffinityPins(sinceMs: number): Promise<AffinityPin[]> {
+		return this.sessionAffinityPins.getSince(sinceMs);
 	}
 
 	// ── Account payment (ledger) operations delegated to repository ───────────

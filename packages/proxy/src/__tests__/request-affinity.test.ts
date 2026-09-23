@@ -115,6 +115,61 @@ describe("extractRequestAffinity", () => {
 		});
 	});
 
+	const PI_HEADERS = {
+		"user-agent": "pi (linux 6.12.101+deb13-amd64; x64)",
+		"x-client-request-id": "01a0ccd4-7cbd-778d-aac9-4151ff4fd1d9",
+	};
+
+	it("uses a non-Codex client's prompt_cache_key when no session header arrived", () => {
+		const result = extractRequestAffinity(
+			new Headers(PI_HEADERS),
+			" 01a0ccd4-7cbd-778d-aac9-4151ff4fd1d9 ",
+		);
+
+		expect(result).toEqual({
+			key: "01a0ccd4-7cbd-778d-aac9-4151ff4fd1d9",
+			scope: "client_session",
+		});
+	});
+
+	it("uses any non-Codex client's prompt_cache_key, not only Pi's", () => {
+		const result = extractRequestAffinity(
+			new Headers({ "user-agent": "OpenAI/JS 5.0.0" }),
+			"shared-bucket",
+		);
+
+		expect(result).toEqual({ key: "shared-bucket", scope: "client_session" });
+	});
+
+	it("keeps the session-id header ahead of prompt_cache_key", () => {
+		const result = extractRequestAffinity(
+			new Headers({ ...PI_HEADERS, "session-id": "header-session" }),
+			"body-session",
+		);
+
+		expect(result).toEqual({ key: "header-session", scope: "client_session" });
+	});
+
+	it("ignores an empty prompt_cache_key", () => {
+		const result = extractRequestAffinity(new Headers(PI_HEADERS), " \x00 ");
+
+		expect(result).toEqual({ key: null, scope: null });
+	});
+
+	it("never keys Codex on prompt_cache_key", () => {
+		const threadless = extractRequestAffinity(
+			new Headers({ originator: "codex-tui" }),
+			"codex-cache-key",
+		);
+		const threaded = extractRequestAffinity(
+			new Headers({ originator: "codex-tui", "thread-id": "codex-thread" }),
+			"codex-cache-key",
+		);
+
+		expect(threadless).toEqual({ key: null, scope: null });
+		expect(threaded).toEqual({ key: "codex-thread", scope: "codex_thread" });
+	});
+
 	it("keeps Codex thread id ahead of the session-id Codex also sends", () => {
 		const result = extractRequestAffinity(
 			new Headers({

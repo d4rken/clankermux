@@ -10,6 +10,10 @@ import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { getCodexTransientFailureUntil } from "./codex-transient-health";
+import {
+	hasRecentProtectedTierTurn,
+	recordProtectedTierTurn,
+} from "./conversation-tier-memory";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
 	type ContextWindowExcludedBackend,
@@ -18,6 +22,7 @@ import {
 	type FamilyWeeklyPacedAccount,
 	getUsageThrottleUntil,
 	isAbsorbablePeer,
+	LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT,
 	type ProxyContext,
 	resolveFamilyWeeklyExclusion,
 	resolveFamilyWeeklyPacing,
@@ -92,6 +97,22 @@ export interface AdmissionGateDeps {
 export interface AdmissionGates {
 	/** Rebind only when a durable exclusion invalidates the remembered account. */
 	reconcileAffinity: (candidates: Account[]) => void;
+	/**
+	 * When the preceding `applySoftDemotionReorder` held the pinned account back
+	 * for pool liveness, returns a callback that moves the pin to the account the
+	 * reorder put first, once that account has served the request. Call it right
+	 * after the reorder on a fresh selection, never from a hold wake.
+	 */
+	prepareSoftDemotionFollow: (
+		candidates: Account[],
+	) => ((served: Account) => void) | null;
+	/**
+	 * Remember that this request's conversation can be served as the protected
+	 * family (Fable), so a later side request of it does not move its pin off an
+	 * account only the side request's tier holds in reserve. Call after every
+	 * selection pass, hold wakes included.
+	 */
+	noteConversationTier: (candidates: Account[]) => void;
 	modelForAccount: (account: Account) => string | null;
 	applyProviderOverloadGate: (accounts: Account[]) => {
 		available: Account[];
@@ -142,6 +163,13 @@ export interface AdmissionGates {
 	 */
 	readonly softDemotionReasons: ReadonlyMap<string, string>;
 }
+
+/** Decisions where the strategy's own pick is the pin; a hold keeps its target. */
+const FOLLOWABLE_AFFINITY_DECISIONS = new Set([
+	"affinity_hit",
+	"affinity_miss",
+	"affinity_reassigned",
+]);
 
 /**
  * Build the admission gates for ONE request.
@@ -507,6 +535,11 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// order the attempt loop is actually about to follow (the strategy's own
 	// logSelection runs BEFORE these gates and therefore cannot show it).
 	let softDemotionReasons = new Map<string, string>();
+	// The account the latest reorder put first, before any failure memo.
+	let softDemotionHead: Account | null = null;
+	// Accounts the latest reorder held back for pool liveness at the protected
+	// family's tier too, i.e. whichever model the conversation's next turn asks for.
+	let livenessHeldAtEveryTier = new Set<string>();
 
 	// 6d. Composite soft-demotion reorder — SOFT demotions (never exclusions).
 	// Two independent reasons move an account to the BACK of the candidate list:
@@ -594,19 +627,13 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 			);
 		}
 
-		const reasons = new Map<string, string>();
-		const kept: Account[] = [];
-		const demoted: Account[] = [];
-		for (const account of candidates) {
-			// Pass 2 — how many OTHER candidates could absorb this account's traffic.
-			// A family-reserved peer is being held for Fable and a peer that owes a
-			// capacity-restored probe admits only that one probe, so neither counts.
-			// Peers are judged at the DECIDING account's tier threshold, which is what
-			// keeps "reserved" and "absorbing" exactly complementary.
-			const threshold =
-				livenessThreshold.get(account.id) ??
-				resolveLivenessReserveThreshold(false);
-			let absorbablePeerCount = 0;
+		// Pass 2 — how many OTHER candidates could absorb this account's traffic.
+		// A family-reserved peer is being held for Fable and a peer that owes a
+		// capacity-restored probe admits only that one probe, so neither counts.
+		// Peers are judged at the DECIDING account's tier threshold, which is what
+		// keeps "reserved" and "absorbing" exactly complementary.
+		const countAbsorbablePeers = (account: Account, threshold: number) => {
+			let count = 0;
 			for (const peer of candidates) {
 				if (peer.id === account.id) continue;
 				if (
@@ -617,15 +644,22 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 						threshold,
 					)
 				) {
-					absorbablePeerCount++;
+					count++;
 				}
 			}
-			// Pass 3 — the liveness decision for this account, at its tier and with
-			// its observed weekly burn (validated against the BINDING weekly window;
-			// null whenever there is no usable evidence, which yields the static
-			// tier-scaled horizon).
+			return count;
+		};
+		// Pass 3 — the liveness decision for this account, at a tier and with its
+		// observed weekly burn (validated against the BINDING weekly window; null
+		// whenever there is no usable evidence, which yields the static
+		// tier-scaled horizon).
+		const livenessDemotes = (
+			account: Account,
+			threshold: number,
+			absorbablePeerCount: number,
+		) => {
 			const accountCapacity = capacityById.get(account.id) ?? null;
-			const livenessDemote = resolvePoolLivenessDemotion(
+			return resolvePoolLivenessDemotion(
 				accountCapacity,
 				absorbablePeerCount,
 				now,
@@ -638,6 +672,36 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 					),
 				},
 			);
+		};
+
+		const reasons = new Map<string, string>();
+		const heldAtEveryTier = new Set<string>();
+		const kept: Account[] = [];
+		const demoted: Account[] = [];
+		for (const account of candidates) {
+			const threshold =
+				livenessThreshold.get(account.id) ??
+				resolveLivenessReserveThreshold(false);
+			const absorbablePeerCount = countAbsorbablePeers(account, threshold);
+			const livenessDemote = livenessDemotes(
+				account,
+				threshold,
+				absorbablePeerCount,
+			);
+			if (
+				livenessDemote &&
+				(threshold === LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT ||
+					livenessDemotes(
+						account,
+						LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT,
+						countAbsorbablePeers(
+							account,
+							LIVENESS_RESERVE_PROTECTED_HEADROOM_PCT,
+						),
+					))
+			) {
+				heldAtEveryTier.add(account.id);
+			}
 			const family = familyDemote.get(account.id) === true;
 			if (family || livenessDemote) {
 				const reason =
@@ -663,6 +727,8 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 			}
 		}
 		softDemotionReasons = reasons;
+		softDemotionHead = kept[0] ?? null;
+		livenessHeldAtEveryTier = heldAtEveryTier;
 		// ONE stable partition over the union of both reasons — never drops an
 		// account, only reorders.
 		return [...kept, ...demoted];
@@ -687,8 +753,65 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		if (durable) deps.strategy?.reassignAffinity?.(requestMeta, candidates[0]);
 	};
 
+	// A liveness reserve lasts hours, so a conversation pinned behind it runs on
+	// the peer and moves back whenever the reserve lifts or a failure memo flips
+	// the order, re-reading its prompt on an account that never cached it.
+	const noteConversationTier = (candidates: Account[]) => {
+		const conversationKey = requestMeta.routing?.affinityKey;
+		if (
+			!conversationKey ||
+			isSyntheticProbeRequest ||
+			requestMeta.path === "/v1/messages/count_tokens" ||
+			!candidates.some((account) =>
+				isProtectedFamily(getModelFamily(modelForAccount(account))),
+			)
+		)
+			return;
+		recordProtectedTierTurn(conversationKey, Date.now());
+	};
+
+	// Family reservation depends on the request's model and is never followed.
+	// The liveness reserve is tiered by model too: a conversation with a recent
+	// Fable turn follows only a reserve that would also hold Fable back, so a
+	// side request cannot move it off an account its Fable turns may still use.
+	const prepareSoftDemotionFollow = (
+		candidates: Account[],
+	): ((served: Account) => void) | null => {
+		const routing = requestMeta.routing;
+		if (
+			isSyntheticProbeRequest ||
+			requestMeta.path === "/v1/messages/count_tokens" ||
+			routing?.strategy !== "session"
+		)
+			return null;
+		if (!FOLLOWABLE_AFFINITY_DECISIONS.has(routing.decision)) return null;
+		const now = Date.now();
+		const conversationKey = routing.affinityKey;
+		const pinnedId = routing.heldAccountId ?? routing.selectedAccountId;
+		const pinned = candidates.find((a) => a.id === pinnedId);
+		const head = softDemotionHead;
+		if (
+			!pinned ||
+			!head ||
+			// A failure memo moved the head back; a memo never moves the pin.
+			candidates[0]?.id !== head.id ||
+			head.id === pinned.id ||
+			head.provider !== pinned.provider ||
+			softDemotionReasons.get(pinned.id) !== "pool liveness" ||
+			(!livenessHeldAtEveryTier.has(pinned.id) &&
+				(!conversationKey || hasRecentProtectedTierTurn(conversationKey, now)))
+		)
+			return null;
+		return (served) => {
+			if (served.id === head.id)
+				deps.strategy?.followAffinity?.(requestMeta, pinned.id, head);
+		};
+	};
+
 	return {
 		reconcileAffinity,
+		noteConversationTier,
+		prepareSoftDemotionFollow,
 		modelForAccount,
 		applyProviderOverloadGate,
 		shouldForwardProviderOverloadIfNoCrossProviderFallback,

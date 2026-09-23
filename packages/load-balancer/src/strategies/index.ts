@@ -1,7 +1,12 @@
-import { isAccountAvailable, TIME_CONSTANTS } from "@clankermux/core";
+import {
+	hashRoutingAffinityKey,
+	isAccountAvailable,
+	TIME_CONSTANTS,
+} from "@clankermux/core";
 import { Logger, LogLevel } from "@clankermux/logger";
 import type {
 	Account,
+	AffinityPin,
 	LoadBalancingStrategy,
 	RateLimitReason,
 	RequestMeta,
@@ -99,10 +104,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	private log = new Logger("SessionStrategy");
 	private pickSeq = 0;
 	private lastPickedSeq = new Map<string, number>();
+	/**
+	 * Keyed by the SHA-256 of the composite affinity key, so the pins can be
+	 * persisted without storing session ids.
+	 */
 	private affinityByKey = new Map<
 		string,
 		{ accountId: string; lastUsedAt: number }
 	>();
+	private affinityChanges = 0;
 	/**
 	 * Highest `lastUsedAt` ever written to {@link affinityByKey}. Stored stamps
 	 * are clamped to this, so they are non-decreasing in insertion order even if
@@ -115,6 +125,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		sessionDurationMs: number = TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
 	) {
 		this.sessionDurationMs = sessionDurationMs;
+	}
+
+	get affinityRevision(): number {
+		return this.affinityChanges;
 	}
 
 	initialize(store: StrategyStore): void {
@@ -252,6 +266,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		return `${prefix}project:${project}`;
 	}
 
+	private getAffinityMapKey(meta: RequestMeta): string | null {
+		return hashRoutingAffinityKey(this.getAffinityKey(meta));
+	}
+
 	private getAffinityScope(
 		meta: RequestMeta,
 	): RequestMeta["affinityScope"] | null {
@@ -302,7 +320,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		account: Account,
 		now: number,
 	): void {
-		const key = this.getAffinityKey(meta);
+		const key = this.getAffinityMapKey(meta);
 		if (!key) return;
 		// Clamp the stamp to be non-decreasing. `now` comes from the wall clock,
 		// which can step backwards; without this a later entry could carry an
@@ -315,6 +333,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		this.lastAffinityStamp = stamp;
 		this.affinityByKey.delete(key);
 		this.affinityByKey.set(key, { accountId: account.id, lastUsedAt: stamp });
+		this.affinityChanges++;
 		this.pruneAffinity(now);
 	}
 
@@ -338,6 +357,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				cleared++;
 			}
 		}
+		if (cleared > 0) this.affinityChanges++;
 		return cleared;
 	}
 
@@ -354,6 +374,59 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		meta.routing.heldAccountId = account.id;
 	}
 
+	followAffinity(
+		meta: RequestMeta,
+		fromAccountId: string,
+		account: Account,
+	): void {
+		if (meta.routing?.strategy !== "session") return;
+		const key = this.getAffinityMapKey(meta);
+		if (!key || this.affinityByKey.get(key)?.accountId !== fromAccountId)
+			return;
+		this.rememberAffinity(meta, account, Date.now());
+		this.log.info(
+			`Moved ${this.getAffinityLabel(meta)} affinity to ${account.name}, which served it while the pinned account was held in reserve`,
+		);
+	}
+
+	exportAffinity(): AffinityPin[] {
+		return Array.from(this.affinityByKey, ([keyHash, entry]) => ({
+			keyHash,
+			accountId: entry.accountId,
+			lastUsedAt: entry.lastUsedAt,
+		}));
+	}
+
+	importAffinity(pins: readonly AffinityPin[], now: number): void {
+		const staleBefore = now - this.sessionDurationMs;
+		const merged = new Map(this.affinityByKey);
+		let changed = false;
+		for (const pin of pins) {
+			// A stamp from a clock that ran ahead would otherwise outlive the
+			// session duration and drag every later write up to it.
+			const lastUsedAt = Math.min(pin.lastUsedAt, now);
+			if (!(lastUsedAt >= staleBefore)) continue;
+			const current = merged.get(pin.keyHash);
+			if (current && current.lastUsedAt >= lastUsedAt) continue;
+			merged.delete(pin.keyHash);
+			merged.set(pin.keyHash, { accountId: pin.accountId, lastUsedAt });
+			changed = true;
+		}
+		if (!changed) return;
+
+		// Rebuilt in ascending stamp order, the order pruneAffinity() relies on.
+		const ordered = [...merged]
+			.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
+			.slice(-MAX_AFFINITY_ENTRIES);
+		this.affinityByKey.clear();
+		for (const [key, entry] of ordered) {
+			this.affinityByKey.set(key, entry);
+			if (entry.lastUsedAt > this.lastAffinityStamp)
+				this.lastAffinityStamp = entry.lastUsedAt;
+		}
+		this.affinityChanges++;
+	}
+
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
 		// The map is maintained in least-recently-used order: recordAffinity()
@@ -362,10 +435,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// stale entries are a prefix and the first live entry ends the sweep.
 		// Without the break this scans every entry on EVERY affinity write,
 		// which is O(n) per request and O(n^2) to fill the map.
+		const sizeBefore = this.affinityByKey.size;
 		for (const [key, entry] of this.affinityByKey) {
 			if (entry.lastUsedAt >= staleBefore) break;
 			this.affinityByKey.delete(key);
 		}
+		if (this.affinityByKey.size !== sizeBefore) this.affinityChanges++;
 
 		if (this.affinityByKey.size <= MAX_AFFINITY_ENTRIES) return;
 
@@ -376,6 +451,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			removed++;
 			if (removed >= overflow) break;
 		}
+		this.affinityChanges++;
 		this.log.warn(
 			`Pruned ${removed} cache affinity entr${removed === 1 ? "y" : "ies"} after reaching ${MAX_AFFINITY_ENTRIES} entries`,
 		);
@@ -398,12 +474,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 */
 	private resolveAffinity(
 		accounts: Account[],
-		meta: RequestMeta,
+		key: string | null,
 		now: number,
 		isAvailable: (account: Account) => boolean,
 	): AffinityResolution {
 		this.pruneAffinity(now);
-		const key = this.getAffinityKey(meta);
 		if (!key) return { kind: "miss" };
 
 		const entry = this.affinityByKey.get(key);
@@ -417,6 +492,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// identity here; availability below handles pauses and exhaustion.
 		if (!account) {
 			this.affinityByKey.delete(key);
+			this.affinityChanges++;
 			return { kind: "reassign", previousAccountId: entry.accountId };
 		}
 
@@ -429,6 +505,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// the nature of the unavailability.
 		if (this.isAffinityBreakingUnavailability(account, now)) {
 			this.affinityByKey.delete(key);
+			this.affinityChanges++;
 			return { kind: "reassign", previousAccountId: entry.accountId };
 		}
 
@@ -782,12 +859,13 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 		if (!bypassSession) {
 			const affinityKey = this.getAffinityKey(meta);
-			const previousAccountId = affinityKey
-				? (this.affinityByKey.get(affinityKey)?.accountId ?? null)
+			const affinityMapKey = hashRoutingAffinityKey(affinityKey);
+			const previousAccountId = affinityMapKey
+				? (this.affinityByKey.get(affinityMapKey)?.accountId ?? null)
 				: null;
 			const resolution = this.resolveAffinity(
 				accounts,
-				meta,
+				affinityMapKey,
 				now,
 				getCachedAvailability,
 			);

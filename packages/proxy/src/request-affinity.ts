@@ -9,7 +9,10 @@ function sanitizeAffinityHeader(value: string | null): string | null {
 	return sanitized.slice(0, 128);
 }
 
-export function extractRequestAffinity(headers: Headers): {
+export function extractRequestAffinity(
+	headers: Headers,
+	promptCacheKey: string | null = null,
+): {
 	key: string | null;
 	scope: RequestAffinityScope | null;
 } {
@@ -33,11 +36,13 @@ export function extractRequestAffinity(headers: Headers): {
 
 	// Codex is keyed by its thread or not at all; its `session-id` is broader.
 	// `x-client-request-id` is never a key: other SDKs send it per request.
+	// `prompt_cache_key` comes last. Pi repeats its session uuid there, and a
+	// reverse proxy may drop the underscore `session_id` header.
 	const clientSession = isCodexClient(headers)
 		? null
-		: sanitizeAffinityHeader(
+		: (sanitizeAffinityHeader(
 				headers.get("session-id") ?? headers.get("session_id"),
-			);
+			) ?? sanitizeAffinityHeader(promptCacheKey));
 	if (clientSession) {
 		return { key: clientSession, scope: "client_session" };
 	}

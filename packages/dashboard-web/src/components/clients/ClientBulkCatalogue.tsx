@@ -106,6 +106,7 @@ export function ClientBulkCatalogue({
 		models: ClientModel[];
 	} | null>(null);
 	const [replaceDefault, setReplaceDefault] = useState("");
+	const [dropRoutes, setDropRoutes] = useState(false);
 	const [confirming, setConfirming] = useState(false);
 	const [review, setReview] = useState<ClientBulkReview | null>(null);
 	/** The catalogues the review was taken against; the list keeps refreshing. */
@@ -326,7 +327,7 @@ export function ClientBulkCatalogue({
 			setReview(
 				await clientRequest<ClientBulkReview>("/bulk/review", {
 					clientIds: snapshot.map((c) => c.apiKeyId),
-					operation,
+					operation: dropRoutes ? { ...operation, dropRoutes } : operation,
 				}),
 			);
 			setReviewedClients(snapshot);
@@ -352,6 +353,7 @@ export function ClientBulkCatalogue({
 			setStagedModels([]);
 			setSource(null);
 			setReplaceDefault("");
+			setDropRoutes(false);
 			setNotice(`Applied to ${clientCount(applied)}.`);
 		});
 	const accountName = (id: string) =>
@@ -565,6 +567,23 @@ export function ClientBulkCatalogue({
 									: "Move models between the columns to stage changes."}
 							</p>
 						</div>
+						<label className="flex items-start gap-2 text-sm">
+							<input
+								type="checkbox"
+								className="mt-1"
+								aria-label="Delete the routes of removed aliases"
+								disabled={busy}
+								checked={dropRoutes}
+								onChange={(e) => setDropRoutes(e.target.checked)}
+							/>
+							<span>
+								Delete the routes of aliases this edit or replace removes
+								<span className="block text-muted-foreground">
+									Otherwise a client that still sends the alias ID keeps
+									reaching its target.
+								</span>
+							</span>
+						</label>
 						<details className="rounded-md border p-3">
 							<summary className="cursor-pointer w-fit text-sm font-medium">
 								Add a custom model or alias
@@ -779,7 +798,10 @@ export function ClientBulkCatalogue({
 								return picked
 									? clientLabelText(picked.key.name, picked.application)
 									: "the chosen client";
-							})()}. Other formats are untouched.
+							})()}. Other formats are untouched.{" "}
+							{dropRoutes
+								? "Routes of the aliases it removes are deleted."
+								: "Routes of the aliases it removes are kept."}
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
@@ -886,6 +908,18 @@ function PreviewRow({
 							<dd className="break-all">
 								{result.modified.map(describe).join("; ")}
 							</dd>
+						</>
+					)}
+					{result.droppedRoutes.length > 0 && (
+						<>
+							<dt>Routes removed</dt>
+							<dd className="break-all">{result.droppedRoutes.join(", ")}</dd>
+						</>
+					)}
+					{result.keptRoutes.length > 0 && (
+						<>
+							<dt>Routes kept</dt>
+							<dd className="break-all">{result.keptRoutes.join(", ")}</dd>
 						</>
 					)}
 					{result.defaultModelChange && (

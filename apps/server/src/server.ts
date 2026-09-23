@@ -113,6 +113,7 @@ import {
 	supportsUsagePolling,
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
+import { AffinityPinPersistence } from "./affinity-pin-persistence";
 import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
 import { AnthropicSubscriptionDiagnosis } from "./anthropic-subscription-diagnosis";
 import {
@@ -308,6 +309,8 @@ let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
 let anthropicBankedResetApplyScheduler: AnthropicBankedResetApplyScheduler | null =
 	null;
 let quotaDriftScheduler: QuotaDriftScheduler | null = null;
+let affinityPinPersistence: AffinityPinPersistence | null = null;
+let strategyGeneration = 0;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1245,6 +1248,17 @@ export default async function startServer(options?: {
 	strategy.initialize?.(strategyStore);
 	currentStrategy = strategy;
 
+	// Restored before serve() binds, so a conversation resumed in the first
+	// seconds after a restart finds its pin.
+	const affinityPins = new AffinityPinPersistence({
+		store: dbOps,
+		getStrategy: () => currentStrategy,
+		maxAgeMs: runtimeConfig.sessionDurationMs,
+	});
+	affinityPinPersistence = affinityPins;
+	await affinityPins.restore(strategy);
+	affinityPins.start();
+
 	// Proxy context. Usage is computed inline on the main thread (no worker):
 	// forwardToClient feeds the per-request UsageState and finalizes it after
 	// transport finish, attaching the summary to the RequestRecorder.
@@ -1485,8 +1499,20 @@ export default async function startServer(options?: {
 				runtimeConfig.sessionDurationMs,
 			);
 			strategy.initialize?.(strategyStore);
-			proxyContext.strategy = strategy;
-			currentStrategy = strategy;
+			// Published only once seeded, so no request pins a conversation afresh
+			// while the stored pins are still loading. A newer change supersedes an
+			// adoption still in flight.
+			const generation = ++strategyGeneration;
+			void affinityPins
+				.adopt(currentStrategy, strategy)
+				.catch((error) => {
+					log.error(`Failed to carry session affinity pins over: ${error}`);
+				})
+				.finally(() => {
+					if (generation !== strategyGeneration) return;
+					proxyContext.strategy = strategy;
+					currentStrategy = strategy;
+				});
 		}
 		// store_payloads needs no worker push anymore: the RequestRecorder reads
 		// config.getStorePayloads() live on every begin()/capture/persist, so a
@@ -2221,6 +2247,13 @@ async function handleGracefulShutdown(signal: string) {
 		// them — bounded — so their attachUsageSummary/onSummary land BEFORE we
 		// dispose the RequestRecorder + AsyncDbWriter below (R6).
 		await drainPendingUsageFinalizers();
+
+		// After the drain, so the pins the last requests moved are included, and
+		// before shutdown() closes the database.
+		if (affinityPinPersistence) {
+			await affinityPinPersistence.flushFinal();
+			affinityPinPersistence = null;
+		}
 
 		// Flush AsyncDbWriter and other Disposables (recorder.dispose runs here).
 		await shutdown();

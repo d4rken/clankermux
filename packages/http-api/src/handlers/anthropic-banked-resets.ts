@@ -129,7 +129,7 @@ function claimMessage(
 		case "ineligible":
 			return `Account '${accountName}' cannot use this banked reset.`;
 		case "failed":
-			return `This banked-reset claim was given up after an hour unconfirmed for account '${accountName}'.`;
+			return `The banked-reset claim for account '${accountName}' was given up unconfirmed when its replay window closed; start a new one.`;
 		default:
 			return `The banked-reset claim for account '${accountName}' is unconfirmed (${result ?? "pending"}); retry with the same request id.`;
 	}
@@ -183,6 +183,7 @@ export function createAnthropicBankedResetClaimHandler(
 						message: dispatched.message,
 						pendingRequestId: dispatched.pendingRequestId,
 						pendingGrantId: dispatched.pendingGrantId,
+						pendingReplayUntil: iso(dispatched.pendingReplayUntil),
 					},
 					{ status: 409 },
 				);
@@ -213,6 +214,7 @@ export function createAnthropicBankedResetClaimHandler(
 				cleared: dispatched.cleared,
 				cooldownUntil: iso(dispatched.result?.cooldownUntil ?? null),
 				nextAttemptAt: iso(dispatched.nextAttemptAt),
+				replayUntil: iso(dispatched.replayUntil),
 				statusRefreshed: dispatched.statusRefreshed,
 			};
 			return jsonResponse(response);

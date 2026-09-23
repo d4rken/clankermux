@@ -645,6 +645,8 @@ async function handleIngestedProxy(
 		),
 	);
 	gates.reconcileAffinity(accounts);
+	gates.noteConversationTier(accounts);
+	const followServedAccount = gates.prepareSoftDemotionFollow(accounts);
 	// The pool this request could actually have landed on, for restating the
 	// client-facing rate-limit headers as pool headroom. Stashed here because
 	// this is where the candidate set is final — every gate and reorder has run.
@@ -1156,9 +1158,9 @@ async function handleIngestedProxy(
 	 *    `comboInfo === null` the conjunct is vacuously true, so it is the same
 	 *    value. (`everyRemainingCandidateUnattemptable` is a separate, deliberate
 	 *    addition made for both passes.)
-	 *  - AFFINITY: unchanged — the burst preflight still attempts the held account
-	 *    outside this loop and hands its id in as `skipAccountId`; nothing here
-	 *    reads or writes affinity state.
+	 *  - AFFINITY: the burst preflight still attempts the held account outside
+	 *    this loop and hands its id in as `skipAccountId`. The only affinity
+	 *    write here is `followServedAccount` on a successful serve.
 	 *  - OVERLOAD ACCOUNTING: every attempt still passes
 	 *    `onOutcome: noteOverloadSuppression`, and `logFinalOrderOnce` is still
 	 *    called from inside the probe-gate callback (the admission point).
@@ -1302,6 +1304,7 @@ async function handleIngestedProxy(
 				continue;
 			}
 			if (gated.response) {
+				if (gated.response.ok) followServedAccount?.(list[i]);
 				return gated.response;
 			}
 		}

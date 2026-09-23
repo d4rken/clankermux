@@ -1,5 +1,5 @@
 import {
-	CLAUDE_CLI_VERSION,
+	claudeUsageReadHeaders,
 	collectObservedWindows,
 	normalizeAnthropicUsage,
 	type ObservedWindow,
@@ -465,13 +465,7 @@ export function parseRetryAfterMs(
 export function anthropicOAuthUsageHeaders(
 	accessToken: string,
 ): Record<string, string> {
-	return {
-		Authorization: `Bearer ${accessToken}`,
-		"anthropic-beta": "oauth-2025-04-20",
-		"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
-		Accept: "application/json",
-		"Content-Type": "application/json",
-	};
+	return claudeUsageReadHeaders(accessToken);
 }
 
 /**

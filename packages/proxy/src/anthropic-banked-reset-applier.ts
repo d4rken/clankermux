@@ -327,7 +327,7 @@ export function decideBankedResetAction(inputs: {
 export interface BankedResetApplyDeps {
 	/** Anthropic OAuth accounts with either toggle on. */
 	listCandidateAccounts(): Promise<Array<{ id: string; name: string }>>;
-	/** Resolve claims unconfirmed for an hour as `failed`; returns how many. */
+	/** Resolve claims whose replay window closed as `failed`; returns how many. */
 	expireStaleAttempts(now: number): Promise<number>;
 	/** Rows owing an overage-pause verdict, every account. */
 	getRecoveryPending(): Promise<AnthropicBankedResetEventRow[]>;
@@ -424,7 +424,7 @@ export class AnthropicBankedResetApplyScheduler {
 			const expired = await this.deps.expireStaleAttempts(this.now());
 			if (expired > 0) {
 				log.info(
-					`Banked-reset applier: gave up ${expired} claim(s) unconfirmed for an hour`,
+					`Banked-reset applier: gave up ${expired} claim(s) whose replay window closed`,
 				);
 			}
 		} catch (error) {

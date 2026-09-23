@@ -135,4 +135,34 @@ export interface LoadBalancingStrategy {
 	clearAffinityForAccount?(accountId: string): number;
 	/** Rebind a conversation after a durable request-specific exclusion. */
 	reassignAffinity?(meta: RequestMeta, account: Account): void;
+	/**
+	 * Move a conversation's pin from `fromAccountId` to the account that just
+	 * served it, unless a concurrent request has moved the pin since. Leaves the
+	 * request's routing telemetry as the strategy recorded it.
+	 */
+	followAffinity?(
+		meta: RequestMeta,
+		fromAccountId: string,
+		account: Account,
+	): void;
+	/** The live affinity pins, least recently used first. */
+	exportAffinity?(): AffinityPin[];
+	/**
+	 * Merge pins exported earlier (possibly by another process). Pins older than
+	 * the session duration are dropped, and a pin never replaces a newer one
+	 * already held for the same key.
+	 */
+	importAffinity?(pins: readonly AffinityPin[], now: number): void;
+	/**
+	 * Advances on every change to the affinity pins, so a snapshotter can skip
+	 * state it has already written.
+	 */
+	readonly affinityRevision?: number;
+}
+
+/** One conversation's account pin, keyed by the hash of its affinity key. */
+export interface AffinityPin {
+	keyHash: string;
+	accountId: string;
+	lastUsedAt: number;
 }

@@ -22,6 +22,8 @@ export interface NativeResponsesContext {
 	 * it), null when absent/non-string.
 	 */
 	reasoningEffort?: string | null;
+	/** `prompt_cache_key` from the ORIGINAL body, null when absent/non-string. */
+	promptCacheKey?: string | null;
 }
 
 /**

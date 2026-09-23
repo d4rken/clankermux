@@ -518,6 +518,12 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	session_affinity_pins: {
+		shipped: "2026-09-23",
+		commit: "unreleased",
+		columns: ["key_hash", "account_id", "last_used_at"],
+		source: "create-table-at-intro",
+	},
 };
 
 /**

@@ -52,8 +52,7 @@ function render(account: AccountResponse): string {
  * The rendered chips, one markup slice each. `AccountPolicyChips` returns a
  * fragment so the chips are siblings of the status pills rather than one
  * indivisible block, which means there is no wrapper element to slice on — each
- * chip is instead cut at the next chip's opening tag. The nested `sr-only`
- * span cannot start a slice: only `StatusChip`'s own base classes do.
+ * chip is instead cut at the next chip's opening tag.
  */
 function chips(html: string): string[] {
 	const marker = '<span class="inline-flex';
@@ -64,7 +63,7 @@ function chips(html: string): string[] {
 }
 
 function chipFor(html: string, label: string): string {
-	const found = chips(html).filter((chip) => chip.includes(`${label}<span`));
+	const found = chips(html).filter((chip) => chip.includes(`${label}</span>`));
 	if (found.length !== 1) {
 		throw new Error(
 			`expected exactly one chip labelled "${label}", found ${found.length}`,
@@ -75,15 +74,28 @@ function chipFor(html: string, label: string): string {
 
 function labelsOf(html: string): string[] {
 	return chips(html).map((chip) => {
-		const match = chip.match(/<\/svg>(.*?)<span class="sr-only"/);
+		const match = chip.match(/<\/svg>(.*?)<\/span>/);
 		if (!match) throw new Error(`chip has no label: ${chip}`);
 		return match[1] as string;
 	});
 }
 
-describe("AccountPolicyChips — provider inventory", () => {
-	it("renders all five codex flags with their chip labels", () => {
-		expect(labelsOf(render(makeAccount({ provider: "codex" })))).toEqual([
+describe("AccountPolicyChips — enabled flags only", () => {
+	it("renders every codex flag when all five are on", () => {
+		expect(
+			labelsOf(
+				render(
+					makeAccount({
+						provider: "codex",
+						autoFallbackEnabled: true,
+						autoRefreshEnabled: true,
+						autoPauseOnOverageEnabled: false,
+						autoApplyResetCreditsEnabled: true,
+						autoApplyResetOnWeeklyLimitEnabled: true,
+					}),
+				),
+			),
+		).toEqual([
 			"Fallback",
 			"Prewarm",
 			"Credit spend",
@@ -92,26 +104,66 @@ describe("AccountPolicyChips — provider inventory", () => {
 		]);
 	});
 
-	it("renders the three anthropic flags with their chip labels", () => {
-		expect(labelsOf(render(makeAccount({ provider: "anthropic" })))).toEqual([
-			"Fallback",
-			"Prewarm",
-			"Overage spend",
-		]);
-	});
-
-	it("renders the three zai flags, including peak-hours pause", () => {
-		expect(labelsOf(render(makeAccount({ provider: "zai" })))).toEqual([
-			"Fallback",
-			"Prewarm",
-			"Peak pause",
-		]);
-	});
-
-	it("renders only the plan-billing chip for a compatible provider", () => {
+	it("omits disabled flags and keeps the enabled ones in menu order", () => {
 		expect(
-			labelsOf(render(makeAccount({ provider: "openai-compatible" }))),
+			labelsOf(
+				render(
+					makeAccount({
+						provider: "codex",
+						autoFallbackEnabled: false,
+						autoRefreshEnabled: true,
+						autoPauseOnOverageEnabled: true,
+						autoApplyResetCreditsEnabled: false,
+						autoApplyResetOnWeeklyLimitEnabled: true,
+					}),
+				),
+			),
+		).toEqual(["Prewarm", "Apply: weekly"]);
+	});
+
+	it("renders the enabled anthropic flags with their chip labels", () => {
+		expect(
+			labelsOf(
+				render(
+					makeAccount({
+						provider: "anthropic",
+						autoFallbackEnabled: true,
+						autoRefreshEnabled: true,
+						autoPauseOnOverageEnabled: false,
+					}),
+				),
+			),
+		).toEqual(["Fallback", "Prewarm", "Overage spend"]);
+	});
+
+	it("renders an enabled zai peak-hours pause", () => {
+		expect(
+			labelsOf(
+				render(makeAccount({ provider: "zai", peakHoursPauseEnabled: true })),
+			),
+		).toEqual(["Peak pause"]);
+	});
+
+	it("renders the plan-billing chip only when plan billing is on", () => {
+		expect(
+			labelsOf(
+				render(
+					makeAccount({ provider: "openai-compatible", billingType: "plan" }),
+				),
+			),
 		).toEqual(["Plan billing"]);
+		expect(render(makeAccount({ provider: "openai-compatible" }))).toBe("");
+	});
+
+	it("renders nothing when every supported flag is off", () => {
+		expect(
+			render(
+				makeAccount({
+					provider: "anthropic",
+					autoPauseOnOverageEnabled: true,
+				}),
+			),
+		).toBe("");
 	});
 
 	it("renders nothing at all for a provider with no automation flags", () => {
@@ -119,27 +171,14 @@ describe("AccountPolicyChips — provider inventory", () => {
 	});
 });
 
-describe("AccountPolicyChips — polarity tone", () => {
-	it("fills an enabled ordinary flag and keeps its border transparent", () => {
+describe("AccountPolicyChips — tone", () => {
+	it("fills an enabled ordinary flag", () => {
 		const chip = chipFor(
 			render(makeAccount({ provider: "anthropic", autoFallbackEnabled: true })),
 			"Fallback",
 		);
 		expect(chip).toContain("bg-secondary");
-		expect(chip).toContain("border-transparent");
-		expect(chip).not.toContain("border-border");
-	});
-
-	it("outlines a disabled flag with no fill", () => {
-		const chip = chipFor(
-			render(
-				makeAccount({ provider: "anthropic", autoFallbackEnabled: false }),
-			),
-			"Fallback",
-		);
-		expect(chip).toContain("border-border");
-		expect(chip).toContain("text-muted-foreground");
-		expect(chip).not.toContain("bg-secondary");
+		expect(chip).not.toContain("border");
 	});
 
 	it("gives permitted extra spend the warning tone", () => {
@@ -151,81 +190,42 @@ describe("AccountPolicyChips — polarity tone", () => {
 		);
 		expect(chip).toContain("bg-warning/15");
 		expect(chip).toContain("text-warning-strong");
-		expect(chip).toContain("border-transparent");
 	});
 
-	it("gives blocked extra spend the ordinary off tone, not the warning tone", () => {
-		const chip = chipFor(
-			render(
-				makeAccount({ provider: "codex", autoPauseOnOverageEnabled: true }),
-			),
-			"Credit spend",
-		);
-		expect(chip).toContain("border-border");
-		expect(chip).toContain("text-muted-foreground");
-		expect(chip).not.toContain("bg-warning/15");
-		expect(chip).not.toContain("text-warning-strong");
-	});
-
-	it("carries a border in both states so the two are the same size", () => {
+	it("hides blocked extra spend", () => {
 		const html = render(
 			makeAccount({
 				provider: "codex",
 				autoFallbackEnabled: true,
-				autoRefreshEnabled: false,
+				autoPauseOnOverageEnabled: true,
 			}),
 		);
-		for (const chip of chips(html)) {
-			expect(chip).toContain("border ");
-		}
+		expect(html).not.toContain("Credit spend");
 	});
 });
 
 describe("AccountPolicyChips — accessible state", () => {
-	it("prefixes every tooltip with the state word and the menu explanation", () => {
+	it("prefixes the tooltip with the On state and the menu explanation", () => {
 		const html = render(
 			makeAccount({
 				provider: "codex",
 				autoFallbackEnabled: true,
-				autoPauseOnOverageEnabled: true,
+				autoPauseOnOverageEnabled: false,
 			}),
 		);
-		for (const chip of chips(html)) {
-			const match = chip.match(/title="(On|Off) — [^"]+"/);
-			expect(match).not.toBeNull();
-		}
 		expect(chipFor(html, "Fallback")).toContain(
 			'title="On — Automatically switch back to this account from lower-priority ones',
 		);
 		expect(chipFor(html, "Credit spend")).toContain(
-			'title="Off — When the weekly Codex limit is reached',
+			'title="On — When the weekly Codex limit is reached',
 		);
-	});
-
-	it("names the state in an sr-only span that matches the tone", () => {
-		const html = render(
-			makeAccount({
-				provider: "codex",
-				autoFallbackEnabled: true,
-				autoRefreshEnabled: false,
-				autoPauseOnOverageEnabled: true,
-			}),
-		);
-		for (const chip of chips(html)) {
-			const isOn = chip.includes('<span class="sr-only">On</span>');
-			const isOff = chip.includes('<span class="sr-only">Off</span>');
-			expect(isOn || isOff).toBe(true);
-			if (isOn) {
-				expect(chip).toContain("border-transparent");
-			} else {
-				expect(chip).toContain("border-border");
-			}
-		}
 	});
 
 	it("hides the decorative icon from assistive technology", () => {
 		const chip = chipFor(
-			render(makeAccount({ provider: "openai-compatible" })),
+			render(
+				makeAccount({ provider: "openai-compatible", billingType: "plan" }),
+			),
 			"Plan billing",
 		);
 		expect(chip).toContain('aria-hidden="true"');

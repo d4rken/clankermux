@@ -298,6 +298,8 @@ it("keeps the bulk panel open on the committed catalogues, then closes with the 
 							removed: [],
 							modified: [],
 							defaultModelChange: null,
+							droppedRoutes: [],
+							keptRoutes: [],
 							notices: [],
 						},
 					],

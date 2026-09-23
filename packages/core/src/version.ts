@@ -11,7 +11,7 @@ import rootPackageJson from "../../../package.json";
 // User-agent version for the requests ClankerMux originates itself, where there
 // is no client user-agent to pass through. Hand-maintained: refresh it from
 // `claude --version`.
-export const CLAUDE_CLI_VERSION = "2.1.270";
+export const CLAUDE_CLI_VERSION = "2.1.280";
 
 /** The single cache for {@link getAppVersionSync}, which {@link getVersion} reads through. */
 let cachedAppVersion: string | null = null;

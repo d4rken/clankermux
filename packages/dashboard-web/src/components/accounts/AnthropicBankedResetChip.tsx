@@ -13,6 +13,7 @@ import {
 	bankedResetClearsLabels,
 	bankedResetEventDetail,
 	bankedResetEventStatusLabel,
+	bankedResetRetryState,
 	claimableBankedResetGrant,
 	describeBankedResetClaim,
 	findResumableBankedResetClaim,
@@ -31,6 +32,7 @@ import {
 	type ResetApplyState,
 	ResetEventsPanel,
 	type ResetEventsState,
+	usageResetChipLabel,
 } from "./UsageResetPanels";
 
 /**
@@ -41,19 +43,22 @@ const TERMINAL_CLAIM_HTTP_STATUSES = new Set([400, 404, 409]);
 
 /**
  * The manual claim in progress. `requestId` is generated once per armed
- * attempt and reused by every retry until the claim settles, so the server
- * deduplicates a retried POST that had already landed.
+ * attempt and reused by every retry until the claim settles or its replay
+ * window closes at `replayUntil` (ms epoch), so the server deduplicates a
+ * retried POST that had already landed.
  */
 interface ClaimAttempt {
 	state: ResetApplyState;
 	requestId: string | null;
 	grantId: string | null;
+	replayUntil: number | null;
 }
 
 const IDLE_ATTEMPT: ClaimAttempt = {
 	state: { kind: "idle" },
 	requestId: null,
 	grantId: null,
+	replayUntil: null,
 };
 
 function GrantRow({ grant }: { grant: AnthropicBankedResetGrantInfo }) {
@@ -145,17 +150,28 @@ export function AnthropicBankedResetChip({
 		ResetEventsState<AnthropicBankedResetEventResponse>
 	>({ kind: "idle" });
 	const [attempt, setAttempt] = useState<ClaimAttempt>(IDLE_ATTEMPT);
-	// Re-render once a held Retry becomes available.
+	// Re-render once a held Retry becomes available, and once it lapses.
 	const [, setRetryTick] = useState(0);
 	const retryAt =
 		attempt.state.kind === "retry" ? attempt.state.retryAt : undefined;
+	const replayUntil =
+		attempt.state.kind === "retry" ? attempt.replayUntil : null;
 	useEffect(() => {
-		if (retryAt === undefined) return;
-		const wait = retryAt - Date.now();
-		if (wait <= 0) return;
-		const timer = setTimeout(() => setRetryTick((tick) => tick + 1), wait + 50);
-		return () => clearTimeout(timer);
-	}, [retryAt]);
+		const now = Date.now();
+		const timers = [retryAt, replayUntil ?? undefined]
+			.filter((at): at is number => at !== undefined && at > now)
+			.map((at) =>
+				setTimeout(() => setRetryTick((tick) => tick + 1), at - now + 50),
+			);
+		return () => {
+			for (const timer of timers) clearTimeout(timer);
+		};
+	}, [retryAt, replayUntil]);
+	const shownState = bankedResetRetryState(
+		attempt.state,
+		attempt.replayUntil,
+		Date.now(),
+	);
 	const info = account.anthropicBankedResets;
 	if (!info || !showsAnthropicBankedResetChip(account)) return null;
 
@@ -181,6 +197,7 @@ export function AnthropicBankedResetChip({
 								},
 								requestId: pending.requestId,
 								grantId: pending.grantId,
+								replayUntil: pending.replayUntil,
 							}
 						: prev,
 				);
@@ -193,16 +210,30 @@ export function AnthropicBankedResetChip({
 			);
 	};
 
-	const runClaim = (requestId: string, grantId: string) => {
-		setAttempt({ state: { kind: "applying" }, requestId, grantId });
+	const runClaim = (
+		requestId: string,
+		grantId: string,
+		replayUntil: number | null,
+	) => {
+		setAttempt({
+			state: { kind: "applying" },
+			requestId,
+			grantId,
+			replayUntil,
+		});
 		api
 			.claimAccountBankedReset(account.id, { grantId, requestId })
 			.then((response) => {
 				const view = describeBankedResetClaim(response);
 				setAttempt(
 					view.kind === "retry"
-						? { state: view, requestId, grantId }
-						: { state: view, requestId: null, grantId: null },
+						? {
+								state: view,
+								requestId,
+								grantId,
+								replayUntil: view.replayUntil ?? replayUntil,
+							}
+						: { ...IDLE_ATTEMPT, state: view },
 				);
 				loadEvents();
 			})
@@ -218,6 +249,7 @@ export function AnthropicBankedResetChip({
 						},
 						requestId: pending.requestId,
 						grantId: pending.grantId,
+						replayUntil: pending.replayUntil,
 					});
 					return;
 				}
@@ -226,9 +258,8 @@ export function AnthropicBankedResetChip({
 					TERMINAL_CLAIM_HTTP_STATUSES.has(error.status)
 				) {
 					setAttempt({
+						...IDLE_ATTEMPT,
 						state: { kind: "done", success: false, message },
-						requestId: null,
-						grantId: null,
 					});
 					return;
 				}
@@ -241,6 +272,7 @@ export function AnthropicBankedResetChip({
 					},
 					requestId,
 					grantId,
+					replayUntil,
 				});
 			});
 	};
@@ -252,11 +284,13 @@ export function AnthropicBankedResetChip({
 			state: { kind: "confirm" },
 			requestId: randomUUID(),
 			grantId: claimable.id,
+			replayUntil: null,
 		});
 	};
 	const handleConfirmOrRetry = () => {
+		if (shownState.kind === "done") return;
 		if (attempt.requestId && attempt.grantId) {
-			runClaim(attempt.requestId, attempt.grantId);
+			runClaim(attempt.requestId, attempt.grantId, attempt.replayUntil);
 		}
 	};
 	const handleCancel = () => setAttempt(IDLE_ATTEMPT);
@@ -264,11 +298,10 @@ export function AnthropicBankedResetChip({
 	const handleOpenChange = (open: boolean) => {
 		if (open && eventsState.kind === "idle") loadEvents();
 		// A terminal outcome from a previous visit is stale on reopen.
-		if (open && attempt.state.kind === "done") handleCancel();
+		if (open && shownState.kind === "done") handleCancel();
 	};
 
 	const left = info.resetsLeftTotal;
-	const countLabel = `${left} reset${left === 1 ? "" : "s"}`;
 	const nextExpiry = status.bankedResetNextExpiry;
 	const expiryLine = nextExpiry
 		? ` Next use-by: ${nextExpiry.toLocaleString()}.`
@@ -300,13 +333,13 @@ export function AnthropicBankedResetChip({
 					title={`${left} banked reset${left === 1 ? "" : "s"} left.${expiryLine}${autoApplyLine} Click for grants and reset history.`}
 				>
 					<RotateCcw className="h-3.5 w-3.5" />
-					{countLabel}
+					{usageResetChipLabel(left, nextExpiry)}
 				</StatusChip>
 			</PopoverTrigger>
 			<PopoverContent align="start" className="w-80 p-row space-y-row">
 				<ResetApplyConfirmPanel
 					available={claimable !== null}
-					state={attempt.state}
+					state={shownState}
 					armTitle="Claim the next banked reset now to clear the limits it covers"
 					confirmPrompt={
 						<>

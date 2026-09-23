@@ -18,14 +18,15 @@ import {
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
-import type {
-	Account,
-	AnthropicBankedResetClaimRequest,
-	AnthropicBankedResetClaimResult,
-	AnthropicBankedResetEventStatus,
-	AnthropicBankedResetStatus,
-	AnthropicBankedResetWindow,
-	AnthropicUsageData,
+import {
+	type Account,
+	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+	type AnthropicBankedResetClaimRequest,
+	type AnthropicBankedResetClaimResult,
+	type AnthropicBankedResetEventStatus,
+	type AnthropicBankedResetStatus,
+	type AnthropicBankedResetWindow,
+	type AnthropicUsageData,
 } from "@clankermux/types";
 import { clearFamilyWeeklyExhausted } from "./family-weekly-memo";
 import type { ProxyContext } from "./handlers/proxy-types";
@@ -40,7 +41,7 @@ const log = new Logger("AnthropicBankedResets");
 
 /**
  * `reason` of a manual row resolved `failed` without its POST ever being
- * sent, as opposed to one given up after an hour unconfirmed.
+ * sent, as opposed to `unconfirmed`: given up when its replay window closed.
  */
 export const BANKED_RESET_NOT_SENT_REASON = "not_sent";
 
@@ -191,7 +192,8 @@ type LedgerTarget =
  * with the usage poll, and the claim, which spends a reset.
  *
  * Every claim has a ledger row written `pending` before its POST, and replays
- * reuse the row's request id, which the server deduplicates on. A reset
+ * reuse the row's request id, which the server deduplicates on, but only
+ * within ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS of the row opening. A reset
  * changes the account's usage upstream, so a restoring claim fences the usage
  * cache and refetches instead of clearing any rate-limit state itself: the
  * refetch reaches the capacity-restored path, and `rate_limit_reset` must
@@ -446,6 +448,13 @@ export class AnthropicBankedResetCoordinator {
 		}
 		account = gate.account;
 
+		// The awaits since the ledger sweep may have carried the row past its
+		// replay window; checked with no await before the POST it guards.
+		const replayUntil =
+			target.createdAt + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
+		if (this.now() >= replayUntil) {
+			return this.giveUpAtWindow(account, request, target);
+		}
 		const claimStartedAt = this.now();
 		const ids = { grantId: request.grantId, requestId: request.requestId };
 		let result = await this.claimReset(accessToken, orgUuid, ids);
@@ -459,8 +468,20 @@ export class AnthropicBankedResetCoordinator {
 				log.warn(
 					`Banked-reset claim for '${account.name}' not retried after an auth error: ${retryGate.message}`,
 				);
+			} else if (refreshed && this.now() >= replayUntil) {
+				log.warn(
+					`Banked-reset claim for '${account.name}' not retried after an auth error: its replay window closed`,
+				);
 			} else if (refreshed) {
 				result = await this.claimReset(refreshed, orgUuid, ids);
+			}
+			// Whatever kept the retry from leaving, a claim past its window is
+			// given up now rather than left pending to block the account.
+			if (result.result === "auth_error" && this.now() >= replayUntil) {
+				return this.giveUpAtWindow(account, request, {
+					...target,
+					createdHere: false,
+				});
 			}
 		}
 
@@ -568,6 +589,10 @@ export class AnthropicBankedResetCoordinator {
 			resetsLeft: result.resetsLeft,
 			cleared: result.cleared,
 			nextAttemptAt,
+			replayUntil:
+				ledgerStatus === "pending"
+					? target.createdAt + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS
+					: null,
 			windowsRestored,
 			statusRefreshed,
 		};
@@ -662,6 +687,15 @@ export class AnthropicBankedResetCoordinator {
 	): Promise<LedgerTarget> {
 		const now = this.now();
 		try {
+			// Nothing is replayed once its window has closed, and a claim given up
+			// that way no longer holds off a new one.
+			const expired =
+				await this.ctx.dbOps.expireStaleAnthropicBankedResetAttempts(now);
+			if (expired > 0) {
+				log.info(
+					`Gave up ${expired} banked-reset claim(s) whose replay window closed`,
+				);
+			}
 			if (request.autoApply) {
 				const row =
 					await this.ctx.dbOps.getAnthropicBankedResetEventByRequestId(
@@ -726,6 +760,8 @@ export class AnthropicBankedResetCoordinator {
 						message: `An earlier banked-reset claim for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
 						pendingRequestId: begin.row.request_id,
 						pendingGrantId: begin.row.grant_id,
+						pendingReplayUntil:
+							begin.row.created_at + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
 					},
 				};
 			}
@@ -760,6 +796,47 @@ export class AnthropicBankedResetCoordinator {
 		}
 	}
 
+	/**
+	 * A claim whose replay window closed before its next POST could leave. A
+	 * manual row written by this call never had a POST, so it is `not_sent`;
+	 * any other row may have, so it is given up as the ledger sweep would.
+	 * Answers with the settled row.
+	 */
+	private async giveUpAtWindow(
+		account: Account,
+		request: AnthropicBankedResetClaimRequest,
+		target: { rowId: string; createdHere: boolean },
+	): Promise<AnthropicBankedResetClaimDispatchOutcome> {
+		try {
+			if (target.createdHere) {
+				await this.ctx.dbOps.resolveAnthropicBankedResetAttempt(target.rowId, {
+					status: "failed",
+					reason: BANKED_RESET_NOT_SENT_REASON,
+					errorMessage: `Not sent: the claim for '${account.name}' reached the end of its replay window before its request left`,
+					now: this.now(),
+				});
+			} else {
+				await this.ctx.dbOps.expireStaleAnthropicBankedResetAttempts(
+					this.now(),
+				);
+			}
+			const row = await this.ctx.dbOps.getAnthropicBankedResetEventByRequestId(
+				account.id,
+				request.requestId,
+			);
+			if (row) return this.settledOutcome(account, row);
+		} catch (error) {
+			log.warn(
+				`Could not give up the expired banked-reset claim for '${account.name}': ${errorMessage(error)}`,
+			);
+		}
+		return {
+			status: "failed",
+			code: "error",
+			message: `Not sent: the banked-reset claim for '${account.name}' reached the end of its replay window.`,
+		};
+	}
+
 	private settledOutcome(
 		account: Account,
 		row: AnthropicBankedResetEventRow,
@@ -775,6 +852,10 @@ export class AnthropicBankedResetCoordinator {
 			resetsLeft: row.resets_left,
 			cleared: parseCleared(row.cleared),
 			nextAttemptAt: row.next_attempt_at,
+			replayUntil:
+				row.status === "pending"
+					? row.created_at + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS
+					: null,
 			windowsRestored: false,
 			statusRefreshed: false,
 		};

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 // Force @clankermux/core to initialise before @clankermux/types resolves its
 // circular dependency. Same pattern as codex-reset-credit-event.repository.test.ts.
 import "@clankermux/core";
+import { ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS } from "@clankermux/types";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { ensureSchema } from "../../migrations";
 import { AnthropicBankedResetEventRepository } from "../anthropic-banked-reset-event.repository";
@@ -324,23 +325,92 @@ describe("AnthropicBankedResetEventRepository", () => {
 			).toEqual(["auto"]);
 		});
 
-		it("expires rows pending for an hour or more to failed", async () => {
-			await repo.beginManualAttempt(MANUAL);
+		it("gives up a row unconfirmed 10 minutes after it opened as failed/unconfirmed", async () => {
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			await repo.setNextAttemptAt(
+				row.id,
+				NOW + 15 * 60_000,
+				"Banked-reset claim returned 502 Bad Gateway",
+			);
 			await repo.claimAutoAttempt({
 				...AUTO,
 				accountId: "acc-2",
-				now: NOW + 30 * 60_000,
+				now: NOW + 5 * 60_000,
 			});
-			expect(await repo.expireStalePending(NOW + HOUR - 1)).toBe(0);
-			expect(await repo.expireStalePending(NOW + HOUR)).toBe(1);
+			expect(
+				await repo.expireStalePending(
+					NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS - 1,
+				),
+			).toBe(0);
+			expect(
+				await repo.expireStalePending(
+					NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+				),
+			).toBe(1);
 
 			const expired = await repo.findByRequestId("acc-1", "req-manual-1");
-			expect(expired?.status).toBe("failed");
-			expect(expired?.resolved_at).toBe(NOW + HOUR);
-			expect(expired?.error_message).not.toBeNull();
+			expect(expired).toMatchObject({
+				status: "failed",
+				reason: "unconfirmed",
+				next_attempt_at: null,
+				resolved_at: NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+				error_message:
+					"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed (last: Banked-reset claim returned 502 Bad Gateway)",
+			});
 			expect(
 				(await repo.findPendingForAccount("acc-2")).map((r) => r.status),
 			).toEqual(["pending"]);
+		});
+
+		it("records a late answer over a given-up row, but not over another resolution", async () => {
+			const { row } = await repo.beginManualAttempt(MANUAL);
+			const late = NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
+			await repo.expireStalePending(late);
+			expect(
+				await repo.resolveAttempt(row.id, {
+					status: "reset",
+					cleared: ["seven_day"],
+					now: late + 5_000,
+				}),
+			).toBe(true);
+			expect(await repo.findByRequestId("acc-1", "req-manual-1")).toMatchObject(
+				{
+					status: "reset",
+					reason: null,
+					error_message: null,
+					resolved_at: late + 5_000,
+				},
+			);
+			expect(
+				await repo.resolveAttempt(row.id, {
+					status: "already_used",
+					now: late + 6_000,
+				}),
+			).toBe(false);
+		});
+
+		it("explains a given-up row that recorded no error", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			await repo.expireStalePending(
+				NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+			);
+			expect(
+				(await repo.findByRequestId("acc-1", "req-manual-1"))?.error_message,
+			).toBe(
+				"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed",
+			);
+		});
+
+		it("lets a new claim on the account through once the unconfirmed one is given up", async () => {
+			await repo.beginManualAttempt(MANUAL);
+			const later = {
+				...MANUAL,
+				requestId: "req-manual-2",
+				now: NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+			};
+			expect((await repo.beginManualAttempt(later)).kind).toBe("pending_other");
+			await repo.expireStalePending(later.now);
+			expect((await repo.beginManualAttempt(later)).kind).toBe("created");
 		});
 	});
 

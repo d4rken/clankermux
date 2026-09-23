@@ -1,3 +1,4 @@
+import { claudeBankedResetHeaders } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	ANTHROPIC_BANKED_RESET_CLAIM_REASONS,
@@ -11,10 +12,9 @@ import {
 	type AnthropicBankedResetStatus,
 	type AnthropicBankedResetWindow,
 } from "@clankermux/types";
-import {
-	anthropicOAuthUsageHeaders,
-	parseRetryAfterMs,
-} from "../../usage-fetcher";
+import { parseRetryAfterMs } from "../../usage-fetcher";
+
+export { newerClaudeCliVersion } from "@clankermux/core";
 
 const log = new Logger("AnthropicBankedResets");
 
@@ -28,6 +28,13 @@ export const ANTHROPIC_BANKED_RESET_STATUS_ENDPOINT =
 
 export function anthropicBankedResetClaimEndpoint(orgUuid: string): string {
 	return `https://api.anthropic.com/api/organizations/${encodeURIComponent(orgUuid)}/reset_rate_limits`;
+}
+
+export function anthropicBankedResetHeaders(
+	accessToken: string,
+	clientVersion?: string,
+): Record<string, string> {
+	return claudeBankedResetHeaders(accessToken, clientVersion);
 }
 
 const STATUS_TIMEOUT_MS = 5_000;
@@ -242,7 +249,7 @@ export async function fetchAnthropicBankedResetStatus(
 	try {
 		const response = await fetch(ANTHROPIC_BANKED_RESET_STATUS_ENDPOINT, {
 			method: "GET",
-			headers: anthropicOAuthUsageHeaders(accessToken),
+			headers: anthropicBankedResetHeaders(accessToken),
 			signal: controller.signal,
 		});
 		httpStatus = response.status;
@@ -318,7 +325,7 @@ export async function claimAnthropicBankedReset(
 	try {
 		const response = await fetch(anthropicBankedResetClaimEndpoint(orgUuid), {
 			method: "POST",
-			headers: anthropicOAuthUsageHeaders(accessToken),
+			headers: anthropicBankedResetHeaders(accessToken),
 			body: JSON.stringify({
 				program: "cedar_ember",
 				grant_id: request.grantId,

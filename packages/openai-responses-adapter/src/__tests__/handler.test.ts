@@ -1073,6 +1073,20 @@ describe("handleResponsesRequest", () => {
 			).toBeNull();
 		});
 
+		test("carries the original prompt_cache_key string", async () => {
+			const ctx = await captureContext({
+				prompt_cache_key: "01a0ccd4-7cbd-778d-aac9-4151ff4fd1d9",
+			});
+			expect(ctx?.promptCacheKey).toBe("01a0ccd4-7cbd-778d-aac9-4151ff4fd1d9");
+		});
+
+		test("promptCacheKey is null when prompt_cache_key is absent or non-string", async () => {
+			expect((await captureContext({}))?.promptCacheKey).toBeNull();
+			expect(
+				(await captureContext({ prompt_cache_key: 42 }))?.promptCacheKey,
+			).toBeNull();
+		});
+
 		test("string input is normalized in the attached nativeBody", async () => {
 			const ctx = await captureContext({ input: "plain text", stream: true });
 			expect(ctx).toBeDefined();

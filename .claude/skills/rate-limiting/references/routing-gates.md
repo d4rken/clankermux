@@ -50,6 +50,34 @@ Two membership tests are correct and stay as they are:
 - the marker-active path → a provider-family-wide per-IP burst where switching
   accounts does not help; it has its own weekly-exhaustion guard.
 
+### The pin follows a liveness reserve, and nothing else
+
+A soft demotion reorders after `SessionStrategy.select()` has pinned the
+conversation, so a reserved pin runs its turns on the peer while the pin stays
+put. Every flip of the reserve or of a failure memo then moves the conversation
+to an account that never cached its prompt. Prod, 2026-09-23: 49.8% of
+`claude_session` affinity hits were served off-pin. A Pi session pinned to one
+Codex account ran on another via the reserve, failed over to its pin on a 529,
+and returned when the 60s memo expired.
+
+`prepareSoftDemotionFollow` (main pass and alias pass only) arms a callback
+that moves the pin, compare-and-set, to the reorder's head once THAT account
+has served a 2xx. It stays unarmed for:
+
+- family reservation, which depends on the request's model;
+- a liveness reserve that would not also hold Fable back (the 10-20% headroom
+  band), when the conversation sent a Fable-tier request within the last hour.
+  A Sonnet side request shares its conversation key with the Fable turns. After
+  an hour without one there is no warm Fable prefix left to protect. Pi and
+  Codex conversations on gpt models therefore follow the ordinary 20% reserve;
+- a head a failure memo pushed back: memos and failover never move a pin;
+- `affinity_hold` and hold wakes: a hold keeps its target;
+- another provider, synthetic probes, and `count_tokens`, which the proxy may
+  answer locally.
+
+Routing telemetry is not rewritten. A move shows only as the INFO line
+`Moved … affinity to …`.
+
 `SessionStrategy.logSelection()` runs BEFORE these gates, so it does NOT show the
 order clients follow. The DEBUG line `Final candidate order: … — first admitted
 attempt: … (gated primary by position: …)` in `proxy.ts` is the one that does.

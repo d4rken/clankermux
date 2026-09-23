@@ -1,5 +1,6 @@
 // Re-export only used items from each module
 
+export { hashRoutingAffinityKey } from "./affinity-key-hash";
 export {
 	isAccountAllowedByPin,
 	isPinActive,
@@ -105,6 +106,7 @@ export { supportsChatIngress, unsupportedChatField } from "./chat-capabilities";
 // estimator below: pure, DB-free, and reachable from http-api only through this
 // root entry.
 export * from "./claim-audit";
+export * from "./claude-client-identity";
 export {
 	BUFFER_SIZES,
 	CACHE,
