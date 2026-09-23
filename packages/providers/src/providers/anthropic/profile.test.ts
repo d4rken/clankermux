@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { claudeProfileReadHeaders } from "@clankermux/core";
 import { ANTHROPIC_PROFILE_ENDPOINT, fetchAnthropicProfile } from "./profile";
 
 afterEach(() => {
@@ -34,7 +35,7 @@ describe("fetchAnthropicProfile", () => {
 		});
 	});
 
-	it("sends the anthropic-beta and claude-code user-agent headers", async () => {
+	it("sends Claude Code's profile headers", async () => {
 		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(JSON.stringify({ account: { uuid: "x" } }), {
 				status: 200,
@@ -47,10 +48,7 @@ describe("fetchAnthropicProfile", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe(ANTHROPIC_PROFILE_ENDPOINT);
-		const headers = new Headers(init.headers);
-		expect(headers.get("Authorization")).toBe("Bearer secret-token");
-		expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-		expect(headers.get("User-Agent")).toMatch(/^claude-code\//);
+		expect(init.headers).toEqual(claudeProfileReadHeaders("secret-token"));
 	});
 
 	it("returns null on a non-2xx status without throwing", async () => {

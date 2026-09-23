@@ -240,6 +240,8 @@ describe("anthropicBankedResetHeaders", () => {
 			"anthropic-beta": "oauth-2025-04-20",
 			"Content-Type": "application/json",
 			"User-Agent": "claude-cli/9.0.0 (external, cli)",
+			Accept: "application/json, text/plain, */*",
+			"Accept-Encoding": "gzip, compress, deflate, br",
 		});
 	});
 
@@ -255,14 +257,10 @@ describe("anthropicBankedResetHeaders", () => {
 		);
 	});
 
-	it("leaves the usage poller's headers alone", () => {
-		expect(anthropicOAuthUsageHeaders("tok")).toEqual({
-			Authorization: "Bearer tok",
-			"anthropic-beta": "oauth-2025-04-20",
-			"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
-			Accept: "application/json",
-			"Content-Type": "application/json",
-		});
+	it("sends the usage poller's headers", () => {
+		expect(anthropicBankedResetHeaders("tok")).toEqual(
+			anthropicOAuthUsageHeaders("tok"),
+		);
 	});
 });
 
