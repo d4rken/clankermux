@@ -66,6 +66,12 @@ describe("laneRequestsHref", () => {
 		expect(laneRequestsHref({ kind: "other" })).toBeNull();
 	});
 
+	it("has no link while an account request is still routing", () => {
+		// Pending work has no account identity yet; linking it as no-account would
+		// incorrectly claim routing had already finished without an account.
+		expect(laneRequestsHref({ kind: "account-pending" })).toBeNull();
+	});
+
 	it("filters to a client by key id", () => {
 		expect(laneRequestsHref({ kind: "client", apiKeyId: "key-1" })).toBe(
 			"/requests?apiKeyId=key-1",

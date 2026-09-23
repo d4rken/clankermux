@@ -482,6 +482,42 @@ describe("account identity", () => {
 			"New",
 		]);
 	});
+
+	it("falls back from a missing current name to the recorded name and id", () => {
+		const recorded = store();
+		applyHistoryRows(recorded, [
+			summaryPayload({
+				id: "recorded",
+				accountId: "acct-recorded",
+				accountUsed: "Former name",
+			}),
+		]);
+		const recordedLane = buildLanes(
+			[...recorded.values()],
+			"account",
+			T0,
+			WINDOW,
+			8,
+		).lanes[0];
+		expect(recordedLane.label).toBe("Former name");
+
+		const opaque = store();
+		applyHistoryRows(opaque, [
+			summaryPayload({
+				id: "opaque",
+				accountId: "acct-opaque",
+				accountUsed: undefined,
+			}),
+		]);
+		const opaqueLane = buildLanes(
+			[...opaque.values()],
+			"account",
+			T0,
+			WINDOW,
+			8,
+		).lanes[0];
+		expect(opaqueLane.label).toBe("acct-opaque");
+	});
 });
 
 describe("client identity", () => {

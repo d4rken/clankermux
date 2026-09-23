@@ -7,6 +7,7 @@ import { buildLanes, hitTest } from "../../../lib/live-activity";
 import { getModelColor } from "../../../lib/model-colors";
 import {
 	LiveActivityLanesView,
+	type ResolveAccount,
 	type ResolveClient,
 	unknownRegions,
 } from "../LiveActivityLanes";
@@ -633,6 +634,82 @@ describe("LiveActivityLanesView client dimension", () => {
 		expect(render()).toContain(
 			"Request activity over the last 3 minutes by project",
 		);
+	});
+});
+
+describe("LiveActivityLanesView account dimension", () => {
+	function accountLanes(events: LiveEvent[], maxLanes = 6): Lane[] {
+		return buildLanes(events, "account", T0, WINDOW, maxLanes).lanes;
+	}
+
+	const currentAccount: ResolveAccount = (accountId) =>
+		accountId === "acct-1"
+			? ({
+					id: accountId,
+					name: "Current account",
+				} as ReturnType<ResolveAccount>)
+			: null;
+
+	it("uses the current account name for the lane and mark tooltip", () => {
+		const html = render({
+			dimension: "account",
+			lanes: accountLanes([
+				event({ accountId: "acct-1", account: "Recorded account" }),
+			]),
+			resolveAccount: currentAccount,
+		});
+
+		expect(listOf(html, "live-lane-labels")).toContain("Current account");
+		expect(listOf(html, "live-lane-labels")).toContain(
+			'href="/requests?accountId=acct-1"',
+		);
+		expect(plotOf(html)).toContain("Current account");
+	});
+
+	it("falls back to recorded account name and then id", () => {
+		const recorded = render({
+			dimension: "account",
+			lanes: accountLanes([
+				event({ accountId: "acct-9", account: "Former account" }),
+			]),
+		});
+		expect(listOf(recorded, "live-lane-labels")).toContain("Former account");
+
+		const opaque = render({
+			dimension: "account",
+			lanes: accountLanes([event({ accountId: "acct-opaque", account: null })]),
+		});
+		expect(listOf(opaque, "live-lane-labels")).toContain("acct-opaque");
+		expect(plotOf(opaque)).toContain("acct-opaque");
+	});
+
+	it("links terminal no-account traffic and leaves routing and overflow explicit", () => {
+		const noAccount = render({
+			dimension: "account",
+			lanes: accountLanes([event({ accountId: null, status: "ok" })]),
+		});
+		expect(listOf(noAccount, "live-lane-labels")).toContain(
+			'href="/requests?noAccount=1"',
+		);
+
+		const routing = render({
+			dimension: "account",
+			lanes: accountLanes([event({ accountId: null, status: "pending" })]),
+		});
+		expect(listOf(routing, "live-lane-labels")).not.toContain("<a");
+		expect(listOf(routing, "live-lane-labels")).toContain("(routing)");
+
+		const overflow = render({
+			dimension: "account",
+			lanes: accountLanes(
+				[
+					event({ id: "a", accountId: "acct-a" }),
+					event({ id: "b", accountId: "acct-b" }),
+				],
+				1,
+			),
+		});
+		expect(listOf(overflow, "live-lane-labels")).not.toMatch(/<a[^>]*>Other/);
 	});
 });
 

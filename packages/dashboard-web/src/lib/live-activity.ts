@@ -542,7 +542,9 @@ const LANE_DIMENSIONS: Record<LaneDimension, LaneDimensionSpec> = {
 };
 
 function accountLaneKeyOf(event: LiveEvent): string {
-	if (event.accountId) return laneKeyOf("account", event.accountId);
+	// Presence, not truthiness, is the identity test: the empty string is still
+	// a recorded account id and must not be relabelled as routing/no-account.
+	if (event.accountId !== null) return laneKeyOf("account", event.accountId);
 	return isActiveStatus(event.status)
 		? ACCOUNT_PENDING_LANE_KEY
 		: NO_ACCOUNT_LANE_KEY;
