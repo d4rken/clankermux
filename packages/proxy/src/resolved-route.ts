@@ -91,6 +91,11 @@ export interface BuildRouteInput {
 	accounts: readonly Account[];
 	rules: readonly RoutingRule[];
 	requestedModel: string;
+	/**
+	 * What the routing table decides for, when it is not the requested model: a
+	 * Claude Code client's `claude-gpt-6-astra` routes as `gpt-6-astra`.
+	 */
+	routingModel?: string;
 	apiKeyId: string | null;
 	pin: RoutingPin | null;
 	permissions: ReadonlyMap<string, ModelPermissionSet>;
@@ -182,6 +187,9 @@ export class ResolvedRoute {
 		this.upstreamModel = models.size === 1 ? [...models][0] : null;
 		this.#snapshot = JSON.stringify({
 			requestedModel: input.requestedModel,
+			...(input.routingModel && input.routingModel !== input.requestedModel
+				? { routingModel: input.routingModel }
+				: {}),
 			rule,
 			pin: input.pin,
 			forcedAccountId: input.forcedAccountId ?? null,
@@ -282,9 +290,10 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 		throw new RoutingPolicyError("Inference requests require a model");
 	if (input.pin && !isRoutingPinValid(input.pin))
 		throw new RoutingPolicyError("Invalid API key destinations");
+	const routingModel = input.routingModel ?? input.requestedModel;
 	const winning = input.maintenance
 		? null
-		: matchRoutingRule(input.rules, input.apiKeyId, input.requestedModel);
+		: matchRoutingRule(input.rules, input.apiKeyId, routingModel);
 	const targets = new Map<string, AuthorizedTarget>();
 	// Why each account dropped out, in pool order, so the rejection can say what
 	// an operator would otherwise have to reconstruct from the dashboard.
@@ -312,7 +321,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 						upstreamModel: input.requestedModel,
 						targetSource: "requested" as const,
 					}
-				: resolveRoutingTarget(winning, input.requestedModel);
+				: resolveRoutingTarget(winning, routingModel);
 		if (
 			!input.maintenance &&
 			!isModelPermitted(

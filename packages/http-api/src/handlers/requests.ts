@@ -1,7 +1,7 @@
 import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { ProjectAttributionSource } from "@clankermux/types";
-import { resolveCostSource } from "@clankermux/types";
+import { normalizeAccountId, resolveCostSource } from "@clankermux/types";
 import type { RequestResponse } from "../types";
 import {
 	buildRequestFilterClause,
@@ -110,6 +110,7 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			method: request.method,
 			path: request.path,
 			accountUsed: request.account_name || request.account_used,
+			accountId: normalizeAccountId(request.account_used),
 			statusCode: request.status_code,
 			success: !!request.success,
 			errorMessage: request.error_message,

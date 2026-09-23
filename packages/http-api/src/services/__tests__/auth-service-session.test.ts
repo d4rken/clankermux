@@ -43,6 +43,16 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword() {
 		return this.password;
 	}
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	) {
+		if (this.password) return false;
+		this.password = { verifier, params, updatedAt };
+		this.sessions.clear();
+		return true;
+	}
 	async createManagementSession(
 		record: AuthSessionRecord,
 		_boundTo: PasswordBinding,
@@ -201,6 +211,7 @@ describe("paths the session policy must not touch", () => {
 		"/api/auth/login",
 		"/api/auth/logout",
 		"/api/auth/status",
+		"/api/auth/setup",
 		"/api/event_logging/batch",
 		"/api/system/package-manager",
 		"/health",

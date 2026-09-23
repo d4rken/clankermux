@@ -133,14 +133,17 @@ export function describeBankedResetClaim(
 ): BankedResetClaimView {
 	switch (response.status) {
 		case "reset":
-			return { kind: "done", success: true, message: "Limits reset" };
+			return { kind: "done", success: true, message: "Reset applied" };
 		case "already_used":
-			return { kind: "done", success: false, message: "Already used" };
+			// Success here means an earlier send with this request id landed.
+			return response.success
+				? { kind: "done", success: true, message: "Reset applied" }
+				: { kind: "done", success: false, message: "Already used" };
 		case "not_limited":
 			return {
 				kind: "done",
 				success: false,
-				message: "Not at a limit — nothing used",
+				message: "Nothing to reset — none used",
 			};
 		case "cooldown":
 			return {
@@ -225,8 +228,8 @@ const EVENT_STATUS_LABELS: Record<
 	pending: "Pending",
 	reset: "Reset applied",
 	already_used: "Already used",
-	not_limited: "Not at a limit",
-	cooldown: "Cooldown",
+	not_limited: "Nothing to reset",
+	cooldown: "Cooling down",
 	ineligible: "Not eligible",
 	unavailable: "Unavailable",
 	failed: "Failed",

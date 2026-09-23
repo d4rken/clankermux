@@ -141,6 +141,66 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 		});
 	});
 
+	it("reports already_used as success only when this request's earlier POST restored the limits", async () => {
+		const alreadyUsed = (windowsRestored: boolean) =>
+			mock(async () =>
+				completed({
+					ledgerStatus: "already_used",
+					result: {
+						result: "already_used",
+						reason: "already_used",
+						resetsLeft: 0,
+						cleared: [],
+						weeklyResetsAt: null,
+						cooldownUntil: null,
+						httpStatus: 200,
+						retryAfterMs: null,
+						errorMessage: null,
+					},
+					reason: "already_used",
+					cleared: [],
+					windowsRestored,
+					statusRefreshed: windowsRestored,
+				}),
+			);
+		const respond = async (windowsRestored: boolean) =>
+			(
+				await createAnthropicBankedResetClaimHandler(
+					dbOps({}),
+					alreadyUsed(windowsRestored),
+				)(post({ grantId: "g1", requestId: "r1" }), "acct-1")
+			).json();
+
+		const fresh = await respond(false);
+		expect(fresh).toMatchObject({ success: false, status: "already_used" });
+		expect(fresh.message).toContain("nothing was restored");
+
+		const landed = await respond(true);
+		expect(landed).toMatchObject({ success: true, status: "already_used" });
+		expect(landed.message).not.toContain("nothing was restored");
+	});
+
+	it("does not report an already_used row answered from the ledger as restored", async () => {
+		const claim = mock(async () =>
+			completed({
+				ledgerStatus: "already_used",
+				result: null,
+				reason: "already_used",
+				cleared: [],
+				windowsRestored: false,
+				statusRefreshed: false,
+			}),
+		);
+		const body = await (
+			await createAnthropicBankedResetClaimHandler(dbOps({}), claim)(
+				post({ grantId: "g1", requestId: "r1" }),
+				"acct-1",
+			)
+		).json();
+		expect(body).toMatchObject({ success: false, status: "already_used" });
+		expect(body.message).toContain("already completed");
+	});
+
 	it("reports a pending claim with its retry time", async () => {
 		const claim = mock(async () =>
 			completed({
@@ -154,7 +214,7 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 					cooldownUntil: null,
 					httpStatus: 429,
 					retryAfterMs: 60_000,
-					errorMessage: "Banked-reset claim was rate-limited",
+					errorMessage: "Banked-reset request was rate-limited",
 				},
 				nextAttemptAt: NOW + 60_000,
 				replayUntil: NOW + 10 * 60_000,
@@ -261,7 +321,7 @@ describe("POST /api/accounts/:id/banked-resets/claim — pending claim", () => {
 		const pending = mock(async () => ({
 			status: "failed" as const,
 			code: "pending_claim" as const,
-			message: "An earlier claim is unconfirmed",
+			message: "An earlier attempt is unconfirmed",
 			pendingRequestId: "req-pending",
 			pendingGrantId: "g0",
 			pendingReplayUntil: NOW + 10 * 60_000,
@@ -272,7 +332,7 @@ describe("POST /api/accounts/:id/banked-resets/claim — pending claim", () => {
 		)(post({ grantId: "g1", requestId: "r1" }), "acct-1");
 		expect(res.status).toBe(409);
 		expect(await res.json()).toEqual({
-			message: "An earlier claim is unconfirmed",
+			message: "An earlier attempt is unconfirmed",
 			pendingRequestId: "req-pending",
 			pendingGrantId: "g0",
 			pendingReplayUntil: new Date(NOW + 10 * 60_000).toISOString(),

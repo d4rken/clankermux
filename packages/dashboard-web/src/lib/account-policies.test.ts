@@ -284,13 +284,23 @@ describe("describeAccountPolicy — descriptions pinned to the menu copy", () =>
 
 	it("pins auto-apply on expiry", () => {
 		expect(describeAccountPolicy("autoApplyExpiry", "codex").description).toBe(
-			"Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
+			"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
+		);
+		expect(
+			describeAccountPolicy("autoApplyExpiry", "anthropic").description,
+		).toBe(
+			"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Only grants that clear a weekly limit are applied, and a grant usable only at a limit is applied only while one is reached. Applies even while paused, unless the account needs re-authentication.",
 		);
 	});
 
 	it("pins auto-apply at the weekly limit", () => {
 		expect(describeAccountPolicy("autoApplyWeekly", "codex").description).toBe(
-			"Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+			"Automatically apply the next banked reset when this account reaches 100% weekly usage, no other Codex account can serve, and the account's natural weekly reset is at least 12 hours away. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+		);
+		expect(
+			describeAccountPolicy("autoApplyWeekly", "anthropic").description,
+		).toBe(
+			"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 12 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 		);
 	});
 
@@ -349,9 +359,41 @@ it("words the auto-apply flags for Anthropic banked resets", () => {
 	expect(weekly.chipLabel).toBe("Apply: weekly");
 	expect(expiry.description).not.toContain("Codex");
 	expect(weekly.description).not.toContain("Codex");
-	expect(weekly.description).toContain("Anthropic account");
-	// Codex keeps its own copy.
-	expect(describeAccountPolicy("autoApplyWeekly", "codex").menuLabel).toBe(
-		"Auto-apply reset at weekly limit",
+	expect(weekly.description).toContain("no other Claude account can serve");
+});
+
+it("labels the auto-apply flags identically for Codex and Anthropic", () => {
+	for (const key of ["autoApplyExpiry", "autoApplyWeekly"] as const) {
+		const codex = describeAccountPolicy(key, "codex");
+		const anthropic = describeAccountPolicy(key, "anthropic");
+		expect(codex.menuLabel).toBe(anthropic.menuLabel);
+		expect(codex.chipLabel).toBe(anthropic.chipLabel);
+		// Only the rules differ.
+		expect(codex.description).not.toBe(anthropic.description);
+	}
+	expect(describeAccountPolicy("autoApplyExpiry", "codex").menuLabel).toBe(
+		"Auto-apply expiring banked resets",
 	);
+	expect(describeAccountPolicy("autoApplyWeekly", "codex").menuLabel).toBe(
+		"Auto-apply banked reset at weekly limit",
+	);
+});
+
+it("words the auto-apply copy in one vocabulary for both providers", () => {
+	for (const provider of ["codex", "anthropic"]) {
+		for (const key of ["autoApplyExpiry", "autoApplyWeekly"] as const) {
+			const { menuLabel, description } = describeAccountPolicy(key, provider);
+			expect(`${menuLabel} ${description}`).not.toMatch(
+				/claim|consume|redeem|usage reset|reset credit/i,
+			);
+		}
+		const weekly = describeAccountPolicy("autoApplyWeekly", provider);
+		expect(weekly.description).toContain("at least 12 hours away");
+		expect(weekly.description).toContain(
+			"An account whose usage is unknown counts as able to serve.",
+		);
+		expect(weekly.description).toContain(
+			"Manual pauses conserve banked resets",
+		);
+	}
 });

@@ -577,7 +577,8 @@ describe("RunwayCard", () => {
 			});
 
 			expect(html).toContain("Assumes");
-			expect(html).toContain("2 reset credits");
+			expect(html).toContain("2 banked resets");
+			expect(html).not.toMatch(/reset credit|redemption/);
 		});
 
 		it("shows nothing when no credit was assumed", () => {
@@ -596,7 +597,7 @@ describe("RunwayCard", () => {
 			});
 
 			expect(html).not.toContain("Assumes");
-			expect(html).not.toContain("reset credit");
+			expect(html).not.toContain("banked reset");
 		});
 	});
 });

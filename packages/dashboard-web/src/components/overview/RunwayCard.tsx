@@ -316,9 +316,9 @@ export function RunwayCard({
 	if (assumedCredits > 0) {
 		subRows.push({
 			label: "Assumes",
-			value: `${assumedCredits} reset credit${assumedCredits === 1 ? "" : "s"}`,
+			value: `${assumedCredits} banked reset${assumedCredits === 1 ? "" : "s"}`,
 			tooltip:
-				"The figure assumes banked usage-reset credits get auto-applied when the weekly window runs out. If a redemption fails or the credits are spent elsewhere, the real runway is shorter.",
+				"The figure assumes banked resets get auto-applied when the weekly window runs out. If applying one fails or the resets are used elsewhere, the real runway is shorter.",
 		});
 	}
 

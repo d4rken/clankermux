@@ -61,6 +61,7 @@ describe("request cost persistence", () => {
 			costSource: "reported",
 			estimatedCostUsd: 0.02,
 			costIsByok: false,
+			accountId: "a",
 		});
 	});
 	it("upgrades an estimate to a reported zero via a late patch without later degrading it", async () => {
@@ -141,5 +142,12 @@ describe("request cost persistence", () => {
 			estimated_cost_usd: null,
 			cost_is_byok: null,
 		});
+	});
+
+	it("normalizes the no-account sentinel when deriving stable identity", async () => {
+		await repo.save({ ...request, accountUsed: "no_account" });
+		const response = toRequestResponse(toRequest(row()));
+		expect(response.accountUsed).toBe("no_account");
+		expect(response.accountId).toBeNull();
 	});
 });

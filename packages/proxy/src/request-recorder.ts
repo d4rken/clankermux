@@ -10,6 +10,7 @@ import {
 	type CostSource,
 	type GatewayHintMetadata,
 	NO_ACCOUNT_ID,
+	normalizeAccountId,
 	type ProjectAttributionSource,
 	parseUpstreamError,
 	type RequestResponse,
@@ -1200,6 +1201,7 @@ export class RequestRecorder {
 			method: meta.method,
 			path: meta.path,
 			accountUsed: meta.accountId,
+			accountId: normalizeAccountId(meta.accountId),
 			statusCode: meta.responseStatus,
 			success,
 			errorMessage,
@@ -1626,6 +1628,7 @@ export class RequestRecorder {
 			method: meta.method,
 			path: meta.path,
 			accountUsed: meta.accountId,
+			accountId: normalizeAccountId(meta.accountId),
 			statusCode: meta.responseStatus,
 			success,
 			errorMessage: success

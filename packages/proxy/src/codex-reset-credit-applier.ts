@@ -9,7 +9,8 @@
  *      shortly before it expires; and
  *      WEEKLY-LIMIT (`codex_auto_apply_reset_on_weekly_limit_enabled`) —
  *      redeem a credit when the cached 7-day usage window is exhausted
- *      (>= 100%) and no other usable Codex account has quota available,
+ *      (>= 100%) and no other usable Codex account has quota available or
+ *      unknown usage,
  *      rate-limited by a 1h cooldown anchored on the last auto
  *      resolution (reset/alreadyRedeemed/nothingToReset) so stale usage data
  *      can't drain credits back-to-back and a stuck 100% reading can't hammer
@@ -24,7 +25,7 @@
  *    Expiry protection includes paused accounts. Weekly redemption skips any
  *    pause the restored window cannot lift — everything except an overage
  *    pause that auto-resume will clear (see {@link weeklyResetCanLiftPause}).
- *    Needs-reauth accounts are excluded from both triggers.
+ *    Disabled and needs-reauth accounts are excluded from both triggers.
  *  - Two-phase tick per candidate: DISCOVERY runs on the cheap TTL-gated cache
  *    read; only when discovery says "consume" does CONFIRMATION force a fresh
  *    metadata read and re-run every gate (last-moment toggle flip, credit
@@ -33,18 +34,19 @@
  *    retries with the SAME idempotency key (the pending row is reused). The
  *    applier never resolves ledger rows — the spend coordinator does that when
  *    the consume yields a business outcome; a dispatch failure/throw leaves the
- *    row pending on purpose.
- *  - One credit per account per tick: the next near-expiry credit is picked up
- *    on a later tick once the first attempt resolves.
+ *    row pending on purpose. The one exception is a fresh claim the registry
+ *    refused before sending (`notSent`): nothing is uncertain, so the claim is
+ *    withdrawn instead of replayed past every gate.
+ *  - One fresh claim per account per tick: the next near-expiry credit is
+ *    picked up on a later tick once the first attempt resolves. A pending
+ *    attempt is replayed first; after it, only a different credit's expiry may
+ *    claim, and a pending weekly-limit attempt holds the tick's weekly slot
+ *    even when a failed reconcile read defers its replay.
  *  - Everything is injectable ({@link CodexResetCreditApplyDeps}) so tests use
  *    plain doubles + a fake clock — no mock.module.
  */
 
-import {
-	intervalManager,
-	isAccountAvailable,
-	PAUSE_REASON_NEEDS_REAUTH,
-} from "@clankermux/core";
+import { intervalManager, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import type {
 	CodexResetCreditAutoClaim,
 	CodexResetCreditEventRow,
@@ -63,6 +65,7 @@ import type {
 	Account,
 	CodexRateLimitResetCreditConsumeRequest,
 } from "@clankermux/types";
+import { cooldownRulesOutAlternative } from "./banked-reset-alternative";
 import {
 	type CodexResetCreditConsumeDispatchOutcome,
 	consumeCodexResetCreditForAccount,
@@ -120,6 +123,7 @@ export type ResetCreditApplyDecision =
 				| "weekly-reset-unknown"
 				| "natural-reset-soon"
 				| "other-account-available"
+				| "pending-attempt"
 				| "paused"
 				| "cooldown"
 				| "no-credit-available"
@@ -354,7 +358,7 @@ function compareWeeklyProposals(a: WeeklyProposal, b: WeeklyProposal): number {
  * comes from {@link createCodexResetCreditApplyScheduler}.
  */
 export interface CodexResetCreditApplyDeps {
-	/** Codex accounts with EITHER auto-apply toggle ON (no pause/rate-limit filter). */
+	/** Enabled Codex accounts with EITHER auto-apply toggle ON (no pause/rate-limit filter). */
 	listCandidateAccounts(): Promise<Array<{ id: string; name: string }>>;
 	/** Fresh account row for the decision gates (re-read per phase). */
 	getAccount(accountId: string): Promise<Account | null>;
@@ -400,6 +404,8 @@ export interface CodexResetCreditApplyDeps {
 		accountId: string,
 		request: CodexRateLimitResetCreditConsumeRequest,
 	): Promise<CodexResetCreditConsumeDispatchOutcome>;
+	/** Delete a still-pending ledger row; false when it is gone or resolved. */
+	withdrawPendingAttempt(rowId: string): Promise<boolean>;
 	/** Injectable clock (ms epoch) for deterministic tests. */
 	now?(): number;
 }
@@ -468,11 +474,11 @@ export class CodexResetCreditApplyScheduler {
 		}
 
 		const weekly: WeeklyProposal[] = [];
-		let weeklyReplayed = false;
+		let weeklyHeld = false;
 		for (const candidate of candidates) {
 			try {
 				const pass = await this.processAccount(candidate);
-				if (pass === "weekly-replayed") weeklyReplayed = true;
+				if (pass === "weekly-held") weeklyHeld = true;
 				else if (pass) weekly.push(pass);
 			} catch (err) {
 				// One bad account must not abort the batch — log and move on.
@@ -483,9 +489,9 @@ export class CodexResetCreditApplyScheduler {
 			}
 		}
 
-		// A replayed weekly attempt is this tick's weekly dispatch, even when its
-		// outcome is still unknown.
-		if (weeklyReplayed) return;
+		// A pending weekly attempt is this tick's weekly dispatch while its
+		// outcome is unknown, whether or not its replay could be sent.
+		if (weeklyHeld) return;
 		weekly.sort(compareWeeklyProposals);
 		for (const proposal of weekly) {
 			const { candidate } = proposal;
@@ -507,8 +513,15 @@ export class CodexResetCreditApplyScheduler {
 		}
 	}
 
-	/** Re-read account + cache + ledger + usage inputs and run the pure decision. */
-	private async evaluate(accountId: string): Promise<{
+	/**
+	 * Re-read account + cache + ledger + usage inputs and run the pure decision.
+	 * `replayedCreditId` names a pending attempt this tick already handled: that
+	 * credit is left out, and only the expiry trigger may act.
+	 */
+	private async evaluate(
+		accountId: string,
+		replayedCreditId: string | null,
+	): Promise<{
 		decision: ResetCreditApplyDecision;
 		weeklyResetsAt: number | null;
 	} | null> {
@@ -524,21 +537,29 @@ export class CodexResetCreditApplyScheduler {
 		const weeklyResetsAt = weeklyWindow.resetsAt;
 		const decision = decideResetCreditAction({
 			account,
-			credits: cached?.summary.credits ?? null,
+			credits:
+				cached?.summary.credits?.filter(
+					(credit) => credit.id !== replayedCreditId,
+				) ?? null,
 			terminallyResolvedCreditIds,
 			weeklyUsedPercent: weeklyWindow.usedPercent,
 			weeklyResetsAt,
 			autoApplyCooldownAnchorAt: cooldownAnchorAt,
 			now: (this.deps.now ?? Date.now)(),
 		});
+		if (decision.action !== "consume" || decision.cause !== "weekly-limit") {
+			return { decision, weeklyResetsAt };
+		}
+		if (replayedCreditId !== null) {
+			return {
+				decision: { action: "skip", reason: "pending-attempt" },
+				weeklyResetsAt,
+			};
+		}
 		// Check in BOTH discovery and confirmation, and separately for each
 		// candidate. A preceding reset can restore another account during this
 		// tick. Keep expiry independent, including when reading the pool fails.
-		if (
-			decision.action === "consume" &&
-			decision.cause === "weekly-limit" &&
-			(await this.deps.hasOtherAvailableCodexAccount(accountId))
-		) {
+		if (await this.deps.hasOtherAvailableCodexAccount(accountId)) {
 			return {
 				decision: { action: "skip", reason: "other-account-available" },
 				weeklyResetsAt,
@@ -548,23 +569,29 @@ export class CodexResetCreditApplyScheduler {
 	}
 
 	/**
-	 * Replays a pending attempt, or runs discovery. An expiry consume is
+	 * Replays a pending attempt, then runs discovery. An expiry consume is
 	 * confirmed and dispatched here; a weekly-limit consume is returned for
-	 * ranking instead.
+	 * ranking instead. "weekly-held" means a pending weekly-limit attempt takes
+	 * this tick's weekly slot.
 	 */
 	private async processAccount(candidate: {
 		id: string;
 		name: string;
-	}): Promise<WeeklyProposal | "weekly-replayed" | null> {
+	}): Promise<WeeklyProposal | "weekly-held" | null> {
 		const { id, name } = candidate;
 		const pending = await this.deps.getPendingAttempt(id);
+		let replayedCreditId: string | null = null;
+		let weeklyHeld = false;
 		if (pending) {
+			const before = await this.deps.getAccount(id);
+			if (!before || before.disabled) return null;
 			// A lost response may already have spent this credit. Reconcile it
 			// before selecting a different credit for weekly exhaustion.
-			if (!(await this.deps.refreshCredits(id, true))) return null;
+			const reconciled = await this.deps.refreshCredits(id, true);
 			const account = await this.deps.getAccount(id);
 			if (
 				!account ||
+				account.disabled ||
 				account.provider !== "codex" ||
 				!account.refresh_token ||
 				account.pause_reason === PAUSE_REASON_NEEDS_REAUTH ||
@@ -576,58 +603,81 @@ export class CodexResetCreditApplyScheduler {
 					? account.codex_auto_apply_reset_on_weekly_limit_enabled &&
 						weeklyResetCanLiftPause(account)
 					: account.codex_auto_apply_reset_credits_enabled;
-			// Replay the SAME key even when usage recovered or the metadata now
-			// says redeemed/missing/expired. This retrieves the uncertain outcome
-			// instead of treating a stale 100% reading as permission for credit B.
 			if (mayReplay) {
-				await this.dispatchAttempt(
-					id,
-					name,
-					pending.credit_id,
-					pending.cause ?? "expiry",
-					{
-						id: pending.id,
-						idempotencyKey: pending.idempotency_key,
-						attemptSeq: pending.attempt_seq ?? 1,
-						reused: true,
-					},
-				);
-				return pending.cause === "weekly-limit" ? "weekly-replayed" : null;
+				replayedCreditId = pending.credit_id;
+				// Its outcome stays unknown until a replay lands, and meanwhile
+				// its account still reads as exhausted to every pool check.
+				weeklyHeld = pending.cause === "weekly-limit";
+				if (reconciled) {
+					// Replay the SAME key even when usage recovered or the metadata
+					// now says redeemed/missing/expired. This retrieves the uncertain
+					// outcome instead of treating a stale 100% reading as permission
+					// for credit B.
+					await this.dispatchAttempt(
+						id,
+						name,
+						pending.credit_id,
+						pending.cause ?? "expiry",
+						{
+							id: pending.id,
+							idempotencyKey: pending.idempotency_key,
+							attemptSeq: pending.attempt_seq ?? 1,
+							reused: true,
+						},
+					);
+				} else {
+					log.debug(
+						`Reset-credit applier: reconcile refresh failed for '${name}'; replay of credit ${pending.credit_id} deferred`,
+					);
+				}
+			} else if (!reconciled) {
+				// Its credit may already be spent; only other credits may act.
+				replayedCreditId = pending.credit_id;
 			}
 			// A pause the reset can't lift, or a toggle flip, stops a weekly retry
 			// but must not disable the independent protection for credits about
-			// to expire.
+			// to expire. Neither may a replay: another credit can lapse while it
+			// keeps failing.
 		}
+		const held = weeklyHeld ? "weekly-held" : null;
 
-		// Phase 1 — DISCOVERY on the cheap TTL-gated cache read.
-		await this.deps.refreshCredits(id, false);
-		const evaluated = await this.evaluate(id);
-		if (!evaluated) {
-			log.debug(`Reset-credit applier: account '${name}' vanished mid-tick`);
-			return null;
-		}
-		const { decision: discovery, weeklyResetsAt } = evaluated;
-		if (discovery.action === "skip") {
-			if (
-				discovery.reason === "needs-reauth" ||
-				discovery.reason === "already-resolved"
-			) {
-				log.debug(
-					`Reset-credit applier: skipping '${name}' (${discovery.reason})`,
-				);
+		try {
+			// Phase 1 — DISCOVERY on the cheap TTL-gated cache read.
+			await this.deps.refreshCredits(id, false);
+			const evaluated = await this.evaluate(id, replayedCreditId);
+			if (!evaluated) {
+				log.debug(`Reset-credit applier: account '${name}' vanished mid-tick`);
+				return held;
 			}
-			return null;
+			const { decision: discovery, weeklyResetsAt } = evaluated;
+			if (discovery.action === "skip") {
+				if (
+					discovery.reason === "needs-reauth" ||
+					discovery.reason === "already-resolved"
+				) {
+					log.debug(
+						`Reset-credit applier: skipping '${name}' (${discovery.reason})`,
+					);
+				}
+				return held;
+			}
+			if (discovery.cause === "weekly-limit" && weeklyResetsAt !== null) {
+				return {
+					candidate,
+					pending,
+					weeklyResetsAt,
+					creditExpiresAt: discovery.expiresAt,
+				};
+			}
+			await this.confirmAndDispatch(candidate, pending, replayedCreditId);
+		} catch (err) {
+			// A replayed weekly attempt keeps the slot whatever fails after it.
+			log.error(
+				`Reset-credit applier: discovery failed for account ${name} (${id}):`,
+				err,
+			);
 		}
-		if (discovery.cause === "weekly-limit" && weeklyResetsAt !== null) {
-			return {
-				candidate,
-				pending,
-				weeklyResetsAt,
-				creditExpiresAt: discovery.expiresAt,
-			};
-		}
-		await this.confirmAndDispatch(candidate, pending);
-		return null;
+		return held;
 	}
 
 	/**
@@ -639,6 +689,7 @@ export class CodexResetCreditApplyScheduler {
 	private async confirmAndDispatch(
 		candidate: { id: string; name: string },
 		pending: CodexResetCreditEventRow | null,
+		replayedCreditId: string | null = null,
 	): Promise<boolean> {
 		const { id, name } = candidate;
 		if (!(await this.deps.refreshCredits(id, true))) {
@@ -647,7 +698,7 @@ export class CodexResetCreditApplyScheduler {
 			);
 			return false;
 		}
-		const confirmed = (await this.evaluate(id))?.decision;
+		const confirmed = (await this.evaluate(id, replayedCreditId))?.decision;
 		if (!confirmed || confirmed.action !== "consume") {
 			log.debug(
 				`Reset-credit applier: confirmation aborted for '${name}' (${
@@ -710,6 +761,15 @@ export class CodexResetCreditApplyScheduler {
 		}
 
 		if (outcome.status === "failed") {
+			// Nothing reached upstream, so a fresh claim holds no uncertain outcome
+			// to retrieve. A replay keeps its row: the original send may have
+			// landed.
+			if (
+				outcome.notSent &&
+				!claim.reused &&
+				(await this.withdrawUnsentClaim(name, creditId, claim, outcome.message))
+			)
+				return;
 			// Row stays pending → same-key retry on a later tick.
 			log.warn(
 				`Reset-credit applier: consume failed for '${name}' credit ${creditId} (attempt ${claim.attemptSeq}); will retry with the same key: ${outcome.message}`,
@@ -720,6 +780,29 @@ export class CodexResetCreditApplyScheduler {
 		log.info(
 			`Reset-credit applier: auto-applied for '${name}' credit ${creditId} (cause: ${cause}, attempt ${claim.attemptSeq}, ${claim.reused ? "reused pending claim" : "fresh claim"}, outcome: ${outcome.result.outcome}, windowsReset: ${outcome.result.windowsReset})`,
 		);
+	}
+
+	private async withdrawUnsentClaim(
+		name: string,
+		creditId: string,
+		claim: CodexResetCreditAutoClaim,
+		reason: string,
+	): Promise<boolean> {
+		let withdrawn: boolean;
+		try {
+			withdrawn = await this.deps.withdrawPendingAttempt(claim.id);
+		} catch (err) {
+			log.warn(
+				`Reset-credit applier: could not withdraw unsent claim ${claim.id} for '${name}': ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return false;
+		}
+		if (withdrawn) {
+			log.info(
+				`Reset-credit applier: withdrew unsent claim for '${name}' credit ${creditId} (attempt ${claim.attemptSeq}): ${reason}`,
+			);
+		}
+		return withdrawn;
 	}
 }
 
@@ -740,6 +823,7 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 		| "getTerminallyResolvedCodexResetCreditIds"
 		| "claimCodexResetCreditAutoAttempt"
 		| "getCodexResetCreditAutoApplyCooldownAnchorAt"
+		| "withdrawPendingCodexResetCreditAttempt"
 	>;
 	coordinator: {
 		refreshResetCredits(
@@ -751,13 +835,15 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 	overrides?: Partial<CodexResetCreditApplyDeps>;
 }): CodexResetCreditApplyScheduler {
 	const { dbOps, coordinator, overrides } = wiring;
-	// Bound retries of unknown alternatives across discovery/confirmation and
-	// candidates. Failed free reads must not hold up reset redemption forever.
+	// One free usage read per unknown alternative per tick, shared by
+	// discovery, confirmation and every candidate.
 	const usageRefreshAttempts = new Map<string, number>();
 	const nowMs = overrides?.now ?? Date.now;
 	const usable = (account: Account, now: number) =>
 		account.provider === "codex" &&
-		isAccountAvailable(account, now) &&
+		!account.disabled &&
+		!account.paused &&
+		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
 		Boolean(
 			account.refresh_token ||
@@ -769,6 +855,7 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 			(await dbOps.getAllAccounts())
 				.filter(
 					(account) =>
+						!account.disabled &&
 						account.provider === "codex" &&
 						(account.codex_auto_apply_reset_credits_enabled ||
 							account.codex_auto_apply_reset_on_weekly_limit_enabled),
@@ -844,20 +931,9 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 					"codex",
 					nowMs(),
 				);
-				if (capacity) {
-					if (capacity.minHeadroom > 0) return true;
-					continue;
-				}
-				// A just-resolved reset (or nothingToReset) is evidence against
-				// another immediate redemption while usage catches up. After one
-				// tick, an alternative we still cannot verify no longer blocks.
-				const restoredAt =
-					await dbOps.getCodexResetCreditAutoApplyCooldownAnchorAt(account.id);
-				if (
-					restoredAt !== null &&
-					nowMs() - restoredAt < RESET_CREDIT_AUTO_APPLY_TICK_MS
-				)
-					return true;
+				// Usage that is still unknown counts as able to serve: a failed
+				// read (a 429, say) says nothing about the account's headroom.
+				if (!capacity || capacity.minHeadroom > 0) return true;
 			}
 			return false;
 		},
@@ -866,6 +942,8 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 		claimAutoAttempt: (input) => dbOps.claimCodexResetCreditAutoAttempt(input),
 		dispatchConsume: (accountId, request) =>
 			consumeCodexResetCreditForAccount(accountId, request),
+		withdrawPendingAttempt: (rowId) =>
+			dbOps.withdrawPendingCodexResetCreditAttempt(rowId),
 		...overrides,
 	});
 }

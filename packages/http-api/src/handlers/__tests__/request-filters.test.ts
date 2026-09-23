@@ -61,6 +61,22 @@ describe("buildRequestFilterClause", () => {
 		expect(params).toEqual(["acct-1", "acct-1"]);
 	});
 
+	it("matches an account by exact id", () => {
+		const { sql, params } = buildRequestFilterClause({ accountId: "acct-id" });
+		expect(sql).toBe("WHERE r.account_used = ?");
+		expect(params).toEqual(["acct-id"]);
+	});
+
+	it("matches the no-account bucket and gives it precedence", () => {
+		const { sql, params } = buildRequestFilterClause({
+			account: "legacy-name",
+			accountId: "acct-id",
+			noAccount: true,
+		});
+		expect(sql).toBe("WHERE r.account_used IS NULL");
+		expect(params).toEqual([]);
+	});
+
 	it("matches an exact request id, ahead of every other clause", () => {
 		const { sql, params } = buildRequestFilterClause({ id: "req-1" });
 		expect(sql).toBe("WHERE r.id = ?");
@@ -236,6 +252,18 @@ describe("parseRequestFilters", () => {
 			account: "acct-1",
 			apiKey: "my-key",
 			project: "my-proj",
+		});
+	});
+
+	it("parses account id and no-account with precedence", () => {
+		expect(parse("account=legacy-name&accountId=acct-id")).toEqual({
+			accountId: "acct-id",
+		});
+		expect(parse("account=legacy-name&accountId=acct-id&noAccount=1")).toEqual({
+			noAccount: true,
+		});
+		expect(parse("noAccount=0&accountId=acct-id")).toEqual({
+			accountId: "acct-id",
 		});
 	});
 

@@ -166,6 +166,19 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 		);
 	}
 
+	/**
+	 * Delete a still-pending attempt that provably never reached upstream.
+	 * Returns false when the row is gone or already resolved. The next claim
+	 * for the credit then mints the same attempt_seq and idempotency key.
+	 */
+	async withdrawPendingAttempt(id: string): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`DELETE FROM codex_reset_credit_events WHERE id = ? AND status = 'pending'`,
+			[id],
+		);
+		return changes > 0;
+	}
+
 	/** One-shot resolved manual event (dashboard button press). */
 	async recordManual(input: {
 		accountId: string;

@@ -24,8 +24,12 @@ export interface RequestFilterState {
 	status: StatusCategory;
 	/** Specific status codes as strings (from the multi-select Set). */
 	codes: string[];
-	/** Account name, or null when inactive. */
+	/** Legacy account name, or null when inactive. */
 	account: string | null;
+	/** Stable account ID, or null when inactive. */
+	accountId: string | null;
+	/** Restrict to requests with no recorded account. */
+	noAccount: boolean;
 	/**
 	 * API key ID, or null when inactive. An ID rather than a name because two
 	 * clients can carry the same name, and a name filter returns both with no
@@ -52,7 +56,10 @@ export interface RequestQueryParams {
 	codes?: number[];
 	from?: number;
 	to?: number;
+	/** Legacy account name filter retained for existing callers. */
 	account?: string;
+	accountId?: string;
+	noAccount?: boolean;
 	apiKeyId?: string;
 	noApiKey?: boolean;
 	project?: string;
@@ -83,7 +90,9 @@ export function isRequestFilterActive(state: RequestFilterState): boolean {
 	return (
 		state.status !== "all" ||
 		state.codes.length > 0 ||
-		state.account !== null ||
+		(state.account !== null && !state.noAccount && state.accountId === null) ||
+		state.accountId !== null ||
+		state.noAccount ||
 		state.apiKeyId !== null ||
 		state.noApiKey ||
 		state.project !== null ||
@@ -117,7 +126,9 @@ export function buildRequestQueryParams(
 	const to = localDateTimeToEpoch(state.to);
 	if (to !== undefined) params.to = to;
 
-	if (state.account !== null) params.account = state.account;
+	if (state.noAccount) params.noAccount = true;
+	else if (state.accountId !== null) params.accountId = state.accountId;
+	else if (state.account !== null) params.account = state.account;
 	if (state.noApiKey) params.noApiKey = true;
 	else if (state.apiKeyId !== null) params.apiKeyId = state.apiKeyId;
 	if (state.noProject) params.noProject = true;
@@ -140,9 +151,9 @@ export function requestQueryToSearchParams(
 	}
 	if (params.from != null) p.set("from", String(params.from));
 	if (params.to != null) p.set("to", String(params.to));
-	if (params.account) {
-		p.set("account", params.account);
-	}
+	if (params.noAccount) p.set("noAccount", "1");
+	else if (params.accountId) p.set("accountId", params.accountId);
+	else if (params.account) p.set("account", params.account);
 	// Names are serialized verbatim — no value is filtered out as a sentinel,
 	// so a key or project called "all" reaches the server as itself.
 	if (params.noApiKey) p.set("noApiKey", "1");

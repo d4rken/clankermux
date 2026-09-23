@@ -341,7 +341,7 @@ function main(): void {
 				if (!account) return json({ error: { type: "authentication_error" } }, 401);
 				return codexUsage(account, now);
 			}
-			if (url.pathname === "/backend-api/codex/rate-limit-reset-credits") {
+			if (url.pathname === "/backend-api/wham/rate-limit-reset-credits") {
 				// Earned reset credits are a separate read the accounts endpoint
 				// kicks off for every Codex account. Two banked credits rather than
 				// zero: the chip renders either way, and "0 usage resets" is a chip

@@ -12,7 +12,7 @@ export interface CacheKeepaliveWindowTotals {
 	savedUsd5m: number;
 }
 
-/** Raw counter columns of one snapshot (cumulative-since-restart). */
+/** Raw counter columns of one snapshot (cumulative; see CacheKeepaliveSnapshotRow). */
 interface CounterRow {
 	keepalives_sent: number;
 	hits: number;
@@ -26,11 +26,18 @@ interface CounterRow {
 
 /**
  * Fold consecutive cumulative-counter samples into a window total, clamping each
- * process-restart reset (a sample smaller than its predecessor → count the sample
- * itself, i.e. post-restart activity). `anchor` is the latest sample before the
- * window (or null when the window opens at the first-ever sample): with an anchor
- * the first in-window sample contributes only its increment over the anchor;
- * without one it counts in full. Exported for unit testing.
+ * reset (a sample smaller than its predecessor → count the sample itself, i.e.
+ * post-reset activity). `anchor` is the latest sample before the window: with
+ * one, the first in-window sample contributes its increment over the anchor;
+ * without one, the first in-window sample is the baseline and contributes 0.
+ * Counters are seeded across restarts, so a first sample's absolute value is
+ * mostly activity from before the window:
+ *
+ *   anchor null, hits [899, 899, 899] → 0
+ *   anchor null, hits [3, 8]          → 5
+ *   anchor 10,   hits [12, 15]        → 5
+ *
+ * Exported for unit testing.
  */
 export function sumCounterDeltas(
 	anchor: CounterRow | null,
@@ -48,8 +55,8 @@ export function sumCounterDeltas(
 	};
 	let prev: CounterRow | null = anchor;
 	const step = (cur: number, p: number | undefined): number => {
-		if (p === undefined) return cur; // no prior sample → full value
-		return cur >= p ? cur - p : cur; // reset → count the post-restart value
+		if (p === undefined) return 0; // no prior sample → this one is the baseline
+		return cur >= p ? cur - p : cur; // reset → count the post-reset value
 	};
 	for (const cur of rows) {
 		totals.keepalivesSent += step(cur.keepalives_sent, prev?.keepalives_sent);
@@ -70,8 +77,9 @@ export function sumCounterDeltas(
  *
  * Gauges (`warmSessions`/`promotedSessions`/`totalBytes`) are point-in-time;
  * the counters (`keepalivesSent`/`hits`/`misses`/`failures`/`spentUsd`/
- * `savedUsd`) are CUMULATIVE-since-process-restart running totals captured at
- * sample time.
+ * `savedUsd`) are CUMULATIVE running totals captured at sample time. The server
+ * seeds them from the newest row at boot, so they carry across restarts; a
+ * failed seed restarts them from 0, which readers treat as a reset.
  */
 export interface CacheKeepaliveSnapshotRow {
 	/** Sample time, ms since epoch. */
@@ -82,19 +90,19 @@ export interface CacheKeepaliveSnapshotRow {
 	promotedSessions: number;
 	/** GAUGE: total bytes held across warm sessions. */
 	totalBytes: number;
-	/** CUMULATIVE: keepalive requests sent since process restart. */
+	/** CUMULATIVE: keepalive requests sent. */
 	keepalivesSent: number;
-	/** CUMULATIVE: cache hits since process restart. */
+	/** CUMULATIVE: cache hits. */
 	hits: number;
-	/** CUMULATIVE: cache misses since process restart. */
+	/** CUMULATIVE: cache misses. */
 	misses: number;
-	/** CUMULATIVE: keepalive failures since process restart. */
+	/** CUMULATIVE: keepalive failures. */
 	failures: number;
-	/** CUMULATIVE: USD spent on keepalive requests since process restart. */
+	/** CUMULATIVE: USD spent on keepalive requests. */
 	spentUsd: number;
-	/** CUMULATIVE: optimistic USD saved (1h write rate) since process restart. */
+	/** CUMULATIVE: optimistic USD saved (1h write rate). */
 	savedUsd: number;
-	/** CUMULATIVE: real warm resumes since process restart. */
+	/** CUMULATIVE: real warm resumes. */
 	warmResumes: number;
 	/** CUMULATIVE: honest USD saved (5m write rate, no-bridge counterfactual). */
 	savedUsd5m: number;
@@ -258,12 +266,11 @@ export class CacheKeepaliveSnapshotRepository extends BaseRepository<CacheKeepal
 	 * Summed counter activity in the window [sinceMs, now] — the correct
 	 * window TOTAL (not chart-shaped per-bucket deltas, which zero the first bucket).
 	 *
-	 * Cumulative counters reset to 0 on each process restart, so a window total is
-	 * the sum of consecutive-sample deltas, clamping each reset (cur < prev → count
-	 * cur). We anchor on the latest sample BEFORE the window (if any) so the first
-	 * in-window sample contributes only its in-window increment; with no anchor (the
-	 * window starts at the first-ever sample, e.g. range "all") the first sample's
-	 * cumulative value IS in-window activity and counts in full.
+	 * A window total is the sum of consecutive-sample deltas, clamping each reset
+	 * (cur < prev → count cur). We anchor on the latest sample BEFORE the window (if
+	 * any) so the first in-window sample contributes only its in-window increment;
+	 * with no anchor (range "all", or retention removed every older row) the first
+	 * in-window sample is the baseline. See `sumCounterDeltas`.
 	 */
 	async getWindowCounterTotals(
 		sinceMs: number,
@@ -325,12 +332,16 @@ export class CacheKeepaliveSnapshotRepository extends BaseRepository<CacheKeepal
 	}
 
 	/**
-	 * Delete snapshots strictly older than `cutoffMs`. Returns rows deleted.
-	 * Volume is tiny (one row per sample tick), so a single DELETE suffices.
+	 * Delete snapshots strictly older than `cutoffMs`, except the newest row.
+	 * Returns rows deleted. The newest row seeds the bridge counters at boot, and
+	 * the sampler writes nothing while the bridge state is unchanged, so on an idle
+	 * bridge it can be older than any retention window.
 	 */
 	async deleteOlderThan(cutoffMs: number): Promise<number> {
 		return this.runWithChanges(
-			`DELETE FROM cache_keepalive_snapshots WHERE sampled_at < ?`,
+			`DELETE FROM cache_keepalive_snapshots
+			 WHERE sampled_at < ?
+			   AND sampled_at < (SELECT MAX(sampled_at) FROM cache_keepalive_snapshots)`,
 			[cutoffMs],
 		);
 	}

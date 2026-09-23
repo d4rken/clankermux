@@ -247,6 +247,7 @@ describe("exempt paths", () => {
 		"/api/auth/login",
 		"/api/auth/logout",
 		"/api/auth/status",
+		"/api/auth/setup",
 	]) {
 		it(`reaches the API router for ${path} on a gated deployment`, async () => {
 			const { deps, calls } = makeDeps({ apiRoutes: [path] });

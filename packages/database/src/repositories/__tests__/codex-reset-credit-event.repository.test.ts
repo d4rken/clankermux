@@ -9,6 +9,7 @@
  *  - a nothingToReset resolution allows a NEW attempt with a NEW key
  *  - terminal outcomes (reset/alreadyRedeemed/noCredit/failed) block automation
  *  - resolveAttempt only touches pending rows
+ *  - withdrawPendingAttempt deletes only pending rows, freeing the same key
  *  - the partial unique index absorbs concurrent duplicate auto claims
  *  - recordManual inserts one-shot resolved rows
  */
@@ -288,6 +289,38 @@ describe("CodexResetCreditEventRepository", () => {
 		it("is a no-op for an unknown id", async () => {
 			await repo.resolveAttempt("nope", "failed", null, "x", NOW);
 			expect((await repo.findRecentForAccount("acc-1", 10)).length).toBe(0);
+		});
+	});
+
+	describe("withdrawPendingAttempt", () => {
+		it("deletes a pending row so the next claim mints the same attempt and key", async () => {
+			const claim = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				cause: "weekly-limit",
+			});
+			expect(await repo.withdrawPendingAttempt(claim?.id as string)).toBe(true);
+			expect(await repo.findPendingForAccount("acc-1")).toBeNull();
+			expect(await repo.findRecentForAccount("acc-1", 10)).toEqual([]);
+
+			const again = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				cause: "weekly-limit",
+			});
+			expect(again).toEqual(claim);
+		});
+
+		it("leaves a resolved row alone", async () => {
+			const claim = await repo.claimAutoAttempt(CLAIM_INPUT);
+			await repo.resolveAttempt(claim?.id as string, "reset", 2, null, NOW + 1);
+			expect(await repo.withdrawPendingAttempt(claim?.id as string)).toBe(
+				false,
+			);
+			const rows = await repo.findRecentForAccount("acc-1", 10);
+			expect(rows.map((row) => row.status)).toEqual(["reset"]);
+		});
+
+		it("returns false for an unknown id", async () => {
+			expect(await repo.withdrawPendingAttempt("nope")).toBe(false);
 		});
 	});
 

@@ -15,6 +15,8 @@ const emptyState: RequestFilterState = {
 	status: "all",
 	codes: [],
 	account: null,
+	accountId: null,
+	noAccount: false,
 	apiKeyId: null,
 	noApiKey: false,
 	project: null,
@@ -41,6 +43,12 @@ describe("isRequestFilterActive", () => {
 			true,
 		);
 		expect(isRequestFilterActive({ ...emptyState, project: "my-proj" })).toBe(
+			true,
+		);
+		expect(isRequestFilterActive({ ...emptyState, accountId: "acct-id" })).toBe(
+			true,
+		);
+		expect(isRequestFilterActive({ ...emptyState, noAccount: true })).toBe(
 			true,
 		);
 		// A project genuinely named "all" is an active filter, not the
@@ -94,6 +102,24 @@ describe("buildRequestQueryParams", () => {
 				project: "my-proj",
 			}),
 		).toEqual({ account: "acct", noApiKey: true, project: "my-proj" });
+	});
+
+	it("prefers no-account, then account id, over the legacy account name", () => {
+		expect(
+			buildRequestQueryParams({
+				...emptyState,
+				account: "legacy-name",
+				accountId: "acct-id",
+				noAccount: true,
+			}),
+		).toEqual({ noAccount: true });
+		expect(
+			buildRequestQueryParams({
+				...emptyState,
+				account: "legacy-name",
+				accountId: "acct-id",
+			}),
+		).toEqual({ accountId: "acct-id" });
 	});
 
 	it("passes the no-project bucket through as its own flag", () => {
@@ -165,6 +191,22 @@ describe("requestQueryToSearchParams", () => {
 		expect(requestQueryToSearchParams({ apiKeyId: "key-1" }).toString()).toBe(
 			"apiKeyId=key-1",
 		);
+	});
+
+	it("serializes account ids and the no-account bucket with precedence", () => {
+		expect(
+			requestQueryToSearchParams({
+				account: "legacy-name",
+				accountId: "acct-id",
+				noAccount: true,
+			}).toString(),
+		).toBe("noAccount=1");
+		expect(
+			requestQueryToSearchParams({
+				account: "legacy-name",
+				accountId: "acct-id",
+			}).toString(),
+		).toBe("accountId=acct-id");
 	});
 
 	it("serializes the empty buckets as their own flags", () => {

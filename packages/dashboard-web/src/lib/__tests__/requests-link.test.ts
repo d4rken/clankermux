@@ -22,6 +22,7 @@ function event(over: Partial<LiveEvent> = {}): LiveEvent {
 		status: "ok",
 		durationMs: 1200,
 		tokensPerSecond: null,
+		accountId: null,
 		account: "backup2-darken",
 		apiKeyId: null,
 		apiKeyName: null,
@@ -65,9 +66,27 @@ describe("laneRequestsHref", () => {
 		expect(laneRequestsHref({ kind: "other" })).toBeNull();
 	});
 
+	it("has no link while an account request is still routing", () => {
+		// Pending work has no account identity yet; linking it as no-account would
+		// incorrectly claim routing had already finished without an account.
+		expect(laneRequestsHref({ kind: "account-pending" })).toBeNull();
+	});
+
 	it("filters to a client by key id", () => {
 		expect(laneRequestsHref({ kind: "client", apiKeyId: "key-1" })).toBe(
 			"/requests?apiKeyId=key-1",
+		);
+	});
+
+	it("filters to an account by account id", () => {
+		expect(laneRequestsHref({ kind: "account", accountId: "acct-1" })).toBe(
+			"/requests?accountId=acct-1",
+		);
+	});
+
+	it("selects the no-account bucket with its own flag", () => {
+		expect(laneRequestsHref({ kind: "no-account" })).toBe(
+			"/requests?noAccount=1",
 		);
 	});
 

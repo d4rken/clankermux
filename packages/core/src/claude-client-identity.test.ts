@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import {
+	CLAUDE_STAINLESS_HEADERS,
 	type ClaudeModelPermissionsAuth,
 	claudeBankedResetHeaders,
 	claudeCliUserAgent,
@@ -13,8 +14,12 @@ import {
 	claudeTokenRefreshHeaders,
 	claudeUsageReadHeaders,
 	compareClaudeCliVersions,
+	isClaudeCliUserAgent,
+	lastSeenClaudeStainlessHeaders,
 	newerClaudeCliVersion,
 	newestClaudeCliVersion,
+	resetClaudeCliStainlessHeadersForTests,
+	trackClaudeCliStainlessHeaders,
 } from "./claude-client-identity";
 import { CLAUDE_CLI_VERSION, trackClientVersion } from "./version";
 
@@ -99,6 +104,20 @@ describe("user agents", () => {
 			"claude-cli/2.1.280 (external, cli)",
 		);
 	});
+
+	it("recognises only the interactive CLI", () => {
+		expect(isClaudeCliUserAgent("claude-cli/2.1.280 (external, cli)")).toBe(
+			true,
+		);
+		for (const ua of [
+			"claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.280)",
+			"claude-code/2.1.280",
+			"claude-cli/2.1.280 (external, cli) extra",
+			"",
+			null,
+		])
+			expect(isClaudeCliUserAgent(ua)).toBe(false);
+	});
 });
 
 describe("endpoint profiles", () => {
@@ -135,27 +154,86 @@ describe("endpoint profiles", () => {
 	});
 
 	it("keepalive names the last client seen, even an older one", () => {
-		expect(claudeKeepaliveHeaders("2.1.63")).toEqual({
+		expect(claudeKeepaliveHeaders("2.1.63", CLAUDE_STAINLESS_HEADERS)).toEqual({
 			accept: "application/json",
-			"accept-language": "*",
 			"anthropic-beta":
-				"oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+				"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01,oauth-2025-04-20",
 			"anthropic-dangerous-direct-browser-access": "true",
 			"anthropic-version": "2023-06-01",
 			connection: "keep-alive",
 			"content-type": "application/json",
-			"sec-fetch-mode": "cors",
 			"user-agent": "claude-cli/2.1.63 (external, cli)",
 			"x-app": "cli",
 			"x-stainless-arch": "x64",
-			"x-stainless-helper-method": "stream",
 			"x-stainless-lang": "js",
 			"x-stainless-os": "Linux",
-			"x-stainless-package-version": "0.60.0",
+			"x-stainless-package-version": "0.112.1",
 			"x-stainless-retry-count": "0",
 			"x-stainless-runtime": "node",
-			"x-stainless-runtime-version": "v24.9.0",
+			"x-stainless-runtime-version": "v26.3.0",
 			"x-stainless-timeout": "600",
+		});
+	});
+
+	describe("keepalive Stainless block", () => {
+		beforeEach(() => resetClaudeCliStainlessHeadersForTests());
+
+		const cli = (
+			extra: Record<string, string>,
+			ua = "claude-cli/2.1.281 (external, cli)",
+		) =>
+			new Headers({
+				"user-agent": ua,
+				"x-stainless-arch": "arm64",
+				"x-stainless-lang": "js",
+				"x-stainless-os": "MacOS",
+				"x-stainless-package-version": "0.113.0",
+				"x-stainless-retry-count": "2",
+				"x-stainless-runtime": "node",
+				"x-stainless-runtime-version": "v26.4.0",
+				"x-stainless-timeout": "300",
+				...extra,
+			});
+
+		it("mirrors the runtime of the last interactive client, not its per-request fields", () => {
+			trackClaudeCliStainlessHeaders(cli({}));
+			expect(lastSeenClaudeStainlessHeaders()).toEqual({
+				"x-stainless-arch": "arm64",
+				"x-stainless-lang": "js",
+				"x-stainless-os": "MacOS",
+				"x-stainless-package-version": "0.113.0",
+				"x-stainless-retry-count": "0",
+				"x-stainless-runtime": "node",
+				"x-stainless-runtime-version": "v26.4.0",
+				"x-stainless-timeout": "600",
+			});
+			expect(claudeKeepaliveHeaders("2.1.281")["x-stainless-os"]).toBe("MacOS");
+		});
+
+		it("names the interactive client's version, not a later Agent SDK request's", () => {
+			trackClaudeCliStainlessHeaders(cli({}));
+			trackClientVersion(
+				"claude-cli/2.1.299 (external, sdk-ts, agent-sdk/0.3.299)",
+			);
+			expect(claudeKeepaliveHeaders()["user-agent"]).toBe(
+				"claude-cli/2.1.281 (external, cli)",
+			);
+		});
+
+		it("ignores Agent SDK clients, incomplete blocks and malformed values", () => {
+			trackClaudeCliStainlessHeaders(cli({}));
+			const before = lastSeenClaudeStainlessHeaders();
+			trackClaudeCliStainlessHeaders(
+				cli(
+					{ "x-stainless-os": "Linux" },
+					"claude-cli/2.1.281 (external, sdk-ts, agent-sdk/0.3.281)",
+				),
+			);
+			const missing = cli({});
+			missing.delete("x-stainless-runtime-version");
+			trackClaudeCliStainlessHeaders(missing);
+			trackClaudeCliStainlessHeaders(cli({ "x-stainless-os": "Linux; x" }));
+			expect(lastSeenClaudeStainlessHeaders()).toBe(before);
 		});
 	});
 

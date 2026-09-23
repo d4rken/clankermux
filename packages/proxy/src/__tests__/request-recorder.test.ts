@@ -33,6 +33,7 @@ interface SaveRequestCall {
 	method: string;
 	path: string;
 	accountUsed: string | null;
+	accountId?: string | null;
 	statusCode: number | null;
 	success: boolean;
 	errorMessage: string | null;
@@ -99,6 +100,7 @@ class FakeDbOps {
 		method: string;
 		path: string;
 		accountUsed: string | null;
+		accountId?: string | null;
 		statusCode: number | null;
 		success: boolean;
 		errorMessage: string | null;
@@ -131,6 +133,7 @@ class FakeDbOps {
 			method: data.method,
 			path: data.path,
 			accountUsed: data.accountUsed,
+			accountId: data.accountId,
 			statusCode: data.statusCode,
 			success: data.success,
 			errorMessage: data.errorMessage,
@@ -596,6 +599,8 @@ describe("RequestRecorder — normal terminal end", () => {
 		expect(h.emitted.length).toBe(1);
 		const ev = h.emitted[0];
 		expect(ev.id).toBe("req-1");
+		expect(ev.accountId).toBe("acct-1");
+		expect(h.dbOps.saveRequestCalls[0].accountId).toBe("acct-1");
 		expect(ev.model).toBe("claude-opus-4-8");
 		expect(ev.costUsd).toBe(0.0123);
 		expect(ev.totalTokens).toBe(165);

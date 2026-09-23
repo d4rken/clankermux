@@ -5,6 +5,11 @@ import type {
 	StoredPasswordVerifier,
 } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
+import { MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH } from "@clankermux/types";
+
+// Re-exported: the limits live in @clankermux/types so a browser bundle can
+// import them without pulling in a server package.
+export { MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH };
 
 const log = new Logger("SessionAuth");
 
@@ -33,8 +38,20 @@ export const SESSION_IDLE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 
-/** Longest password the login endpoint will hash. Checked BEFORE scrypt runs. */
-export const MAX_PASSWORD_BYTES = 1024;
+/**
+ * Null when `password` may be stored as the management password, otherwise a
+ * sentence for the operator. The upper bound is {@link MAX_PASSWORD_BYTES}: a
+ * longer password could be stored but never used to sign in.
+ */
+export function validateNewPassword(password: string): string | null {
+	if (password.length < MIN_PASSWORD_LENGTH) {
+		return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+	}
+	if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
+		return `Password must be at most ${MAX_PASSWORD_BYTES} bytes (UTF-8).`;
+	}
+	return null;
+}
 
 /** scrypt cost parameters for newly written verifiers. */
 const CURRENT_SCRYPT_PARAMS = {
@@ -188,6 +205,15 @@ export function clearedSessionCookieHeader(): string {
 /** The persistence this service needs. `DatabaseOperations` satisfies it. */
 export interface SessionAuthStore {
 	getManagementPassword(): Promise<StoredPasswordVerifier | null>;
+	/**
+	 * Store the verifier only when no password exists; false when one does.
+	 * Revokes every session when it stores.
+	 */
+	setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean>;
 	createManagementSession(
 		record: AuthSessionRecord,
 		boundTo: PasswordBinding,
@@ -263,6 +289,26 @@ export class SessionAuthService {
 			stored.params,
 		);
 		return ok ? { verifier: stored.verifier, params: stored.params } : null;
+	}
+
+	/**
+	 * Store `password` as the FIRST management password. Returns the binding a
+	 * session can be minted against, or null when a password already existed —
+	 * the write is a compare-and-set in the store, so a claim cannot overwrite a
+	 * password set by the CLI or another claim meanwhile.
+	 *
+	 * Does not validate `password`; the caller does, before paying for the hash.
+	 */
+	async claimInitialPassword(
+		password: string,
+	): Promise<PasswordBinding | null> {
+		const { verifier, params } = await this.hasher.hash(password);
+		const inserted = await this.store.setManagementPasswordIfAbsent(
+			verifier,
+			params,
+			this.now(),
+		);
+		return inserted ? { verifier, params } : null;
 	}
 
 	/**

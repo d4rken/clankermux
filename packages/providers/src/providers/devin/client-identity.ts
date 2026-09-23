@@ -12,8 +12,8 @@ import { create } from "./vendor/protobuf";
 
 export const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 
-/** Pinned to the official CLI release manifest, inspected 2026-09-11. */
-export const DEVIN_CLI_VERSION = "3000.10.21";
+/** Pinned to the official CLI release (npm `@cognition-ai/cli-*` beta), inspected 2026-09-23. */
+export const DEVIN_CLI_VERSION = "3000.11.1";
 export const DEVIN_CLI_IDE_NAME = "devin-cli";
 export const DEVIN_CLI_IDE_TYPE = "chisel";
 export const DEVIN_CLI_EXTENSION_NAME = "chisel";

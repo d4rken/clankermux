@@ -13,6 +13,7 @@ export * from "./constants";
 export * from "./conversation";
 export * from "./internal-dispatch-spend";
 export * from "./logging";
+export * from "./management-password";
 export * from "./memory-snapshot";
 export * from "./model-alias";
 export * from "./model-substitutions";

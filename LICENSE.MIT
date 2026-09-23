@@ -1,10 +1,11 @@
 The MIT License below covers:
 
   * the code ClankerMux inherited from tombii/better-ccflare and
-    snipeship/ccflare; and
+    snipeship/ccflare;
   * code previously published as part of ClankerMux under the MIT License,
     which stays available under those grants wherever it sits in the history
-    and however far it survives into later revisions.
+    and however far it survives into later revisions; and
+  * contributions submitted to ClankerMux under the terms in CONTRIBUTING.md.
 
 This revision is licensed as a whole under the GNU Affero General Public
 License (see LICENSE and COPYING), subject to the portions above and to the
@@ -23,6 +24,7 @@ MIT License
 
 Copyright (c) 2025 snipeship & tombii
 Copyright (c) 2025 darken (ClankerMux)
+Copyright (c) ClankerMux contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

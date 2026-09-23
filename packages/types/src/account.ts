@@ -1027,7 +1027,10 @@ export interface AnthropicBankedResetsInfo {
 
 /** Response of POST /api/accounts/:id/banked-resets/claim. */
 export interface AnthropicBankedResetClaimResponse {
-	/** True when the ledger row resolved `reset` or `already_used`. */
+	/**
+	 * True when the limits were restored: the row resolved `reset`, or this
+	 * call's replay was answered `already_used` because an earlier POST landed.
+	 */
 	success: boolean;
 	message: string;
 	eventId: string;

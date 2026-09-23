@@ -1,9 +1,11 @@
 import {
 	ALIAS_REASONING_EFFORTS,
 	type ClientApplication,
+	type ClientCatalogue,
 	type ClientFormat,
 	type ClientModel,
 	type ClientModelMetadata,
+	claudeCodeCatalogue,
 } from "@clankermux/types";
 export const APPLICATIONS: Record<ClientApplication, string> = {
 	generic: "Generic / script",
@@ -24,12 +26,23 @@ export const FORMAT_LABELS: Record<ClientFormat, string> = {
 	openai: "OpenAI",
 	codex: "Codex",
 };
-/**
- * Claude Code only accepts an Anthropic-style ID that reads as one. The server
- * rejects the rest outright, so this is the same rule on both sides of the
- * wire; `client-service.test.ts` pins the server half.
- */
-export const needsClaudeAlias = (id: string) => !/claude|anthropic/i.test(id);
+/** A catalogue as the client application is served it (see `claudeCodeCatalogue`). */
+export function publishedCatalogue(
+	application: ClientApplication,
+	format: ClientFormat,
+	catalogue: ClientCatalogue,
+): ClientCatalogue {
+	if (application !== "claude-code" || format !== "anthropic") return catalogue;
+	const published = claudeCodeCatalogue(
+		catalogue.models,
+		catalogue.defaultModel,
+	);
+	return {
+		...catalogue,
+		models: published.models.map(({ model, name }) => ({ ...model, id: name })),
+		defaultModel: published.defaultModel,
+	};
+}
 export const destinationsLabel = (
 	key: {
 		pinnedAccountId: string | null;
@@ -177,7 +190,7 @@ export function clientSetup(
 				"export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1",
 				...(selected ? [`export ANTHROPIC_MODEL=${shell(selected)}`] : []),
 			].join("\n"),
-			note: "Start a new Claude Code session. Gateway model discovery caches by base URL; switching keys may require clearing ~/.claude/cache/gateway-models.json. An empty compatible list may show built-in models. Hint headers label requests by class and agent type in Request Details on Claude Code 2.1.273+.",
+			note: "Start a new Claude Code session. Gateway model discovery caches by base URL; switching keys may require clearing ~/.claude/cache/gateway-models.json. An empty list may show built-in models. Hint headers label requests by class and agent type in Request Details on Claude Code 2.1.273+.",
 		};
 	if (application === "codex")
 		return {

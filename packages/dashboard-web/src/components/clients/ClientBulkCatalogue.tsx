@@ -1,11 +1,13 @@
-import type {
-	ClientBulkClientResult,
-	ClientBulkOperation,
-	ClientBulkReview,
-	ClientFormat,
-	ClientModel,
-	ClientSuggestions,
-	ClientView,
+import {
+	type ClientBulkClientResult,
+	type ClientBulkOperation,
+	type ClientBulkReview,
+	type ClientFormat,
+	type ClientModel,
+	type ClientSuggestions,
+	type ClientView,
+	type GlobalCatalogueView,
+	globalCatalogueFormats,
 } from "@clankermux/types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../ui/button";
@@ -147,6 +149,54 @@ export function ClientBulkCatalogue({
 			live = false;
 		};
 	}, []);
+	/** Read only when a selected client uses the global catalogue. */
+	const [globalView, setGlobalView] = useState<GlobalCatalogueView | null>(
+		null,
+	);
+	/** Failed reads leave the view null, which counts every removal as global. */
+	const [globalSettled, setGlobalSettled] = useState(false);
+	const anySubscribed = clients.some((c) => c.global);
+	const loadGlobal = async (): Promise<GlobalCatalogueView | null> => {
+		try {
+			const view =
+				await clientRequest<GlobalCatalogueView>("/global-catalogue");
+			setGlobalView(view);
+			return view;
+		} catch {
+			return null;
+		} finally {
+			setGlobalSettled(true);
+		}
+	};
+	// biome-ignore lint/correctness/useExhaustiveDependencies: read once per panel; reviews and applies read it again themselves
+	useEffect(() => {
+		if (anySubscribed) void loadGlobal();
+	}, [anySubscribed]);
+	/** Selected clients whose catalogue in this format follows the global one. */
+	const subscribed = clients.filter(
+		(c) => c.global && globalCatalogueFormats(c.application).includes(format),
+	);
+	/** IDs some of those clients publish in this format. */
+	const subscriberIds = new Set(
+		subscribed.flatMap((c) => c.catalogues[format].models.map((m) => m.id)),
+	);
+	/** Of `ids`, those a subscriber publishes that the global catalogue lists. */
+	const hiddenGlobal = (
+		ids: readonly string[],
+		view: GlobalCatalogueView | null,
+	): string[] => {
+		const listed = view
+			? new Set(view.catalogues[format].models.map((m) => m.id))
+			: null;
+		return ids
+			.filter((id) => subscriberIds.has(id) && (!listed || listed.has(id)))
+			.sort();
+	};
+	const globalIds = new Set(
+		globalView?.catalogues[format].models.map((m) => m.id) ?? [],
+	);
+	const [confirmedHide, setConfirmedHide] = useState<string | null>(null);
+	const [confirmedReplace, setConfirmedReplace] = useState<string | null>(null);
 	const candidates = useMemo((): Candidate[] => {
 		const union = new Map<string, Candidate>();
 		for (const client of clients)
@@ -162,13 +212,7 @@ export function ClientBulkCatalogue({
 		for (const suggestion of suggestions?.models ?? []) {
 			// `generic` keeps every non-alias entry at `accountIds: null`, which
 			// validates against any client's destinations.
-			const model = suggestedModel(
-				suggestion.id,
-				suggestion.displayName,
-				suggestion.accountIds,
-				"generic",
-				format,
-			);
+			const model = suggestedModel(suggestion.id, suggestion.displayName);
 			if (!union.has(model.id))
 				union.set(model.id, { model, coverage: 0, conflicted: false });
 		}
@@ -242,6 +286,38 @@ export function ClientBulkCatalogue({
 	// A row can turn conflicted after it was staged: a custom entry a client
 	// then publishes differently, or a refetch that changes a client's entry.
 	const conflictedAdds = adds.filter((c) => c.conflicted).length;
+	// Removing a global model from a subscriber hides it from that client alone,
+	// which is easy to mistake for removing it everywhere; it takes a tick.
+	const hidesGlobal = hiddenGlobal(
+		removes.map((c) => c.model.id),
+		globalView,
+	);
+	const confirmationKey = (mode: string, extra: unknown, hidden: string[]) =>
+		JSON.stringify([
+			mode,
+			format,
+			subscribed.map((c) => c.apiKeyId).sort(),
+			extra,
+			hidden,
+		]);
+	const hideKey = confirmationKey("edit", null, hidesGlobal);
+	const hideConfirmed = !hidesGlobal.length || confirmedHide === hideKey;
+	/** Until the global catalogue has been read, a removal cannot be judged. */
+	const globalPending =
+		anySubscribed &&
+		!globalSettled &&
+		removes.some((c) => subscriberIds.has(c.model.id));
+	const replaceHides = source
+		? hiddenGlobal(
+				[...subscriberIds].filter(
+					(id) => !source.models.some((m) => m.id === id),
+				),
+				globalView,
+			)
+		: [];
+	const replaceKey = confirmationKey("replace", source?.id, replaceHides);
+	const replaceConfirmed =
+		!replaceHides.length || confirmedReplace === replaceKey;
 	/**
 	 * Moving a row to the side its stored coverage already puts it on undoes the
 	 * intent rather than recording one that changes nothing.
@@ -276,6 +352,8 @@ export function ClientBulkCatalogue({
 		});
 	const changeFormat = (next: ClientFormat) => {
 		setFormat(next);
+		setConfirmedHide(null);
+		setConfirmedReplace(null);
 		setPending(new Map());
 		setSource(null);
 		setReplaceDefault("");
@@ -285,6 +363,7 @@ export function ClientBulkCatalogue({
 	const discard = () => {
 		setPending(new Map());
 		setStagedModels([]);
+		setConfirmedHide(null);
 	};
 	const stage = () => {
 		const id = custom.id.trim();
@@ -323,6 +402,29 @@ export function ClientBulkCatalogue({
 	};
 	const propose = (operation: ClientBulkOperation) =>
 		run(async () => {
+			// What the operator confirmed was judged against the global catalogue as
+			// last read; one edited since then may hide more than they saw.
+			if (anySubscribed) {
+				const fresh = await loadGlobal();
+				const hidden =
+					operation.mode === "edit"
+						? hiddenGlobal(operation.remove, fresh)
+						: hiddenGlobal(
+								[...subscriberIds].filter(
+									(id) => !operation.models.some((m) => m.id === id),
+								),
+								fresh,
+							);
+				const confirmed =
+					operation.mode === "edit"
+						? confirmedHide === confirmationKey("edit", null, hidden)
+						: confirmedReplace ===
+							confirmationKey("replace", source?.id, hidden);
+				if (hidden.length && !confirmed)
+					throw new Error(
+						"The global catalogue changed; confirm the models this hides again",
+					);
+			}
 			const snapshot = clients;
 			setReview(
 				await clientRequest<ClientBulkReview>("/bulk/review", {
@@ -349,6 +451,9 @@ export function ClientBulkCatalogue({
 			);
 			onApplied(committed.clients);
 			setReview(null);
+			setConfirmedHide(null);
+			setConfirmedReplace(null);
+			if (anySubscribed) void loadGlobal();
 			setPending(new Map());
 			setStagedModels([]);
 			setSource(null);
@@ -381,6 +486,11 @@ export function ClientBulkCatalogue({
 					{custom && (
 						<span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px]">
 							Custom
+						</span>
+					)}
+					{subscribed.length > 0 && globalIds.has(model.id) && (
+						<span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px]">
+							Global catalogue
 						</span>
 					)}
 					{intent && (
@@ -507,6 +617,16 @@ export function ClientBulkCatalogue({
 								))}
 							</TabsList>
 						</Tabs>
+						{subscribed.length > 0 && (
+							<p className="rounded-md border p-3 text-sm text-muted-foreground">
+								{subscribed.length} of the selected clients{" "}
+								{subscribed.length === 1 ? "uses" : "use"} the global catalogue
+								for {FORMAT_LABELS[format]}. Changes here apply to those clients
+								alone: removing a global model hides it from them, and the
+								global catalogue keeps it. To change what every client gets,
+								edit the global catalogue.
+							</p>
+						)}
 						{candidates.length === 0 ? (
 							<p className="rounded-md border p-3 text-sm text-muted-foreground">
 								No models to choose from in this format yet.
@@ -534,11 +654,21 @@ export function ClientBulkCatalogue({
 						)}
 						<div className="flex flex-wrap items-center gap-3">
 							<Button
-								disabled={busy || staged === 0 || conflictedAdds > 0}
+								disabled={
+									busy ||
+									staged === 0 ||
+									conflictedAdds > 0 ||
+									!hideConfirmed ||
+									globalPending
+								}
 								title={
 									conflictedAdds > 0
 										? "Some models to add are defined differently across the selected clients; undo them or edit those clients individually"
-										: undefined
+										: globalPending
+											? "Reading the global catalogue"
+											: !hideConfirmed
+												? "Confirm hiding global models from these clients first"
+												: undefined
 								}
 								onClick={() =>
 									propose({
@@ -567,6 +697,28 @@ export function ClientBulkCatalogue({
 									: "Move models between the columns to stage changes."}
 							</p>
 						</div>
+						{hidesGlobal.length > 0 && (
+							<label className="flex items-start gap-2 rounded-md border border-destructive/40 p-3 text-sm">
+								<input
+									type="checkbox"
+									className="mt-1"
+									aria-label="Hide these global models from these clients"
+									disabled={busy}
+									checked={hideConfirmed}
+									onChange={(e) =>
+										setConfirmedHide(e.target.checked ? hideKey : null)
+									}
+								/>
+								<span>
+									Hide {hidesGlobal.join(", ")} from{" "}
+									{clientCount(subscribed.length)} that use the global catalogue
+									<span className="block text-muted-foreground">
+										They stay in the global catalogue and every other client
+										keeps them. Each of these clients records its own removal.
+									</span>
+								</span>
+							</label>
+						)}
 						<label className="flex items-start gap-2 text-sm">
 							<input
 								type="checkbox"
@@ -748,7 +900,10 @@ export function ClientBulkCatalogue({
 									// A replace would silently drop the staged changes.
 									disabled={busy || !source || staged > 0}
 									title={staged > 0 ? PENDING_FIRST : undefined}
-									onClick={() => setConfirming(true)}
+									onClick={() => {
+										setConfirmedReplace(null);
+										setConfirming(true);
+									}}
 								>
 									Replace catalogue for {clientCount(total)}
 								</Button>
@@ -804,6 +959,28 @@ export function ClientBulkCatalogue({
 								: "Routes of the aliases it removes are kept."}
 						</DialogDescription>
 					</DialogHeader>
+					{replaceHides.length > 0 && (
+						<label className="flex items-start gap-2 rounded-md border border-destructive/40 p-3 text-sm">
+							<input
+								type="checkbox"
+								className="mt-1"
+								aria-label="Hide these global models with the replacement"
+								disabled={busy}
+								checked={replaceConfirmed}
+								onChange={(e) =>
+									setConfirmedReplace(e.target.checked ? replaceKey : null)
+								}
+							/>
+							<span>
+								Hide {replaceHides.join(", ")} from{" "}
+								{clientCount(subscribed.length)} that use the global catalogue
+								<span className="block text-muted-foreground">
+									The replacement leaves them out. They stay in the global
+									catalogue and every other client keeps them.
+								</span>
+							</span>
+						</label>
+					)}
 					<DialogFooter>
 						<Button
 							variant="outline"
@@ -814,7 +991,7 @@ export function ClientBulkCatalogue({
 						</Button>
 						<Button
 							variant="destructive"
-							disabled={busy}
+							disabled={busy || !replaceConfirmed}
 							onClick={() => {
 								setConfirming(false);
 								void propose({

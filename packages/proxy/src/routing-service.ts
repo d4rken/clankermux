@@ -1,4 +1,5 @@
 import {
+	getRoutingModelFamily,
 	isModelAliasId,
 	isModelPermitted,
 	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
@@ -14,6 +15,7 @@ import type {
 	SdkBridgeInnerContext,
 } from "@clankermux/types";
 import {
+	claudeCodeTarget,
 	getChatContext,
 	getSdkBridgeInnerMetaContext,
 	sdkBridgeCandidatesForModel,
@@ -139,6 +141,61 @@ export function getModelPermissionService(
 	}
 	return service;
 }
+/**
+ * The model a Claude Code client means by the name it sent: the catalogue ID a
+ * `claudeCodeName` stands for, routed exactly as a request for that ID.
+ *
+ * Decided from the stored model lists alone, never by asking an upstream. The
+ * name is translated when an account the real name's route may use offers the
+ * target and none offers the name as sent; an account whose list is unknown
+ * counts only through its manually entered models. A real Claude model name,
+ * and a rule written for the exact name as sent, are never translated.
+ */
+async function claudeCodeRoutingModel(
+	ctx: ProxyContext,
+	application: string | null,
+	apiKeyId: string | null,
+	model: string,
+	accounts: readonly Account[],
+	rules: readonly RoutingRule[],
+	restrictions: Parameters<typeof destinationExclusionReason>[1],
+): Promise<string> {
+	if (application !== "claude-code" || getRoutingModelFamily(model))
+		return model;
+	const candidate = claudeCodeTarget(model);
+	if (!candidate) return model;
+	if (
+		rules.some(
+			(r) =>
+				r.enabled &&
+				r.match_model_kind === "exact" &&
+				r.match_model_value === model &&
+				(r.match_api_key_id === null || r.match_api_key_id === apiKeyId),
+		)
+	)
+		return model;
+	const winning = matchRoutingRule(rules, apiKeyId, candidate);
+	const target = resolveRoutingTarget(winning, candidate).upstreamModel;
+	if (isModelAliasId(target))
+		return (await ctx.dbOps.modelAliases.get(target)) ? candidate : model;
+	const pool = accounts.filter(
+		(a) => !destinationExclusionReason(a, restrictions, winning),
+	);
+	const permissions = new Map<string, AccountModelPermissions>();
+	const stale = new Set<string>();
+	await readPermissions(
+		getModelPermissionService(ctx),
+		pool,
+		permissions,
+		stale,
+	);
+	if (stale.size) return model;
+	const rows = pool.map((a) => [a, permissions.get(a.id) ?? null] as const);
+	return rows.some(([a, p]) => isModelPermitted(p, a.id, target, null)) &&
+		!rows.some(([a, p]) => isModelPermitted(p, a.id, model, null))
+		? candidate
+		: model;
+}
 export async function initializeRequestRoute(
 	meta: RequestMeta,
 	ctx: ProxyContext,
@@ -157,12 +214,14 @@ export async function initializeRequestRoute(
 			model,
 			apiKeyId,
 		);
+	let application: string | null = null;
 	if (apiKeyId && !meta.internal) {
 		const pin = await ctx.dbOps.getApiKeyPin(apiKeyId);
 		if (!pin || pin.malformed)
 			throw new RoutingPolicyError(
 				"API key destinations are missing or invalid",
 			);
+		application = pin.application ?? null;
 		meta.pin = {
 			accountId: pin.pinnedAccountId,
 			providers: pin.pinnedProviders,
@@ -189,7 +248,6 @@ export async function initializeRequestRoute(
 		ctx.dbOps.getAllAccounts(),
 		ctx.dbOps.routing.listRules(),
 	]);
-	const winning = maintenance ? null : matchRoutingRule(rules, apiKeyId, model);
 	// Read once, here: whether official Anthropic accounts are candidates at
 	// all. A bridged attempt re-checks before it starts a turn, and fails over
 	// if the bridge has begun shutting down since.
@@ -208,6 +266,21 @@ export async function initializeRequestRoute(
 		sdkBridgeRefusal: meta.sdkBridgeRefusedField ?? null,
 		maintenance,
 	};
+	/** The model the routing table decides for; the requested one stays on record. */
+	const routingModel = maintenance
+		? model
+		: await claudeCodeRoutingModel(
+				ctx,
+				application,
+				apiKeyId,
+				model,
+				accounts,
+				rules,
+				restrictions,
+			);
+	const winning = maintenance
+		? null
+		: matchRoutingRule(rules, apiKeyId, routingModel);
 	// An account dropped here never reaches buildResolvedRoute's own loop, so
 	// carry its reason along or the rejection can only explain the survivors.
 	const priorExclusions = new Map<string, string>();
@@ -222,7 +295,7 @@ export async function initializeRequestRoute(
 	const target =
 		maintenance?.purpose === "keepalive"
 			? model
-			: resolveRoutingTarget(winning, model).upstreamModel;
+			: resolveRoutingTarget(winning, routingModel).upstreamModel;
 	if (!maintenance && isModelAliasId(target)) {
 		const alias = await ctx.dbOps.modelAliases.get(target);
 		if (!alias) throw new RoutingPolicyError(`Unknown model alias "${target}"`);
@@ -249,7 +322,7 @@ export async function initializeRequestRoute(
 				position: 0,
 				match_api_key_id: null,
 				match_model_kind: "exact",
-				match_model_value: model,
+				match_model_value: routingModel,
 				pool_kind: destination.accountIds
 					? "accounts"
 					: (winning?.pool_kind ?? "inherit"),
@@ -313,6 +386,7 @@ export async function initializeRequestRoute(
 					accounts: routedStage,
 					rules: [stageRule],
 					requestedModel: model,
+					routingModel,
 					apiKeyId,
 					permissions,
 					priorExclusions,
@@ -333,6 +407,7 @@ export async function initializeRequestRoute(
 		winning,
 		target,
 		model,
+		routingModel,
 		apiKeyId,
 		priorExclusions,
 	});
@@ -353,6 +428,8 @@ async function installPooledRoute(
 		winning: RoutingRule | null;
 		target: string;
 		model: string;
+		/** The name the routing table decided for, when it differs from `model`. */
+		routingModel?: string;
 		apiKeyId: string | null;
 		priorExclusions: Map<string, string>;
 		sdkBridgeTurnId?: string;
@@ -399,6 +476,7 @@ async function installPooledRoute(
 			accounts: routed,
 			rules: input.rules,
 			requestedModel: input.model,
+			routingModel: input.routingModel,
 			apiKeyId: input.apiKeyId,
 			permissions,
 			priorExclusions,

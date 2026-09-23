@@ -12,8 +12,10 @@
  *  - WEEKLY-LIMIT (`anthropic_auto_apply_banked_reset_on_weekly_limit_enabled`):
  *    a weekly window the grant clears is at its limit, the pause (if any) is
  *    one a reset lifts, the last cooldown-anchoring auto claim is an hour old,
- *    and no other Anthropic account can serve the same scope, unless the grant
- *    expires before that window resets on its own.
+ *    that window resets on its own no sooner than
+ *    {@link BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS} from now, and no other
+ *    Anthropic account can serve the same scope. A grant that expires before
+ *    that window resets passes the last two gates.
  *
  * Only the server's `next_grant_id` is ever claimed, and only a grant that
  * clears a weekly window: a 5h-only grant is manual-only.
@@ -23,13 +25,16 @@
  * Discovery then reads only caches; a candidate it finds gets a forced
  * status read (at most one per account per
  * {@link BANKED_RESET_CONFIRM_READ_INTERVAL_MS}) and the decision is taken on
- * that before the ledger claim.
+ * that before the ledger claim. Expiry claims are sent during the account
+ * loop. Weekly-limit candidates are ranked latest natural reset first and
+ * confirmed in that order until one claim is sent, so a tick spends at most
+ * one grant on a weekly limit; a pending weekly-limit claim that may replay
+ * takes that slot, whether it replays now or is backing off.
  */
 
 import {
 	FAMILY_PRIORITY,
 	intervalManager,
-	isAccountAvailable,
 	type ModelFamily,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
@@ -58,6 +63,7 @@ import {
 	isOveragePause,
 	overagePauseVerdict,
 } from "./anthropic-banked-reset-coordinator";
+import { cooldownRulesOutAlternative } from "./banked-reset-alternative";
 import { weeklyResetCanLiftPause } from "./codex-reset-credit-applier";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
@@ -77,6 +83,12 @@ export const BANKED_RESET_AUTO_APPLY_TICK_MS = 60_000;
  * triggers through the ledger's re-arm deadline instead.
  */
 export const BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS = 60 * 60 * 1_000;
+/**
+ * Weekly-limit trigger: a grant keeps the account's weekly reset day, so a
+ * claim gains only the time until the cleared window would reset anyway. It
+ * needs at least this much of it, unless the grant expires first.
+ */
+export const BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS = 12 * 60 * 60 * 1_000;
 /**
  * At most one forced status read per account in this span. The read shares
  * the usage poll's rate-limit bucket, and an account held at its limit (a
@@ -101,6 +113,8 @@ export type BankedResetApplyDecision =
 			cause: "weekly-limit";
 			/** The exhausted weekly windows the grant clears. */
 			windows: AnthropicBankedResetWindow[];
+			/** The latest known natural reset among those windows. */
+			resetsAt: number;
 			/** The grant expires before one of those windows resets on its own. */
 			lastChance: boolean;
 	  }
@@ -125,6 +139,8 @@ export type BankedResetApplyDecision =
 				| "weekly-not-exhausted"
 				| "paused"
 				| "cooldown"
+				| "weekly-reset-unknown"
+				| "reset-soon"
 				| "other-account-available";
 	  };
 
@@ -187,12 +203,46 @@ export function readUsageWindow(
 }
 
 /**
+ * When `window` resets on its own: the usage reading's time, else the status's
+ * weekly reset for `seven_day`; null when neither knows.
+ */
+function naturalResetAt(
+	window: AnthropicBankedResetWindow,
+	windowResetsAt: Partial<Record<AnthropicBankedResetWindow, number>>,
+	status: AnthropicBankedResetStatus | null,
+): number | null {
+	return (
+		windowResetsAt[window] ??
+		(window === "seven_day" ? (status?.weeklyResetsAt ?? null) : null)
+	);
+}
+
+/** The grant expires before one of the windows resets on its own. */
+function isLastChance(
+	grantEndsAt: number | null,
+	resets: Array<number | null>,
+): boolean {
+	return (
+		grantEndsAt !== null &&
+		resets.some((resetsAt) => resetsAt !== null && grantEndsAt < resetsAt)
+	);
+}
+
+function latestReset(resets: Array<number | null>): number | null {
+	const known = resets.filter((resetsAt) => resetsAt !== null);
+	return known.length > 0 ? Math.max(...known) : null;
+}
+
+/**
  * Pure decision for one account. Shared gates first (a toggle on, Anthropic
  * OAuth, not needs-reauth), then the next grant's gates (usable now, not
  * paused, not expired, server cooldown passed, clears a weekly window), then
  * EXPIRY before WEEKLY-LIMIT so a claim both would make is audited as expiry.
- * The weekly "another account can serve the scope" gate is async and left to
- * the caller, which skips it when `lastChance` is set.
+ * WEEKLY-LIMIT needs one of the windows it clears to reset on its own no
+ * sooner than {@link BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS} from now, unless
+ * `lastChance` is set; an unknown reset fails closed. The weekly
+ * "another account can serve the scope" gate is async and left to the
+ * caller, which skips it when `lastChance` is set.
  */
 export function decideBankedResetAction(inputs: {
 	account: Pick<
@@ -298,29 +348,116 @@ export function decideBankedResetAction(inputs: {
 		) {
 			weeklySkip = { action: "skip", reason: "cooldown" };
 		} else {
-			const endsAt = grant.endsAt;
-			const lastChance =
-				endsAt !== null &&
-				windows.some((window) => {
-					const resetsAt =
-						windowResetsAt[window] ??
-						(window === "seven_day" ? status.weeklyResetsAt : null);
-					return resetsAt != null && endsAt < resetsAt;
-				});
-			return {
-				action: "claim",
-				grantId: grant.id,
-				grantEndsAt: endsAt,
-				cause: "weekly-limit",
-				windows,
-				lastChance,
-			};
+			const resets = windows.map((window) =>
+				naturalResetAt(window, windowResetsAt, status),
+			);
+			const lastChance = isLastChance(grant.endsAt, resets);
+			const resetsAt = latestReset(resets);
+			if (resetsAt === null) {
+				weeklySkip = { action: "skip", reason: "weekly-reset-unknown" };
+			} else if (
+				lastChance ||
+				resetsAt - now >= BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS
+			) {
+				return {
+					action: "claim",
+					grantId: grant.id,
+					grantEndsAt: grant.endsAt,
+					cause: "weekly-limit",
+					windows,
+					resetsAt,
+					lastChance,
+				};
+			} else {
+				weeklySkip = { action: "skip", reason: "reset-soon" };
+			}
 		}
 	}
 
 	return (
 		weeklySkip ?? expirySkip ?? { action: "skip", reason: "toggle-disabled" }
 	);
+}
+
+type BankedResetClaimDecision = Extract<
+	BankedResetApplyDecision,
+	{ action: "claim" }
+>;
+
+function nextGrant(status: AnthropicBankedResetStatus | null) {
+	return (
+		status?.grants.find((grant) => grant.id === status.nextGrantId) ?? null
+	);
+}
+
+/** Family-weekly memo entries: when each exhausted family's window resets. */
+export type FamilyWeeklyMemo = Partial<Record<ModelFamily, number>>;
+
+/**
+ * When each weekly window resets: the usage reading's time, else, for a
+ * family window, the family-weekly memo's.
+ */
+function windowResets(
+	usage: UsageData | null,
+	memo: FamilyWeeklyMemo,
+	now: number,
+): Partial<Record<AnthropicBankedResetWindow, number>> {
+	const resets: Partial<Record<AnthropicBankedResetWindow, number>> = {};
+	for (const window of WEEKLY_WINDOWS) {
+		const family = bankedResetWindowFamily(window);
+		const resetMs =
+			readUsageWindow(usage, window, now)?.resetMs ??
+			(family === null ? undefined : memo[family]);
+		if (resetMs != null) resets[window] = resetMs;
+	}
+	return resets;
+}
+
+/** Weekly windows at their limit in usage, the family-weekly memo or `status`. */
+function atLimitWeeklyWindows(
+	usage: UsageData | null,
+	memo: FamilyWeeklyMemo,
+	status: AnthropicBankedResetStatus | null,
+	now: number,
+): AnthropicBankedResetWindow[] {
+	return WEEKLY_WINDOWS.filter((window) => {
+		const family = bankedResetWindowFamily(window);
+		return (
+			(readUsageWindow(usage, window, now)?.utilization ?? 0) >= 100 ||
+			(family !== null && memo[family] !== undefined) ||
+			(status?.exhausted.includes(window) ?? false)
+		);
+	});
+}
+
+/** A weekly-limit claim that passed discovery and awaits ranking. */
+interface WeeklyProposal {
+	candidate: { id: string; name: string };
+	/** The latest known natural reset among the windows it would clear. */
+	resetsAt: number | null;
+	grantEndsAt: number | null;
+}
+
+/**
+ * Pick order among weekly proposals: latest natural reset first (the grant
+ * gains the most time there), then the grant that ends first; unknowns last.
+ */
+function compareWeeklyProposals(a: WeeklyProposal, b: WeeklyProposal): number {
+	return (
+		compareKnownFirst(a.resetsAt, b.resetsAt, (x, y) => y - x) ||
+		compareKnownFirst(a.grantEndsAt, b.grantEndsAt, (x, y) => x - y)
+	);
+}
+
+function compareKnownFirst(
+	a: number | null,
+	b: number | null,
+	compare: (a: number, b: number) => number,
+): number {
+	if (a === b) return 0;
+	if (a === null) return 1;
+	if (b === null) return -1;
+	return compare(a, b);
 }
 
 /** Injectable dependencies; production wiring is {@link createAnthropicBankedResetApplyScheduler}. */
@@ -359,9 +496,12 @@ export interface BankedResetApplyDeps {
 	statusNeedsRefresh(accountId: string): boolean;
 	/** Pure usage-cache read; never a network call. */
 	getUsage(accountId: string): UsageData | null;
-	/** Whether the family-weekly memo holds any entry for the account. */
-	hasFamilyWeeklyMemo(accountId: string): boolean;
-	/** Whether other accounts can serve every one of these exhausted windows. */
+	/** The account's family-weekly memo entries. */
+	getFamilyWeeklyMemo(accountId: string): FamilyWeeklyMemo;
+	/**
+	 * Whether other accounts can serve every one of these exhausted windows.
+	 * A usable account whose usage stays unknown counts as able to serve.
+	 */
 	hasOtherAvailableAccount(
 		accountId: string,
 		windows: AnthropicBankedResetWindow[],
@@ -438,9 +578,40 @@ export class AnthropicBankedResetApplyScheduler {
 			log.warn(`Banked-reset applier: failed to list accounts: ${error}`);
 			return;
 		}
+		const readThisTick = new Set<string>();
+		const weekly: WeeklyProposal[] = [];
+		let weeklyHeld = false;
 		for (const candidate of candidates) {
 			try {
-				await this.processAccount(candidate);
+				const pass = await this.processAccount(candidate, readThisTick);
+				if (pass === "weekly-held") weeklyHeld = true;
+				else if (pass) weekly.push(pass);
+			} catch (error) {
+				log.error(
+					`Banked-reset applier: failed for account ${candidate.name} (${candidate.id}):`,
+					error,
+				);
+			}
+		}
+
+		// A pending weekly-limit claim that may replay is this tick's weekly
+		// claim, whatever it answered and whether or not it was due.
+		if (weeklyHeld) return;
+		weekly.sort(compareWeeklyProposals);
+		for (const proposal of weekly) {
+			const { candidate } = proposal;
+			try {
+				const decision = await this.confirm(candidate, readThisTick);
+				if (!decision || !(await this.claimAndDispatch(candidate, decision))) {
+					continue;
+				}
+				if (decision.cause !== "weekly-limit") continue;
+				if (weekly.length > 1) {
+					log.info(
+						`Banked-reset applier: the weekly-limit claim went to '${candidate.name}' (natural reset ${new Date(decision.resetsAt).toISOString()}) out of ${weekly.length} candidates`,
+					);
+				}
+				return;
 			} catch (error) {
 				log.error(
 					`Banked-reset applier: failed for account ${candidate.name} (${candidate.id}):`,
@@ -548,18 +719,29 @@ export class AnthropicBankedResetApplyScheduler {
 		await this.deps.clearRecoveryPending(row.id);
 	}
 
-	private async processAccount(candidate: {
-		id: string;
-		name: string;
-	}): Promise<void> {
+	/**
+	 * Replays a due pending claim, or runs discovery. An expiry claim is
+	 * confirmed and dispatched here; a weekly-limit one is returned for ranking.
+	 */
+	private async processAccount(
+		candidate: { id: string; name: string },
+		readThisTick: Set<string>,
+	): Promise<WeeklyProposal | "weekly-held" | null> {
 		const { id, name } = candidate;
 		const account = await this.deps.getAccount(id);
-		if (!account) return;
+		if (!account) return null;
 
 		const allPending = await this.deps.getPendingAttempts(id);
 		const pending = allPending.filter((row) => row.trigger === "auto");
 		if (pending.length > 0) {
 			const now = this.now();
+			// Its outcome stays unknown until a replay lands, and meanwhile its
+			// account still reads as exhausted to every pool check.
+			const held = pending.some(
+				(row) => row.cause === "weekly-limit" && this.mayReplay(account, row),
+			)
+				? "weekly-held"
+				: null;
 			// A backed-off claim holds the account until it is due: any new claim
 			// for its grant would reuse its row and replay early.
 			if (
@@ -567,20 +749,21 @@ export class AnthropicBankedResetApplyScheduler {
 					(row) => row.next_attempt_at !== null && row.next_attempt_at > now,
 				)
 			) {
-				return;
+				return held;
 			}
 			const replayable = pending.find((row) => this.mayReplay(account, row));
 			if (replayable) {
-				await this.dispatch(id, name, replayable.cause ?? "expiry", {
+				const cause = replayable.cause ?? "expiry";
+				await this.dispatch(id, name, cause, {
 					grantId: replayable.grant_id,
 					requestId: replayable.request_id,
 					autoApply: {
 						ledgerRowId: replayable.id,
-						cause: replayable.cause ?? "expiry",
+						cause,
 						replay: true,
 					},
 				});
-				return;
+				return held;
 			}
 		}
 
@@ -591,43 +774,153 @@ export class AnthropicBankedResetApplyScheduler {
 			log.debug(
 				`Banked-reset applier: '${name}' has an unconfirmed claim; no new attempt`,
 			);
-			return;
+			return null;
 		}
 
-		if (account.anthropic_auto_apply_banked_resets_enabled) {
+		const now = this.now();
+		const usage = this.deps.getUsage(id);
+		const memo = this.deps.getFamilyWeeklyMemo(id);
+		// Discovery trusts the cached next grant, so a weekly limit keeps it
+		// within the cache's own TTL.
+		if (
+			account.anthropic_auto_apply_banked_resets_enabled ||
+			(account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled &&
+				(Object.keys(memo).length > 0 ||
+					atLimitWeeklyWindows(usage, memo, null, now).length > 0))
+		) {
 			await this.deps.refreshStatus(id, false);
 		}
-		if (!this.discover(account)) return;
+		const status = this.deps.getCachedStatus(id);
+		const discovery = this.discover(account, status, usage, memo, now);
+		if (!discovery) return null;
 
 		// An ineligible account stays ineligible until the cache's own TTL (6 h
 		// for a stable reason) says to look again.
-		const cached = this.deps.getCachedStatus(id);
-		if (cached && !cached.eligible && !this.deps.statusNeedsRefresh(id)) {
-			return;
+		if (status && !status.eligible && !this.deps.statusNeedsRefresh(id)) {
+			return null;
 		}
 
-		// A claim only ever follows a forced read in the same tick.
-		const lastRead = this.confirmReadAt.get(id);
-		const now = this.now();
-		if (
-			lastRead !== undefined &&
-			now - lastRead < BANKED_RESET_CONFIRM_READ_INTERVAL_MS
-		) {
-			return;
+		if (discovery.kind === "weekly") {
+			return this.weeklyProposal(
+				candidate,
+				status,
+				discovery.windows,
+				usage,
+				memo,
+			);
 		}
-		this.confirmReadAt.set(id, now);
-		if (!(await this.deps.refreshStatus(id, true))) {
-			log.debug(`Banked-reset applier: status read failed for '${name}'`);
-			return;
+		const decision = await this.confirm(candidate, readThisTick);
+		if (!decision) return null;
+		if (decision.cause === "weekly-limit") {
+			return {
+				candidate,
+				resetsAt: decision.resetsAt,
+				grantEndsAt: decision.grantEndsAt,
+			};
+		}
+		await this.claimAndDispatch(candidate, decision);
+		return null;
+	}
+
+	/**
+	 * A weekly-only candidate, ranked on cached readings; its forced read waits
+	 * for confirmation. Null when the cached readings already fail the
+	 * decision's minimum-gain or cooldown gate, or when another account can
+	 * serve the at-limit windows and the grant outlives them. Without a cached
+	 * grant the last chance is unknowable and taken as false.
+	 */
+	private async weeklyProposal(
+		candidate: { id: string; name: string },
+		status: AnthropicBankedResetStatus | null,
+		windows: AnthropicBankedResetWindow[],
+		usage: UsageData | null,
+		memo: FamilyWeeklyMemo,
+	): Promise<WeeklyProposal | null> {
+		const { id, name } = candidate;
+		const now = this.now();
+		const windowResetsAt = windowResets(usage, memo, now);
+		const resets = windows.map((window) =>
+			naturalResetAt(window, windowResetsAt, status),
+		);
+		const grantEndsAt = nextGrant(status)?.endsAt ?? null;
+		const lastChance = isLastChance(grantEndsAt, resets);
+		const resetsAt = latestReset(resets);
+		// An unknown reset still goes to the forced read, which may supply one.
+		if (
+			!lastChance &&
+			resetsAt !== null &&
+			resetsAt - now < BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS
+		) {
+			log.debug(
+				`Banked-reset applier: '${name}' resets on its own within the minimum gain; no status read`,
+			);
+			return null;
+		}
+		const cooldownAnchorAt = await this.deps.getAutoApplyCooldownAnchorAt(id);
+		if (
+			cooldownAnchorAt !== null &&
+			now - cooldownAnchorAt < BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS
+		) {
+			log.debug(
+				`Banked-reset applier: '${name}' is in its weekly-limit cooldown; no status read`,
+			);
+			return null;
+		}
+		if (
+			!lastChance &&
+			windows.length > 0 &&
+			(await this.deps.hasOtherAvailableAccount(id, windows))
+		) {
+			log.debug(
+				`Banked-reset applier: another account can serve '${name}' at its weekly limit; no status read`,
+			);
+			return null;
+		}
+		return { candidate, resetsAt, grantEndsAt };
+	}
+
+	/**
+	 * The forced status read a claim follows, at most one per account per
+	 * {@link BANKED_RESET_CONFIRM_READ_INTERVAL_MS} and reused within the tick,
+	 * then the decision on it. Null unless that decision is a claim.
+	 */
+	private async confirm(
+		candidate: { id: string; name: string },
+		readThisTick: Set<string>,
+	): Promise<BankedResetClaimDecision | null> {
+		const { id, name } = candidate;
+		if (!readThisTick.has(id)) {
+			const lastRead = this.confirmReadAt.get(id);
+			const now = this.now();
+			if (
+				lastRead !== undefined &&
+				now - lastRead < BANKED_RESET_CONFIRM_READ_INTERVAL_MS
+			) {
+				return null;
+			}
+			this.confirmReadAt.set(id, now);
+			if (!(await this.deps.refreshStatus(id, true))) {
+				log.debug(`Banked-reset applier: status read failed for '${name}'`);
+				return null;
+			}
+			readThisTick.add(id);
 		}
 		const decision = await this.evaluate(id);
 		if (!decision || decision.action !== "claim") {
 			log.debug(
 				`Banked-reset applier: no claim for '${name}' (${decision?.action === "skip" ? decision.reason : "account vanished"})`,
 			);
-			return;
+			return null;
 		}
+		return decision;
+	}
 
+	/** False when the ledger refused the claim. */
+	private async claimAndDispatch(
+		candidate: { id: string; name: string },
+		decision: BankedResetClaimDecision,
+	): Promise<boolean> {
+		const { id, name } = candidate;
 		const claim = await this.deps.claimAutoAttempt({
 			accountId: id,
 			accountName: name,
@@ -640,7 +933,7 @@ export class AnthropicBankedResetApplyScheduler {
 			log.debug(
 				`Banked-reset applier: claim refused for '${name}' grant ${decision.grantId} (another claim is pending)`,
 			);
-			return;
+			return false;
 		}
 		await this.dispatch(id, name, decision.cause, {
 			grantId: decision.grantId,
@@ -651,6 +944,7 @@ export class AnthropicBankedResetApplyScheduler {
 				replay: claim.reused,
 			},
 		});
+		return true;
 	}
 
 	private mayReplay(
@@ -671,37 +965,45 @@ export class AnthropicBankedResetApplyScheduler {
 			: account.anthropic_auto_apply_banked_resets_enabled;
 	}
 
-	/** Cheap: caches only. */
-	private discover(account: Account): boolean {
-		const now = this.now();
-		const status = this.deps.getCachedStatus(account.id);
-		if (account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled) {
-			const usage = this.deps.getUsage(account.id);
-			const weeklyAtLimit = WEEKLY_WINDOWS.some(
-				(window) =>
-					(readUsageWindow(usage, window, now)?.utilization ?? 0) >= 100,
-			);
-			if (
-				weeklyAtLimit ||
-				this.deps.hasFamilyWeeklyMemo(account.id) ||
-				status?.exhausted.some(isWeeklyWindow)
-			) {
-				return true;
-			}
+	/**
+	 * Cheap: caches only. The weekly trigger fires on a weekly window at its
+	 * limit in usage, the family-weekly memo or the cached status; once a
+	 * status is cached, only on one its next grant clears. The expiry trigger
+	 * takes precedence: its forced read decides both.
+	 */
+	private discover(
+		account: Account,
+		status: AnthropicBankedResetStatus | null,
+		usage: UsageData | null,
+		memo: FamilyWeeklyMemo,
+		now: number,
+	):
+		| { kind: "expiry" }
+		| { kind: "weekly"; windows: AnthropicBankedResetWindow[] }
+		| null {
+		const grant = nextGrant(status);
+		if (
+			account.anthropic_auto_apply_banked_resets_enabled &&
+			grant?.endsAt != null &&
+			grant.endsAt > now &&
+			grant.endsAt - now <= BANKED_RESET_AUTO_APPLY_LEAD_MS
+		) {
+			return { kind: "expiry" };
 		}
-		if (account.anthropic_auto_apply_banked_resets_enabled && status) {
-			const next = status.grants.find(
-				(grant) => grant.id === status.nextGrantId,
-			);
-			if (
-				next?.endsAt != null &&
-				next.endsAt > now &&
-				next.endsAt - now <= BANKED_RESET_AUTO_APPLY_LEAD_MS
-			) {
-				return true;
-			}
+		if (!account.anthropic_auto_apply_banked_reset_on_weekly_limit_enabled) {
+			return null;
 		}
-		return false;
+		const atLimit = atLimitWeeklyWindows(usage, memo, status, now);
+		if (!status) {
+			// The forced read fills in the status.
+			return atLimit.length > 0 || Object.keys(memo).length > 0
+				? { kind: "weekly", windows: atLimit }
+				: null;
+		}
+		const windows = grant
+			? atLimit.filter((window) => grant.clears.includes(window))
+			: [];
+		return windows.length > 0 ? { kind: "weekly", windows } : null;
 	}
 
 	private async evaluate(
@@ -710,20 +1012,17 @@ export class AnthropicBankedResetApplyScheduler {
 		const account = await this.deps.getAccount(accountId);
 		if (!account) return null;
 		const now = this.now();
-		const usage = this.deps.getUsage(accountId);
-		const windowResetsAt: Partial<Record<AnthropicBankedResetWindow, number>> =
-			{};
-		for (const window of WEEKLY_WINDOWS) {
-			const resetMs = readUsageWindow(usage, window, now)?.resetMs;
-			if (resetMs != null) windowResetsAt[window] = resetMs;
-		}
 		const decision = decideBankedResetAction({
 			account,
 			status: this.deps.getCachedStatus(accountId),
 			autoApplyCooldownAnchorAt:
 				await this.deps.getAutoApplyCooldownAnchorAt(accountId),
 			rearmAt: await this.deps.getRearmAt(accountId),
-			windowResetsAt,
+			windowResetsAt: windowResets(
+				this.deps.getUsage(accountId),
+				this.deps.getFamilyWeeklyMemo(accountId),
+				now,
+			),
 			now,
 		});
 		if (
@@ -826,12 +1125,15 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 	const { dbOps, coordinator, overrides } = wiring;
 	const usage = wiring.usage ?? usageCache;
 	const nowMs = overrides?.now ?? Date.now;
-	// One usage read per unknown alternative per tick at most.
+	// One usage read per unknown alternative per forced-read interval: unknown
+	// already blocks the claim, so reading it sooner saves nothing.
 	const usageRefreshAttempts = new Map<string, number>();
 	const usable = (account: Account, now: number) =>
 		account.provider === "anthropic" &&
 		Boolean(account.refresh_token) &&
-		isAccountAvailable(account, now) &&
+		!account.disabled &&
+		!account.paused &&
+		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH;
 	const readUsage = (accountId: string) =>
 		usage.get(accountId) as UsageData | null;
@@ -877,12 +1179,14 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		statusNeedsRefresh: (accountId) =>
 			anthropicBankedResetCache.needsRefresh(accountId, nowMs()),
 		getUsage: readUsage,
-		hasFamilyWeeklyMemo: (accountId) => {
+		getFamilyWeeklyMemo: (accountId) => {
 			const now = nowMs();
-			return FAMILY_PRIORITY.some(
-				(family) =>
-					getFamilyWeeklyExhaustedUntil(accountId, family, now) !== null,
-			);
+			const memo: FamilyWeeklyMemo = {};
+			for (const family of FAMILY_PRIORITY) {
+				const until = getFamilyWeeklyExhaustedUntil(accountId, family, now);
+				if (until !== null) memo[family] = until;
+			}
+			return memo;
 		},
 		hasOtherAvailableAccount: async (accountId, windows) => {
 			const [accounts, keys] = await Promise.all([
@@ -893,13 +1197,17 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 			if (keys.some((key) => key.pinnedAccountId === accountId)) return false;
 			const now = nowMs();
 			for (const [id, attemptedAt] of usageRefreshAttempts) {
-				if (now - attemptedAt >= BANKED_RESET_AUTO_APPLY_TICK_MS) {
+				if (now - attemptedAt >= BANKED_RESET_CONFIRM_READ_INTERVAL_MS) {
 					usageRefreshAttempts.delete(id);
 				}
 			}
 			const served = new Set<AnthropicBankedResetWindow>();
 			const unknown: Account[] = [];
-			const note = (account: Account, at: number): boolean => {
+			const note = (
+				account: Account,
+				at: number,
+				unknownServes: boolean,
+			): boolean => {
 				let anyUnknown = false;
 				for (const window of windows) {
 					const serves = servesWindow(
@@ -908,15 +1216,18 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 						window,
 						at,
 					);
-					if (serves === true) served.add(window);
+					if (serves === true || (serves === null && unknownServes)) {
+						served.add(window);
+					}
 					if (serves === null) anyUnknown = true;
 				}
 				return anyUnknown;
 			};
 			for (const account of accounts) {
 				if (account.id === accountId || !usable(account, now)) continue;
-				if (note(account, now)) unknown.push(account);
+				if (note(account, now, false)) unknown.push(account);
 			}
+			// One read each; a reading that stays unknown counts as able to serve.
 			for (const account of unknown) {
 				if (served.size === windows.length) break;
 				if (!usageRefreshAttempts.has(account.id)) {
@@ -931,7 +1242,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 					}
 				}
 				const current = await dbOps.getAccount(account.id);
-				if (current && usable(current, nowMs())) note(current, nowMs());
+				if (current && usable(current, nowMs())) note(current, nowMs(), true);
 			}
 			return served.size === windows.length;
 		},

@@ -36,6 +36,11 @@ import {
 	getValidAccessToken,
 	refreshAccessTokenSafe,
 } from "./handlers/token-manager";
+import {
+	type ReadGate,
+	type ReadTurn,
+	SpacedReadGate,
+} from "./spaced-read-gate";
 
 const log = new Logger("AnthropicBankedResets");
 
@@ -165,7 +170,12 @@ export interface AnthropicBankedResetCoordinatorDeps {
 		"fenceAndRefetch" | "get" | "noteRateLimited" | "getRateLimitedUntil"
 	>;
 	now?: () => number;
+	/** Spaces status reads of different accounts; one per coordinator. */
+	readGate?: ReadGate;
 }
+
+/** Gap between status reads of different accounts, jittered up to 1.5×. */
+export const ANTHROPIC_BANKED_RESET_READ_SPACING_MS = 3_000;
 
 type LedgerTarget =
 	| {
@@ -212,6 +222,7 @@ export class AnthropicBankedResetCoordinator {
 		AnthropicBankedResetCoordinatorDeps["usage"]
 	>;
 	private readonly now: () => number;
+	private readonly readGate: ReadGate;
 	private readonly statusInflight = new Map<
 		string,
 		Promise<AnthropicBankedResetRefreshOutcome>
@@ -238,6 +249,17 @@ export class AnthropicBankedResetCoordinator {
 		this.canFetchProfile = deps.canFetchProfile ?? canFetchAnthropicProfile;
 		this.usage = deps.usage ?? usageCache;
 		this.now = deps.now ?? Date.now;
+		this.readGate =
+			deps.readGate ??
+			new SpacedReadGate({
+				spacingMs: ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
+				now: this.now,
+			});
+	}
+
+	/** Refuses every status read still waiting for its turn, and any later one. */
+	stop(): void {
+		this.readGate.stop();
 	}
 
 	/**
@@ -264,7 +286,7 @@ export class AnthropicBankedResetCoordinator {
 					};
 		}
 
-		const promise = this.runStatusRead(accountId);
+		const promise = this.runStatusRead(accountId, force);
 		this.statusInflight.set(accountId, promise);
 		const clear = () => {
 			if (this.statusInflight.get(accountId) === promise) {
@@ -291,7 +313,7 @@ export class AnthropicBankedResetCoordinator {
 				status: "failed",
 				code: "busy",
 				message:
-					"Another banked-reset claim is already in progress for this account.",
+					"Another banked-reset attempt is already in progress for this account.",
 			};
 		}
 		const promise = this.runClaim(accountId, request);
@@ -308,36 +330,78 @@ export class AnthropicBankedResetCoordinator {
 
 	private async runStatusRead(
 		accountId: string,
+		urgent: boolean,
 	): Promise<AnthropicBankedResetRefreshOutcome> {
-		const account = await this.ctx.dbOps.getAccount(accountId);
-		const unusable = this.unusableReason(account, accountId);
-		if (unusable || !account) {
+		const queued = await this.ctx.dbOps.getAccount(accountId);
+		const unusable = this.unusableReason(queued, accountId);
+		if (unusable || !queued) {
 			return { success: false, message: unusable ?? "Account not found" };
 		}
+		const limited = this.rateLimitedStatusRead(queued);
+		if (limited) return limited;
 
-		const limitedUntil = this.usage.getRateLimitedUntil(accountId);
-		if (limitedUntil !== null) {
-			return {
-				success: false,
-				message: `Banked-reset status read for '${account.name}' skipped: the usage endpoint is rate-limited until ${new Date(limitedUntil).toISOString()}.`,
-			};
-		}
-
-		let accessToken: string;
+		let turn: ReadTurn;
 		try {
-			accessToken = await this.getValidAccessToken(account, this.ctx);
-		} catch (error) {
+			turn = await this.readGate.acquire(accountId, { urgent });
+		} catch {
 			return {
 				success: false,
-				message: `Could not refresh access token for '${account.name}': ${errorMessage(error)}`,
+				message: `Banked-reset status read for '${queued.name}' skipped: shutting down.`,
 			};
 		}
+		try {
+			// The turn can take several reads' spacing to come round, so the
+			// account, its rate limit and its token are taken as they stand now.
+			const account = await this.ctx.dbOps.getAccount(accountId);
+			const unusableNow = this.unusableReason(account, accountId);
+			if (unusableNow || !account) {
+				return { success: false, message: unusableNow ?? "Account not found" };
+			}
+			const limitedNow = this.rateLimitedStatusRead(account);
+			if (limitedNow) return limitedNow;
 
-		anthropicBankedResetCache.markAttempt(accountId, this.now());
+			let accessToken: string;
+			try {
+				accessToken = await this.getValidAccessToken(account, this.ctx);
+			} catch (error) {
+				return {
+					success: false,
+					message: `Could not refresh access token for '${account.name}': ${errorMessage(error)}`,
+				};
+			}
+
+			anthropicBankedResetCache.markAttempt(accountId, this.now());
+			return await this.sendStatusRead(account, accessToken, turn);
+		} finally {
+			turn.release();
+		}
+	}
+
+	private rateLimitedStatusRead(
+		account: Account,
+	): AnthropicBankedResetRefreshOutcome | null {
+		const limitedUntil = this.usage.getRateLimitedUntil(account.id);
+		if (limitedUntil === null) return null;
+		return {
+			success: false,
+			message: `Banked-reset status read for '${account.name}' skipped: the usage endpoint is rate-limited until ${new Date(limitedUntil).toISOString()}.`,
+		};
+	}
+
+	private async sendStatusRead(
+		account: Account,
+		accessToken: string,
+		turn: ReadTurn,
+	): Promise<AnthropicBankedResetRefreshOutcome> {
+		const accountId = account.id;
+		turn.sent();
 		let read = await this.fetchStatus(accessToken);
 		if (read.httpStatus === 401) {
 			const refreshed = await this.forceTokenRefresh(account, accessToken);
-			if (refreshed) read = await this.fetchStatus(refreshed);
+			if (refreshed) {
+				turn.sent();
+				read = await this.fetchStatus(refreshed);
+			}
 		}
 		if (read.httpStatus === 429) {
 			this.usage.noteRateLimited(
@@ -391,7 +455,7 @@ export class AnthropicBankedResetCoordinator {
 			return {
 				status: "failed",
 				code: "error",
-				message: `The organization of '${account.name}' is unknown, so no claim was sent. Re-authenticate the account or retry once its profile can be read.`,
+				message: `The organization of '${account.name}' is unknown, so nothing was sent. Re-authenticate the account or retry once its profile can be read.`,
 			};
 		}
 
@@ -747,7 +811,7 @@ export class AnthropicBankedResetCoordinator {
 					outcome: {
 						status: "failed",
 						code: "grant_mismatch",
-						message: `Request ${request.requestId} was already used for grant ${begin.row.grant_id}; generate a new request id.`,
+						message: `Request ${request.requestId} was already used for banked reset ${begin.row.grant_id}; generate a new request id.`,
 					},
 				};
 			}
@@ -757,7 +821,7 @@ export class AnthropicBankedResetCoordinator {
 					outcome: {
 						status: "failed",
 						code: "pending_claim",
-						message: `An earlier banked-reset claim for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
+						message: `An earlier banked-reset attempt for '${account.name}' is still unconfirmed; retry it with request ${begin.row.request_id} before starting another.`,
 						pendingRequestId: begin.row.request_id,
 						pendingGrantId: begin.row.grant_id,
 						pendingReplayUntil:
@@ -790,7 +854,7 @@ export class AnthropicBankedResetCoordinator {
 				outcome: {
 					status: "failed",
 					code: "error",
-					message: `The banked-reset claim for '${account.name}' could not be recorded, so it was not sent: ${errorMessage(error)}`,
+					message: `The banked-reset attempt for '${account.name}' could not be recorded, so it was not sent: ${errorMessage(error)}`,
 				},
 			};
 		}
@@ -812,7 +876,7 @@ export class AnthropicBankedResetCoordinator {
 				await this.ctx.dbOps.resolveAnthropicBankedResetAttempt(target.rowId, {
 					status: "failed",
 					reason: BANKED_RESET_NOT_SENT_REASON,
-					errorMessage: `Not sent: the claim for '${account.name}' reached the end of its replay window before its request left`,
+					errorMessage: `Not sent: the attempt for '${account.name}' reached the end of its replay window before its request left`,
 					now: this.now(),
 				});
 			} else {
@@ -833,7 +897,7 @@ export class AnthropicBankedResetCoordinator {
 		return {
 			status: "failed",
 			code: "error",
-			message: `Not sent: the banked-reset claim for '${account.name}' reached the end of its replay window.`,
+			message: `Not sent: the banked-reset attempt for '${account.name}' reached the end of its replay window.`,
 		};
 	}
 

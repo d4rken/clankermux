@@ -465,7 +465,7 @@ export class CodexSpendCoordinator {
 				accountId,
 				account.name,
 				request,
-				`Failed to consume a reset credit for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
+				`Failed to apply a banked reset for '${account.name}': ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 
@@ -591,12 +591,12 @@ export class CodexSpendCoordinator {
 			return cached
 				? {
 						success: true,
-						message: `Codex reset metadata is still fresh (${cached.summary.availableCount} available).`,
+						message: `Codex banked resets are still fresh (${cached.summary.availableCount} available).`,
 					}
 				: {
 						success: false,
 						message:
-							"Codex reset metadata refresh is waiting for its retry window.",
+							"Codex banked-reset refresh is waiting for its retry window.",
 					};
 		}
 
@@ -639,7 +639,7 @@ export class CodexSpendCoordinator {
 		if (this.needsReauth(account)) {
 			return {
 				success: false,
-				message: `Codex reset-credit metadata refresh skipped for '${account.name}': the account needs re-authentication.`,
+				message: `Codex banked-reset refresh skipped for '${account.name}': the account needs re-authentication.`,
 			};
 		}
 
@@ -675,7 +675,7 @@ export class CodexSpendCoordinator {
 		}
 
 		if (!summary) {
-			const base = `Codex returned no reset-credit metadata for '${account.name}'`;
+			const base = `Codex returned no banked-reset status for '${account.name}'`;
 			return {
 				success: false,
 				message: refreshFailureReason
@@ -687,7 +687,7 @@ export class CodexSpendCoordinator {
 		codexRateLimitResetCreditsCache.set(accountId, summary);
 		return {
 			success: true,
-			message: `Reset metadata refreshed for '${account.name}' (${summary.availableCount} available).`,
+			message: `Banked resets refreshed for '${account.name}' (${summary.availableCount} available).`,
 		};
 	}
 
@@ -785,14 +785,14 @@ export class CodexSpendCoordinator {
 		if (usage.success) {
 			return {
 				success: false,
-				message: `${usage.message} — reset-credit metadata refresh failed: ${credits.message}`,
+				message: `${usage.message} — banked-reset refresh failed: ${credits.message}`,
 			};
 		}
 		return {
 			success: false,
 			message: credits.success
 				? usage.message
-				: `${usage.message} — reset-credit metadata refresh also failed: ${credits.message}`,
+				: `${usage.message} — banked-reset refresh also failed: ${credits.message}`,
 		};
 	}
 

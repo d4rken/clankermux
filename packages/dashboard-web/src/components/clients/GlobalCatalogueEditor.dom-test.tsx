@@ -195,10 +195,13 @@ afterEach(async () => {
 });
 
 describe("global catalogue editor", () => {
-	it("offers other models to the Anthropic catalogue under a claude- alias", async () => {
+	it("offers models to the Anthropic catalogue under their real IDs and says how Claude Code lists them", async () => {
 		await mount();
 		expect(listed("Selected")).toEqual(["claude-x"]);
-		expect(listed("Available")).toEqual(["claude-gpt-new"]);
+		expect(listed("Available")).toEqual(["gpt-new"]);
+		expect(document.body.textContent).toContain(
+			"Claude Code lists it as claude-gpt-new",
+		);
 	});
 
 	it("reviews the edited catalogue and subscriber list, then saves the reviewed token", async () => {

@@ -4,6 +4,7 @@ import type { RequestResponse } from "@clankermux/types";
 // copy of its number.
 import { MAX_LANES } from "../../components/overview/LiveActivityLanes";
 import {
+	ACCOUNT_PENDING_LANE_KEY,
 	applyHistoryRows,
 	applyStreamEvent,
 	buildLanes,
@@ -13,6 +14,7 @@ import {
 	laneKeyOf,
 	MARK_OPACITY,
 	markRadius,
+	NO_ACCOUNT_LANE_KEY,
 	pruneLiveStore,
 	rankModels,
 	sweepLostEvents,
@@ -352,6 +354,172 @@ describe("normalization", () => {
 	});
 });
 
+describe("account identity", () => {
+	it("moves ingress work from routing into its selected account", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "ingress",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			project: null,
+			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
+		});
+		expect(
+			buildLanes([...s.values()], "account", T0, WINDOW, 8).lanes[0],
+		).toMatchObject({
+			key: ACCOUNT_PENDING_LANE_KEY,
+			label: "(routing)",
+		});
+
+		applyStreamEvent(s, {
+			type: "start",
+			id: "r1",
+			timestamp: T0 + 1000,
+			method: "POST",
+			path: "/v1/messages",
+			accountId: "acct-a",
+			statusCode: 200,
+			project: null,
+			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
+		});
+		expect(s.get("r1")).toMatchObject({
+			accountId: "acct-a",
+			status: "streaming",
+		});
+		expect(
+			buildLanes([...s.values()], "account", T0, WINDOW, 8).lanes[0].key,
+		).toBe("account:acct-a");
+	});
+
+	it("moves a failover attempt and terminal no-account result explicitly", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "start",
+			id: "r1",
+			timestamp: T0,
+			method: "POST",
+			path: "/v1/messages",
+			accountId: "acct-a",
+			statusCode: 200,
+			project: null,
+			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
+		});
+		applyStreamEvent(s, {
+			type: "start",
+			id: "r1",
+			timestamp: T0 + 1000,
+			method: "POST",
+			path: "/v1/messages",
+			accountId: "acct-b",
+			statusCode: 200,
+			project: null,
+			model: null,
+			apiKeyId: null,
+			apiKeyName: null,
+		});
+		expect(s.get("r1")?.accountId).toBe("acct-b");
+
+		applyStreamEvent(s, {
+			type: "summary",
+			payload: summaryPayload({ accountId: null, accountUsed: "no_account" }),
+		});
+		expect(s.get("r1")).toMatchObject({
+			accountId: null,
+			account: "no_account",
+			status: "ok",
+		});
+		expect(
+			buildLanes([...s.values()], "account", T0, WINDOW, 8).lanes[0],
+		).toMatchObject({
+			key: NO_ACCOUNT_LANE_KEY,
+			label: "(no account)",
+		});
+	});
+
+	it("groups by id while resolving the current name at render time", () => {
+		const rows = [
+			{
+				...summaryPayload({
+					id: "old",
+					accountId: "acct-1",
+					accountUsed: "Old",
+				}),
+			},
+			{
+				...summaryPayload({
+					id: "new",
+					accountId: "acct-1",
+					accountUsed: "New",
+				}),
+			},
+		];
+		const s = store();
+		applyHistoryRows(s, rows);
+		const result = buildLanes(
+			[...s.values()],
+			"account",
+			T0,
+			WINDOW,
+			8,
+			[],
+			(id) => (id === "acct-1" ? "Renamed" : null),
+		);
+		expect(result.lanes).toHaveLength(1);
+		expect(result.lanes[0]).toMatchObject({
+			key: "account:acct-1",
+			label: "Renamed",
+		});
+		expect(result.lanes[0].events.map((event) => event.account)).toEqual([
+			"Old",
+			"New",
+		]);
+	});
+
+	it("falls back from a missing current name to the recorded name and id", () => {
+		const recorded = store();
+		applyHistoryRows(recorded, [
+			summaryPayload({
+				id: "recorded",
+				accountId: "acct-recorded",
+				accountUsed: "Former name",
+			}),
+		]);
+		const recordedLane = buildLanes(
+			[...recorded.values()],
+			"account",
+			T0,
+			WINDOW,
+			8,
+		).lanes[0];
+		expect(recordedLane.label).toBe("Former name");
+
+		const opaque = store();
+		applyHistoryRows(opaque, [
+			summaryPayload({
+				id: "opaque",
+				accountId: "acct-opaque",
+				accountUsed: undefined,
+			}),
+		]);
+		const opaqueLane = buildLanes(
+			[...opaque.values()],
+			"account",
+			T0,
+			WINDOW,
+			8,
+		).lanes[0];
+		expect(opaqueLane.label).toBe("acct-opaque");
+	});
+});
+
 describe("client identity", () => {
 	it("carries the key through an ingress", () => {
 		const s = store();
@@ -648,6 +816,7 @@ describe("buildLanes", () => {
 			status: "ok" as const,
 			durationMs: 100,
 			tokensPerSecond: null,
+			accountId: null,
 			account: null,
 			apiKeyId: null,
 			apiKeyName: null,
@@ -1303,6 +1472,7 @@ describe("rankModels", () => {
 			status: "ok" as const,
 			durationMs: 1,
 			tokensPerSecond: null,
+			accountId: null,
 			account: null,
 			apiKeyId: null,
 			apiKeyName: null,

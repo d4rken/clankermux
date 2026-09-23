@@ -18,6 +18,7 @@ export interface LaneDimensionOption {
 export const LANE_DIMENSION_OPTIONS: readonly LaneDimensionOption[] = [
 	{ value: "project", label: "Project" },
 	{ value: "client", label: "Client" },
+	{ value: "account", label: "Account" },
 ] as const;
 
 /** Projects are what the card has always shown, and what most reads want. */

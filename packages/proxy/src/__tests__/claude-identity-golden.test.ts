@@ -6,7 +6,10 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { trackClientVersion } from "@clankermux/core";
+import {
+	trackClaudeCliStainlessHeaders,
+	trackClientVersion,
+} from "@clankermux/core";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -16,6 +19,7 @@ import type { Account } from "@clankermux/types";
 import { AccountModelPermissionService } from "../account-model-permissions";
 import { AnthropicModelCatalogCache } from "../anthropic-model-catalog-cache";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
+import { ClaudeDeviceRegistry } from "../claude-device-registry";
 
 function sorted(headers: HeadersInit | undefined): Array<[string, string]> {
 	return Array.from(new Headers(headers).entries()).sort(([a], [b]) =>
@@ -43,6 +47,20 @@ afterEach(() => {
 describe("Claude identity at the fetch boundary", () => {
 	it("auto-refresh keepalive names the last client seen", async () => {
 		trackClientVersion("claude-cli/2.1.63 (external, cli)");
+		trackClaudeCliStainlessHeaders(
+			new Headers({
+				"user-agent": "claude-cli/2.1.63 (external, cli)",
+				"x-stainless-arch": "x64",
+				"x-stainless-lang": "js",
+				"x-stainless-os": "Linux",
+				"x-stainless-package-version": "0.112.7",
+				"x-stainless-retry-count": "1",
+				"x-stainless-runtime": "node",
+				"x-stainless-runtime-version": "v26.3.9",
+			}),
+		);
+		const devices = new ClaudeDeviceRegistry();
+		devices.record("acc-1", "e01ccdf3".repeat(8));
 		const dispatched: Request[] = [];
 		const scheduler = new AutoRefreshScheduler(
 			{
@@ -53,6 +71,7 @@ describe("Claude identity at the fetch boundary", () => {
 			{
 				runtime: { port: 8080, clientId: "test-client" },
 				refreshInFlight: new Map(),
+				claudeDevices: devices,
 			} as never,
 			undefined,
 			(async (req: Request) => {
@@ -78,31 +97,36 @@ describe("Claude identity at the fetch boundary", () => {
 		});
 
 		expect(dispatched[0]?.url).toBe("http://internal.clankermux/v1/messages");
+		const sessionId = dispatched[0]?.headers.get("x-claude-code-session-id");
+		expect(sessionId).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
+		expect(await dispatched[0]?.text()).toBe(
+			`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"quota"}],"metadata":{"user_id":"{\\"device_id\\":\\"${"e01ccdf3".repeat(8)}\\",\\"account_uuid\\":\\"\\",\\"session_id\\":\\"${sessionId}\\"}"}}`,
+		);
 		expect(sorted(dispatched[0]?.headers)).toEqual([
 			["accept", "application/json"],
-			["accept-language", "*"],
 			[
 				"anthropic-beta",
-				"oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+				"interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219,advisor-tool-2026-03-01,oauth-2025-04-20",
 			],
 			["anthropic-dangerous-direct-browser-access", "true"],
 			["anthropic-version", "2023-06-01"],
 			["connection", "keep-alive"],
 			["content-type", "application/json"],
-			["sec-fetch-mode", "cors"],
 			["user-agent", "claude-cli/2.1.63 (external, cli)"],
 			["x-app", "cli"],
 			["x-clankermux-account-id", "acc-1"],
 			["x-clankermux-auto-refresh", "true"],
 			["x-clankermux-bypass-session", "true"],
+			["x-claude-code-session-id", sessionId as string],
 			["x-stainless-arch", "x64"],
-			["x-stainless-helper-method", "stream"],
 			["x-stainless-lang", "js"],
 			["x-stainless-os", "Linux"],
-			["x-stainless-package-version", "0.60.0"],
+			["x-stainless-package-version", "0.112.7"],
 			["x-stainless-retry-count", "0"],
 			["x-stainless-runtime", "node"],
-			["x-stainless-runtime-version", "v24.9.0"],
+			["x-stainless-runtime-version", "v26.3.9"],
 			["x-stainless-timeout", "600"],
 		]);
 	});

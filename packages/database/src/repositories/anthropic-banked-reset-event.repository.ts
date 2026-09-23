@@ -343,7 +343,7 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 			WHERE status = 'pending' AND created_at <= ?
 		`,
 			[
-				`Unconfirmed ${ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS / 60_000} minutes after the claim opened; its request id is no longer replayed`,
+				`Unconfirmed ${ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS / 60_000} minutes after the attempt started; its request id is no longer replayed`,
 				now,
 				now - ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
 			],

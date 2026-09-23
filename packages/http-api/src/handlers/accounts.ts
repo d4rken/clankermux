@@ -3061,7 +3061,7 @@ export function createAccountConsumeRateLimitResetCreditHandler(
 			if (account.provider !== "codex") {
 				return errorResponse(
 					BadRequest(
-						"Rate-limit reset credits are only available for Codex accounts",
+						"Codex banked resets are only available for Codex accounts",
 					),
 				);
 			}
@@ -3094,7 +3094,7 @@ export function createAccountConsumeRateLimitResetCreditHandler(
 					case "nothingToReset":
 						return `Account '${dispatched.accountName}' has no eligible usage window to reset.`;
 					case "noCredit":
-						return `Account '${dispatched.accountName}' has no usage reset credits available.`;
+						return `Account '${dispatched.accountName}' has no banked reset left.`;
 				}
 			})();
 			const response: CodexRateLimitResetCreditConsumeResponse = {
@@ -3118,7 +3118,7 @@ export function createAccountConsumeRateLimitResetCreditHandler(
 			return errorResponse(
 				error instanceof Error
 					? error
-					: new Error("Failed to consume rate-limit reset credit"),
+					: new Error("Failed to apply a banked reset"),
 			);
 		}
 	};
@@ -3161,7 +3161,7 @@ export function createAccountAutoApplyResetCreditsHandler(
 			if (account.provider !== "codex") {
 				return errorResponse(
 					BadRequest(
-						"Auto-apply of reset credits is only available for Codex accounts",
+						"Auto-apply of Codex banked resets is only available for Codex accounts",
 					),
 				);
 			}
@@ -3176,7 +3176,7 @@ export function createAccountAutoApplyResetCreditsHandler(
 
 			return jsonResponse({
 				success: true,
-				message: `Auto-apply of reset credits ${action} for account '${account.name}'`,
+				message: `Auto-apply of banked resets ${action} for account '${account.name}'`,
 				autoApplyResetCreditsEnabled: enabled === 1,
 			});
 		} catch (error) {
@@ -3184,7 +3184,7 @@ export function createAccountAutoApplyResetCreditsHandler(
 			return errorResponse(
 				error instanceof Error
 					? error
-					: new Error("Failed to toggle auto-apply-reset-credits"),
+					: new Error("Failed to toggle auto-apply of banked resets"),
 			);
 		}
 	};
@@ -3229,7 +3229,7 @@ export function createAccountAutoApplyResetOnWeeklyLimitHandler(
 			if (account.provider !== "codex") {
 				return errorResponse(
 					BadRequest(
-						"Auto-apply of reset credits is only available for Codex accounts",
+						"Auto-apply of Codex banked resets is only available for Codex accounts",
 					),
 				);
 			}
@@ -3244,7 +3244,7 @@ export function createAccountAutoApplyResetOnWeeklyLimitHandler(
 
 			return jsonResponse({
 				success: true,
-				message: `Auto-apply of reset credits at the weekly limit ${action} for account '${account.name}'`,
+				message: `Auto-apply of banked resets at the weekly limit ${action} for account '${account.name}'`,
 				autoApplyResetOnWeeklyLimitEnabled: enabled === 1,
 			});
 		} catch (error) {
@@ -3288,7 +3288,7 @@ export function createAccountResetCreditEventsHandler(
 			if (account.provider !== "codex") {
 				return errorResponse(
 					BadRequest(
-						"Rate-limit reset credits are only available for Codex accounts",
+						"Codex banked resets are only available for Codex accounts",
 					),
 				);
 			}
@@ -3340,7 +3340,7 @@ export function createAccountResetCreditEventsHandler(
 			return errorResponse(
 				error instanceof Error
 					? error
-					: new Error("Failed to list reset-credit events"),
+					: new Error("Failed to list banked-reset events"),
 			);
 		}
 	};

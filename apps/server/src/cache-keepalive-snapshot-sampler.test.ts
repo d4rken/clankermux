@@ -165,3 +165,118 @@ describe("CacheKeepaliveSnapshotSampler tick", () => {
 		await expect(sampler.tick()).resolves.toBeUndefined();
 	});
 });
+
+/** A sampler whose gauges/stats are driven by mutable test state. */
+function harness(lastSnapshot?: CacheKeepaliveSnapshotRow | null) {
+	const state = {
+		gauges: { warmSessions: 0, promotedSessions: 0, totalBytes: 0 },
+		stats: stats(),
+		failInsert: false,
+	};
+	const inserted: CacheKeepaliveSnapshotRow[] = [];
+	const sampler = new CacheKeepaliveSnapshotSampler({
+		getGauges: () => ({ ...state.gauges }),
+		getStats: () => ({ ...state.stats }),
+		insertSnapshot: async (row) => {
+			if (state.failInsert) throw new Error("db down");
+			inserted.push(row);
+		},
+		getPollIntervalMs: () => 90_000,
+		lastSnapshot,
+	});
+	return { state, inserted, sampler };
+}
+
+describe("CacheKeepaliveSnapshotSampler change detection", () => {
+	it("writes the first sample after boot when there is no stored snapshot", async () => {
+		const { inserted, sampler } = harness(null);
+		await sampler.tick();
+		expect(inserted).toHaveLength(1);
+	});
+
+	it("skips identical consecutive samples", async () => {
+		const { inserted, sampler } = harness(null);
+		await sampler.tick();
+		await sampler.tick();
+		await sampler.tick();
+		expect(inserted).toHaveLength(1);
+	});
+
+	it("writes nothing after boot when the live state equals the stored snapshot", async () => {
+		const stored = buildCacheKeepaliveSnapshotRow(
+			NOW,
+			{ warmSessions: 0, promotedSessions: 0, totalBytes: 0 },
+			stats({ keepalivesSent: 899, hits: 800, misses: 99, spentUsd: 182.15 }),
+		);
+		const { state, inserted, sampler } = harness(stored);
+		state.stats = stats({
+			keepalivesSent: 899,
+			hits: 800,
+			misses: 99,
+			spentUsd: 182.15,
+		});
+		await sampler.tick();
+		await sampler.tick();
+		expect(inserted).toHaveLength(0);
+	});
+
+	it("writes when a counter changes, and again on every changing tick", async () => {
+		const { state, inserted, sampler } = harness(null);
+		await sampler.tick();
+		state.stats = stats({ keepalivesSent: 1, hits: 1, spentUsd: 0.01 });
+		await sampler.tick();
+		state.stats = stats({ keepalivesSent: 2, hits: 2, spentUsd: 0.02 });
+		await sampler.tick();
+		expect(inserted.map((r) => r.keepalivesSent)).toEqual([0, 1, 2]);
+	});
+
+	it("writes when only a session gauge changes", async () => {
+		const { state, inserted, sampler } = harness(null);
+		await sampler.tick();
+		state.gauges = { warmSessions: 1, promotedSessions: 0, totalBytes: 0 };
+		await sampler.tick();
+		state.gauges = { warmSessions: 1, promotedSessions: 1, totalBytes: 0 };
+		await sampler.tick();
+		expect(inserted).toHaveLength(3);
+	});
+
+	it("resumes writing once warming is enabled after an idle stretch, closing the idle run first", async () => {
+		const stored = buildCacheKeepaliveSnapshotRow(
+			NOW,
+			{ warmSessions: 0, promotedSessions: 0, totalBytes: 0 },
+			stats({ keepalivesSent: 899, spentUsd: 182.15 }),
+		);
+		const { state, inserted, sampler } = harness(stored);
+		state.stats = stats({ keepalivesSent: 899, spentUsd: 182.15 });
+		for (let i = 0; i < 5; i++) await sampler.tick();
+		expect(inserted).toHaveLength(0);
+
+		state.gauges = { warmSessions: 2, promotedSessions: 1, totalBytes: 4096 };
+		state.stats = stats({ keepalivesSent: 901, spentUsd: 182.2 });
+		await sampler.tick();
+
+		// The changed row is written first (it is the boot checkpoint), then the
+		// last unchanged sample, so the change has a baseline one tick earlier even
+		// after retention drops the stored row.
+		expect(inserted.map((r) => r.keepalivesSent)).toEqual([901, 899]);
+		expect(inserted[0]?.warmSessions).toBe(2);
+		expect(inserted[1]?.warmSessions).toBe(0);
+		expect(inserted[1]?.sampledAt).toBeLessThanOrEqual(
+			inserted[0]?.sampledAt ?? 0,
+		);
+
+		state.stats = stats({ keepalivesSent: 905, spentUsd: 182.3 });
+		await sampler.tick();
+		expect(inserted.map((r) => r.keepalivesSent)).toEqual([901, 899, 905]);
+	});
+
+	it("retries a failed write on the next tick instead of treating it as written", async () => {
+		const { state, inserted, sampler } = harness(null);
+		state.failInsert = true;
+		await sampler.tick();
+		expect(inserted).toHaveLength(0);
+		state.failInsert = false;
+		await sampler.tick();
+		expect(inserted).toHaveLength(1);
+	});
+});

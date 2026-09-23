@@ -210,9 +210,11 @@ export interface AccountStatus {
 	/** Per-account auto-apply of a reset credit at the weekly limit is enabled (opt-in). */
 	resetCreditAutoApplyOnWeeklyLimitArmed: boolean;
 	/**
-	 * Soonest future use-by date among Anthropic banked-reset grants that still
-	 * have resets left, or null when none.
+	 * Future use-by dates of Anthropic banked-reset grants that still have
+	 * resets left, soonest first; one per grant.
 	 */
+	bankedResetExpiries: Date[];
+	/** Soonest of `bankedResetExpiries`, or null when none. */
 	bankedResetNextExpiry: Date | null;
 	/** Urgency of `bankedResetNextExpiry` (drives the banked-reset chip color). */
 	bankedResetUrgency: ResetCreditUrgency;
@@ -435,11 +437,9 @@ export function deriveAccountStatus(
 			const endsAtMs = Date.parse(grant.endsAt);
 			return Number.isFinite(endsAtMs) && endsAtMs > now ? [endsAtMs] : [];
 		})
-		.sort((a, b) => a - b);
-	const bankedResetNextExpiry =
-		bankedResetExpiries[0] !== undefined
-			? new Date(bankedResetExpiries[0])
-			: null;
+		.sort((a, b) => a - b)
+		.map((endsAtMs) => new Date(endsAtMs));
+	const bankedResetNextExpiry = bankedResetExpiries[0] ?? null;
 
 	return {
 		isPrimary: account.isPrimary,
@@ -491,6 +491,7 @@ export function deriveAccountStatus(
 		resetCreditUrgency,
 		resetCreditAutoApplyArmed,
 		resetCreditAutoApplyOnWeeklyLimitArmed,
+		bankedResetExpiries,
 		bankedResetNextExpiry,
 		bankedResetUrgency: resetCreditUrgencyFor(bankedResetNextExpiry, now),
 		bankedResetAutoApplyArmed: account.autoApplyBankedResetsEnabled === true,

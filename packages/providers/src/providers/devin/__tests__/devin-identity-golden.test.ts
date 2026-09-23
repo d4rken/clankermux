@@ -181,10 +181,10 @@ async function chatMetadata(request: Request): Promise<Metadata | undefined> {
 /** The "chat" profile: GetUserJwt, GetUserStatus and GetChatMessage. */
 const chatProfile = (os: string, userJwt?: string) => ({
 	ideName: "devin-cli",
-	ideVersion: "3000.10.21",
+	ideVersion: "3000.11.1",
 	ideType: "chisel",
 	extensionName: "chisel",
-	extensionVersion: "3000.10.21",
+	extensionVersion: "3000.11.1",
 	apiKey: "devin-session-token$tok",
 	locale: "en",
 	os,
@@ -227,7 +227,7 @@ describe("Devin identity at the fetch boundary", () => {
 		setPlatform("linux");
 		const calls = await captureAccountLoad();
 		expect(hex(calls.get(JWT_PATH)?.body ?? new Uint8Array())).toBe(
-			"0a580a09646576696e2d636c693a0a333030302e31302e3231e2010663686973656c620663686973656c120a333030302e31302e32311a17646576696e2d73657373696f6e2d746f6b656e24746f6b2202656e2a056c696e7578",
+			"0a560a09646576696e2d636c693a09333030302e31312e31e2010663686973656c620663686973656c1209333030302e31312e311a17646576696e2d73657373696f6e2d746f6b656e24746f6b2202656e2a056c696e7578",
 		);
 	});
 

@@ -3,7 +3,11 @@
  * Anthropic, one function per endpoint. Proxied /v1/messages traffic is not
  * covered: it forwards the real client's headers.
  */
-import { CLAUDE_CLI_VERSION, getClientVersion } from "./version";
+import {
+	CLAUDE_CLI_VERSION,
+	extractClaudeVersion,
+	getClientVersion,
+} from "./version";
 
 export const CLAUDE_OAUTH_BETA = "oauth-2025-04-20";
 export const ANTHROPIC_API_VERSION = "2023-06-01";
@@ -13,24 +17,90 @@ export const AXIOS_USER_AGENT = "axios/1.15.2";
 export const AXIOS_ACCEPT = "application/json, text/plain, */*";
 export const AXIOS_ACCEPT_ENCODING = "gzip, compress, deflate, br";
 
+/**
+ * Claude Code 2.1.280's betas on a Haiku call, then the OAuth beta in the
+ * position the proxy appends it to forwarded client traffic.
+ */
 export const CLAUDE_KEEPALIVE_BETAS: readonly string[] = Object.freeze([
+	"interleaved-thinking-2025-05-14",
+	"thinking-token-count-2026-05-13",
+	"context-management-2025-06-27",
+	"prompt-caching-scope-2026-01-05",
+	"claude-code-20250219",
+	"advisor-tool-2026-03-01",
 	CLAUDE_OAUTH_BETA,
-	"fine-grained-tool-streaming-2025-05-14",
 ]);
 
-/** Pinned by hand, not read from a client. */
+/** The Stainless fields that describe the client's runtime rather than one request. */
+const CLAUDE_STAINLESS_RUNTIME_FIELDS = [
+	"x-stainless-arch",
+	"x-stainless-lang",
+	"x-stainless-os",
+	"x-stainless-package-version",
+	"x-stainless-runtime",
+	"x-stainless-runtime-version",
+] as const;
+
+/** Claude Code 2.1.280 on Linux x64; used until a client has been seen. */
 export const CLAUDE_STAINLESS_HEADERS: Readonly<Record<string, string>> =
 	Object.freeze({
 		"x-stainless-arch": "x64",
-		"x-stainless-helper-method": "stream",
 		"x-stainless-lang": "js",
 		"x-stainless-os": "Linux",
-		"x-stainless-package-version": "0.60.0",
+		"x-stainless-package-version": "0.112.1",
 		"x-stainless-retry-count": "0",
 		"x-stainless-runtime": "node",
-		"x-stainless-runtime-version": "v24.9.0",
+		"x-stainless-runtime-version": "v26.3.0",
 		"x-stainless-timeout": "600",
 	});
+
+const CLAUDE_CLI_USER_AGENT = /^claude-cli\/\S+ \(external, cli\)$/;
+
+/** Interactive Claude Code, as opposed to the Agent SDK or another client. */
+export function isClaudeCliUserAgent(userAgent: string | null): boolean {
+	return userAgent !== null && CLAUDE_CLI_USER_AGENT.test(userAgent);
+}
+
+const STAINLESS_VALUE = /^[\w.-]{1,40}$/;
+
+let lastSeenCli: {
+	version: string;
+	stainless: Readonly<Record<string, string>>;
+} | null = null;
+
+/**
+ * Remembers the version and Stainless runtime block of an interactive Claude
+ * Code request, as one pair, so the keepalive describes a single real client
+ * on the account. Agent SDK and other clients are ignored, and so is a block
+ * with a field missing or malformed.
+ */
+export function trackClaudeCliStainlessHeaders(headers: Headers): void {
+	const userAgent = headers.get("user-agent") ?? "";
+	if (!isClaudeCliUserAgent(userAgent)) return;
+	const version = extractClaudeVersion(userAgent);
+	if (!version) return;
+	const runtime: Record<string, string> = {};
+	for (const name of CLAUDE_STAINLESS_RUNTIME_FIELDS) {
+		const value = headers.get(name);
+		if (value === null || !STAINLESS_VALUE.test(value)) return;
+		runtime[name] = value;
+	}
+	lastSeenCli = {
+		version,
+		stainless: Object.freeze({ ...CLAUDE_STAINLESS_HEADERS, ...runtime }),
+	};
+}
+
+/** The Stainless block of the last interactive client seen, else the pinned one. */
+export function lastSeenClaudeStainlessHeaders(): Readonly<
+	Record<string, string>
+> {
+	return lastSeenCli?.stainless ?? CLAUDE_STAINLESS_HEADERS;
+}
+
+export function resetClaudeCliStainlessHeadersForTests(): void {
+	lastSeenCli = null;
+}
 
 export function claudeCodeUserAgent(version: string): string {
 	return `claude-code/${version}`;
@@ -153,20 +223,21 @@ export function claudeBankedResetHeaders(
 
 /** The auto-refresh keepalive's in-process /v1/messages request. */
 export function claudeKeepaliveHeaders(
-	lastSeen: string = lastSeenClaudeCliVersion(),
+	lastSeen: string = lastSeenCli?.version ?? lastSeenClaudeCliVersion(),
+	stainless: Readonly<
+		Record<string, string>
+	> = lastSeenClaudeStainlessHeaders(),
 ): Record<string, string> {
 	return {
 		accept: "application/json",
-		"accept-language": "*",
 		"anthropic-beta": CLAUDE_KEEPALIVE_BETAS.join(","),
 		"anthropic-dangerous-direct-browser-access": "true",
 		"anthropic-version": ANTHROPIC_API_VERSION,
 		connection: "keep-alive",
 		"content-type": "application/json",
-		"sec-fetch-mode": "cors",
 		"user-agent": claudeCliUserAgent(lastSeen),
 		"x-app": "cli",
-		...CLAUDE_STAINLESS_HEADERS,
+		...stainless,
 	};
 }
 

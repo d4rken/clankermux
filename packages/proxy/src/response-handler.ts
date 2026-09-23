@@ -575,6 +575,8 @@ export interface ResponseHandlerOptions {
 	sdkBridgeTurnId?: string | null;
 	/** Called once the request's row has begun (`requestRecorder.begin`). */
 	onRecordBegun?: () => void;
+	/** Claude Code device of the request (see RequestMeta.claudeDeviceId). */
+	claudeDeviceId?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -781,6 +783,7 @@ async function forwardToClientInner(
 		clientUserAgent,
 		clientHarness,
 		sdkBridgeTurnId,
+		claudeDeviceId,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -1094,6 +1097,8 @@ async function forwardToClientInner(
 			if (observedOutcome || !shouldProcessRequest || internalDispatch) return;
 			observedOutcome = true;
 			clientStreamOutcomes[outcome]++;
+			if (outcome === "success" && claudeDeviceId && account)
+				ctx.claudeDevices?.record(account.id, claudeDeviceId);
 			if (completedBeforeCut) clientStreamOutcomes.completedBeforeCut++;
 			const failed = outcome === "error" || outcome === "timeout";
 			log[failed ? "warn" : "debug"](

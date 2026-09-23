@@ -20,6 +20,13 @@ function normalizeEmail(value: unknown): string | null {
 	return normalized === "" ? null : normalized;
 }
 
+/** The ChatGPT workspace id in an access token's claims, or null. */
+export function readChatgptAccountId(accessToken: string): string | null {
+	const claims = decodeJwtPayloadSafe(accessToken);
+	const auth = asRecord(claims?.["https://api.openai.com/auth"]);
+	return nullableString(auth?.chatgpt_account_id);
+}
+
 /**
  * Resolve a normalized {@link AccountIdentity} from Codex OAuth token claims.
  *

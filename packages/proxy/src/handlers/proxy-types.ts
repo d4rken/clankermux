@@ -6,6 +6,7 @@ import type {
 	SdkBridgeTransport,
 } from "@clankermux/types";
 import type { AccountModelPermissionService } from "../account-model-permissions";
+import type { ClaudeDeviceRegistry } from "../claude-device-registry";
 import type { RequestRecorder } from "../request-recorder";
 
 export interface ProxyContext {
@@ -38,6 +39,12 @@ export interface ProxyContext {
 	 * so floored requests exclude official Anthropic accounts.
 	 */
 	sdkBridge?: SdkBridgeTransport;
+	/**
+	 * Claude Code devices per account, recorded from successful client streams
+	 * and read by the auto-refresh keepalive. Without it nothing is recorded
+	 * and the keepalive sends no device.
+	 */
+	claudeDevices?: ClaudeDeviceRegistry;
 }
 
 /** Error messages used throughout the proxy module */

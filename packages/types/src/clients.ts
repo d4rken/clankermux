@@ -169,6 +169,54 @@ export const globalCatalogueFormats = (
 			: application === "codex"
 				? ["codex"]
 				: ["openai"];
+const CLAUDE_CODE_VISIBLE = /claude|anthropic/i;
+/**
+ * The name Claude Code sees for a catalogue ID. Its model picker lists only
+ * IDs naming Claude, so any other gets a `claude-` prefix:
+ *
+ *   gpt-6-astra      -> claude-gpt-6-astra
+ *   alias:frontier   -> claude-alias:frontier
+ *   claude-opus-5-5  -> claude-opus-5-5
+ */
+export const claudeCodeName = (id: string): string =>
+	CLAUDE_CODE_VISIBLE.test(id) ? id : `claude-${id}`;
+/**
+ * The ID a Claude Code name may stand for, or null when `claudeCodeName` can
+ * never have produced it. A result is only a candidate: `claude-opus-5-5`
+ * yields `opus-5-5`, and whether a name really is a prefixed one is decided
+ * by what the accounts serve.
+ */
+export const claudeCodeTarget = (name: string): string | null => {
+	if (!name.startsWith("claude-")) return null;
+	const rest = name.slice("claude-".length);
+	return rest && !CLAUDE_CODE_VISIBLE.test(rest) ? rest : null;
+};
+/**
+ * A catalogue as Claude Code sees it: each entry under its `claudeCodeName`,
+ * and the default only while its entry is listed. Two entries can land on one
+ * name (`gpt-6` and `claude-gpt-6`); the one already stored under that name
+ * wins, else the first, so every reader resolves the same way.
+ */
+export function claudeCodeCatalogue<T extends { id: string }>(
+	models: readonly T[],
+	defaultModel: string | null,
+): {
+	models: Array<{ model: T; name: string }>;
+	defaultModel: string | null;
+} {
+	const byName = new Map<string, T>();
+	for (const model of models) {
+		const name = claudeCodeName(model.id);
+		const held = byName.get(name);
+		if (!held || (held.id !== name && model.id === name))
+			byName.set(name, model);
+	}
+	const listed = models
+		.map((model) => ({ model, name: claudeCodeName(model.id) }))
+		.filter(({ model, name }) => byName.get(name) === model);
+	const chosen = listed.find(({ model }) => model.id === defaultModel);
+	return { models: listed, defaultModel: chosen?.name ?? null };
+}
 /** The client-independent fields of an entry, with a canonical account pin. */
 export const globalEntry = (
 	model: GlobalCatalogueModel,

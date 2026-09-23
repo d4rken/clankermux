@@ -8,6 +8,7 @@ import {
 	type ClientReview,
 	type ClientSuggestions,
 	type ClientView,
+	claudeCodeName,
 	composeGlobalCatalogue,
 	type GlobalCatalogueView,
 	globalCatalogueFormats,
@@ -33,7 +34,6 @@ import {
 	destinationsLabel,
 	FORMAT_LABELS,
 	FORMATS,
-	needsClaudeAlias,
 	preferredFormat,
 } from "./setup";
 
@@ -111,45 +111,8 @@ export function draftFor(client?: ClientView): ClientDraft {
 				},
 			};
 }
-export function suggestedModel(
-	id: string,
-	displayName: string,
-	accountIds: string[],
-	application: ClientApplication,
-	format: ClientFormat,
-): ClientModel {
-	const alias =
-		application === "claude-code" &&
-		format === "anthropic" &&
-		needsClaudeAlias(id);
-	return {
-		id: alias ? `claude-${id}` : id,
-		displayName,
-		targetModel: id,
-		accountIds: alias ? accountIds : null,
-	};
-}
-/**
- * Copied Anthropic IDs this application cannot publish. Hand-selection cannot
- * reach this state, because `suggestedModel` aliases a non-Claude ID as it
- * offers it; a copy takes the source's entries verbatim, so one click can
- * stage a Claude Code catalogue the server refuses outright.
- *
- * Deliberately only this rule. Review remains the authority for everything
- * else, and the Codex metadata rule in particular cannot be decided here: the
- * server looks for metadata among an entry's own allowed accounts, and also
- * accepts an unchanged entry it already stores, neither of which the
- * suggestions payload can answer.
- */
-function unpublishable(
-	application: ClientApplication,
-	catalogues: Record<ClientFormat, ClientCatalogue>,
-): string[] {
-	return application === "claude-code"
-		? catalogues.anthropic.models
-				.filter((m) => needsClaudeAlias(m.id))
-				.map((m) => m.id)
-		: [];
+export function suggestedModel(id: string, displayName: string): ClientModel {
+	return { id, displayName, targetModel: id, accountIds: null };
 }
 export function ClientWizard({
 	client,
@@ -526,15 +489,7 @@ export function ClientWizard({
 					defaultModel: null,
 					models: models
 						.filter((m) => preferred !== "codex" || m.codexMetadataAvailable)
-						.map((m) =>
-							suggestedModel(
-								m.id,
-								m.displayName,
-								m.accountIds,
-								application,
-								preferred,
-							),
-						),
+						.map((m) => suggestedModel(m.id, m.displayName)),
 				},
 			},
 		}));
@@ -673,30 +628,14 @@ export function ClientWizard({
 					? await ensureSuggestions(false, destinations)
 					: suggestions;
 			if (seedOwed) seedPreferred(application, discovered?.models ?? []);
-			// Only what this copy staged. Entries the draft already held are the
-			// operator's own, and a seed writes IDs `suggestedModel` has already
-			// made publishable.
-			const rejected = copy.catalogues
-				? unpublishable(application, catalogues)
-				: [];
 			setCopied(
-				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.${
-					rejected.length
-						? ` Claude Code cannot publish ${rejected.join(", ")} under ${rejected.length === 1 ? "that ID" : "those IDs"}; give each a claude-* alias on the Anthropic tab, or Review will refuse the whole client.`
-						: ""
-				}`,
+				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.`,
 			);
 		});
 	const candidates = new Map<string, ClientModel>();
 	for (const m of suggestions?.models ?? [])
 		if (format !== "codex" || m.codexMetadataAvailable) {
-			const model = suggestedModel(
-				m.id,
-				m.displayName,
-				m.accountIds,
-				draft.application,
-				format,
-			);
+			const model = suggestedModel(m.id, m.displayName);
 			candidates.set(model.id, model);
 		}
 	// Restoring a global entry restores the global definition, not discovery's.
@@ -716,21 +655,39 @@ export function ClientWizard({
 		selected: boolean,
 	): CatalogueRowExtras => {
 		const entry = globalById.get(model.id);
-		if (!covered.has(format)) return {};
-		const text = !entry
-			? selected
-				? "Added for this client"
-				: null
-			: !selected
-				? "In the global catalogue, removed for this client"
-				: sameGlobalEntry(entry, model)
-					? "From the global catalogue"
-					: "Changes the global entry for this client";
+		const origin = !covered.has(format)
+			? null
+			: !entry
+				? selected
+					? "Added for this client"
+					: null
+				: !selected
+					? "In the global catalogue, removed for this client"
+					: sameGlobalEntry(entry, model)
+						? "From the global catalogue"
+						: "Changes the global entry for this client";
+		const name = claudeCodeName(model.id);
+		const listedAs =
+			draft.application === "claude-code" &&
+			format === "anthropic" &&
+			name !== model.id
+				? `Claude Code lists it as ${name}`
+				: null;
+		// The server refuses a client whose entries Claude Code would list under
+		// one name.
+		const clash =
+			listedAs &&
+			!selected &&
+			draft.catalogues[format].models.some((m) => m.id === name)
+				? `Clashes with ${name} in this catalogue`
+				: undefined;
+		const text = [origin, clash ?? listedAs].filter(Boolean).join(" · ");
 		return text
 			? {
 					note: (
 						<span className="block text-xs text-muted-foreground">{text}</span>
 					),
+					blocked: clash,
 				}
 			: {};
 	};
@@ -1517,13 +1474,7 @@ export function ClientWizard({
 												const id = alias.id.slice("alias:".length);
 												setCustom({
 													...custom,
-													id: custom.editId
-														? custom.id
-														: draft.application === "claude-code" &&
-																format === "anthropic" &&
-																needsClaudeAlias(id)
-															? `claude-${id}`
-															: id,
+													id: custom.editId ? custom.id : id,
 													target: alias.id,
 													name: alias.displayName,
 													accounts: [],

@@ -175,15 +175,15 @@ describe("AccountListItem — automation menu copy", () => {
 				checked: false,
 			},
 			{
-				label: "Auto-apply expiring usage resets",
+				label: "Auto-apply expiring banked resets",
 				title:
-					"Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
+					"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication.",
 				checked: true,
 			},
 			{
-				label: "Auto-apply reset at weekly limit",
+				label: "Auto-apply banked reset at weekly limit",
 				title:
-					"Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+					"Automatically apply the next banked reset when this account reaches 100% weekly usage, no other Codex account can serve, and the account's natural weekly reset is at least 12 hours away. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 				checked: false,
 			},
 		]);
@@ -248,13 +248,13 @@ describe("AccountListItem — automation menu copy", () => {
 		expect(items[3]).toEqual({
 			label: "Auto-apply expiring banked resets",
 			title:
-				"Automatically claim the next banked reset shortly (~10 min) before its grant expires so it isn't wasted. Only grants that clear a weekly limit are claimed, and a grant usable only at a limit is claimed only while one is reached. Applies even while paused, unless the account needs re-authentication.",
+				"Automatically apply the next banked reset shortly (~10 min) before it expires so it isn't wasted. Only grants that clear a weekly limit are applied, and a grant usable only at a limit is applied only while one is reached. Applies even while paused, unless the account needs re-authentication.",
 			checked: false,
 		});
 		expect(items[4]).toEqual({
 			label: "Auto-apply banked reset at weekly limit",
 			title:
-				"Automatically claim the next banked reset when this account reaches a weekly limit the grant clears and no other Anthropic account can serve the same models, or when the grant would expire before that limit resets. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+				"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 12 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 			checked: true,
 		});
 

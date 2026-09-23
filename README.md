@@ -16,7 +16,7 @@
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](./LICENSE)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
 A gateway that puts the model accounts you pay for behind one API. Your coding
 clients point at ClankerMux instead of a provider; it picks which account serves
@@ -75,10 +75,18 @@ Requires [Bun](https://bun.sh) 1.4.0 or newer
 ([why](https://github.com/oven-sh/bun/issues/32111)).
 
 It binds `0.0.0.0` by default; set `CLANKERMUX_HOST=127.0.0.1` for loopback
-only. The management API is fail-open until a dashboard password exists, so set
-one with `bun run auth:password --set`. That password covers management only.
-Agent traffic is gated separately: every request must present a valid client
-key, including on a fresh install where none exists yet.
+only, since the management API stays open until a dashboard password exists.
+On a start with no password the server prints a one-time setup code to its
+output (`journalctl -u clankermux`, `docker logs`, …), and the dashboard asks
+for that code and a new password before showing anything else. Each restart
+prints a new code. From a shell, use
+`bun run auth:password --set|--clear|--status` in a checkout or
+`clankermux-server auth password --set|--clear|--status` with the compiled
+binary; `--db-path <file>` targets a specific database.
+
+That password covers management only. Agent traffic is gated separately: every
+request must present a valid client key, including on a fresh install where
+none exists yet.
 
 Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
@@ -158,10 +166,12 @@ been developed independently since.
 
 ## License
 
-AGPLv3. See [LICENSE](LICENSE), full text in [COPYING](COPYING). If you modify
+AGPL-3.0-or-later. See [LICENSE](LICENSE), full text in [COPYING](COPYING). If you modify
 ClankerMux and let other people reach it over a network, section 13 obliges you
 to offer them the source of your modified version.
 
 The inherited upstream code, and everything previously published under MIT, stay
 MIT ([LICENSE.MIT](LICENSE.MIT)); the bundled Devin protocol code and the Geist
 fonts keep their own terms.
+
+Contributions are accepted under MIT; see [CONTRIBUTING.md](CONTRIBUTING.md).

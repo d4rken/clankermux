@@ -23,6 +23,7 @@ export type RecordFieldsFromMeta = Pick<
 	| "cachePrefixHashes"
 	| "clientUserAgent"
 	| "clientHarness"
+	| "claudeDeviceId"
 	| "comboName"
 	| "routing"
 	| "sdkBridgeTurnId"
@@ -53,6 +54,7 @@ export function recordFieldsFromMeta(
 		cachePrefixHashes: requestMeta.cachePrefixHashes,
 		clientUserAgent: requestMeta.clientUserAgent,
 		clientHarness: requestMeta.clientHarness,
+		claudeDeviceId: requestMeta.claudeDeviceId,
 		comboName: requestMeta.comboName,
 		routing: requestMeta.routing ?? null,
 		sdkBridgeTurnId: requestMeta.sdkBridgeTurnId,

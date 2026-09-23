@@ -31,11 +31,12 @@ import {
 	sanitizeChatGptBackendBody,
 } from "./backend-params";
 import {
-	applyCodexSessionIdHeader,
+	applyChatGptAccountId,
+	applyCodexNativeProfile,
+	applyCodexTranslatedProfile,
 	CODEX_CLIENT_ID,
-	CODEX_OAUTH_SCOPES,
 	codexInferenceHeaders,
-	codexTokenEndpointHeaders,
+	codexRefreshHeaders,
 } from "./client-identity";
 import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
@@ -95,12 +96,18 @@ const OPENAI_PROMPT_CACHE_HOSTS = new Set([
 	"api.openai.com",
 ]);
 /**
- * Hex length of the truncated sha256 digest in a derived prompt_cache_key.
- * OpenAI caps prompt_cache_key at 64 chars; the longest prefix we emit is
- * `clankermux-session-` (19 chars), so 45 hex keeps every key <= 64
- * (session: 19+45=64, convo: 17+45=62) while retaining 180 bits of digest.
+ * The first 16 bytes of a sha256 digest as a version-4 UUID, the shape of the
+ * session id the real client sends as its prompt_cache_key:
+ *
+ *   digest 29e8c3bb751b608dd200322ecc0efcee… → 29e8c3bb-751b-408d-9200-322ecc0efcee
  */
-const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
+function digestToUuid(digest: Buffer): string {
+	const bytes = Buffer.from(digest.subarray(0, 16));
+	bytes[6] = (bytes[6] & 0x0f) | 0x40;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	const hex = bytes.toString("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 // Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
 // CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
 // silently breaks usage sampling ("Codex returned no usage headers (status
@@ -487,17 +494,14 @@ export class CodexProvider extends BaseProvider {
 
 		log.info(`Refreshing Codex token for account ${account.name}`);
 
-		const body = new URLSearchParams({
-			grant_type: "refresh_token",
-			refresh_token: account.refresh_token,
-			client_id: CODEX_CLIENT_ID,
-			scope: CODEX_OAUTH_SCOPES.join(" "),
-		});
-
 		const response = await fetch(TOKEN_URL, {
 			method: "POST",
-			headers: codexTokenEndpointHeaders(),
-			body: body.toString(),
+			headers: codexRefreshHeaders(),
+			body: JSON.stringify({
+				client_id: CODEX_CLIENT_ID,
+				grant_type: "refresh_token",
+				refresh_token: account.refresh_token,
+			}),
 		});
 
 		if (!response.ok) {
@@ -641,9 +645,11 @@ export class CodexProvider extends BaseProvider {
 				body.stream === true ? "true" : "false",
 			);
 			newHeaders.delete("content-length");
-			if (targetsChatGptCodexBackend(account)) {
-				applyCodexSessionIdHeader(newHeaders, codexBody.prompt_cache_key);
-			}
+			applyCodexTranslatedProfile(
+				newHeaders,
+				codexBody.prompt_cache_key,
+				targetsChatGptCodexBackend(account),
+			);
 			applyReasoningEffortAdaptation(newHeaders, reasoningAdaptation);
 
 			return new Request(request.url, {
@@ -656,6 +662,10 @@ export class CodexProvider extends BaseProvider {
 				throw error;
 			}
 			log.error("Failed to transform request body to Codex format:", error);
+			applyChatGptAccountId(
+				request.headers,
+				targetsChatGptCodexBackend(account),
+			);
 			return request;
 		}
 	}
@@ -753,9 +763,11 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.set("content-type", "application/json");
 			newHeaders.set("x-clankermux-request-stream", "true");
 			newHeaders.delete("content-length");
-			if (chatGptBackend) {
-				applyCodexSessionIdHeader(newHeaders, body.prompt_cache_key);
-			}
+			applyCodexNativeProfile(
+				newHeaders,
+				body.prompt_cache_key,
+				chatGptBackend,
+			);
 			applyReasoningEffortAdaptation(newHeaders, {
 				requested: requestedEffort,
 				effective: nativeReasoningEffort(body),
@@ -1318,10 +1330,9 @@ export class CodexProvider extends BaseProvider {
 	 * (Claude Code → Codex) path only; the native /v1/responses passthrough
 	 * carries the Codex CLI's own key.
 	 *
-	 * Digests are truncated to PROMPT_CACHE_KEY_DIGEST_LEN hex chars so the full
-	 * key (including the longer `clankermux-session-` prefix) stays within the
-	 * API's 64-char key bound. Session ids and prompt content never appear in
-	 * the key.
+	 * The key is a UUID built from the digest ({@link digestToUuid}), and also
+	 * becomes the request's `session-id`. Session ids and prompt content never
+	 * appear in it.
 	 */
 	private derivePromptCacheKey(
 		body: AnthropicRequest,
@@ -1332,10 +1343,7 @@ export class CodexProvider extends BaseProvider {
 		const sessionId = this.extractSessionId(body);
 		if (!sessionId) return undefined;
 		const sessionKey = () =>
-			`clankermux-session-${createHash("sha256")
-				.update(sessionId)
-				.digest("hex")
-				.slice(0, PROMPT_CACHE_KEY_DIGEST_LEN)}`;
+			digestToUuid(createHash("sha256").update(sessionId).digest());
 		// Empty input: no conversation-identity anchor → coarse per-session key.
 		if (input.length === 0) return sessionKey();
 		let firstItem: string | undefined;
@@ -1347,12 +1355,13 @@ export class CodexProvider extends BaseProvider {
 		// Non-serializable first item (e.g. a circular structure): fall back to
 		// the coarse per-session key rather than a partial-identity convo key.
 		if (firstItem === undefined) return sessionKey();
-		return `clankermux-convo-${createHash("sha256")
-			.update(sessionId)
-			.update("\0")
-			.update(firstItem)
-			.digest("hex")
-			.slice(0, PROMPT_CACHE_KEY_DIGEST_LEN)}`;
+		return digestToUuid(
+			createHash("sha256")
+				.update(sessionId)
+				.update("\0")
+				.update(firstItem)
+				.digest(),
+		);
 	}
 
 	/**

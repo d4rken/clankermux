@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { type AuthStatus, api } from "../api";
 import { AuthGate } from "./AuthGate";
@@ -8,8 +8,9 @@ import { AuthGate } from "./AuthGate";
 /**
  * The gate that decides whether the dashboard runs at all.
  *
- * The property that matters most here is NEGATIVE and is asserted directly: on
- * a gated deployment with no session, the app's children must never mount.
+ * The property that matters most here is NEGATIVE and is asserted directly:
+ * whenever the gate shows a screen instead of the app (signed out, or no
+ * password set yet), the app's children must never mount.
  * `RequestEventProvider` opens `/api/requests/stream` and fires a protected
  * backfill query the instant it mounts, so a gate that rendered the app behind
  * a login overlay would leave a signed-out browser in an `EventSource` retry
@@ -36,7 +37,10 @@ function AppMarker(): ReactNode {
 	return <div data-testid="app-mounted">the app</div>;
 }
 
-async function mount(status: AuthStatus | Error): Promise<void> {
+async function mount(
+	status: AuthStatus | Error,
+	children: ReactNode = <AppMarker />,
+): Promise<void> {
 	const spy = spyOn(api, "getAuthStatus").mockImplementation(async () => {
 		if (status instanceof Error) throw status;
 		return status;
@@ -54,9 +58,7 @@ async function mount(status: AuthStatus | Error): Promise<void> {
 	await act(async () => {
 		root?.render(
 			<QueryClientProvider client={client}>
-				<AuthGate>
-					<AppMarker />
-				</AuthGate>
+				<AuthGate>{children}</AuthGate>
 			</QueryClientProvider>,
 		);
 	});
@@ -65,6 +67,37 @@ async function mount(status: AuthStatus | Error): Promise<void> {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 	});
 }
+
+let streamsOpened = 0;
+let restoreEventSource: (() => void) | null = null;
+
+/**
+ * Stands in for `RequestEventProvider`: opens the request stream on mount, as
+ * the real provider does. Counted through a fake `EventSource`, so a gate that
+ * let it mount would show up as a non-zero count.
+ */
+function StreamOpener(): ReactNode {
+	useEffect(() => {
+		const stream = new EventSource("/api/requests/stream");
+		return () => stream.close();
+	}, []);
+	return <div data-testid="app-mounted">the app</div>;
+}
+
+beforeEach(() => {
+	streamsOpened = 0;
+	const realEventSource = globalThis.EventSource;
+	class CountingEventSource {
+		constructor(_url: string) {
+			streamsOpened += 1;
+		}
+		close(): void {}
+	}
+	globalThis.EventSource = CountingEventSource as unknown as typeof EventSource;
+	restoreEventSource = () => {
+		globalThis.EventSource = realEventSource;
+	};
+});
 
 function appMounted(): boolean {
 	return host?.querySelector('[data-testid="app-mounted"]') !== null;
@@ -83,6 +116,8 @@ afterEach(async () => {
 	host = null;
 	restoreStatus?.();
 	restoreStatus = null;
+	restoreEventSource?.();
+	restoreEventSource = null;
 });
 
 describe("gated, signed out", () => {
@@ -101,7 +136,8 @@ describe("gated, signed out", () => {
 
 	it("offers no reset link — recovery is a shell command", async () => {
 		await mount({ configured: true, authenticated: false });
-		expect(text()).toContain("auth:password --clear");
+		expect(text()).toContain("clankermux-server auth password --clear");
+		expect(text()).toContain("bun run auth:password --clear");
 		expect(host?.querySelectorAll("a")).toHaveLength(0);
 	});
 });
@@ -114,22 +150,29 @@ describe("gated, signed in", () => {
 	});
 });
 
-describe("fail-open", () => {
-	it("mounts the app when no password is configured", async () => {
-		// An upgrade must not lock an operator out of a box that never had one.
+describe("no password configured", () => {
+	it("shows the setup screen instead of the app", async () => {
 		await mount({ configured: false, authenticated: false });
-		expect(appMounted()).toBe(true);
+		expect(text()).toContain("Set a management password");
+		expect(host?.querySelector("#setup-code")).not.toBeNull();
+		expect(host?.querySelector("#setup-password")).not.toBeNull();
+		expect(host?.querySelector("#setup-password-repeat")).not.toBeNull();
 	});
 
-	it("renders the children ALONE — the notice belongs to the sidebar", async () => {
+	it("does NOT mount the app, so nothing opens the request stream", async () => {
+		await mount({ configured: false, authenticated: false }, <StreamOpener />);
+		expect(appMounted()).toBe(false);
+		expect(streamsOpened).toBe(0);
+	});
+
+	it("offers no way past it — the only exits are the code or a shell command", async () => {
 		await mount({ configured: false, authenticated: false });
-		// The gate used to render the "unprotected" warning itself, as a
-		// full-width bar above every page. It now only decides; the warning is a
-		// card in the navigation sidebar's footer, driven off the same
-		// `configured === false` read. That the operator is still told, and still
-		// gets the command, is asserted in Navigation.unprotected.dom-test.tsx.
-		expect(text()).toBe("the app");
-		expect(host?.querySelectorAll("button")).toHaveLength(0);
+		expect(text()).toContain("auth password --set");
+		expect(host?.querySelectorAll("a")).toHaveLength(0);
+		const buttons = [...(host?.querySelectorAll("button") ?? [])];
+		expect(buttons.map((button) => button.textContent)).toEqual([
+			"Set password",
+		]);
 	});
 });
 

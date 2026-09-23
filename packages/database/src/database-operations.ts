@@ -15,6 +15,7 @@ import type {
 	AccountPaymentRow,
 	AccountSubscriptionState,
 	AffinityPin,
+	ClientApplication,
 	ClientDestinations,
 	ClientProfile,
 	CodexWindowObservationRow,
@@ -1871,6 +1872,15 @@ OAuth tokens will need to be re-authenticated.
 		return this.auth.setPassword(verifier, params, updatedAt);
 	}
 
+	/** Store the FIRST password only; false when one already exists. */
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean> {
+		return this.auth.setPasswordIfAbsent(verifier, params, updatedAt);
+	}
+
 	async clearManagementPassword(): Promise<number> {
 		return this.auth.clearPassword();
 	}
@@ -2689,6 +2699,8 @@ OAuth tokens will need to be re-authenticated.
 		excludedProviders?: string[] | null;
 		/** Invalid stored selectors must fail closed in routing. */
 		malformed: boolean;
+		/** The key's client application; absent or null when it has no profile. */
+		application?: ClientApplication | null;
 	} | null> {
 		const raw = await this.apiKeys.findRawPinById(id);
 		if (!raw) {
@@ -2715,6 +2727,7 @@ OAuth tokens will need to be re-authenticated.
 			pinnedProviders,
 			excludedProviders,
 			malformed,
+			application: raw.application,
 		};
 	}
 
@@ -3120,6 +3133,10 @@ OAuth tokens will need to be re-authenticated.
 			errorMessage,
 			now,
 		);
+	}
+
+	async withdrawPendingCodexResetCreditAttempt(id: string): Promise<boolean> {
+		return this.codexResetCreditEvents.withdrawPendingAttempt(id);
 	}
 
 	async recordManualCodexResetCreditEvent(input: {

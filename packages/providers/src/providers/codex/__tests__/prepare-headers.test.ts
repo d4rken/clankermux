@@ -4,12 +4,8 @@ import { CodexProvider } from "../provider";
 
 const provider = new CodexProvider();
 
-describe("CodexProvider.prepareHeaders — SDK fingerprint stripping", () => {
-	it("strips every x-stainless-* header regardless of suffix", () => {
-		// The suffix set is open-ended and versioned by the SDK generator, so the
-		// strip has to be by prefix. These are the ones our own Anthropic prime
-		// emits (auto-refresh-scheduler.ts), plus an invented one to prove the
-		// rule is not an enumeration of known names.
+describe("CodexProvider.prepareHeaders — header allowlist", () => {
+	it("drops every x-stainless-* header regardless of suffix", () => {
 		const headers = new Headers({
 			"x-stainless-arch": "x64",
 			"x-stainless-lang": "js",
@@ -29,7 +25,7 @@ describe("CodexProvider.prepareHeaders — SDK fingerprint stripping", () => {
 		}
 	});
 
-	it("strips the five x-openai-client-* SDK identity headers", () => {
+	it("drops the five x-openai-client-* SDK identity headers", () => {
 		const headers = new Headers({
 			"x-openai-client-version": "1.2.3",
 			"x-openai-client-os": "Linux",
@@ -45,32 +41,32 @@ describe("CodexProvider.prepareHeaders — SDK fingerprint stripping", () => {
 		}
 	});
 
-	it("keeps x-codex-* continuity headers — they are what the backend needs", () => {
-		// The strip must be an exact/prefix denylist, never a blanket x-openai-
-		// or x-* sweep: the native passthrough path carries the Codex CLI's own
-		// continuity headers and dropping them would break turn continuity.
+	it("keeps the Codex continuity headers by exact name, not by prefix", () => {
+		// The native passthrough carries the Codex CLI's own turn and thread
+		// state; names the real client does not send are dropped with everything
+		// else that is not allowlisted.
 		const headers = new Headers({
 			"x-codex-turn-state": "ts_abc",
+			"x-codex-window-id": "thread:0",
 			"x-codex-session-id": "sess_abc",
-			"x-codex-conversation-id": "conv_abc",
 			"x-codex-installation-id": "inst_abc",
+			"session-id": "session",
+			"thread-id": "thread",
 			session_id: "raw-session",
-			"content-type": "application/json",
 		});
 
 		const prepared = provider.prepareHeaders(headers, "token");
 
 		expect(prepared.get("x-codex-turn-state")).toBe("ts_abc");
-		expect(prepared.get("x-codex-session-id")).toBe("sess_abc");
-		expect(prepared.get("x-codex-conversation-id")).toBe("conv_abc");
-		expect(prepared.get("x-codex-installation-id")).toBe("inst_abc");
-		expect(prepared.get("session_id")).toBe("raw-session");
-		expect(prepared.get("content-type")).toBe("application/json");
+		expect(prepared.get("x-codex-window-id")).toBe("thread:0");
+		expect(prepared.get("session-id")).toBe("session");
+		expect(prepared.get("thread-id")).toBe("thread");
+		expect(prepared.get("x-codex-session-id")).toBeNull();
+		expect(prepared.get("x-codex-installation-id")).toBeNull();
+		expect(prepared.get("session_id")).toBeNull();
 	});
 
-	it("keeps non-identity x-openai-* headers the Codex backend defines", () => {
-		// `x-openai-client-*` is the SDK identity family; other `x-openai-*`
-		// headers are Codex protocol surface and must survive.
+	it("keeps the x-openai-* headers the Codex client sends", () => {
 		const headers = new Headers({
 			"x-openai-internal-codex-responses-lite": "1",
 			"x-openai-subagent": "review",
@@ -82,27 +78,24 @@ describe("CodexProvider.prepareHeaders — SDK fingerprint stripping", () => {
 		expect(prepared.get("x-openai-subagent")).toBe("review");
 	});
 
-	it("still applies the Codex CLI persona after stripping", () => {
+	it("applies the codex_exec persona", () => {
 		const prepared = provider.prepareHeaders(
 			new Headers({ "x-stainless-lang": "js" }),
 			"token",
 		);
 
 		expect(prepared.get("user-agent")).toBe(CODEX_USER_AGENT);
-		expect(prepared.get("originator")).toBe("codex_cli_rs");
+		expect(prepared.get("originator")).toBe("codex_exec");
 		expect(prepared.get("authorization")).toBe("Bearer token");
 	});
 
-	it("overwrites a client-supplied originator rather than forwarding it", () => {
-		// A downstream SDK that sets its own originator would otherwise contradict
-		// the User-Agent we set, which is the same mismatch the strip exists to
-		// remove.
+	it("overwrites a non-Codex client's originator rather than forwarding it", () => {
 		const prepared = provider.prepareHeaders(
 			new Headers({ originator: "some_sdk", "user-agent": "some-sdk/1.0" }),
 			"token",
 		);
 
-		expect(prepared.get("originator")).toBe("codex_cli_rs");
+		expect(prepared.get("originator")).toBe("codex_exec");
 		expect(prepared.get("user-agent")).toBe(CODEX_USER_AGENT);
 	});
 });

@@ -45,7 +45,11 @@ function setup(
 		init?: RequestInit,
 	) => Promise<Response>,
 	token?: () => Promise<string>,
-	budgets?: { requestBudgetMs?: number; backgroundBudgetMs?: number },
+	budgets?: {
+		requestBudgetMs?: number;
+		backgroundBudgetMs?: number;
+		anthropicSpacingMs?: number;
+	},
 ) {
 	const db = new Database(":memory:");
 	databases.push(db);
@@ -58,6 +62,7 @@ function setup(
 		fetchImpl: fetcher as typeof fetch,
 		requestBudgetMs: budgets?.requestBudgetMs ?? 25,
 		backgroundBudgetMs: budgets?.backgroundBudgetMs ?? 40,
+		anthropicSpacingMs: budgets?.anthropicSpacingMs ?? 0,
 	});
 	return { repo, service };
 }
@@ -1218,5 +1223,100 @@ describe("grok-subscription model discovery", () => {
 		expect(seen[0].url).toBe("https://api.x.ai/v1/models");
 		for (const name of Object.keys(GROK_CLI_IDENTITY_HEADERS))
 			expect(seen[0].headers.has(name)).toBe(false);
+	});
+});
+
+describe("background discovery spacing", () => {
+	const anthropic = (id: string) =>
+		account(id, {
+			provider: "anthropic",
+			api_key: null,
+			custom_endpoint: null,
+		});
+
+	it("reads Anthropic accounts that fall due together one at a time, others at once", async () => {
+		const started: Array<[string, number]> = [];
+		const { service } = setup(
+			[
+				anthropic("claude-1"),
+				anthropic("claude-2"),
+				anthropic("claude-3"),
+				account("other-1"),
+				account("other-2"),
+			],
+			async (_input, init) => {
+				const auth = new Headers(init?.headers).get("authorization") ?? "";
+				started.push([auth, performance.now()]);
+				return Response.json({ data: [{ id: "m" }] });
+			},
+			async () => "token",
+			{ backgroundBudgetMs: 1000, anthropicSpacingMs: 40 },
+		);
+		await service.tick();
+		const order = started.map(([auth]) => auth);
+		const reads = started
+			.filter(([auth]) => auth === "Bearer token")
+			.map(([, at]) => at);
+		expect(reads).toHaveLength(3);
+		expect(order.filter((auth) => auth === "Bearer key")).toHaveLength(2);
+		expect(order.lastIndexOf("Bearer key")).toBeLessThan(
+			order.lastIndexOf("Bearer token"),
+		);
+		for (let i = 1; i < reads.length; i++)
+			expect(reads[i] - reads[i - 1]).toBeGreaterThanOrEqual(35);
+	});
+
+	it("does not start a second spaced sweep while one is running", async () => {
+		let calls = 0;
+		const { service } = setup(
+			[anthropic("claude-1"), anthropic("claude-2")],
+			async () => {
+				calls++;
+				return Response.json({ data: [{ id: "m" }] });
+			},
+			async () => "token",
+			{ backgroundBudgetMs: 1000, anthropicSpacingMs: 40 },
+		);
+		await Promise.all([service.tick(), service.tick()]);
+		expect(calls).toBe(2);
+	});
+
+	function gatedService() {
+		let calls = 0;
+		let firstStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			firstStarted = resolve;
+		});
+		const { service } = setup(
+			[anthropic("claude-1"), anthropic("claude-2")],
+			async () => {
+				calls++;
+				firstStarted();
+				return Response.json({ data: [{ id: "m" }] });
+			},
+			async () => "token",
+			{ backgroundBudgetMs: 1000, anthropicSpacingMs: 40 },
+		);
+		return { service, started, calls: () => calls };
+	}
+
+	it("abandons the rest of a spaced sweep when stopped", async () => {
+		const { service, started, calls } = gatedService();
+		const sweep = service.tick();
+		await started;
+		service.stop();
+		await sweep;
+		expect(calls()).toBe(1);
+	});
+
+	it("starts a fresh sweep right after a stop, while the old one still waits", async () => {
+		const { service, started, calls } = gatedService();
+		const abandoned = service.tick();
+		await started;
+		service.stop();
+		// claude-1 was read moments ago, so the fresh sweep reads only claude-2.
+		await service.tick();
+		await abandoned;
+		expect(calls()).toBe(2);
 	});
 });

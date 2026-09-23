@@ -259,6 +259,8 @@ export interface Request extends GatewayHintMetadata {
 	method: string;
 	path: string;
 	accountUsed: string | null;
+	/** Stable account identity, distinct from the source-specific accountUsed label. */
+	accountId?: string | null;
 	statusCode: number | null;
 	success: boolean;
 	errorMessage: string | null;
@@ -312,6 +314,8 @@ export interface RequestResponse extends GatewayHintMetadata {
 	method: string;
 	path: string;
 	accountUsed: string | null;
+	/** Stable account identity; unlike accountUsed this is never a display label. */
+	accountId?: string | null;
 	statusCode: number | null;
 	success: boolean;
 	errorMessage: string | null;
@@ -462,6 +466,7 @@ export function toRequest(row: RequestRow): Request {
 		method: row.method,
 		path: row.path,
 		accountUsed: row.account_used,
+		accountId: normalizeAccountId(row.account_used),
 		statusCode: row.status_code != null ? Number(row.status_code) : null,
 		success: !!row.success,
 		errorMessage: row.error_message,
@@ -532,6 +537,9 @@ export function toRequestResponse(request: Request): RequestResponse {
 		method: request.method,
 		path: request.path,
 		accountUsed: request.accountUsed,
+		accountId: normalizeAccountId(
+			request.accountId !== undefined ? request.accountId : request.accountUsed,
+		),
 		statusCode: request.statusCode,
 		success: request.success,
 		errorMessage: request.errorMessage,
@@ -569,3 +577,10 @@ export function toRequestResponse(request: Request): RequestResponse {
 
 // Special account ID for requests without an account
 export const NO_ACCOUNT_ID = "no_account";
+
+/** Convert the recorder/analytics sentinel into the nullable identity model. */
+export function normalizeAccountId(
+	accountId: string | null | undefined,
+): string | null {
+	return accountId == null || accountId === NO_ACCOUNT_ID ? null : accountId;
+}

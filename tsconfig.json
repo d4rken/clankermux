@@ -36,13 +36,13 @@
 		"scripts/db-tool-io.ts",
 		"scripts/ledger-feasibility.ts",
 		"scripts/ledger-feasibility.test.ts",
-		// Same reasoning, and more load-bearing: this is the only way to set the
-		// management password and the only way to recover from a forgotten one,
-		// so it must not be the one file a type error can reach production in.
+		// Same reasoning, and more load-bearing: this is how an operator sets the
+		// management password from a checkout and the only way to recover from a
+		// forgotten one, so it must not be the one file a type error can reach
+		// production in.
 		"scripts/auth-password.ts",
 		"scripts/devin-login.ts",
 		"scripts/devin-check.ts",
-		"scripts/auth-password.test.ts",
 		// Historical cost repair writes estimates against the live request schema.
 		"scripts/backfill-request-costs.ts",
 		"scripts/backfill-request-costs.test.ts",

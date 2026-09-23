@@ -37,6 +37,8 @@ describe("recordFieldsFromMeta", () => {
 			cachePrefixHashes,
 			clientUserAgent: "claude-cli/2.1.240",
 			clientHarness: "claude-code",
+			claudeDeviceId:
+				"e01c000000000000000000000000000000000000000000000000000000000000",
 			comboName: "combo-a",
 			routing,
 			// Fields that are not per-request record data stay out of the result.
@@ -62,6 +64,8 @@ describe("recordFieldsFromMeta", () => {
 			cachePrefixHashes,
 			clientUserAgent: "claude-cli/2.1.240",
 			clientHarness: "claude-code",
+			claudeDeviceId:
+				"e01c000000000000000000000000000000000000000000000000000000000000",
 			comboName: "combo-a",
 			routing,
 		});
@@ -84,5 +88,6 @@ describe("recordFieldsFromMeta", () => {
 		expect(fields.requestedModel).toBeUndefined();
 		expect(fields.project).toBeUndefined();
 		expect(fields.clientHarness).toBeUndefined();
+		expect(fields.claudeDeviceId).toBeUndefined();
 	});
 });

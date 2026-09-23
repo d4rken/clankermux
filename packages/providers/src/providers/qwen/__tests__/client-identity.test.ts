@@ -4,18 +4,19 @@ import {
 	QWEN_CODE_IDENTITY_PROMPT,
 	QWEN_CODE_PLATFORM,
 	QWEN_CODE_PRODUCT_NAME,
-	QWEN_CODE_SDK_VERSION,
 	QWEN_CODE_USER_AGENT,
+	QWEN_CODE_VERSION,
 	QWEN_STAINLESS_HEADERS,
 	qwenDeviceAuthorizationHeaders,
+	qwenFormBody,
 	qwenInferenceHeaders,
 	qwenTokenHeaders,
 } from "../client-identity";
 
 describe("Qwen Code client identity", () => {
-	it("builds the User-Agent from the SDK version and pinned platform", () => {
+	it("builds the User-Agent from the CLI version and pinned platform", () => {
 		expect(QWEN_CODE_USER_AGENT).toBe(
-			`QwenCode/sdk-typescript-v${QWEN_CODE_SDK_VERSION} (${QWEN_CODE_PLATFORM}; ${QWEN_CODE_ARCH})`,
+			`QwenCode/${QWEN_CODE_VERSION} (${QWEN_CODE_PLATFORM}; ${QWEN_CODE_ARCH})`,
 		);
 	});
 
@@ -39,6 +40,7 @@ describe("Qwen Code client identity", () => {
 		it("sets headers in a fixed order, authorization first", () => {
 			expect(Object.keys(qwenInferenceHeaders("tok"))).toEqual([
 				"Authorization",
+				"Accept",
 				"Content-Type",
 				"User-Agent",
 				"X-DashScope-CacheControl",
@@ -47,10 +49,11 @@ describe("Qwen Code client identity", () => {
 				"X-Stainless-Lang",
 				"X-Stainless-Runtime",
 				"X-Stainless-Runtime-Version",
-				"X-Stainless-Os",
+				"X-Stainless-OS",
 				"X-Stainless-Arch",
 				"X-Stainless-Package-Version",
 				"X-Stainless-Retry-Count",
+				"X-Stainless-Timeout",
 				"Accept-Language",
 				"Accept-Encoding",
 				"Sec-Fetch-Mode",
@@ -82,10 +85,23 @@ describe("Qwen Code client identity", () => {
 	});
 
 	describe("OAuth headers", () => {
-		it("send a form body to both OAuth endpoints", () => {
-			const form = { "Content-Type": "application/x-www-form-urlencoded" };
-			expect(qwenDeviceAuthorizationHeaders()).toEqual(form);
+		it("send a form body and ask for JSON", () => {
+			const { "x-request-id": _id, ...device } =
+				qwenDeviceAuthorizationHeaders();
+			const form = {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Accept: "application/json",
+			};
+			expect(device).toEqual(form);
 			expect(qwenTokenHeaders()).toEqual(form);
+		});
+
+		it("give each device authorization request its own id", () => {
+			const first = qwenDeviceAuthorizationHeaders()["x-request-id"];
+			expect(first).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+			);
+			expect(qwenDeviceAuthorizationHeaders()["x-request-id"]).not.toBe(first);
 		});
 
 		it("return a fresh object each call", () => {
@@ -93,6 +109,14 @@ describe("Qwen Code client identity", () => {
 			expect(qwenDeviceAuthorizationHeaders()).not.toBe(
 				qwenDeviceAuthorizationHeaders(),
 			);
+		});
+	});
+
+	describe("qwenFormBody", () => {
+		it("percent-encodes fields in insertion order", () => {
+			expect(
+				qwenFormBody({ grant_type: "a:b", scope: "x y", token: "t~*'()!" }),
+			).toBe("grant_type=a%3Ab&scope=x%20y&token=t~*'()!");
 		});
 	});
 });

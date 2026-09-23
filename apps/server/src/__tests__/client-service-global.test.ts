@@ -294,16 +294,18 @@ describe("global catalogue", () => {
 	it("skips a global entry a client cannot publish, says why, and publishes it where it can", async () => {
 		const cc = await makeClient("CC", "claude-code");
 		const generic = await makeClient("Generic", "generic");
+		// Claude Code would see both as claude-gpt-x.
 		const review = await applyGlobal(
-			await globalDraft({ anthropic: ["claude-ok", "gpt-nope"] }, [
+			await globalDraft({ anthropic: ["claude-gpt-x", "gpt-x"] }, [
 				cc.apiKeyId,
 				generic.apiKeyId,
 			]),
 		);
 		const skipped = [
 			{
-				id: "gpt-nope",
-				reason: "Claude Code requires a compatible alias for gpt-nope",
+				id: "gpt-x",
+				reason:
+					"gpt-x appears to Claude Code as claude-gpt-x, which another entry already uses",
 			},
 		];
 		expect(
@@ -311,22 +313,24 @@ describe("global catalogue", () => {
 				?.skipped,
 		).toEqual(skipped);
 		const ccAfter = await client(cc.apiKeyId);
-		expect(ids(ccAfter, "anthropic")).toEqual(["claude-ok"]);
+		expect(ids(ccAfter, "anthropic")).toEqual(["claude-gpt-x"]);
 		expect(ccAfter.global?.formats.anthropic?.skipped).toEqual(skipped);
 		expect(ids(await client(generic.apiKeyId), "anthropic")).toEqual([
-			"claude-ok",
-			"gpt-nope",
+			"claude-gpt-x",
+			"gpt-x",
 		]);
 	});
 
 	it("still refuses a client's own entry that it cannot publish", async () => {
 		const cc = await makeClient("CC", "claude-code");
-		await applyGlobal(await globalDraft({}, [cc.apiKeyId]));
+		await applyGlobal(
+			await globalDraft({ anthropic: ["claude-gpt-x"] }, [cc.apiKeyId]),
+		);
 		const draft = edit(await client(cc.apiKeyId));
 		draft.global = {
 			formats: {
 				anthropic: {
-					additions: [entry("gpt-nope")],
+					additions: [entry("gpt-x")],
 					removals: [],
 					inheritDefault: true,
 					defaultModel: null,
@@ -334,6 +338,110 @@ describe("global catalogue", () => {
 			},
 		};
 		expect(await status(service.review(draft))).toBe(400);
+	});
+
+	it("lets an entry publish under a Claude Code name whose stored holder this client skips", async () => {
+		const cc = await makeClient("CC", "claude-code", (d) => {
+			d.destinations.excludedProviders = ["devin"];
+		});
+		const draft = await globalDraft({ anthropic: ["claude-gpt-x", "gpt-x"] }, [
+			cc.apiKeyId,
+		]);
+		// Only the excluded Devin account may serve it, so this client skips it.
+		const holder = draft.catalogues.anthropic.models[0];
+		if (holder) holder.accountIds = ["d"];
+		await applyGlobal(draft);
+		const after = await client(cc.apiKeyId);
+		expect(ids(after, "anthropic")).toEqual(["gpt-x"]);
+		expect(after.global?.formats.anthropic?.skipped.map((s) => s.id)).toEqual([
+			"claude-gpt-x",
+		]);
+	});
+
+	it("drops only the generated route when a global edit removes an alias a hand-made rule also names", async () => {
+		const cc = await makeClient("CC", "claude-code");
+		const withAlias = await globalDraft({}, [cc.apiKeyId]);
+		withAlias.catalogues.anthropic.models = [
+			entry("claude-fast", "gpt-static", ["c"]),
+		];
+		await applyGlobal(withAlias);
+		await dbOps.routing.saveRule({
+			id: "manual",
+			name: "Manual",
+			position: 1000,
+			enabled: true,
+			match_api_key_id: null,
+			match_model_kind: "exact",
+			match_model_value: "claude-fast",
+			pool_kind: "inherit",
+			pool_provider: null,
+			pool_account_ids: null,
+			target_kind: "literal",
+			target_model: "gpt-static",
+		});
+		await applyGlobal({
+			...(await globalDraft({}, [cc.apiKeyId])),
+			droppedAliasRoutes: ["claude-fast"],
+		});
+		expect((await client(cc.apiKeyId)).aliasRules).toEqual([]);
+		expect((await dbOps.routing.listRules()).map((r) => r.id)).toEqual([
+			"manual",
+		]);
+	});
+
+	it("publishes a Claude Code client's catalogue under the names Claude Code lists", async () => {
+		const cc = await makeClient("CC", "claude-code");
+		const generic = await makeClient("Generic", "generic");
+		await applyGlobal(
+			await globalDraft(
+				{ anthropic: ["gpt-6-astra", "claude-opus-5-5"] },
+				[cc.apiKeyId, generic.apiKeyId],
+				{ anthropic: "gpt-6-astra" },
+			),
+		);
+		const listed = async (id: string) =>
+			(
+				(await (await service.wire(id, "anthropic")).json()) as {
+					data: { id: string }[];
+				}
+			).data.map((m) => m.id);
+		expect(await listed(cc.apiKeyId)).toEqual([
+			"claude-gpt-6-astra",
+			"claude-opus-5-5",
+		]);
+		expect(await listed(generic.apiKeyId)).toEqual([
+			"gpt-6-astra",
+			"claude-opus-5-5",
+		]);
+		expect(
+			Object.keys(
+				(await service.modelMetadata(cc.apiKeyId, "anthropic")).models,
+			),
+		).toEqual(["claude-gpt-6-astra", "claude-opus-5-5"]);
+	});
+
+	it("lists a stored name clash once for Claude Code, keeping the entry stored under that name", async () => {
+		const cc = await makeClient("CC", "claude-code");
+		const stored = await dbOps.clients.getProfile(cc.apiKeyId);
+		if (!stored) throw new Error("no profile");
+		// Written before clashes were checked on save.
+		stored.catalogues.anthropic.models = [
+			{ ...entry("gpt-x"), createdAt: "2026-01-01T00:00:00Z" },
+			{
+				...entry("claude-gpt-x", "other"),
+				displayName: "Stored",
+				createdAt: "2026-01-01T00:00:00Z",
+			},
+		];
+		await dbOps.clients.saveProfile(stored, stored.revision);
+		const body = (await (
+			await service.wire(cc.apiKeyId, "anthropic")
+		).json()) as {
+			data: { id: string; display_name: string }[];
+		};
+		expect(body.data.map((m) => [m.id, m.display_name])).toEqual([
+			["claude-gpt-x", "Stored"],
+		]);
 	});
 
 	it("rejects a malformed global catalogue before recomposing any client", async () => {
@@ -585,6 +693,20 @@ describe("global catalogue", () => {
 		expect(ids(after, "openai")).toEqual(["g1", "g2"]);
 		expect(after.global?.formats.openai).toEqual(
 			expect.objectContaining({ additions: [], removals: [] }),
+		);
+	});
+
+	it("says in the bulk preview when a removal hides a global model from a subscriber", async () => {
+		const pi = await makeClient("Pi");
+		await applyGlobal(
+			await globalDraft({ openai: ["g1", "g2"] }, [pi.apiKeyId]),
+		);
+		const review = await service.bulkReview({
+			clientIds: [pi.apiKeyId],
+			operation: { format: "openai", mode: "edit", add: [], remove: ["g1"] },
+		});
+		expect(review.clients[0]?.notices).toContain(
+			"Hides g1 from this client only; the global catalogue still lists it.",
 		);
 	});
 

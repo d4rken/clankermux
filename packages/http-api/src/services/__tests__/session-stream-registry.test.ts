@@ -32,6 +32,16 @@ class FakeStore implements SessionAuthStore {
 	async getManagementPassword() {
 		return this.password;
 	}
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	) {
+		if (this.password) return false;
+		this.password = { verifier, params, updatedAt };
+		this.sessions.clear();
+		return true;
+	}
 	async createManagementSession(
 		record: AuthSessionRecord,
 		_boundTo: PasswordBinding,
