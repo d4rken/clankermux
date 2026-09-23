@@ -195,6 +195,16 @@ export class GrokSubscriptionProvider extends BaseAnthropicCompatibleProvider {
 		return prepared;
 	}
 
+	/**
+	 * xAI routes requests with one `x-grok-conv-id` to one server, and its prompt
+	 * cache is per server. Shaped like xAI's documented example (`conv_abc123`);
+	 * a value the client chose is left alone.
+	 */
+	applyConversationId(headers: Headers, conversationId: string): void {
+		if (headers.has("x-grok-conv-id")) return;
+		headers.set("x-grok-conv-id", `conv_${conversationId.slice(0, 32)}`);
+	}
+
 	override async transformRequestBody(
 		request: Request,
 		_account?: Account,

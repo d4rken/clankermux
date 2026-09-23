@@ -5,6 +5,7 @@ import {
 	aliasEffortReachesProvider,
 	clampEffortToModel,
 	getModelFamily,
+	hashRoutingAffinityKey,
 	isCodexSubscriptionLapse,
 	isDebugEnabled,
 	isProtectedFamily,
@@ -104,6 +105,7 @@ import {
 	isModelRouteRestriction,
 } from "../routing-response-audit";
 import { dispatchObservationSource } from "../should-record-request";
+import { getRoutingAffinity } from "./account-selector";
 import {
 	type AccountQuota429,
 	resolveLiveAccountQuota429,
@@ -1114,6 +1116,19 @@ function adaptAliasEffort(
 		});
 }
 
+/** Names the request's conversation to a provider that routes on it. */
+function applyConversationId(
+	provider: ProxyContext["provider"],
+	headers: Headers,
+	requestMeta: RequestMeta,
+): void {
+	if (!provider.applyConversationId) return;
+	const conversationId = hashRoutingAffinityKey(
+		getRoutingAffinity(requestMeta).key,
+	);
+	if (conversationId) provider.applyConversationId(headers, conversationId);
+}
+
 /**
  * Attempts to proxy a request with a specific account
  * @param req - The incoming request
@@ -1446,6 +1461,7 @@ export async function proxyWithAccount(
 		// happened to the reasoning effort, so a client cannot plant an
 		// adaptation on its own attempt row.
 		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
+		applyConversationId(provider, headers, requestMeta);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────
@@ -3586,6 +3602,7 @@ export async function proxyForcedAccount(
 		// happened to the reasoning effort, so a client cannot plant an
 		// adaptation on its own attempt row.
 		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
+		applyConversationId(provider, headers, requestMeta);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {

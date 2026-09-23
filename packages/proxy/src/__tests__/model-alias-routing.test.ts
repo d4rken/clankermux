@@ -160,6 +160,53 @@ it("exhausts all primary accounts before sending the fallback and audits the rea
 		reason: "quota_exhausted",
 	});
 });
+it("stamps each alias stage's upstream model for affinity, never the reported one", async () => {
+	const { ctx } = await setup(undefined, ["Primary-Model", "backup-model"]);
+	const stamped: Array<string | null | undefined> = [];
+	const select = ctx.strategy.select.bind(ctx.strategy);
+	ctx.strategy.select = (accounts, meta) => {
+		stamped.push(meta.affinityModel);
+		return select(accounts, meta);
+	};
+	const seen = upstream((model) =>
+		model === "Primary-Model"
+			? Response.json({ error: { type: "rate_limit_error" } }, { status: 429 })
+			: success("upstream-relabelled-model"),
+	);
+	expect((await run(ctx, request("conversation-one"))).status).toBe(200);
+	expect(seen.map((s) => s.model)).toEqual([
+		"Primary-Model",
+		"Primary-Model",
+		"backup-model",
+	]);
+	expect(stamped).toEqual(["primary-model", "backup-model"]);
+});
+it("stamps the literal routing target for affinity", async () => {
+	const { ctx, routing } = await setup();
+	await routing.saveRule({
+		id: "override",
+		name: "override",
+		enabled: true,
+		position: 0,
+		match_api_key_id: null,
+		match_model_kind: "exact",
+		match_model_value: "alias:good",
+		pool_kind: "accounts",
+		pool_account_ids: ["alias-account-0"],
+		pool_provider: null,
+		target_kind: "literal",
+		target_model: "backup-model",
+	});
+	const stamped: Array<string | null | undefined> = [];
+	const select = ctx.strategy.select.bind(ctx.strategy);
+	ctx.strategy.select = (accounts, meta) => {
+		stamped.push(meta.affinityModel);
+		return select(accounts, meta);
+	};
+	upstream((model) => success(model));
+	expect((await run(ctx)).status).toBe(200);
+	expect(stamped).toEqual(["backup-model"]);
+});
 it("skips a primary pool already cooling down", async () => {
 	const { ctx, accounts } = await setup();
 	for (const a of accounts.slice(0, 2))

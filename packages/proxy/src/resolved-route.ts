@@ -121,6 +121,8 @@ export class ResolvedRoute {
 		this.#aliasReason = reason;
 	}
 	readonly maintenance: BuildRouteInput["maintenance"];
+	/** The model every target sends, or null when the targets disagree or none exist. */
+	readonly upstreamModel: string | null;
 	readonly #rule: RoutingRule | null;
 	readonly #targets: Map<string, Readonly<AuthorizedTarget>>;
 	constructor(
@@ -140,6 +142,10 @@ export class ResolvedRoute {
 			[...targets].map(([id, target]) => [id, Object.freeze({ ...target })]),
 		);
 		this.alias = input.alias ? Object.freeze({ ...input.alias }) : undefined;
+		const models = new Set(
+			[...this.#targets.values()].map((t) => t.upstreamModel),
+		);
+		this.upstreamModel = models.size === 1 ? [...models][0] : null;
 		this.#snapshot = JSON.stringify({
 			requestedModel: input.requestedModel,
 			rule,

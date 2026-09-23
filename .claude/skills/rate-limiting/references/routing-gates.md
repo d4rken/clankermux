@@ -48,9 +48,12 @@ Two membership tests are correct and stay as they are:
 - `heldInGatedAccounts` → feeds `isBurstHoldEligible`, which asks "was this
   account *excluded* by a gate", for which membership is the right semantic.
 - the marker-active path → a provider-family-wide per-IP burst where switching
-  accounts does not help; it has its own weekly-exhaustion guard.
+  accounts does not help; it has its own weekly-exhaustion guard. It still
+  holds an `affinity_hold` pin wherever it sits, but an `affinity_hit` pin that
+  is not the gated primary falls through to the ordinary loop: holding it
+  would bypass the reorder the pin is meant to follow.
 
-### The pin follows a liveness reserve, and nothing else
+### Pins are per model, and follow soft demotions
 
 A soft demotion reorders after `SessionStrategy.select()` has pinned the
 conversation, so a reserved pin runs its turns on the peer while the pin stays
@@ -60,16 +63,27 @@ to an account that never cached its prompt. Prod, 2026-09-23: 49.8% of
 Codex account ran on another via the reserve, failed over to its pin on a 529,
 and returned when the 60s memo expired.
 
+Prompt caches are per (account, model): no cache read crosses either
+boundary. `getOrderedAccounts` stamps `meta.affinityModel` with the upstream
+model the current route SENDS (per alias stage, never the reported model), and
+`SessionStrategy` pins `(conversation, model)`. The conversation-level key,
+which is also what telemetry hashes as `affinity_key_hash`, becomes an anchor:
+written by the conversation's first model-keyed request, never re-pointed after
+that, only kept alive. A model without a pin starts on the anchor's account when
+it is available, so Haiku and Sonnet side calls join the Fable turns' account
+instead of a fresh FEFO pick. Once a model pin exists it alone is held,
+reassigned or followed.
+
 `prepareSoftDemotionFollow` (main pass and alias pass only) arms a callback
 that moves the pin, compare-and-set, to the reorder's head once THAT account
-has served a 2xx. It stays unarmed for:
+has served a 2xx. A model-stamped request follows every soft-demotion reason
+(family reservation, a liveness reserve at any tier, or both): its pin moves
+only that model, so a Sonnet side request cannot drag the Fable turns' pin. A
+request without a model stamp still moves the conversation-level pin, so it
+follows only a pure `pool liveness` demotion whose reserve would also hold
+Fable back; family reservation and the 10-20% headroom band depend on the
+request's model. It stays unarmed for:
 
-- family reservation, which depends on the request's model;
-- a liveness reserve that would not also hold Fable back (the 10-20% headroom
-  band), when the conversation sent a Fable-tier request within the last hour.
-  A Sonnet side request shares its conversation key with the Fable turns. After
-  an hour without one there is no warm Fable prefix left to protect. Pi and
-  Codex conversations on gpt models therefore follow the ordinary 20% reserve;
 - a head a failure memo pushed back: memos and failover never move a pin;
 - `affinity_hold` and hold wakes: a hold keeps its target;
 - another provider, synthetic probes, and `count_tokens`, which the proxy may

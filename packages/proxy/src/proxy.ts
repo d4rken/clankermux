@@ -645,7 +645,6 @@ async function handleIngestedProxy(
 		),
 	);
 	gates.reconcileAffinity(accounts);
-	gates.noteConversationTier(accounts);
 	const followServedAccount = gates.prepareSoftDemotionFollow(accounts);
 	// The pool this request could actually have landed on, for restating the
 	// client-facing rate-limit headers as pool headroom. Stashed here because
@@ -679,8 +678,8 @@ async function handleIngestedProxy(
 	//
 	// Why the ADMITTED account and not `primaryAttemptAccountId`: the latter is
 	// post-gate LIST POSITION, and at least three paths make the real first
-	// admitted attempt differ from it — the marker-active burst hold reprobes the
-	// affinity-pinned account regardless of position, the single-flight probe gate
+	// admitted attempt differ from it — the marker-active burst hold reprobes an
+	// affinity_hold's cooled pin regardless of position, the single-flight probe gate
 	// can suppress accounts[0], and the late provider-overload check skips it
 	// before any upstream call. Reporting position would misdescribe exactly the
 	// cases this line exists to diagnose, so it is called from the admission
@@ -916,7 +915,17 @@ async function handleIngestedProxy(
 					requestMeta,
 					heldAccount,
 				).upstreamModel;
-				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
+				if (
+					requestMeta.routing?.decision === "affinity_hit" &&
+					requestMeta.routing.primaryAttemptAccountId !== heldAccount.id
+				) {
+					// A soft demotion or failure memo moved the available pinned account
+					// behind the head. Holding it here would bypass that reorder, and
+					// with it the follow that moves the pin once the head serves.
+					log.debug(
+						`Burst marker active but held account ${heldAccount.name} is no longer the gated primary — NOT holding, falling through to normal failover`,
+					);
+				} else if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
 					log.warn(
 						`Burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, falling through to normal failover`,
 					);

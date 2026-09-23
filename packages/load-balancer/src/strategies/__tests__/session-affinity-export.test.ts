@@ -112,6 +112,41 @@ describe("SessionStrategy affinity export/import", () => {
 		);
 	});
 
+	it("round-trips per-model pins and their conversation anchor", () => {
+		const a = makeAccount("acc-a", 0);
+		const b = makeAccount("acc-b", 1);
+		const turn = (model: string) =>
+			metaFor({
+				affinityKey: "conversation",
+				affinityScope: "claude_session",
+				affinityModel: model,
+			});
+		const before = makeStrategy();
+		setNow(BASE);
+		before.select([a, b], turn("claude-fable-5-1"));
+		const side = turn("claude-haiku-4-5");
+		before.select([a, b], side);
+		before.reassignAffinity(side, b);
+		const exported = before.exportAffinity();
+		expect(exported).toHaveLength(3);
+
+		const after = makeStrategy();
+		setNow(BASE + 60_000);
+		after.importAffinity(exported, BASE + 60_000);
+		expect(after.exportAffinity()).toEqual(exported);
+
+		for (const [model, account] of [
+			["claude-fable-5-1", "acc-a"],
+			["claude-haiku-4-5", "acc-b"],
+			// A model the conversation never used seeds from the anchor.
+			["claude-sonnet-4-5", "acc-a"],
+		] as const) {
+			const next = turn(model);
+			expect(after.select([a, b], next)[0].id).toBe(account);
+			expect(next.routing?.decision).toBe("affinity_hit");
+		}
+	});
+
 	it("drops pins older than the session duration", () => {
 		const strategy = makeStrategy();
 		const now = BASE + SESSION_MS * 2;

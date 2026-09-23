@@ -550,11 +550,9 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		expect(attempts).toEqual(["at-peer"]);
 	});
 
-	it("burst marker ACTIVE still holds the pinned account (documented scope boundary)", async () => {
-		// The marker-active path is deliberately untouched by the reserve: it
-		// handles a provider-family-wide per-IP burst where switching accounts does
-		// not help, and it has its own exhaustion guards. Pinning this behavior
-		// keeps the scope boundary from being eroded silently.
+	it("burst marker ACTIVE does not hold an affinity_hit pin the reserve moved back", async () => {
+		// Holding the pinned account here would bypass the reorder the pin is
+		// meant to follow, so the request takes the ordinary loop and its head.
 		const pinned = makeAccount({
 			id: "pinned",
 			name: "Pinned",
@@ -587,8 +585,7 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		);
 
 		expect(res.status).toBe(200);
-		// The hold re-probed the pinned (cache-warm) account, not the peer.
-		expect(attempts).toEqual(["at-peer", "at-pinned"]);
+		expect(attempts).toEqual(["at-peer", "at-peer"]);
 	});
 
 	it("still applies the reserve on the overload-hold recovery re-selection", async () => {

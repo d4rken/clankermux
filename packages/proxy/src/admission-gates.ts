@@ -10,10 +10,6 @@ import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { getCodexTransientFailureUntil } from "./codex-transient-health";
-import {
-	hasRecentProtectedTierTurn,
-	recordProtectedTierTurn,
-} from "./conversation-tier-memory";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
 	type ContextWindowExcludedBackend,
@@ -98,21 +94,14 @@ export interface AdmissionGates {
 	/** Rebind only when a durable exclusion invalidates the remembered account. */
 	reconcileAffinity: (candidates: Account[]) => void;
 	/**
-	 * When the preceding `applySoftDemotionReorder` held the pinned account back
-	 * for pool liveness, returns a callback that moves the pin to the account the
-	 * reorder put first, once that account has served the request. Call it right
+	 * When the preceding `applySoftDemotionReorder` held the pinned account back,
+	 * returns a callback that moves the pin to the account the reorder put
+	 * first, once that account has served the request. Call it right
 	 * after the reorder on a fresh selection, never from a hold wake.
 	 */
 	prepareSoftDemotionFollow: (
 		candidates: Account[],
 	) => ((served: Account) => void) | null;
-	/**
-	 * Remember that this request's conversation can be served as the protected
-	 * family (Fable), so a later side request of it does not move its pin off an
-	 * account only the side request's tier holds in reserve. Call after every
-	 * selection pass, hold wakes included.
-	 */
-	noteConversationTier: (candidates: Account[]) => void;
 	modelForAccount: (account: Account) => string | null;
 	applyProviderOverloadGate: (accounts: Account[]) => {
 		available: Account[];
@@ -753,27 +742,14 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		if (durable) deps.strategy?.reassignAffinity?.(requestMeta, candidates[0]);
 	};
 
-	// A liveness reserve lasts hours, so a conversation pinned behind it runs on
-	// the peer and moves back whenever the reserve lifts or a failure memo flips
-	// the order, re-reading its prompt on an account that never cached it.
-	const noteConversationTier = (candidates: Account[]) => {
-		const conversationKey = requestMeta.routing?.affinityKey;
-		if (
-			!conversationKey ||
-			isSyntheticProbeRequest ||
-			requestMeta.path === "/v1/messages/count_tokens" ||
-			!candidates.some((account) =>
-				isProtectedFamily(getModelFamily(modelForAccount(account))),
-			)
-		)
-			return;
-		recordProtectedTierTurn(conversationKey, Date.now());
-	};
-
-	// Family reservation depends on the request's model and is never followed.
-	// The liveness reserve is tiered by model too: a conversation with a recent
-	// Fable turn follows only a reserve that would also hold Fable back, so a
-	// side request cannot move it off an account its Fable turns may still use.
+	// A soft demotion lasts hours, so a conversation pinned behind it runs on the
+	// peer and moves back whenever the demotion lifts or a failure memo flips the
+	// order, re-reading its prompt on an account that never cached it.
+	// A per-model pin follows every demotion reason, since it moves only this
+	// model. A conversation-level pin follows only a liveness reserve that holds
+	// at every tier: family reservation and the ordinary liveness tier depend on
+	// the request's model, and a side request must not move a conversation off
+	// an account its Fable turns may still use.
 	const prepareSoftDemotionFollow = (
 		candidates: Account[],
 	): ((served: Account) => void) | null => {
@@ -781,25 +757,24 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		if (
 			isSyntheticProbeRequest ||
 			requestMeta.path === "/v1/messages/count_tokens" ||
-			routing?.strategy !== "session"
+			routing?.strategy !== "session" ||
+			!FOLLOWABLE_AFFINITY_DECISIONS.has(routing.decision)
 		)
 			return null;
-		if (!FOLLOWABLE_AFFINITY_DECISIONS.has(routing.decision)) return null;
-		const now = Date.now();
-		const conversationKey = routing.affinityKey;
 		const pinnedId = routing.heldAccountId ?? routing.selectedAccountId;
 		const pinned = candidates.find((a) => a.id === pinnedId);
 		const head = softDemotionHead;
+		const reason = pinned ? softDemotionReasons.get(pinned.id) : undefined;
 		if (
 			!pinned ||
 			!head ||
+			!reason ||
 			// A failure memo moved the head back; a memo never moves the pin.
 			candidates[0]?.id !== head.id ||
 			head.id === pinned.id ||
 			head.provider !== pinned.provider ||
-			softDemotionReasons.get(pinned.id) !== "pool liveness" ||
-			(!livenessHeldAtEveryTier.has(pinned.id) &&
-				(!conversationKey || hasRecentProtectedTierTurn(conversationKey, now)))
+			(!requestMeta.affinityModel?.trim() &&
+				(reason !== "pool liveness" || !livenessHeldAtEveryTier.has(pinned.id)))
 		)
 			return null;
 		return (served) => {
@@ -810,7 +785,6 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 
 	return {
 		reconcileAffinity,
-		noteConversationTier,
 		prepareSoftDemotionFollow,
 		modelForAccount,
 		applyProviderOverloadGate,

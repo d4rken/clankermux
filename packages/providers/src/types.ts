@@ -69,6 +69,13 @@ export interface Provider {
 	): Headers;
 
 	/**
+	 * Optional: name the request's conversation to an upstream that routes by
+	 * it. `conversationId` is a stable, non-reversible hex digest of the
+	 * conversation affinity key. Called only for requests that have one.
+	 */
+	applyConversationId?(headers: Headers, conversationId: string): void;
+
+	/**
 	 * Parse rate limit information from response
 	 */
 	parseRateLimit(response: Response): RateLimitInfo;

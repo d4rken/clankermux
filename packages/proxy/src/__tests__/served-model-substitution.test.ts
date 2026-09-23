@@ -555,3 +555,83 @@ describe("served-model substitution — grok-subscription's verified rename", ()
 		expect(suppressed[0]?.reason).toBe(MODEL_SUBSTITUTION_SUPPRESSION_REASON);
 	});
 });
+
+/**
+ * xAI routes requests carrying one `x-grok-conv-id` to one server, and its
+ * prompt cache lives per server. Asserted on the headers that reach `fetch`,
+ * so a later rewrite of the outgoing request cannot drop the header unseen.
+ */
+describe("grok-subscription conversation id", () => {
+	async function sentConversationId(
+		account: Account,
+		headers: Record<string, string>,
+	): Promise<string | null> {
+		let sent: string | null | undefined;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				const outgoing =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				sent = outgoing.get("x-grok-conv-id");
+				return anthropicJson(
+					account.provider === "grok-subscription"
+						? "grok-4.6-build"
+						: "claude-sonnet-4-5",
+				);
+			},
+		) as never;
+		const request = makeRequest(
+			account.provider === "grok-subscription"
+				? "grok-4.6"
+				: "claude-sonnet-4-5",
+			false,
+		);
+		for (const [name, value] of Object.entries(headers))
+			request.headers.set(name, value);
+		const res = await callHandleProxy(request, makeContext([account], "off"));
+		expect(res.status).toBe(200);
+		expect(sent).not.toBeUndefined();
+		return sent ?? null;
+	}
+
+	it("sends a stable id derived from the conversation", async () => {
+		const account = makeGrokAccount("grok-subscription");
+		const first = await sentConversationId(account, {
+			"x-claude-code-session-id": "grok-conversation",
+		});
+		expect(first).toMatch(/^conv_[0-9a-f]{32}$/);
+		expect(first).not.toContain("grok-conversation");
+		expect(
+			await sentConversationId(account, {
+				"x-claude-code-session-id": "grok-conversation",
+			}),
+		).toBe(first);
+		expect(
+			await sentConversationId(account, {
+				"x-claude-code-session-id": "another-conversation",
+			}),
+		).not.toBe(first);
+	});
+
+	it("keeps the id a client sent", async () => {
+		expect(
+			await sentConversationId(makeGrokAccount("grok-subscription"), {
+				"x-claude-code-session-id": "grok-conversation",
+				"x-grok-conv-id": "client-conversation",
+			}),
+		).toBe("client-conversation");
+	});
+
+	it("sends none without a conversation key", async () => {
+		expect(
+			await sentConversationId(makeGrokAccount("grok-subscription"), {}),
+		).toBeNull();
+	});
+
+	it("sends none to another provider", async () => {
+		expect(
+			await sentConversationId(makeAnthropicAccount(), {
+				"x-claude-code-session-id": "grok-conversation",
+			}),
+		).toBeNull();
+	});
+});
