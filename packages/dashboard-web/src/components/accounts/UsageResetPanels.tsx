@@ -28,6 +28,23 @@ export const RESET_CREDIT_URGENCY_CLASSES: Record<ResetCreditUrgency, string> =
 		none: "bg-info/15 text-info",
 	};
 
+/**
+ * The chip text of every provider's reset chip: `3 resets · expires Jan 5`.
+ * "expires" stays in the label: a bare date beside a countdown chip reads as
+ * a reset time, which is the opposite of what it marks.
+ */
+export function usageResetChipLabel(
+	count: number,
+	nextExpiry: Date | null,
+): string {
+	const countLabel = `${count} reset${count === 1 ? "" : "s"}`;
+	const shortExpiry = nextExpiry?.toLocaleDateString(undefined, {
+		month: "short",
+		day: "numeric",
+	});
+	return shortExpiry ? `${countLabel} · expires ${shortExpiry}` : countLabel;
+}
+
 /** Lazy-load lifecycle of a reset-event history in a popover. */
 export type ResetEventsState<E> =
 	| { kind: "idle" }

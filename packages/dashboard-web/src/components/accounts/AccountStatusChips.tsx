@@ -33,6 +33,7 @@ import {
 	ResetEventsPanel,
 	type ResetEventsState,
 	URGENCY_BASE_CLASSES,
+	usageResetChipLabel,
 } from "./UsageResetPanels";
 
 /**
@@ -305,15 +306,7 @@ function CodexUsageResetChip({
 	const availableExpiries = status.resetCreditAvailableExpiries;
 	const nextExpiry = status.resetCreditNextExpiry;
 	const countLabel = `${summary.availableCount} reset${summary.availableCount === 1 ? "" : "s"}`;
-	const shortExpiry = nextExpiry?.toLocaleDateString(undefined, {
-		month: "short",
-		day: "numeric",
-	});
-	// "expires" stays in the label: a bare date beside a countdown chip reads as
-	// a reset time, which is the opposite of what it marks.
-	const label = shortExpiry
-		? `${countLabel} · expires ${shortExpiry}`
-		: countLabel;
+	const label = usageResetChipLabel(summary.availableCount, nextExpiry);
 
 	const expiryDetails = availableExpiries.length
 		? ` Expirations: ${availableExpiries
