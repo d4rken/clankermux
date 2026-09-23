@@ -28,8 +28,9 @@ this license does not replace or withdraw:
 
   * MIT — code inherited from tombii/better-ccflare and snipeship/ccflare, and
     code previously published as part of ClankerMux under MIT, which stays
-    available under those grants. Those parts stay MIT inside this AGPL whole.
-    See LICENSE.MIT.
+    available under those grants, and contributions submitted under the terms
+    in CONTRIBUTING.md. Those parts stay MIT inside this AGPL whole. See
+    LICENSE.MIT.
   * MIT — packages/providers/src/providers/devin/vendor/, which has its own
     copyright holders. See the LICENSE file in that directory.
   * SIL Open Font License 1.1 — the Geist and Geist Mono font files in

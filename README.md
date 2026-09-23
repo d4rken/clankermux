@@ -16,7 +16,7 @@
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](./LICENSE)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
 A gateway that puts the model accounts you pay for behind one API. Your coding
 clients point at ClankerMux instead of a provider; it picks which account serves
@@ -120,10 +120,12 @@ been developed independently since.
 
 ## License
 
-AGPLv3. See [LICENSE](LICENSE), full text in [COPYING](COPYING). If you modify
+AGPL-3.0-or-later. See [LICENSE](LICENSE), full text in [COPYING](COPYING). If you modify
 ClankerMux and let other people reach it over a network, section 13 obliges you
 to offer them the source of your modified version.
 
 The inherited upstream code, and everything previously published under MIT, stay
 MIT ([LICENSE.MIT](LICENSE.MIT)); the bundled Devin protocol code and the Geist
 fonts keep their own terms.
+
+Contributions are accepted under MIT; see [CONTRIBUTING.md](CONTRIBUTING.md).

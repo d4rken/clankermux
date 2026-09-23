@@ -102,16 +102,19 @@ were removed). Don't run `bun publish`.
 
 ## Merging inbound PRs from external contributors
 
-Pull requests are disabled on GitHub and the repo has no contribution terms, so
-there is no inbound license rule to fall back on. Merging a contribution anyway
-takes it in under AGPL by default, which would cost the option of licensing
-ClankerMux under other terms later. Do not merge one: ask the user, who decides
-whether to set inbound terms first.
+Contributions come in under MIT (`CONTRIBUTING.md`, restated in the PR
+template), so ClankerMux keeps the option of shipping under terms other than
+AGPL later. Before merging, check that the PR body still carries the template's
+MIT statement and that the contributor hasn't objected to it in the thread. If
+either fails, don't merge: ask the user. Without those terms GitHub's terms of
+service (section D.6) default the contribution to the repository's own license,
+AGPL only, and relicensing would need that contributor's permission.
 
 Create a merge commit (`git merge --no-ff <branch-name>`) so their history and
 identity are preserved. Don't use `gh pr merge` — it may squash or rebase. If the
 branch isn't local: `git fetch origin pull/<PR_NUMBER>/head:<branch-name>`.
-After merging, thank the contributor in the README Acknowledgements.
+After merging, thank the contributor in the README Acknowledgements section
+(create it with the first one).
 
 Before merging any branch, check what `main` gained since it forked:
 
