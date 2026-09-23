@@ -139,6 +139,7 @@ import {
 	persistRateLimitStatusMeta,
 	processProxyResponse,
 } from "./response-processor";
+import { isSdkBridgeAttempt, proxyViaSdkBridge } from "./sdk-bridge-attempt";
 import {
 	peekServedModel,
 	SERVED_MODEL_PEEK_TIMEOUT_MS,
@@ -293,6 +294,11 @@ export type ProxyAttemptOutcome =
 	| { kind: "server_error"; status: number }
 	| { kind: "network_error"; beforeDispatch?: boolean }
 	| { kind: "invalid_request" }
+	/**
+	 * The SDK bridge could not run a turn for this attempt (unavailable, or
+	 * shutting down since the route was built). Nothing reached the account.
+	 */
+	| { kind: "sdk_bridge_unavailable" }
 	| { kind: "other" };
 
 /**
@@ -1373,6 +1379,34 @@ export async function proxyWithAccount(
 			throw new RoutingPolicyError("Cannot apply resolved model");
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
+
+		// A distinct attempt mode, branched before anything below touches the
+		// account: the bridge's own model calls do the staging, token handling
+		// and every health classification, and its answer is final.
+		if (isSdkBridgeAttempt(requestMeta, account)) {
+			const bridged = await proxyViaSdkBridge({
+				req,
+				url,
+				account,
+				requestMeta,
+				ctx,
+				body: effectiveBodyBuffer,
+				apiKeyId: apiKeyId ?? null,
+				apiKeyName: apiKeyName ?? null,
+				audit: attemptAudit,
+				bumpIdleTimeout,
+			});
+			if (bridged.kind === "response") return bridged.response;
+			log.info(
+				`SDK bridge cannot serve ${account.name} (${bridged.reason}) — failing over`,
+			);
+			return await fail(
+				{ kind: "sdk_bridge_unavailable" },
+				null,
+				undefined,
+				`sdk_bridge_unavailable: ${bridged.reason}`,
+			);
+		}
 
 		// Stage the original request body + headers for cache keepalive replay.
 		// Preserve the resolved model for a faithful replay to this destination.
@@ -3460,6 +3494,44 @@ export async function proxyForcedAccount(
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
+		// Forced onto an official account for a client that reaches it only
+		// through the SDK bridge. Force forbids failover, so a bridge that cannot
+		// run the turn is this request's answer.
+		if (isSdkBridgeAttempt(requestMeta, account)) {
+			const bridged = await proxyViaSdkBridge({
+				req,
+				url,
+				account,
+				requestMeta,
+				ctx,
+				body: effectiveBodyBuffer,
+				apiKeyId: apiKeyId ?? null,
+				apiKeyName: apiKeyName ?? null,
+				audit: attemptAudit,
+			});
+			if (bridged.kind === "response") return bridged.response;
+			await recordLocalRoutingOutcome(
+				attemptAudit,
+				requestMeta,
+				account,
+				ctx,
+				`sdk_bridge_unavailable: ${bridged.reason}`,
+				503,
+			).catch((error: unknown) =>
+				log.warn("Could not persist forced routing outcome", error),
+			);
+			return Response.json(
+				{
+					type: "error",
+					error: {
+						type: "sdk_bridge_unavailable",
+						message: `Forced account '${account.name}' serves this client only through the SDK bridge, which cannot run the turn: ${bridged.reason}`,
+					},
+				},
+				{ status: 503, headers: { "x-clankermux-forced-account": account.id } },
+			);
+		}
+
 		// Get the provider for this account
 		provider = getProvider(account.provider) || ctx.provider;
 
@@ -3805,8 +3877,9 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * @param estimatedTokens  Conservative token estimate for the request
  * @param excludedBackends Codex backends dropped by the size gate
  * @param requestModel     The Anthropic-side model name from the request
- * @param excludeOfficialAnthropic Whether the Codex-CLI floor barred official
- *   Anthropic accounts from this request. It decides WHY nothing else stepped
+ * @param officialAnthropicExcluded Whether the floor for non-Claude-Code
+ *   clients barred official Anthropic accounts from this request (the SDK
+ *   bridge was unavailable). It decides WHY nothing else stepped
  *   in: with the floor active they were never candidates, so reporting them as
  *   rate-limited or paused describes a condition nobody checked — and is
  *   routinely false, since the floor applies to healthy accounts too. The
@@ -3822,7 +3895,7 @@ export function createContextWindowExceededResponse(
 	estimatedTokens: number,
 	excludedBackends: ContextWindowExcludedBackend[],
 	requestModel: string,
-	excludeOfficialAnthropic = false,
+	officialAnthropicExcluded = false,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
 		const target = model;
@@ -3850,9 +3923,9 @@ export function createContextWindowExceededResponse(
 	// were barred from selection; it does NOT prove any exist, or that one would
 	// have fit — Anthropic's 200k window is SMALLER than gpt-5.6-sol's 272k, so
 	// claiming they are the larger-context option would be false here.
-	const largerContextReason = excludeOfficialAnthropic
-		? `Official Anthropic accounts are never eligible for Codex CLI traffic ` +
-			`and were not considered.`
+	const largerContextReason = officialAnthropicExcluded
+		? `Official Anthropic accounts serve this client only through the SDK ` +
+			`bridge, which is unavailable, so they were not considered.`
 		: `Larger-context accounts are currently unavailable (rate-limited or paused).`;
 
 	const message =

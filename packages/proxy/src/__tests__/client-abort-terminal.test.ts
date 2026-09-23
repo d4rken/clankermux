@@ -25,7 +25,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
-import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	type RequestMeta,
+	setNativeResponsesRequestContext,
+} from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import {
@@ -623,7 +627,14 @@ describe("client-abort terminals", () => {
 			provider: "codex",
 			rate_limited_until: Date.now() + 3_600_000,
 		});
-		const denyOfficial = { "x-clankermux-deny-official-anthropic": "1" };
+		// The Responses adapter's floor, as it marks it: in-process, not a header.
+		const floored = (req: Request): Request => {
+			setNativeResponsesRequestContext(req, {
+				nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
+				denyDirectOfficialAnthropic: true,
+			});
+			return req;
+		};
 
 		let calls = 0;
 		globalThis.fetch = upstreamOnlyFetch(() => {
@@ -637,7 +648,7 @@ describe("client-abort terminals", () => {
 			makeSelectionAbortStrategy(() => {}),
 		);
 		const liveResponse = await callHandleProxy(
-			makeRequest(undefined, denyOfficial),
+			floored(makeRequest(undefined)),
 			new URL("https://proxy.local/v1/messages"),
 			liveCtx,
 		);
@@ -653,7 +664,7 @@ describe("client-abort terminals", () => {
 			makeSelectionAbortStrategy(() => controller.abort()),
 		);
 		const response = await callHandleProxy(
-			makeRequest(controller.signal, denyOfficial),
+			floored(makeRequest(controller.signal)),
 			new URL("https://proxy.local/v1/messages"),
 			abortedCtx,
 		);

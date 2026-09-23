@@ -570,7 +570,7 @@ export async function resolveZeroAccountsOutcome(
 					gateTokenEstimate,
 					[...gates.contextExcludedAccounts],
 					effectiveRequestModel ?? "unknown",
-					requestMeta.excludeOfficialAnthropic === true,
+					!!requestMeta.officialAnthropicExcluded,
 				);
 			} else if (!relaxAttempted && relaxSuppressed > 0) {
 				log.info(
@@ -629,9 +629,9 @@ export async function resolveZeroAccountsOutcome(
 		// re-enforces the pin (so it would never be served — no fail-closed
 		// break), but holding for it wastes the budget and the response would name
 		// an account the key isn't allowed to use. Fall through to the genuine
-		// family-exhausted terminal instead. (excludeOfficialAnthropic / Codex-CLI
-		// requests never populate familyWeeklyExcludedAccounts, so `pin` is the
-		// only live case here.)
+		// family-exhausted terminal instead. (A request whose official Anthropic
+		// accounts were excluded never populates familyWeeklyExcludedAccounts, so
+		// `pin` is the only live case here.)
 		const nowGate = Date.now();
 		const cooledSiblings = requestMeta.pin
 			? []
@@ -766,13 +766,15 @@ export async function resolveZeroAccountsOutcome(
 	// this point or already discarded its staged body.
 	if (req.signal.aborted) return createClientAbortResponse();
 
-	// A pin or the Codex-CLI Anthropic floor was active but post-selection
-	// gates removed every allowed candidate (and no more-specific terminal
-	// above applied). Return the pinned terminal rather than a generic
-	// pool_exhausted that reports the wrong (provider-default) accounts — and
-	// never silently fall through to other handling.
+	// A pin, or the floor that excluded official Anthropic accounts because the
+	// SDK bridge was unavailable, was active but post-selection gates removed
+	// every allowed candidate (and no more-specific terminal above applied).
+	// Return the pinned terminal rather than a generic pool_exhausted that
+	// reports the wrong (provider-default) accounts — and never silently fall
+	// through to other handling. With the bridge available the floor excludes
+	// nothing, so pool_exhausted describes the right accounts.
 	if (
-		(requestMeta.pin || requestMeta.excludeOfficialAnthropic) &&
+		(requestMeta.pin || requestMeta.officialAnthropicExcluded) &&
 		!requestMeta.pinFailure
 	) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(

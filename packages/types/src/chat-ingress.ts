@@ -5,6 +5,8 @@ export interface ChatRequirements {
 export interface ChatIngressContext {
 	readonly requirements: ChatRequirements;
 	readonly defaultMaxTokens: number;
+	/** See NativeResponsesContext.denyDirectOfficialAnthropic. */
+	readonly denyDirectOfficialAnthropic?: boolean;
 	outgoingModel?: string;
 	provider?: string;
 	reportedModel?: string;

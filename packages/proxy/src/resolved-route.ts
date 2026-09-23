@@ -96,7 +96,12 @@ export interface BuildRouteInput {
 	substitutedPairs?: ReadonlySet<string>;
 	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
-	excludeOfficialAnthropic?: boolean;
+	/**
+	 * Why official Anthropic accounts cannot be destinations of this request
+	 * (an SDK bridge request whose bridge is unavailable), or null/absent when
+	 * they can.
+	 */
+	officialAnthropicExclusion?: string | null;
 	chatRequirements?: ChatRequirements;
 	/** Only in-process scheduler code supplies this, never client headers alone. */
 	maintenance?: { accountId: string; purpose: "auto_refresh" | "keepalive" };
@@ -154,7 +159,7 @@ export class ResolvedRoute {
 			pin: input.pin,
 			forcedAccountId: input.forcedAccountId ?? null,
 			headerAccountId: input.headerAccountId ?? null,
-			excludeOfficialAnthropic: input.excludeOfficialAnthropic ?? false,
+			officialAnthropicExclusion: input.officialAnthropicExclusion ?? null,
 			maintenance: this.maintenance,
 			...(input.sdkBridgeTurnId
 				? { sdkBridgeTurnId: input.sdkBridgeTurnId }
@@ -203,7 +208,7 @@ export type DestinationRestrictions = Pick<
 	| "pin"
 	| "forcedAccountId"
 	| "headerAccountId"
-	| "excludeOfficialAnthropic"
+	| "officialAnthropicExclusion"
 	| "maintenance"
 >;
 /**
@@ -221,10 +226,10 @@ export function destinationExclusionReason(
 	if (!isAccountAllowedByPin(input.pin ?? null, account))
 		return "excluded by the API key's destinations";
 	if (
-		input.excludeOfficialAnthropic &&
+		input.officialAnthropicExclusion &&
 		isOfficialAnthropicProvider(account.provider)
 	)
-		return "official Anthropic accounts are excluded from this attempt";
+		return input.officialAnthropicExclusion;
 	if (input.forcedAccountId && input.forcedAccountId !== account.id)
 		return "another account was forced for this request";
 	if (input.headerAccountId && input.headerAccountId !== account.id)

@@ -189,11 +189,18 @@ export async function initializeRequestRoute(
 		ctx.dbOps.routing.listRules(),
 	]);
 	const winning = maintenance ? null : matchRoutingRule(rules, apiKeyId, model);
+	// Read once, here: whether official Anthropic accounts are candidates at
+	// all. A bridged attempt re-checks before it starts a turn, and fails over
+	// if the bridge has begun shutting down since.
+	meta.officialAnthropicExcluded =
+		meta.officialAnthropicVia === "sdk-bridge"
+			? sdkBridgeExclusionReason(ctx)
+			: null;
 	const restrictions = {
 		pin: meta.pin ?? null,
 		forcedAccountId,
 		headerAccountId,
-		excludeOfficialAnthropic: meta.excludeOfficialAnthropic === true,
+		officialAnthropicExclusion: meta.officialAnthropicExcluded,
 		maintenance,
 	};
 	// An account dropped here never reaches buildResolvedRoute's own loop, so
@@ -401,6 +408,23 @@ async function installPooledRoute(
 }
 
 /**
+ * Why an SDK bridge request cannot use official Anthropic accounts right now,
+ * or null when the bridge can serve it.
+ */
+function sdkBridgeExclusionReason(ctx: ProxyContext): string | null {
+	const availability = ctx.sdkBridge?.availability() ?? {
+		state: "unavailable" as const,
+		reason: "not configured",
+	};
+	if (availability.state === "available") return null;
+	const why =
+		availability.state === "shutting_down"
+			? "is shutting down"
+			: `is unavailable (${availability.reason})`;
+	return `official Anthropic accounts serve this client only through the SDK bridge, which ${why}`;
+}
+
+/**
  * The route of a bridge inner call: exactly the frozen plan's candidates for
  * the model Claude Code asked for. The key's pin, routing rules, forced
  * accounts and the account header were all applied when the outer request
@@ -432,7 +456,7 @@ async function initializeSdkBridgeInnerRoute(
 		pin: null,
 		forcedAccountId: null,
 		headerAccountId: null,
-		excludeOfficialAnthropic: false,
+		officialAnthropicExclusion: null,
 	};
 	const pool = (await ctx.dbOps.getAllAccounts()).filter((a) => {
 		const candidate = byId.get(a.id);

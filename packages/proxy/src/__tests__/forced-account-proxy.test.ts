@@ -12,7 +12,10 @@ import {
 	makeAccount as canonicalAccount,
 	mockFetch,
 } from "@clankermux/test-support";
-import type { Account } from "@clankermux/types";
+import {
+	type Account,
+	setNativeResponsesRequestContext,
+} from "@clankermux/types";
 import {
 	getFamilyWeeklyExhaustedUntil,
 	recordFamilyWeeklyExhausted,
@@ -273,7 +276,7 @@ describe("force-account proxy override", () => {
 		resetFamilyWeeklyMemoForTests();
 	});
 
-	it("Codex-CLI floor OVERRIDES a global force to a Claude account (never routes there)", async () => {
+	it("with no SDK bridge, the floor OVERRIDES a global force to a Claude account (never routes there)", async () => {
 		const forcedClaude = makeAccount({
 			id: "forced-claude",
 			name: "Claude",
@@ -288,8 +291,12 @@ describe("force-account proxy override", () => {
 			return jsonResponse({}, 200);
 		}) as never;
 
-		// Synthetic /v1/messages request carrying the Codex-CLI floor header.
-		const req = makeRequest({ "x-clankermux-deny-official-anthropic": "1" });
+		// Synthetic /v1/messages request carrying the Responses adapter's floor.
+		const req = makeRequest();
+		setNativeResponsesRequestContext(req, {
+			nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
+			denyDirectOfficialAnthropic: true,
+		});
 		const resp = await callHandleProxy(req, new URL(req.url), ctx);
 
 		expect(resp.status).toBe(403);
@@ -301,7 +308,7 @@ describe("force-account proxy override", () => {
 		expect(fetchCalled).toBe(false);
 	});
 
-	it("global force to a Claude account still applies WITHOUT the Codex floor header", async () => {
+	it("global force to a Claude account still applies WITHOUT the floor, and a client-sent floor header is ignored", async () => {
 		const forcedClaude = makeAccount({
 			id: "forced-claude-2",
 			name: "Claude2",
@@ -314,7 +321,8 @@ describe("force-account proxy override", () => {
 			jsonResponse({ ok: true }, 200),
 		) as never;
 
-		const req = makeRequest(); // no deny header → normal force behavior
+		// The retired header is client-controlled: it neither floors nor unfloors.
+		const req = makeRequest({ "x-clankermux-deny-official-anthropic": "1" });
 		const resp = await callHandleProxy(req, new URL(req.url), ctx);
 
 		expect(resp.status).toBe(200);

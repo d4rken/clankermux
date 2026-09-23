@@ -70,6 +70,7 @@ export function aliasFallbackReason(
 		case "overload_suppressed":
 			return "provider_overloaded";
 		case "server_error":
+		case "sdk_bridge_unavailable":
 			return "temporarily_unavailable";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";

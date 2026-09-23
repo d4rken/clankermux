@@ -11,7 +11,11 @@ import {
 	GATE_OUTPUT_RESERVE_CAP,
 	NETWORK,
 } from "@clankermux/core";
-import { setNativeResponsesRequestContext } from "@clankermux/types";
+import {
+	setChatContext,
+	setNativeResponsesRequestContext,
+	setSdkBridgeInnerRequestContext,
+} from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
 import {
@@ -386,7 +390,63 @@ describe("ingestProxyRequest", () => {
 			expect(meta.affinityKey).toBe(sessionId);
 			expect(meta.affinityScope).toBe("claude_session");
 			expect(meta.affinityPartition).toBe(`api_key:${apiKeyId}`);
-			expect(meta.excludeOfficialAnthropic).toBe(true);
+			// The retired floor header is client-controlled and means nothing.
+			expect(meta.officialAnthropicVia).toBe("direct");
+		});
+
+		it("takes the official-Anthropic floor from the adapters' in-process contexts only", async () => {
+			const responses = jsonRequest("/v1/messages", contextBody());
+			setNativeResponsesRequestContext(responses, {
+				nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
+				denyDirectOfficialAnthropic: true,
+			});
+			const chat = jsonRequest("/v1/messages", contextBody());
+			setChatContext(chat, {
+				requirements: { fields: [] },
+				defaultMaxTokens: 1024,
+				denyDirectOfficialAnthropic: true,
+			});
+			// A bridge inner call is Claude Code itself: never floored, so it can
+			// never be bridged again, whatever else it carries.
+			const inner = jsonRequest("/v1/messages", contextBody());
+			setNativeResponsesRequestContext(inner, {
+				nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
+				denyDirectOfficialAnthropic: true,
+			});
+			setSdkBridgeInnerRequestContext(inner, {
+				turnId: "turn-1",
+				plan: {
+					turnId: "turn-1",
+					routeSnapshot: null,
+					candidates: [],
+					preferredAccountId: "a",
+					apiKeyId: null,
+					apiKeyName: null,
+				},
+				apiKeyId: null,
+				apiKeyName: null,
+				clientHarness: "pi",
+				project: null,
+				deadlineAt: Date.now() + 60_000,
+			});
+
+			const via = async (req: Request) => {
+				const result = await ingestProxyRequest(
+					req,
+					urlFor("/v1/messages"),
+					makeCtx(),
+					null,
+					false,
+				);
+				if (result.kind !== "context") throw new Error("expected a context");
+				return result.context.requestMeta;
+			};
+
+			expect((await via(responses)).officialAnthropicVia).toBe("sdk-bridge");
+			expect((await via(chat)).officialAnthropicVia).toBe("sdk-bridge");
+			const innerMeta = await via(inner);
+			expect(innerMeta.officialAnthropicVia).toBe("direct");
+			expect(innerMeta.sdkBridgeTurnId).toBe("turn-1");
 		});
 
 		function responsesRequest(
@@ -458,7 +518,7 @@ describe("ingestProxyRequest", () => {
 			expect(meta.affinityKey).toBeNull();
 			expect(meta.affinityScope).toBeNull();
 			expect(meta.affinityPartition).toBeNull();
-			expect(meta.excludeOfficialAnthropic).toBe(false);
+			expect(meta.officialAnthropicVia).toBe("direct");
 		});
 
 		it('returns a finalBodyBuffer carrying the injected ttl:"1h" once the session is promoted', async () => {

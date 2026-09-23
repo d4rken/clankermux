@@ -58,6 +58,10 @@ import {
 	getRateLimitProbeAdmission,
 	holdRateLimitProbeLease,
 } from "./handlers/rate-limit-cooldown";
+import {
+	continueParkedSdkBridgeTurn,
+	isSdkBridgeAttempt,
+} from "./handlers/sdk-bridge-attempt";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
@@ -159,6 +163,11 @@ async function attemptThroughProbeGate(
 	attempt: () => Promise<Response | null>,
 	options?: { reprobe?: boolean },
 ): Promise<GatedAttempt> {
+	// A bridged attempt sends nothing to the account itself; its inner calls do,
+	// and each passes this gate on its own. Holding the lease here for the whole
+	// turn would suppress exactly those calls.
+	if (isSdkBridgeAttempt(requestMeta, account))
+		return { response: await attempt(), suppressed: false };
 	const admission = getRateLimitProbeAdmission(account, Date.now(), options);
 	if (admission.decision === "suppressed") {
 		return { response: null, suppressed: true };
@@ -430,6 +439,19 @@ async function handleIngestedProxy(
 		isInternal || getSdkBridgeInnerMetaContext(requestMeta)
 			? null
 			: getForcedAccount();
+	// Tool results for a parked bridge turn go back to that turn, unrouted.
+	const continued = await continueParkedSdkBridgeTurn({
+		req,
+		url,
+		ctx,
+		requestMeta,
+		parsedBody: requestBodyContext.getParsedJson(),
+		body: finalBodyBuffer,
+		apiKeyId: apiKeyId ?? null,
+		apiKeyName: apiKeyName ?? null,
+		bumpIdleTimeout,
+	});
+	if (continued) return continued;
 	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null, forcedId);
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
@@ -476,24 +498,25 @@ async function handleIngestedProxy(
 			);
 		}
 
-		// Codex-CLI floor (API-key pin backstop) overrides the global force: a
-		// /v1/responses request carrying excludeOfficialAnthropic must NEVER be
-		// routed to an official Claude account, even under an operator force-route
-		// (ban risk + not a cross-model review). Fail closed. Left UNRECORDED for
-		// the same ordering reason as the forced-missing case above
-		// (recordSyntheticErrorResponse isn't defined this early).
+		// The floor for non-Claude-Code clients overrides the global force: with
+		// the SDK bridge unavailable, such a request must NEVER reach an official
+		// Claude account, even under an operator force-route (ban risk). Fail
+		// closed. With the bridge available the forced account serves it through
+		// the bridge. Left UNRECORDED for the same ordering reason as the
+		// forced-missing case above (recordSyntheticErrorResponse isn't defined
+		// this early).
 		if (
-			requestMeta.excludeOfficialAnthropic &&
+			requestMeta.officialAnthropicExcluded &&
 			isOfficialAnthropicProvider(forcedAccount.provider)
 		) {
 			log.warn(
-				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a deny-official-anthropic (Codex CLI) request`,
+				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a request from a non-Claude-Code client: ${requestMeta.officialAnthropicExcluded}`,
 			);
 			return createPinnedTargetUnavailableResponse(
 				{
 					code: "anthropic_excluded_no_account",
 					message:
-						"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
+						"This client reaches a Claude/Anthropic account only through the SDK bridge, which is unavailable; the globally forced account is a Claude account.",
 				},
 				retryAfterFromDeadlines([forcedAccount.rate_limited_until], Date.now()),
 			);

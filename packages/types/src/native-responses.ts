@@ -24,6 +24,11 @@ export interface NativeResponsesContext {
 	reasoningEffort?: string | null;
 	/** `prompt_cache_key` from the ORIGINAL body, null when absent/non-string. */
 	promptCacheKey?: string | null;
+	/**
+	 * The client is not Claude Code, so an official Anthropic account may serve
+	 * it only through the SDK bridge (RequestMeta.officialAnthropicVia).
+	 */
+	denyDirectOfficialAnthropic?: boolean;
 }
 
 /**

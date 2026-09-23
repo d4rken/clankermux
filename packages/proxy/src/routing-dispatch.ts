@@ -7,6 +7,7 @@ import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	getChatContext,
 	readReasoningEffortAdaptation,
+	SdkBridgeUnavailableError,
 } from "@clankermux/types";
 import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
@@ -88,6 +89,14 @@ export async function sendAuthorizedRequest(
 		request,
 	),
 	prepareResponse?: (response: Response) => Promise<Response>,
+	/**
+	 * An in-process transport that replaces the network send, for an attempt
+	 * the SDK bridge serves. Authorization, the outgoing-model check and the
+	 * attempt row are exactly those of a network send. Its response is the
+	 * turn's final answer: this function never classifies it (no model
+	 * suppression), and the attempt row finishes when its body ends.
+	 */
+	transport?: (request: Request) => Promise<Response>,
 ): Promise<Response> {
 	const target = getAttemptTarget(meta, account);
 	const route = getResolvedRoute(meta);
@@ -214,6 +223,8 @@ export async function sendAuthorizedRequest(
 				throw new RoutingPolicyError("Unexpected Devin local response");
 			}
 		}
+		if (synthetic && transport)
+			throw new RoutingPolicyError("Unexpected local inference response");
 		if (synthetic) {
 			if (
 				!(
@@ -244,22 +255,31 @@ export async function sendAuthorizedRequest(
 		recorded = true;
 		if (audit) audit.id = attempt.id;
 		noteSdkBridgeInnerSend(meta, account.id);
-		response = await makeProxyRequest(
-			request,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			signal,
-		);
+		response = transport
+			? await transport(request)
+			: await makeProxyRequest(
+					request,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					signal,
+				);
 		if (prepareResponse) response = await prepareResponse(response);
 	} catch (error) {
 		attempt.finished_at = Date.now();
-		attempt.status = error instanceof RoutingPolicyError ? 403 : 502;
+		attempt.status =
+			error instanceof RoutingPolicyError
+				? 403
+				: error instanceof SdkBridgeUnavailableError
+					? 503
+					: 502;
 		attempt.error =
 			error instanceof RoutingPolicyError
 				? error.message
-				: "Upstream transport failed";
+				: error instanceof SdkBridgeUnavailableError
+					? `SDK bridge unavailable: ${error.message}`
+					: "Upstream transport failed";
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else
@@ -293,6 +313,17 @@ export async function sendAuthorizedRequest(
 		);
 		return response;
 	}
+
+	if (transport)
+		return observeRoutingResponse(response, async ({ reportedModel, error }) =>
+			ctx.dbOps.routing.finishAttempt(
+				attempt.id,
+				Date.now(),
+				response.status,
+				error ?? (response.ok ? null : `SDK bridge HTTP ${response.status}`),
+				reportedModel,
+			),
+		);
 
 	return observeRoutingResponse(
 		response,

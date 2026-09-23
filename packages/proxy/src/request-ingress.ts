@@ -8,6 +8,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	defaultProjectRules,
+	getChatContext,
 	getNativeResponsesRequestContext,
 	getSdkBridgeInnerRequestContext,
 	type ProjectAttributionSource,
@@ -427,13 +428,16 @@ export async function ingestProxyRequest(
 		parseReasoningEffort(parsedBody) ??
 		nativeResponsesCtx?.reasoningEffort ??
 		null;
-	// Unconditional floor for Codex-CLI traffic: the /v1/responses adapter sets
-	// this header on every request it forwards. When set, the request may never
-	// be routed to (or burst-held on) an official Claude account — independent of
-	// any API-key pin or auth config.
-	requestMeta.excludeOfficialAnthropic =
-		!sdkBridgeInner &&
-		req.headers.get("x-clankermux-deny-official-anthropic") === "1";
+	// The floor for clients that are not Claude Code: the Responses and Chat
+	// adapters mark it in their in-process contexts, so a client cannot set or
+	// clear it. Such a request reaches an official Anthropic account only
+	// through the SDK bridge, independent of any API-key pin. A bridge inner call
+	// IS Claude Code, so it goes direct and can never be bridged again.
+	const floored =
+		nativeResponsesCtx?.denyDirectOfficialAnthropic === true ||
+		getChatContext(requestMeta)?.denyDirectOfficialAnthropic === true;
+	requestMeta.officialAnthropicVia =
+		floored && !sdkBridgeInner ? "sdk-bridge" : "direct";
 	if (sdkBridgeInner) {
 		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);
 		requestMeta.sdkBridgeTurnId = sdkBridgeInner.turnId;
@@ -452,8 +456,8 @@ export async function ingestProxyRequest(
 			requestMeta,
 			bumpIdleTimeout,
 			// The adapter's context is set from an in-process WeakMap keyed on the
-			// Request object, so unlike the deny-official-anthropic header it
-			// cannot be forged by a client to change its own hold budget.
+			// Request object, so a client cannot forge it to change its own hold
+			// budget.
 			canRearmIdleTimeout: nativeResponsesCtx === undefined,
 		},
 	};

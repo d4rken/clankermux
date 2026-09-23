@@ -110,12 +110,12 @@ describe("API key destination intersection before strategy", () => {
 			),
 		).rejects.toThrow("Invalid API key destinations");
 	});
-	it("applies the Responses official-Anthropic exclusion to pinned traffic", async () => {
+	it("applies the Responses official-Anthropic exclusion to pinned traffic when no SDK bridge is configured", async () => {
 		await expect(
 			selectAccountsForRequest(
 				meta({
 					pin: { accountId: a.id, providers: null },
-					excludeOfficialAnthropic: true,
+					officialAnthropicVia: "sdk-bridge",
 				}),
 				makeContext([a, c]),
 			),

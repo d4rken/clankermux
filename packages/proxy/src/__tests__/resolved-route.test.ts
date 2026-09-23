@@ -71,7 +71,7 @@ describe("resolved route authority", () => {
 			build({
 				rules: [],
 				pin: { accountId: "a", providers: null },
-				excludeOfficialAnthropic: true,
+				officialAnthropicExclusion: "the SDK bridge is unavailable",
 			}),
 		).toThrow();
 	});
