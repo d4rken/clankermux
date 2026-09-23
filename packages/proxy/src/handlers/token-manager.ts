@@ -1195,7 +1195,12 @@ export type CodexResetCreditConsumeDispatchOutcome =
 			availableResetCount: number | null;
 			localRateLimitStateCleared: boolean;
 	  }
-	| { status: "failed"; message: string };
+	| {
+			status: "failed";
+			message: string;
+			/** The registry refused before any server saw the request. */
+			notSent?: true;
+	  };
 
 // Global registry for codex on-demand usage refreshers (one per server). The
 // manual "Refresh usage" click dispatches here; the registered refresher reads
@@ -1340,7 +1345,8 @@ export async function consumeCodexResetCreditForAccount(
 		return {
 			status: "failed",
 			message:
-				"Another reset-credit consume attempt is already in progress for this account; refresh metadata before retrying.",
+				"Another banked-reset attempt is already in progress for this account; refresh its banked resets before retrying.",
+			notSent: true,
 		};
 	}
 
@@ -1350,7 +1356,8 @@ export async function consumeCodexResetCreditForAccount(
 				return {
 					status: "failed",
 					message:
-						"No proxy server is registered to consume Codex reset credits.",
+						"No proxy server is registered to apply Codex banked resets.",
+					notSent: true,
 				};
 			}
 
@@ -1379,7 +1386,7 @@ export async function consumeCodexResetCreditForAccount(
 			return (
 				lastFailure ?? {
 					status: "failed",
-					message: "Codex reset-credit consume failed for unknown reasons.",
+					message: "Applying a Codex banked reset failed for unknown reasons.",
 				}
 			);
 		})();
@@ -1417,7 +1424,7 @@ export async function refreshCodexResetCreditsForAccount(
 			return {
 				success: false,
 				message:
-					"No proxy server is registered to refresh Codex reset metadata.",
+					"No proxy server is registered to refresh Codex banked resets.",
 			};
 		}
 
@@ -1446,7 +1453,7 @@ export async function refreshCodexResetCreditsForAccount(
 		return (
 			lastFailure ?? {
 				success: false,
-				message: "Codex reset metadata refresh failed for unknown reasons.",
+				message: "Codex banked-reset refresh failed for unknown reasons.",
 			}
 		);
 	})();
@@ -1638,7 +1645,7 @@ export async function claimAnthropicBankedResetForAccount(
 			status: "failed",
 			code: "busy",
 			message:
-				"Another banked-reset claim is already in progress for this account.",
+				"Another banked-reset attempt is already in progress for this account.",
 		};
 	}
 
@@ -1649,7 +1656,7 @@ export async function claimAnthropicBankedResetForAccount(
 					status: "failed",
 					code: "error",
 					message:
-						"No proxy server is registered to claim Anthropic banked resets.",
+						"No proxy server is registered to apply Anthropic banked resets.",
 				};
 			}
 			let lastFailure: AnthropicBankedResetClaimDispatchOutcome | null = null;
@@ -1674,7 +1681,7 @@ export async function claimAnthropicBankedResetForAccount(
 				lastFailure ?? {
 					status: "failed",
 					code: "error",
-					message: "Anthropic banked-reset claim failed.",
+					message: "Applying an Anthropic banked reset failed.",
 				}
 			);
 		})();

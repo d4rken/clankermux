@@ -107,10 +107,34 @@ describe("consumeCodexResetCreditForAccount", () => {
 		expect(competing).toEqual({
 			status: "failed",
 			message:
-				"Another reset-credit consume attempt is already in progress for this account; refresh metadata before retrying.",
+				"Another banked-reset attempt is already in progress for this account; refresh its banked resets before retrying.",
+			notSent: true,
 		});
 		expect(consumer).toHaveBeenCalledTimes(1);
 		release?.();
 		await first;
+	});
+
+	it("marks the outcome notSent when no server is registered", async () => {
+		expect(
+			await consumeCodexResetCreditForAccount("account-unserved", {
+				idempotencyKey: "redeem-unserved",
+			}),
+		).toEqual({
+			status: "failed",
+			message: "No proxy server is registered to apply Codex banked resets.",
+			notSent: true,
+		});
+	});
+
+	it("leaves a failure reported by a server unmarked", async () => {
+		registerCodexResetCreditConsumer(SERVER_A, async () => ({
+			status: "failed",
+			message: "response lost",
+		}));
+		const outcome = await consumeCodexResetCreditForAccount("account-lost", {
+			idempotencyKey: "redeem-lost",
+		});
+		expect(outcome).toEqual({ status: "failed", message: "response lost" });
 	});
 });
