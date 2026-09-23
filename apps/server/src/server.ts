@@ -2202,9 +2202,9 @@ async function handleGracefulShutdown(signal: string) {
 			);
 		}
 
-		// A parked bridge turn waits on its client's next request, which cannot
-		// arrive once the listener stops, so it would hold the drain until the
-		// watchdog. Turns still running finish during the drain; their Claude
+		// No new bridged turns from here on, and parked ones end now: their
+		// client's tool results would have to arrive through a listener that is
+		// stopping. Turns still running finish during the drain; their Claude
 		// Code model calls use the bridge's own loopback listener.
 		sdkBridge?.beginShutdown();
 
