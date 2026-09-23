@@ -34,9 +34,8 @@ import {
 	applyCodexNativeProfile,
 	applyCodexTranslatedProfile,
 	CODEX_CLIENT_ID,
-	CODEX_OAUTH_SCOPES,
 	codexInferenceHeaders,
-	codexTokenEndpointHeaders,
+	codexRefreshHeaders,
 } from "./client-identity";
 import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
@@ -494,17 +493,14 @@ export class CodexProvider extends BaseProvider {
 
 		log.info(`Refreshing Codex token for account ${account.name}`);
 
-		const body = new URLSearchParams({
-			grant_type: "refresh_token",
-			refresh_token: account.refresh_token,
-			client_id: CODEX_CLIENT_ID,
-			scope: CODEX_OAUTH_SCOPES.join(" "),
-		});
-
 		const response = await fetch(TOKEN_URL, {
 			method: "POST",
-			headers: codexTokenEndpointHeaders(),
-			body: body.toString(),
+			headers: codexRefreshHeaders(),
+			body: JSON.stringify({
+				client_id: CODEX_CLIENT_ID,
+				grant_type: "refresh_token",
+				refresh_token: account.refresh_token,
+			}),
 		});
 
 		if (!response.ok) {

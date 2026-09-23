@@ -2,8 +2,6 @@
  * Golden record of the Codex client identity on every request ClankerMux
  * originates to OpenAI, captured at the fetch boundary. Values are literals on
  * purpose: a change to any constant has to show up as a diff in this file.
- *
- * Calls that set no User-Agent go out with Bun's own default on the wire.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
@@ -563,11 +561,15 @@ describe("Codex identity golden: OAuth", () => {
 			{
 				url: "https://auth.openai.com/oauth/token",
 				method: "POST",
-				headers: [["content-type", "application/x-www-form-urlencoded"]],
+				headers: [
+					["accept", "*/*"],
+					["content-type", "application/json"],
+					["originator", "codex_exec"],
+					["user-agent", EXEC_UA],
+				],
 				body:
-					"grant_type=refresh_token&refresh_token=old-refresh" +
-					"&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
-					"&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke",
+					'{"client_id":"app_EMoamEEZ73f0CkXaXp7hrann",' +
+					'"grant_type":"refresh_token","refresh_token":"old-refresh"}',
 			},
 		]);
 	});

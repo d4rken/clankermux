@@ -4307,6 +4307,24 @@ describe("CodexProvider refreshToken auth-error classification", () => {
 		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
 	});
 
+	it("treats a 400 invalid_request as a retryable error, not a dead token", async () => {
+		// A malformed request is ours to fix, and re-authenticating the account
+		// would not change it.
+		mockTokenResponse(
+			{
+				error: "invalid_request",
+				error_description: "Missing required parameter.",
+			},
+			400,
+		);
+		const provider = new CodexProvider();
+		const err = await provider
+			.refreshToken(account(), "cid")
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(OAuthRefreshTokenError);
+	});
+
 	it("throws OAuthRefreshTokenError on refresh_token_reused (existing behavior)", async () => {
 		mockTokenResponse({ error: "refresh_token_reused" }, 400);
 		const provider = new CodexProvider();

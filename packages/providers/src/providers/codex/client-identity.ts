@@ -319,9 +319,14 @@ export function codexLoginTokenHeaders(): Record<string, string> {
 	};
 }
 
-/** POST auth.openai.com/oauth/token, refresh grant. */
-export function codexTokenEndpointHeaders(): Record<string, string> {
-	return { "Content-Type": "application/x-www-form-urlencoded" };
+/** POST auth.openai.com/oauth/token, refresh grant, with a JSON body. */
+export function codexRefreshHeaders(): Record<string, string> {
+	return {
+		Accept: "*/*",
+		"Content-Type": "application/json",
+		"User-Agent": CODEX_USER_AGENT,
+		originator: CODEX_EXEC_ORIGINATOR,
+	};
 }
 
 /** POST auth.openai.com/api/accounts/deviceauth/{usercode,token}. */
