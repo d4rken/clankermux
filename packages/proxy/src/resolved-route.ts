@@ -102,6 +102,12 @@ export interface BuildRouteInput {
 	 * they can.
 	 */
 	officialAnthropicExclusion?: string | null;
+	/**
+	 * Official Anthropic destinations of this route are served by the SDK
+	 * bridge: a request under the floor for non-Claude-Code clients, with the
+	 * bridge available when the route was built.
+	 */
+	bridgesOfficialAnthropic?: boolean;
 	chatRequirements?: ChatRequirements;
 	/** Only in-process scheduler code supplies this, never client headers alone. */
 	maintenance?: { accountId: string; purpose: "auto_refresh" | "keepalive" };
@@ -209,6 +215,7 @@ export type DestinationRestrictions = Pick<
 	| "forcedAccountId"
 	| "headerAccountId"
 	| "officialAnthropicExclusion"
+	| "bridgesOfficialAnthropic"
 	| "maintenance"
 >;
 /**
@@ -310,7 +317,12 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			continue;
 		}
 		if (input.chatRequirements) {
-			if (!supportsChatIngress(account.provider)) {
+			// Chat reaches an official Anthropic account only through the bridge,
+			// which answers in Messages form; a direct send never qualifies.
+			const bridged =
+				input.bridgesOfficialAnthropic === true &&
+				isOfficialAnthropicProvider(account.provider);
+			if (!supportsChatIngress(account.provider, bridged)) {
 				unsupportedProvider = true;
 				exclude(
 					account,
@@ -321,6 +333,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			const field = unsupportedChatField(
 				account.provider,
 				input.chatRequirements,
+				bridged,
 			);
 			if (field) {
 				unsupportedField ??= field;

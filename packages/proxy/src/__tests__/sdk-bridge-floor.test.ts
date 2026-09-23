@@ -7,8 +7,10 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
 	type Account,
+	type ChatRequirements,
 	type ModelAlias,
 	SdkBridgeUnavailableError,
+	setChatContext,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
@@ -336,6 +338,80 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(token).toHaveBeenCalled();
 		expect(stage).toHaveBeenCalled();
 		expect(harness.ctx.requestRecorder.begin).toHaveBeenCalled();
+	});
+});
+
+describe("Chat Completions through the SDK bridge", () => {
+	/** A request as the Chat adapter hands it over. */
+	function chatRequest(
+		requirements: ChatRequirements = { fields: [] },
+	): Request {
+		const req = messagesRequest({ stream: true });
+		setChatContext(req, {
+			requirements,
+			defaultMaxTokens: 8192,
+			denyDirectOfficialAnthropic: true,
+		});
+		return req;
+	}
+
+	it("reaches an official Anthropic account only through the bridge", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		const { response } = await run(chatRequest(), harness.ctx);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(harness.upstreamKeys).toEqual([]);
+		expect(sends(harness).map((r) => r.account_id)).toEqual(["claude-a"]);
+	});
+
+	it("never sends Chat to an official Anthropic account directly", async () => {
+		harness = await makeBridgeHarness([claudeA()]);
+
+		const { response, text } = await run(chatRequest(), harness.ctx);
+
+		expect(response.status).toBe(403);
+		expect(JSON.parse(text).error.message).toContain(
+			"only through the SDK bridge",
+		);
+		expect(harness.upstreamKeys).toEqual([]);
+	});
+
+	it("answers 400 naming a Chat field the bridge cannot honor", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		for (const [requirements, param] of [
+			[{ fields: ["temperature"] }, "temperature"],
+			[{ fields: ["max_tokens"] }, "max_tokens"],
+			[{ fields: [], forcesToolChoice: true }, "tool_choice"],
+		] as const) {
+			const { response, text } = await run(
+				chatRequest(requirements),
+				harness.ctx,
+			);
+			expect(response.status).toBe(400);
+			expect(JSON.parse(text).error).toMatchObject({
+				type: "unsupported_parameter",
+				param,
+			});
+		}
+		expect(bridge.starts).toEqual([]);
+	});
+
+	it("replays reasoning_content through the bridge", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		const { response } = await run(
+			chatRequest({ fields: ["reasoning_content"] }),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
 	});
 });
 

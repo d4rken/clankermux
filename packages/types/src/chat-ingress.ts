@@ -1,6 +1,11 @@
 /** In-process Chat ingress context. Client headers cannot create or replace it. */
 export interface ChatRequirements {
 	readonly fields: readonly string[];
+	/**
+	 * The client forbids or forces tool use (`tool_choice` "none", "required"
+	 * or a named function) on a request that declares tools.
+	 */
+	readonly forcesToolChoice?: boolean;
 }
 export interface ChatIngressContext {
 	readonly requirements: ChatRequirements;

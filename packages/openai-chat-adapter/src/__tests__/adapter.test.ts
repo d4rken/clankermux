@@ -555,6 +555,24 @@ it("preserves assistant reasoning replay for compatible destinations", () => {
 	).toThrow();
 });
 
+it("records a tool_choice that forbids or forces tool use", () => {
+	const tools = [{ type: "function", function: { name: "read" } }];
+	const forces = (patch: object) =>
+		translateChatRequest({ ...input, ...patch }).requirements.forcesToolChoice;
+	expect(forces({})).toBe(false);
+	expect(forces({ tools, tool_choice: "auto" })).toBe(false);
+	// Without tools a "none" is a no-op and never reaches the Messages body.
+	expect(forces({ tool_choice: "none" })).toBe(false);
+	expect(forces({ tools, tool_choice: "none" })).toBe(true);
+	expect(forces({ tools, tool_choice: "required" })).toBe(true);
+	expect(
+		forces({
+			tools,
+			tool_choice: { type: "function", function: { name: "read" } },
+		}),
+	).toBe(true);
+});
+
 it("keeps a streaming completion model stable when Codex reports its model late", async () => {
 	let context: ReturnType<typeof getChatContext>;
 	let part = 0;

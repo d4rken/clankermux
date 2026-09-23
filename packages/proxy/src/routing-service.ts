@@ -202,6 +202,9 @@ export async function initializeRequestRoute(
 		forcedAccountId,
 		headerAccountId,
 		officialAnthropicExclusion: meta.officialAnthropicExcluded,
+		bridgesOfficialAnthropic:
+			meta.officialAnthropicVia === "sdk-bridge" &&
+			meta.officialAnthropicExcluded === null,
 		maintenance,
 	};
 	// An account dropped here never reaches buildResolvedRoute's own loop, so

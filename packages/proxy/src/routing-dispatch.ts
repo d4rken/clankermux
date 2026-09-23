@@ -130,11 +130,14 @@ export async function sendAuthorizedRequest(
 	try {
 		// A mismatch here is an internal authorization invariant failure (403);
 		// client field incompatibilities were already rejected during route building.
+		// Only the bridge's own transport may carry Chat to an official
+		// Anthropic account.
 		const chat = getChatContext(meta);
+		const bridged = transport !== undefined;
 		if (
 			chat &&
-			(!supportsChatIngress(account.provider) ||
-				unsupportedChatField(account.provider, chat.requirements))
+			(!supportsChatIngress(account.provider, bridged) ||
+				unsupportedChatField(account.provider, chat.requirements, bridged))
 		)
 			throw new RoutingPolicyError(
 				"Chat capability boundary changed before dispatch",

@@ -280,6 +280,56 @@ describe("Chat capability boundary", () => {
 			}),
 		).toThrow("Chat Completions");
 	});
+	it("admits Chat on an official Anthropic account only when the SDK bridge serves it", () => {
+		const onA = { rules: [], pin: { accountId: "a", providers: null } };
+		expect(
+			build({
+				...onA,
+				bridgesOfficialAnthropic: true,
+				chatRequirements: { fields: ["reasoning_content"] },
+			}).accountIds(),
+		).toEqual(["a"]);
+		expect(() =>
+			build({
+				...onA,
+				bridgesOfficialAnthropic: false,
+				chatRequirements: { fields: [] },
+			}),
+		).toThrow("supports Chat Completions");
+	});
+	it("names the Chat field a bridged turn cannot honor", () => {
+		const onA = {
+			rules: [],
+			pin: { accountId: "a", providers: null },
+			bridgesOfficialAnthropic: true,
+		};
+		for (const [requirements, param] of [
+			[{ fields: ["temperature"] }, "temperature"],
+			[{ fields: ["reasoning_content", "max_tokens"] }, "max_tokens"],
+			[{ fields: ["top_p"] }, "top_p"],
+			[{ fields: ["stop"] }, "stop"],
+			[{ fields: [], forcesToolChoice: true }, "tool_choice"],
+		] as const) {
+			expect(() => build({ ...onA, chatRequirements: requirements })).toThrow(
+				expect.objectContaining({
+					statusCode: 400,
+					code: "unsupported_parameter",
+					param,
+				}),
+			);
+		}
+	});
+	it("keeps other providers' Chat capabilities when official Anthropic is bridged", () => {
+		const route = build({
+			rules: [],
+			pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+			bridgesOfficialAnthropic: true,
+			requestedModel: "claude-fable-5-1",
+			chatRequirements: { fields: ["temperature"] },
+		});
+		// OpenRouter honors temperature; the bridge would not.
+		expect(route.accountIds()).toEqual(["o"]);
+	});
 });
 
 it("disabled accounts cannot be forced by header, global override, pin, or maintenance", () => {
