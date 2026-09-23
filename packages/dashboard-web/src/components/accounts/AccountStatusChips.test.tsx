@@ -6,11 +6,18 @@ import type {
 import { renderToStaticMarkup } from "react-dom/server";
 import { deriveAccountStatus } from "../../lib/account-status";
 import {
+	bankedResetEventStatusLabel,
+	describeBankedResetClaim,
+} from "../../lib/anthropic-banked-resets";
+import {
 	AccountPausedChip,
 	AccountStatusChips,
+	CONSUME_OUTCOME_LABELS,
+	RESET_EVENT_STATUS_LABELS,
 	ResetCreditApplyPanel,
 	ResetCreditEventsPanel,
 } from "./AccountStatusChips";
+import { RESET_HISTORY_HEADING } from "./UsageResetPanels";
 
 // 2024-01-03 noon UTC, matching account-status.test.ts.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
@@ -713,10 +720,10 @@ function makeResetCreditAccount(
 
 /**
  * The reset-credit chip on its own, cut out of the whole chip row. Anchored on
- * the tooltip's "Click for reset history" tail, which only that chip carries.
+ * the tooltip's "Click for history." tail, which only that chip carries.
  */
 function resetCreditChip(html: string): string {
-	const anchor = html.indexOf("Click for reset history");
+	const anchor = html.indexOf("Click for history.");
 	if (anchor === -1) throw new Error("reset-credit chip not found");
 	const start = html.lastIndexOf("<span", anchor);
 	if (start === -1) throw new Error("reset-credit chip has no element start");
@@ -815,9 +822,36 @@ describe("AccountStatusChips — auto-apply tooltip line", () => {
 			}),
 		);
 		expect(html).toContain(
-			"Auto-apply armed — a reset will be consumed automatically shortly before expiry.",
+			"Auto-apply armed — the next banked reset is applied shortly before it expires.",
 		);
 		expect(html).not.toContain("weekly limit");
+	});
+
+	/** The Codex chip's tooltip, entity-decoded. */
+	function tooltip(account: AccountResponse): string {
+		const chip = resetCreditChip(render(account));
+		return (chip.match(/title="([^"]*)"/)?.[1] ?? "").replaceAll("&#x27;", "'");
+	}
+
+	it("words the weekly rule like the Anthropic chip, with the 12-hour rule", () => {
+		const expires = new Date(NOW + 3 * 86_400_000);
+		const title = tooltip(
+			makeResetCreditAccount(expires.toISOString(), {
+				autoApplyResetCreditsEnabled: false,
+				autoApplyResetOnWeeklyLimitEnabled: true,
+			}),
+		);
+		expect(title).toBe(
+			`1 banked reset left. Expires: ${expires.toLocaleString()}. Auto-apply armed (weekly limit) — the next banked reset is applied at the weekly limit when no other Codex account can serve and the account's natural weekly reset is at least 12 hours away. Manual pauses conserve banked resets. Click for history.`,
+		);
+	});
+
+	it("says so when the expiry dates are unknown, and says it off", () => {
+		const title = tooltip(makeResetCreditAccount(null));
+		expect(title).toBe(
+			"1 banked reset left. Expiry dates are unavailable. Auto-apply is off — unused banked resets may expire. Click for history.",
+		);
+		expect(title).not.toMatch(/claim|consume|redeem|credit|grant/i);
 	});
 
 	it("omits the auto-apply line entirely when no credits are available", () => {
@@ -904,9 +938,28 @@ describe("ResetCreditEventsPanel — popover history states", () => {
 		expect(html).toContain("manual");
 		expect(html).toContain("Reset applied");
 		expect(html).toContain("Nothing to reset");
-		expect(html).toContain("2 windows reset");
+		expect(html).toContain("cleared 2 windows");
 		// windowsReset of 0 is noise next to "Nothing to reset" — not rendered.
-		expect(html).not.toContain("0 windows reset");
+		expect(html).not.toContain("cleared 0 windows");
+	});
+
+	it("titles the history with the heading every provider's chip shares", () => {
+		const html = renderToStaticMarkup(
+			<ResetCreditEventsPanel state={{ kind: "loaded", events: [] }} />,
+		);
+		expect(RESET_HISTORY_HEADING).toBe("Banked-reset history");
+		expect(html).toContain(`>${RESET_HISTORY_HEADING}</p>`);
+	});
+
+	it.each([
+		["pending", "Pending"],
+		["reset", "Reset applied"],
+		["nothingToReset", "Nothing to reset"],
+		["noCredit", "No banked reset left"],
+		["alreadyRedeemed", "Already used"],
+		["failed", "Failed"],
+	] as const)("labels a '%s' event '%s'", (status, label) => {
+		expect(RESET_EVENT_STATUS_LABELS[status]).toBe(label);
 	});
 
 	it("truncates a long error message but keeps the full text in the title", () => {
@@ -994,8 +1047,7 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 
 	it("renders the inline confirm step naming the account", () => {
 		const html = renderPanel({ kind: "confirm" });
-		expect(html).toContain("Consume 1 reset for");
-		expect(html).toContain("acct");
+		expect(text(html)).toContain("Use 1 banked reset for acct ?");
 		expect(html).toContain("Confirm");
 		expect(html).toContain("Cancel");
 		expect(html).not.toContain("Apply now");
@@ -1008,29 +1060,118 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 	});
 
 	it.each([
-		["reset", "Reset applied — usage windows cleared"],
-		["nothingToReset", "Nothing to reset"],
-		["noCredit", "No credit available"],
-		["alreadyRedeemed", "Already redeemed"],
+		["reset", "Reset applied"],
+		["nothingToReset", "Nothing to reset — none used"],
+		["noCredit", "No banked reset left"],
+		["alreadyRedeemed", "Already used"],
 	] as const)("renders the '%s' business outcome", (outcome, message) => {
-		const html = renderPanel({ kind: "done", outcome, message });
+		expect(CONSUME_OUTCOME_LABELS[outcome]).toBe(message);
+		const html = renderPanel({
+			kind: "done",
+			outcome,
+			success: outcome === "reset",
+			message,
+		});
 		expect(html).toContain(message);
 		expect(html).not.toContain("Retry");
 	});
 
-	it("colors only the successful reset outcome green", () => {
+	it("words the outcomes both providers share identically", () => {
+		const anthropicApply = (
+			status: "reset" | "already_used" | "not_limited",
+			success = status === "reset",
+		) =>
+			describeBankedResetClaim({
+				success,
+				message: "server message",
+				eventId: "e",
+				status,
+				result: null,
+				reason: null,
+				cleared: [],
+				resetsLeft: null,
+				cooldownUntil: null,
+				nextAttemptAt: null,
+				replayUntil: null,
+				statusRefreshed: false,
+			}).message;
+		expect(CONSUME_OUTCOME_LABELS.reset).toBe(anthropicApply("reset"));
+		expect(CONSUME_OUTCOME_LABELS.alreadyRedeemed).toBe(
+			anthropicApply("already_used"),
+		);
+		// An already-used answer that restored the limits reads as applied.
+		expect(CONSUME_OUTCOME_LABELS.reset).toBe(
+			anthropicApply("already_used", true),
+		);
+		expect(CONSUME_OUTCOME_LABELS.nothingToReset).toBe(
+			anthropicApply("not_limited"),
+		);
+
+		const anthropicHistory = (
+			status: "pending" | "reset" | "already_used" | "not_limited" | "failed",
+		) =>
+			bankedResetEventStatusLabel(
+				{
+					id: "e",
+					grantId: "g",
+					trigger: "manual",
+					cause: null,
+					attemptSeq: null,
+					status,
+					reason: null,
+					cleared: [],
+					resetsLeft: null,
+					errorMessage: null,
+					grantEndsAt: null,
+					nextAttemptAt: null,
+					createdAt: new Date(NOW).toISOString(),
+					resolvedAt: null,
+				},
+				["g"],
+				NOW,
+			);
+		expect(RESET_EVENT_STATUS_LABELS.pending).toBe(anthropicHistory("pending"));
+		expect(RESET_EVENT_STATUS_LABELS.reset).toBe(anthropicHistory("reset"));
+		expect(RESET_EVENT_STATUS_LABELS.alreadyRedeemed).toBe(
+			anthropicHistory("already_used"),
+		);
+		expect(RESET_EVENT_STATUS_LABELS.nothingToReset).toBe(
+			anthropicHistory("not_limited"),
+		);
+		expect(RESET_EVENT_STATUS_LABELS.failed).toBe(anthropicHistory("failed"));
+	});
+
+	it("colors only a successful outcome green", () => {
 		expect(
 			renderPanel({
 				kind: "done",
 				outcome: "reset",
-				message: "Reset applied — usage windows cleared",
+				success: true,
+				message: "Reset applied",
 			}),
 		).toContain("text-success-strong");
 		expect(
 			renderPanel({
 				kind: "done",
+				outcome: "alreadyRedeemed",
+				success: true,
+				message: "Reset applied",
+			}),
+		).toContain("text-success-strong");
+		expect(
+			renderPanel({
+				kind: "done",
+				outcome: "alreadyRedeemed",
+				success: false,
+				message: "Already used",
+			}),
+		).not.toContain("text-success-strong");
+		expect(
+			renderPanel({
+				kind: "done",
 				outcome: "noCredit",
-				message: "No credit available",
+				success: false,
+				message: "No banked reset left",
 			}),
 		).not.toContain("text-success-strong");
 	});
@@ -1041,7 +1182,8 @@ describe("ResetCreditApplyPanel — manual Apply-now flow", () => {
 		const html = renderPanel({
 			kind: "done",
 			outcome: "reset",
-			message: "Reset applied — usage windows cleared",
+			success: true,
+			message: "Reset applied",
 		});
 		expect(html).toContain("Done");
 		expect(html).not.toContain("Retry");

@@ -9,6 +9,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { api } from "../../api";
 import { AccountStatusChips } from "./AccountStatusChips";
+import { APPLY_NOW_TITLE, RESET_HISTORY_HEADING } from "./UsageResetPanels";
 
 (
 	globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -133,7 +134,7 @@ async function openPopover(): Promise<void> {
 	root = createRoot(host);
 	await act(async () => root?.render(<AccountStatusChips account={account} />));
 	const trigger = document.querySelector<HTMLElement>(
-		'[title$="Click for grants and reset history."]',
+		'[title$="Click for banked resets and history."]',
 	);
 	expect(trigger).not.toBeNull();
 	await act(async () => trigger?.click());
@@ -169,6 +170,12 @@ it("keeps one request id across a transport failure and a pending answer", async
 
 	await openPopover();
 	expect(document.body.textContent).toContain("Welcome reset");
+	expect(document.body.textContent).toContain(RESET_HISTORY_HEADING);
+	expect(
+		Array.from(document.querySelectorAll("button")).find(
+			(element) => element.textContent === "Apply now",
+		)?.title,
+	).toBe(APPLY_NOW_TITLE);
 	await clickButton("Apply now");
 	expect(document.body.textContent).toContain(
 		"Use 1 reset from Welcome reset for Claude test?",
@@ -194,7 +201,7 @@ it("keeps one request id across a transport failure and a pending answer", async
 	});
 	expect(retryButton()?.disabled).toBe(false);
 	await clickButton("Retry");
-	expect(document.body.textContent).toContain("Limits reset");
+	expect(document.body.textContent).toContain("Reset applied");
 	expect(claim).toHaveBeenCalledTimes(3);
 	for (const call of claim.mock.calls) {
 		expect(call).toEqual([
@@ -213,13 +220,13 @@ it("keeps one request id across a transport failure and a pending answer", async
 it("settles a rejected claim with the server's message and no Retry", async () => {
 	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([]);
 	spyOn(api, "claimAccountBankedReset").mockRejectedValue(
-		new HttpError(409, "Another banked-reset claim is already in progress"),
+		new HttpError(409, "Another banked-reset attempt is already in progress"),
 	);
 	await openPopover();
 	await clickButton("Apply now");
 	await clickButton("Confirm");
 	expect(document.body.textContent).toContain(
-		"Another banked-reset claim is already in progress",
+		"Another banked-reset attempt is already in progress",
 	);
 	expect(
 		Array.from(document.querySelectorAll("button")).some(
@@ -258,7 +265,24 @@ it("retries a claim left pending before a reload with its own request id", async
 		grantId: "grant-1",
 		requestId: "earlier-request",
 	});
-	expect(document.body.textContent).toContain("Already used");
+	expect(document.body.textContent).toContain("Reset applied");
+});
+
+it.each([
+	["Reset applied", true],
+	["Already used", false],
+] as const)("settles an already_used answer as '%s'", async (message, success) => {
+	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([]);
+	spyOn(api, "claimAccountBankedReset").mockResolvedValue(
+		claimResponse({ success, status: "already_used", result: "already_used" }),
+	);
+	await openPopover();
+	await clickButton("Apply now");
+	await clickButton("Confirm");
+	const outcome = Array.from(document.querySelectorAll("p")).find(
+		(element) => element.textContent === message,
+	);
+	expect(outcome?.classList.contains("text-success-strong")).toBe(success);
 });
 
 it("retries the pending claim a 409 names after Cancel and a fresh Apply now", async () => {
@@ -282,8 +306,8 @@ it("retries the pending claim a 409 names after Cancel and a fresh Apply now", a
 	spyOn(api, "getAccountBankedResetEvents").mockResolvedValue([pending]);
 	const claim = spyOn(api, "claimAccountBankedReset")
 		.mockRejectedValueOnce(
-			new HttpError(409, "An earlier claim is unconfirmed", {
-				message: "An earlier claim is unconfirmed",
+			new HttpError(409, "An earlier attempt is unconfirmed", {
+				message: "An earlier attempt is unconfirmed",
 				pendingRequestId: "earlier-request",
 				pendingGrantId: "grant-0",
 			}),
@@ -297,7 +321,7 @@ it("retries the pending claim a 409 names after Cancel and a fresh Apply now", a
 	await clickButton("Confirm");
 	const fresh = claim.mock.calls[0]?.[1];
 	expect(fresh?.requestId).not.toBe("earlier-request");
-	expect(document.body.textContent).toContain("Earlier claim unconfirmed");
+	expect(document.body.textContent).toContain("Earlier attempt unconfirmed");
 
 	await clickButton("Retry");
 	// The refused claim's grant need not be the next one.
@@ -305,7 +329,7 @@ it("retries the pending claim a 409 names after Cancel and a fresh Apply now", a
 		"claude-account",
 		{ grantId: "grant-0", requestId: "earlier-request" },
 	]);
-	expect(document.body.textContent).toContain("Limits reset");
+	expect(document.body.textContent).toContain("Reset applied");
 });
 
 it("shows a pending claim for a grant no longer listed as Unconfirmed, with no Retry", async () => {

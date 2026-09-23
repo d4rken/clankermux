@@ -12,7 +12,7 @@ import { ResetApplyConfirmPanel } from "./UsageResetPanels";
 
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 const HOUR = 3_600_000;
-const CHIP_ANCHOR = "Click for grants and reset history.";
+const CHIP_ANCHOR = "Click for banked resets and history.";
 
 function grant(
 	overrides: Partial<AnthropicBankedResetGrantInfo> = {},
@@ -209,23 +209,61 @@ describe("AnthropicBankedResetChip — count and urgency", () => {
 });
 
 describe("AnthropicBankedResetChip — auto-apply tooltip line", () => {
+	/** The chip's tooltip, entity-decoded. */
+	function tooltip(account: AccountResponse): string {
+		const chip = bankedChip(render(account)) ?? "";
+		return (chip.match(/title="([^"]*)"/)?.[1] ?? "").replaceAll("&#x27;", "'");
+	}
+
 	it.each([
-		[false, false, "Auto-apply is off"],
+		[false, false, "Auto-apply is off — unused banked resets may expire."],
 		[
 			true,
 			false,
-			"Auto-apply armed — the next grant is claimed shortly before it expires.",
+			"Auto-apply armed — the next banked reset is applied shortly before it expires.",
 		],
-		[false, true, "Auto-apply armed (weekly limit)"],
-		[true, true, "Auto-apply armed (expiry + weekly limit)"],
+		[
+			false,
+			true,
+			"Auto-apply armed (weekly limit) — the next banked reset is applied at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
+		],
+		[
+			true,
+			true,
+			"Auto-apply armed (expiry + weekly limit) — the next banked reset is applied shortly before it expires, and at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
+		],
 	])("expiry=%s weekly=%s reads '%s'", (expiry, weekly, line) => {
-		const html = render(
+		expect(
+			tooltip(
+				makeAccount({
+					autoApplyBankedResetsEnabled: expiry,
+					autoApplyBankedResetOnWeeklyLimitEnabled: weekly,
+				}),
+			),
+		).toContain(line);
+	});
+
+	it("opens with the count left and lists every grant's expiry", () => {
+		const title = tooltip(
 			makeAccount({
-				autoApplyBankedResetsEnabled: expiry,
-				autoApplyBankedResetOnWeeklyLimitEnabled: weekly,
+				anthropicBankedResets: info({
+					grants: [
+						grant(),
+						grant({
+							id: "g2",
+							resetsLeft: 1,
+							isNext: false,
+							endsAt: new Date(NOW + 96 * HOUR).toISOString(),
+						}),
+					],
+				}),
 			}),
 		);
-		expect(bankedChip(html)).toContain(line);
+		expect(title).toStartWith(
+			`3 banked resets left. Expires: ${new Date(NOW + 72 * HOUR).toLocaleString()}; ${new Date(NOW + 96 * HOUR).toLocaleString()}.`,
+		);
+		expect(title).toEndWith(" Click for banked resets and history.");
+		expect(title).not.toMatch(/claim|consume|redeem|grant/i);
 	});
 });
 
@@ -297,7 +335,6 @@ describe("ResetApplyConfirmPanel retry timing", () => {
 			<ResetApplyConfirmPanel
 				available
 				state={{ kind: "retry", message: "Couldn't confirm", retryAt }}
-				armTitle=""
 				confirmPrompt=""
 				onArm={() => {}}
 				onConfirm={() => {}}

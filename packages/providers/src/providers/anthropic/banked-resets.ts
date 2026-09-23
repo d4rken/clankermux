@@ -337,7 +337,7 @@ export async function claimAnthropicBankedReset(
 		if (response.status === 429) {
 			return transportFailure(
 				"rate_limited",
-				"Banked-reset claim was rate-limited",
+				"Banked-reset request was rate-limited",
 				httpStatus,
 				parseRetryAfterMs(response.headers.get("retry-after")),
 			);
@@ -345,14 +345,14 @@ export async function claimAnthropicBankedReset(
 		if (response.status === 401 || response.status === 403) {
 			return transportFailure(
 				"auth_error",
-				`Banked-reset claim was refused with ${response.status}`,
+				`Banked-reset request was refused with ${response.status}`,
 				httpStatus,
 			);
 		}
 		if (!response.ok) {
 			return transportFailure(
 				"error",
-				`Banked-reset claim returned ${response.status} ${response.statusText}`,
+				`Banked-reset request returned ${response.status} ${response.statusText}`,
 				httpStatus,
 			);
 		}
@@ -365,7 +365,7 @@ export async function claimAnthropicBankedReset(
 	} catch (error) {
 		return transportFailure(
 			"error",
-			`Banked-reset claim failed: ${errorMessage(error)}`,
+			`Banked-reset request failed: ${errorMessage(error)}`,
 			httpStatus,
 		);
 	} finally {

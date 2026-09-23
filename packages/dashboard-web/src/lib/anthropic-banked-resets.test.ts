@@ -165,9 +165,9 @@ describe("describeBankedResetClaim", () => {
 	}
 
 	it.each([
-		["reset", "Limits reset", true],
+		["reset", "Reset applied", true],
 		["already_used", "Already used", false],
-		["not_limited", "Not at a limit — nothing used", false],
+		["not_limited", "Nothing to reset — none used", false],
 		["cooldown", "Cooling down", false],
 		["ineligible", "Not eligible", false],
 		["failed", "Unconfirmed — gave up", false],
@@ -177,6 +177,14 @@ describe("describeBankedResetClaim", () => {
 			success,
 			message,
 		});
+	});
+
+	it("settles an already_used answer that restored the limits as applied", () => {
+		expect(
+			describeBankedResetClaim(
+				response({ status: "already_used", success: true }),
+			),
+		).toEqual({ kind: "done", success: true, message: "Reset applied" });
 	});
 
 	it("shows a never-sent claim's recorded refusal instead of 'gave up'", () => {
@@ -354,6 +362,18 @@ describe("bankedResetEventStatusLabel", () => {
 		).toBe("Reset applied");
 	});
 
+	it.each([
+		["reset", "Reset applied"],
+		["already_used", "Already used"],
+		["not_limited", "Nothing to reset"],
+		["cooldown", "Cooling down"],
+		["ineligible", "Not eligible"],
+		["unavailable", "Unavailable"],
+		["failed", "Failed"],
+	] as const)("labels a settled '%s' event '%s'", (status, label) => {
+		expect(bankedResetEventStatusLabel(event({ status }), ["g1"])).toBe(label);
+	});
+
 	it("calls a pending claim past its replay window unconfirmed", () => {
 		const opened = Date.parse("2030-01-01T00:00:00.000Z");
 		expect(
@@ -383,7 +403,7 @@ describe("bankedResetEventDetail", () => {
 					status: "failed",
 					reason: "unconfirmed",
 					errorMessage:
-						"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed",
+						"Unconfirmed 10 minutes after the attempt started; its request id is no longer replayed",
 				}),
 			),
 		).toBeNull();
@@ -405,8 +425,8 @@ describe("pendingBankedResetClaimOf", () => {
 	it("reads the pending claim out of a 409 refusal and nothing else", () => {
 		expect(
 			pendingBankedResetClaimOf(
-				new HttpError(409, "An earlier claim is unconfirmed", {
-					message: "An earlier claim is unconfirmed",
+				new HttpError(409, "An earlier attempt is unconfirmed", {
+					message: "An earlier attempt is unconfirmed",
 					pendingRequestId: "req-pending",
 					pendingGrantId: "g0",
 				}),
@@ -414,7 +434,7 @@ describe("pendingBankedResetClaimOf", () => {
 		).toEqual({ requestId: "req-pending", grantId: "g0", replayUntil: null });
 		expect(
 			pendingBankedResetClaimOf(
-				new HttpError(409, "An earlier claim is unconfirmed", {
+				new HttpError(409, "An earlier attempt is unconfirmed", {
 					pendingRequestId: "req-pending",
 					pendingGrantId: "g0",
 					pendingReplayUntil: "2030-01-05T10:10:00.000Z",

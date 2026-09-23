@@ -300,7 +300,7 @@ export async function consumeCodexRateLimitResetCredit(
 
 		if (!response.ok) {
 			throw new Error(
-				`Codex reset-credit consume endpoint returned ${response.status} ${response.statusText}`,
+				`Codex banked-reset endpoint returned ${response.status} ${response.statusText}`,
 			);
 		}
 
@@ -309,7 +309,7 @@ export async function consumeCodexRateLimitResetCredit(
 		);
 		if (!parsed) {
 			throw new Error(
-				"Codex reset-credit consume endpoint returned an unrecognized payload",
+				"Codex banked-reset endpoint returned an unrecognized payload",
 			);
 		}
 		return parsed;

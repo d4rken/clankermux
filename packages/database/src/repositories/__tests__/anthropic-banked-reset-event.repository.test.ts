@@ -330,7 +330,7 @@ describe("AnthropicBankedResetEventRepository", () => {
 			await repo.setNextAttemptAt(
 				row.id,
 				NOW + 15 * 60_000,
-				"Banked-reset claim returned 502 Bad Gateway",
+				"Banked-reset request returned 502 Bad Gateway",
 			);
 			await repo.claimAutoAttempt({
 				...AUTO,
@@ -355,7 +355,7 @@ describe("AnthropicBankedResetEventRepository", () => {
 				next_attempt_at: null,
 				resolved_at: NOW + ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
 				error_message:
-					"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed (last: Banked-reset claim returned 502 Bad Gateway)",
+					"Unconfirmed 10 minutes after the attempt started; its request id is no longer replayed (last: Banked-reset request returned 502 Bad Gateway)",
 			});
 			expect(
 				(await repo.findPendingForAccount("acc-2")).map((r) => r.status),
@@ -397,7 +397,7 @@ describe("AnthropicBankedResetEventRepository", () => {
 			expect(
 				(await repo.findByRequestId("acc-1", "req-manual-1"))?.error_message,
 			).toBe(
-				"Unconfirmed 10 minutes after the claim opened; its request id is no longer replayed",
+				"Unconfirmed 10 minutes after the attempt started; its request id is no longer replayed",
 			);
 		});
 
