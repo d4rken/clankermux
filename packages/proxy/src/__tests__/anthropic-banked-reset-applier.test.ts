@@ -1362,21 +1362,64 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 		expect(dispatched).toHaveLength(1);
 	});
 
-	it("skips paused, rate-limited and non-OAuth alternatives", async () => {
+	it("skips paused, non-OAuth, out-of-credits and access-denied alternatives", async () => {
 		const { scheduler, dispatched } = poolScheduler({
 			exhausted: ["seven_day"],
 			clears: ["seven_day"],
 			others: [
 				{ account: { paused: true }, usage: usageWith({ seven_day: 0 }) },
+				{ account: { refresh_token: "" }, usage: usageWith({ seven_day: 0 }) },
 				{
-					account: { rate_limited_until: NOW + 60_000 },
+					account: {
+						rate_limited_until: NOW + 60 * 60_000,
+						rate_limited_reason: "out_of_credits",
+					},
 					usage: usageWith({ seven_day: 0 }),
 				},
-				{ account: { refresh_token: "" }, usage: usageWith({ seven_day: 0 }) },
+				{
+					account: {
+						rate_limited_until: NOW - 1,
+						rate_limited_reason: "org_permission_denied",
+					},
+					usage: usageWith({ seven_day: 0 }),
+				},
 			],
 		});
 		await scheduler.tick();
 		expect(dispatched).toHaveLength(1);
+	});
+
+	it("counts an alternative whose out-of-credits cooldown has elapsed", async () => {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [
+				{
+					account: {
+						rate_limited_until: NOW - 1,
+						rate_limited_reason: "out_of_credits",
+					},
+					usage: usageWith({ seven_day: 25 }),
+				},
+			],
+		});
+		await scheduler.tick();
+		expect(dispatched).toEqual([]);
+	});
+
+	it("counts an alternative in a cooldown by its usage", async () => {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [
+				{
+					account: { rate_limited_until: NOW + 60_000 },
+					usage: usageWith({ seven_day: 25 }),
+				},
+			],
+		});
+		await scheduler.tick();
+		expect(dispatched).toEqual([]);
 	});
 
 	it("reads an unknown alternative's usage once and counts it able to serve if still unknown", async () => {

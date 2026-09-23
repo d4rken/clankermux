@@ -46,11 +46,7 @@
  *    plain doubles + a fake clock — no mock.module.
  */
 
-import {
-	intervalManager,
-	isAccountAvailable,
-	PAUSE_REASON_NEEDS_REAUTH,
-} from "@clankermux/core";
+import { intervalManager, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import type {
 	CodexResetCreditAutoClaim,
 	CodexResetCreditEventRow,
@@ -69,6 +65,7 @@ import type {
 	Account,
 	CodexRateLimitResetCreditConsumeRequest,
 } from "@clankermux/types";
+import { cooldownRulesOutAlternative } from "./banked-reset-alternative";
 import {
 	type CodexResetCreditConsumeDispatchOutcome,
 	consumeCodexResetCreditForAccount,
@@ -844,7 +841,9 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 	const nowMs = overrides?.now ?? Date.now;
 	const usable = (account: Account, now: number) =>
 		account.provider === "codex" &&
-		isAccountAvailable(account, now) &&
+		!account.disabled &&
+		!account.paused &&
+		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
 		Boolean(
 			account.refresh_token ||

@@ -2217,8 +2217,41 @@ describe("weekly reset conservation with the production pool check", () => {
 			consume: true,
 		},
 		{
-			label: "the other account is rate limited",
+			label: "the other account is in a cooldown with quota left",
 			other: { rate_limited_until: NOW + 60_000 },
+			usage: usage(75),
+			consume: false,
+		},
+		{
+			label: "the other account is in a cooldown at its weekly limit",
+			other: { rate_limited_until: NOW + 60_000 },
+			usage: usage(100),
+			consume: true,
+		},
+		{
+			label: "the other account is out of credits",
+			other: {
+				rate_limited_until: NOW + 60 * 60_000,
+				rate_limited_reason: "out_of_credits",
+			},
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account's out-of-credits cooldown has elapsed",
+			other: {
+				rate_limited_until: NOW - 1,
+				rate_limited_reason: "out_of_credits",
+			},
+			usage: usage(),
+			consume: false,
+		},
+		{
+			label: "the other account's organization denied access",
+			other: {
+				rate_limited_until: NOW - 1,
+				rate_limited_reason: "org_permission_denied",
+			},
 			usage: usage(),
 			consume: true,
 		},
