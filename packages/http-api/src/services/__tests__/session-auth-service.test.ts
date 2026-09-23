@@ -22,6 +22,8 @@ import type {
 import {
 	clearedSessionCookieHeader,
 	hashSessionToken,
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
 	type PasswordHasher,
 	readSessionCookie,
 	SESSION_ABSOLUTE_MAX_MS,
@@ -32,6 +34,7 @@ import {
 	type SessionAuthStore,
 	scryptPasswordHasher,
 	sessionCookieHeader,
+	validateNewPassword,
 } from "../session-auth-service";
 
 /** In-memory store with the same semantics as AuthRepository, minus SQL. */
@@ -42,6 +45,16 @@ class FakeStore implements SessionAuthStore {
 
 	async getManagementPassword(): Promise<StoredPasswordVerifier | null> {
 		return this.password;
+	}
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean> {
+		if (this.password) return false;
+		this.password = { verifier, params, updatedAt };
+		this.sessions.clear();
+		return true;
 	}
 	async createManagementSession(
 		record: AuthSessionRecord,
@@ -190,6 +203,27 @@ describe("fail-open until a password is set", () => {
 		const { svc, store, hasher } = makeService();
 		await configure(store, hasher, "hunter2");
 		expect(await svc.authorizeRequest(requestWithCookie())).toBe(false);
+	});
+});
+
+describe("claiming the first password", () => {
+	it("stores the hash and returns a binding a session can be minted against", async () => {
+		const { svc, store, hasher } = makeService();
+		const binding = await svc.claimInitialPassword("first password");
+		expect(binding).not.toBeNull();
+		expect(store.password?.verifier).toBe(binding?.verifier ?? "");
+		expect(store.password?.updatedAt).toBe(1_000_000);
+		expect(await svc.verifyPassword("first password")).not.toBeNull();
+		expect(hasher.hashCalls).toBe(1);
+		if (!binding) throw new Error("claim failed");
+		expect(await svc.createSession(binding)).not.toBeNull();
+	});
+
+	it("returns null and keeps the stored password when one already exists", async () => {
+		const { svc, store, hasher } = makeService();
+		const existing = await configure(store, hasher, "hunter2");
+		expect(await svc.claimInitialPassword("usurper password")).toBeNull();
+		expect(store.password?.verifier).toBe(existing.verifier);
 	});
 });
 
@@ -520,5 +554,35 @@ describe("cookie handling", () => {
 
 	it("clears with Max-Age=0", () => {
 		expect(clearedSessionCookieHeader()).toContain("Max-Age=0");
+	});
+});
+
+describe("new-password validation", () => {
+	it("rejects one character under the minimum", () => {
+		expect(MIN_PASSWORD_LENGTH).toBe(8);
+		expect(validateNewPassword("a".repeat(7))).toBe(
+			"Password must be at least 8 characters.",
+		);
+	});
+
+	it("accepts the minimum", () => {
+		expect(validateNewPassword("a".repeat(8))).toBeNull();
+	});
+
+	it("accepts exactly the byte ceiling login enforces", () => {
+		expect(validateNewPassword("a".repeat(MAX_PASSWORD_BYTES))).toBeNull();
+	});
+
+	it("rejects one byte over it, naming the limit", () => {
+		expect(validateNewPassword("a".repeat(MAX_PASSWORD_BYTES + 1))).toBe(
+			"Password must be at most 1024 bytes (UTF-8).",
+		);
+	});
+
+	it("counts UTF-8 bytes, not characters", () => {
+		// "é" is two bytes: 512 of them fill the ceiling, 513 exceed it while
+		// still being far fewer than 1024 characters.
+		expect(validateNewPassword("é".repeat(512))).toBeNull();
+		expect(validateNewPassword("é".repeat(513))).toContain("1024 bytes");
 	});
 });

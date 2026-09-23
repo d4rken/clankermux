@@ -1,11 +1,11 @@
 /**
  * The password CLI.
  *
- * This is the only way to set the management password and the only way to
- * recover from a forgotten one, so the cases that matter are the ones where it
- * must NOT quietly succeed: a database that is not there, two entries that do
- * not match, a password too short to be worth hashing. Each of those printing a
- * success message while changing nothing is the failure mode.
+ * This is how an operator sets the management password from a shell and the
+ * only way to recover from a forgotten one, so the cases that matter are the
+ * ones where it must NOT quietly succeed: a database that is not there, two
+ * entries that do not match, a password too short to be worth hashing. Each of
+ * those printing a success message while changing nothing is the failure mode.
  *
  * The missing-database case is the sharpest. `resolveDbPath()` reads a per-user
  * platform config directory, so running this as the wrong user names a file
@@ -13,7 +13,7 @@
  * deployment has never heard of.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative as relativePath } from "node:path";
@@ -22,12 +22,17 @@ import {
 	BunSqlAdapter,
 	ensureSchema,
 } from "@clankermux/database";
-import { FLOOR_SCHEMA_SQL } from "../packages/database/src/__tests__/schema-floor.fixture";
-import { scryptPasswordHasher } from "@clankermux/http-api";
+import { FLOOR_SCHEMA_SQL } from "../../../database/src/__tests__/schema-floor.fixture";
+import {
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
+	scryptPasswordHasher,
+} from "../services/session-auth-service";
 import {
 	type AuthPasswordIo,
-	MIN_PASSWORD_LENGTH,
-	parseArgs,
+	authPasswordUsage,
+	parseAuthPasswordArgs,
+	runAuthPasswordCli,
 	runAuthPasswordCommand,
 } from "./auth-password";
 
@@ -54,7 +59,10 @@ function createDb(): void {
 
 function openRepo(): { repo: AuthRepository; close: () => void } {
 	const db = new Database(dbPath, { readwrite: true, create: false });
-	return { repo: new AuthRepository(new BunSqlAdapter(db)), close: () => db.close() };
+	return {
+		repo: new AuthRepository(new BunSqlAdapter(db)),
+		close: () => db.close(),
+	};
 }
 
 function io(passwords: string[]): AuthPasswordIo & { lines: string[] } {
@@ -71,23 +79,29 @@ function io(passwords: string[]): AuthPasswordIo & { lines: string[] } {
 
 describe("argument parsing", () => {
 	it("requires an action", () => {
-		expect(parseArgs([])).toMatchObject({ ok: false });
+		expect(parseAuthPasswordArgs([])).toMatchObject({ ok: false });
 	});
 
 	it("rejects contradictory actions", () => {
-		expect(parseArgs(["--set", "--clear"])).toMatchObject({ ok: false });
+		expect(parseAuthPasswordArgs(["--set", "--clear"])).toMatchObject({
+			ok: false,
+		});
 	});
 
 	it("rejects an unknown flag rather than ignoring it", () => {
-		expect(parseArgs(["--set", "--force"])).toMatchObject({ ok: false });
+		expect(parseAuthPasswordArgs(["--set", "--force"])).toMatchObject({
+			ok: false,
+		});
 	});
 
 	it("requires a value after --db-path", () => {
-		expect(parseArgs(["--set", "--db-path"])).toMatchObject({ ok: false });
+		expect(parseAuthPasswordArgs(["--set", "--db-path"])).toMatchObject({
+			ok: false,
+		});
 	});
 
 	it("accepts an explicit database path", () => {
-		const parsed = parseArgs(["--set", "--db-path", "/tmp/x.db"]);
+		const parsed = parseAuthPasswordArgs(["--set", "--db-path", "/tmp/x.db"]);
 		expect(parsed).toEqual({
 			ok: true,
 			options: { action: "set", dbPath: "/tmp/x.db" },
@@ -95,7 +109,7 @@ describe("argument parsing", () => {
 	});
 
 	it("falls back to the resolved default path", () => {
-		const parsed = parseArgs(["--status"]);
+		const parsed = parseAuthPasswordArgs(["--status"]);
 		expect(parsed.ok).toBe(true);
 		if (parsed.ok) expect(parsed.options.dbPath).toContain("clankermux.db");
 	});
@@ -104,10 +118,7 @@ describe("argument parsing", () => {
 describe("a missing database is refused, never created", () => {
 	it("exits non-zero and creates nothing", async () => {
 		const out = io(["hunter2hunter2", "hunter2hunter2"]);
-		const code = await runAuthPasswordCommand(
-			{ action: "set", dbPath },
-			out,
-		);
+		const code = await runAuthPasswordCommand({ action: "set", dbPath }, out);
 		expect(code).toBe(1);
 		expect(out.lines.join("\n")).toContain("Refusing to create one");
 		expect(
@@ -205,7 +216,9 @@ describe("--set", () => {
 	it("stores a verifier that the shared hasher accepts", async () => {
 		createDb();
 		const out = io(["correct horse", "correct horse"]);
-		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(0);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			0,
+		);
 
 		const { repo, close } = openRepo();
 		const stored = await repo.getPassword();
@@ -243,7 +256,9 @@ describe("--set", () => {
 	it("changes nothing when the two entries differ", async () => {
 		createDb();
 		const out = io(["correct horse", "correct hors"]);
-		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(1);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			1,
+		);
 		expect(out.lines.join("\n")).toContain("did not match");
 
 		const { repo, close } = openRepo();
@@ -254,8 +269,26 @@ describe("--set", () => {
 	it("refuses a password shorter than the minimum without hashing it", async () => {
 		createDb();
 		const out = io(["short", "short"]);
-		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(1);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			1,
+		);
 		expect(out.lines.join("\n")).toContain(String(MIN_PASSWORD_LENGTH));
+
+		const { repo, close } = openRepo();
+		expect(await repo.getPassword()).toBeNull();
+		close();
+	});
+
+	it("refuses a password longer than login accepts, naming the limit", async () => {
+		createDb();
+		const tooLong = "a".repeat(MAX_PASSWORD_BYTES + 1);
+		const out = io([tooLong, tooLong]);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			1,
+		);
+		const output = out.lines.join("\n");
+		expect(output).toContain(String(MAX_PASSWORD_BYTES));
+		expect(output).toContain("Nothing was changed.");
 
 		const { repo, close } = openRepo();
 		expect(await repo.getPassword()).toBeNull();
@@ -278,7 +311,9 @@ describe("--set", () => {
 		close();
 
 		const out = io(["a new password", "a new password"]);
-		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(0);
+		expect(await runAuthPasswordCommand({ action: "set", dbPath }, out)).toBe(
+			0,
+		);
 		expect(out.lines.join("\n")).toContain("1 existing session(s) revoked");
 
 		const after = openRepo();
@@ -486,5 +521,74 @@ describe("--clear", () => {
 		const after = openRepo();
 		expect(await after.repo.getSession("a")).toBeNull();
 		after.close();
+	});
+});
+
+describe("usage text", () => {
+	it("names the invocation it was given instead of the bun script", () => {
+		const usage = authPasswordUsage("clankermux-server auth password");
+		expect(usage).toContain("clankermux-server auth password --set");
+		expect(usage).toContain("clankermux-server auth password --status");
+		expect(usage).not.toContain("bun run auth:password");
+	});
+});
+
+describe("runAuthPasswordCli", () => {
+	/** Capture console output for the duration of one call. */
+	async function capture(
+		argv: string[],
+	): Promise<{ code: number; stdout: string; stderr: string }> {
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		const log = spyOn(console, "log").mockImplementation((...args) => {
+			stdout.push(args.join(" "));
+		});
+		const error = spyOn(console, "error").mockImplementation((...args) => {
+			stderr.push(args.join(" "));
+		});
+		try {
+			const code = await runAuthPasswordCli(argv, "test-cli auth password");
+			return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+		}
+	}
+
+	it("prints the error and the usage for bad arguments", async () => {
+		const { code, stderr } = await capture(["--set", "--force"]);
+		expect(code).toBe(1);
+		expect(stderr).toContain("Unknown argument: --force");
+		expect(stderr).toContain("test-cli auth password --set");
+	});
+
+	it("reports a command that throws instead of rejecting", async () => {
+		// Under `bun test` stdin is not a terminal, so the password prompt throws.
+		createDb();
+		const { code, stderr } = await capture(["--set", "--db-path", dbPath]);
+		expect(code).toBe(1);
+		expect(stderr).toContain("stdin is not a terminal");
+
+		const { repo, close } = openRepo();
+		expect(await repo.getPassword()).toBeNull();
+		close();
+	});
+
+	it("reports a database path that cannot be opened", async () => {
+		const { code, stdout, stderr } = await capture([
+			"--status",
+			"--db-path",
+			dir,
+		]);
+		expect(code).toBe(1);
+		expect(stdout).toContain(`Database: ${dir}`);
+		expect(stderr.length).toBeGreaterThan(0);
+	});
+
+	it("returns the command's own exit code on success", async () => {
+		createDb();
+		const { code, stdout } = await capture(["--status", "--db-path", dbPath]);
+		expect(code).toBe(0);
+		expect(stdout).toContain("UNPROTECTED");
 	});
 });

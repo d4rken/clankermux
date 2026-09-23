@@ -64,6 +64,7 @@ import {
 import {
 	createAuthLoginHandler,
 	createAuthLogoutHandler,
+	createAuthSetupHandler,
 	createAuthStatusHandler,
 } from "./handlers/auth";
 import { createCacheEffectivenessHandler } from "./handlers/cache-effectiveness";
@@ -72,7 +73,7 @@ import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-h
 import { createClientsHandler } from "./handlers/clients";
 import { createConfigHandlers } from "./handlers/config";
 import {
-	createHeapSnapshotHandler,
+	createGatedHeapSnapshotHandler,
 	createHeapStatsHandler,
 	createRssHandler,
 } from "./handlers/debug";
@@ -145,6 +146,10 @@ import { createVersionCheckHandler } from "./handlers/version";
 import { createZaiAccountHandlers } from "./handlers/zai-accounts";
 import { SessionAuthService } from "./services/session-auth-service";
 import { createSessionStreamGuard } from "./services/session-stream-registry";
+import {
+	printSetupCodeAnnouncement,
+	SetupCodeService,
+} from "./services/setup-code";
 import type { APIContext } from "./types";
 import { errorResponse } from "./utils/http-error";
 
@@ -188,6 +193,11 @@ export class APIRouter {
 		const sessionAuth =
 			this.context.sessionAuth ?? new SessionAuthService(dbOps);
 		const sessionStreamGuard = createSessionStreamGuard(sessionAuth);
+		// Same fallback for the first-run setup code: the router always has one,
+		// printed to stdout when no dashboard URL is known.
+		const setupCode =
+			this.context.setupCode ??
+			new SetupCodeService({ announce: printSetupCodeAnnouncement });
 
 		// Create handlers
 		const healthHandler = createHealthHandler(
@@ -301,7 +311,9 @@ export class APIRouter {
 
 		// Debug/profiling handlers
 		const heapStatsHandler = createHeapStatsHandler();
-		const heapSnapshotHandler = createHeapSnapshotHandler();
+		const heapSnapshotHandler = createGatedHeapSnapshotHandler(() =>
+			sessionAuth.isConfigured(),
+		);
 		const rssHandler = createRssHandler();
 
 		// API Key handlers
@@ -519,14 +531,16 @@ export class APIRouter {
 		this.handlers.set("POST:/api/payments/seed", (req) =>
 			paymentsSeedHandler(req),
 		);
-		// Management login. These three are the only /api/* routes the session
+		// Management login. These four are the only /api/* routes the session
 		// gate deliberately does not cover — see management-auth-policy.ts.
 		const authLoginHandler = createAuthLoginHandler(sessionAuth);
 		const authLogoutHandler = createAuthLogoutHandler(sessionAuth);
-		const authStatusHandler = createAuthStatusHandler(sessionAuth);
+		const authStatusHandler = createAuthStatusHandler(sessionAuth, setupCode);
+		const authSetupHandler = createAuthSetupHandler(sessionAuth, setupCode);
 		this.handlers.set("POST:/api/auth/login", (req) => authLoginHandler(req));
 		this.handlers.set("POST:/api/auth/logout", (req) => authLogoutHandler(req));
 		this.handlers.set("GET:/api/auth/status", (req) => authStatusHandler(req));
+		this.handlers.set("POST:/api/auth/setup", (req) => authSetupHandler(req));
 
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());

@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { HttpError } from "@clankermux/http-common";
+import {
+	type QueryClient,
+	useMutation,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { useEffect } from "react";
 import { type AuthStatus, api, onUnauthorized } from "../api";
 import { queryKeys } from "../lib/query-keys";
@@ -9,7 +15,8 @@ import { queryKeys } from "../lib/query-keys";
  * Not a security control — the server rejects a dead session on every request
  * regardless. This exists so an operator who runs the password CLI in a
  * terminal sees the dashboard react within a minute instead of on their next
- * click, and so the "unprotected" banner disappears once they have protected it.
+ * click: the setup screen gives way to the sign-in screen once a password is
+ * set, and the sign-in screen gives way to the setup screen once it is cleared.
  */
 const AUTH_STATUS_POLL_MS = 60_000;
 
@@ -48,6 +55,17 @@ export function useAuthStatus() {
 	return query;
 }
 
+/**
+ * A 409 from login or setup means the server's password state is not the one
+ * the gate last read: a password was set (or cleared) since. Re-reading the
+ * status lets the gate swap to the screen that matches.
+ */
+function rereadStatusOnConflict(queryClient: QueryClient, error: unknown) {
+	if (error instanceof HttpError && error.status === 409) {
+		void queryClient.invalidateQueries({ queryKey: queryKeys.authStatus() });
+	}
+}
+
 /** Sign in, then let every query re-run against the new session. */
 export function useLogin() {
 	const queryClient = useQueryClient();
@@ -56,6 +74,23 @@ export function useLogin() {
 		onSuccess: async () => {
 			await queryClient.invalidateQueries();
 		},
+		onError: (error) => rereadStatusOnConflict(queryClient, error),
+	});
+}
+
+/**
+ * Claim the first management password with the server's setup code. Success
+ * signs the browser in, so every query re-runs exactly as after a login.
+ */
+export function useSetupPassword() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: ({ code, password }: { code: string; password: string }) =>
+			api.setupPassword(code, password),
+		onSuccess: async () => {
+			await queryClient.invalidateQueries();
+		},
+		onError: (error) => rereadStatusOnConflict(queryClient, error),
 	});
 }
 

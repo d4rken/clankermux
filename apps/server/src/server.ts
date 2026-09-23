@@ -37,9 +37,12 @@ import {
 	AuthService,
 	ClientRouter,
 	closeAllSseStreams,
+	issueSetupCodeAtStartup,
 	PublicRouter,
+	printSetupCodeAnnouncement,
 	refreshOpenRouterAccountsOnStartup,
 	SessionAuthService,
+	SetupCodeService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
@@ -839,6 +842,15 @@ export default async function startServer(options?: {
 	// "is a password configured" two independent reads of the same row.
 	const sessionAuth = new SessionAuthService(dbOps);
 
+	// The first-run setup code, shared by the startup announcement and the
+	// router's status/setup endpoints. The dashboard URL is only known once the
+	// listener has bound, so the announcement reads it when it prints.
+	let setupAnnouncementDashboardUrl: string | undefined;
+	const setupCode = new SetupCodeService({
+		announce: (code) =>
+			printSetupCodeAnnouncement(code, setupAnnouncementDashboardUrl),
+	});
+
 	// The model catalogues, built HERE rather than beside the rest of the proxy
 	// wiring further down. Two surfaces read them — the wire route and the
 	// management API the router below registers — and both must see the same
@@ -901,6 +913,7 @@ export default async function startServer(options?: {
 		config,
 		dbOps,
 		sessionAuth,
+		setupCode,
 		clients,
 		modelPermissions,
 		runtime: {
@@ -1683,6 +1696,20 @@ export default async function startServer(options?: {
 	}, MEMORY_MONITOR_INTERVAL_MS);
 	memoryMonitorInterval.unref();
 
+	// With no management password, print the one-time setup code to stdout on
+	// every bind host, loopback included. Returns at once; see below for why the
+	// lookup is never awaited.
+	if (withDashboard && dashboardManifest && serverInstance) {
+		const protocol = tlsEnabled ? "https" : "http";
+		const displayHost = hostname === "0.0.0.0" ? "localhost" : hostname;
+		setupAnnouncementDashboardUrl = `${protocol}://${displayHost}:${serverInstance.port}`;
+	}
+	issueSetupCodeAtStartup({
+		isConfigured: () => sessionAuth.isConfigured(),
+		setupCode,
+		reportError: (message) => console.error(message),
+	});
+
 	// Startup diagnostic, fired when this process is bound off loopback and no
 	// management password is set. Never awaited: the lookup is a DB read that
 	// can queue behind write contention for minutes, and nothing else in
@@ -1698,10 +1725,12 @@ export default async function startServer(options?: {
 						`ClankerMux is bound to '${hostname}' and no management password is ` +
 							"set, so the management API (/api/*) admits anyone who can reach " +
 							"this port: account management, API key creation and revocation, " +
-							"request logs, and heap snapshots. Set one with " +
-							"`bun run auth:password --set`, bind to localhost (set " +
-							"CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a reverse " +
-							"proxy that enforces authentication.",
+							"and request logs. Set one in the dashboard with the setup code " +
+							"printed in the server output, or run " +
+							"`clankermux-server auth password --set` (`bun run auth:password " +
+							"--set` from a source checkout). Alternatively bind to localhost " +
+							"(set CLANKERMUX_HOST=127.0.0.1), or put ClankerMux behind a " +
+							"reverse proxy that enforces authentication.",
 					);
 				},
 				(err) => {
@@ -1709,7 +1738,9 @@ export default async function startServer(options?: {
 						`ClankerMux is bound to '${hostname}' and could not determine ` +
 							`whether a management password is set (${err}). If none is, the ` +
 							"management API (/api/*) admits anyone who can reach this port; " +
-							"check with `bun run auth:password --status`.",
+							"check with `clankermux-server auth password --status` " +
+							"(`bun run auth:password --status` from a source checkout). " +
+							"Opening the dashboard prints a setup code if none is set.",
 					);
 				},
 			)
@@ -2289,10 +2320,12 @@ export function getProtocol(): string {
 	return tlsEnabled ? "https" : "http";
 }
 
-// Run server if this is the main entry point
-if (import.meta.main) {
+/**
+ * Start the server from command-line arguments (`--port`, `--ssl-key`,
+ * `--ssl-cert`), falling back to PORT, SSL_KEY_PATH and SSL_CERT_PATH.
+ */
+export function runServerFromArgv(args: string[]): void {
 	// Parse command line arguments
-	const args = process.argv.slice(2);
 	let port: number | undefined;
 	let sslKeyPath: string | undefined;
 	let sslCertPath: string | undefined;
@@ -2345,4 +2378,9 @@ if (import.meta.main) {
 		console.error("❌ Server failed to start:", error);
 		process.exit(1);
 	});
+}
+
+// Run server if this is the main entry point
+if (import.meta.main) {
+	runServerFromArgv(process.argv.slice(2));
 }

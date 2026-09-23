@@ -1866,6 +1866,15 @@ OAuth tokens will need to be re-authenticated.
 		return this.auth.setPassword(verifier, params, updatedAt);
 	}
 
+	/** Store the FIRST password only; false when one already exists. */
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean> {
+		return this.auth.setPasswordIfAbsent(verifier, params, updatedAt);
+	}
+
 	async clearManagementPassword(): Promise<number> {
 		return this.auth.clearPassword();
 	}

@@ -75,10 +75,18 @@ Requires [Bun](https://bun.sh) 1.4.0 or newer
 ([why](https://github.com/oven-sh/bun/issues/32111)).
 
 It binds `0.0.0.0` by default; set `CLANKERMUX_HOST=127.0.0.1` for loopback
-only. The management API is fail-open until a dashboard password exists, so set
-one with `bun run auth:password --set`. That password covers management only.
-Agent traffic is gated separately: every request must present a valid client
-key, including on a fresh install where none exists yet.
+only, since the management API stays open until a dashboard password exists.
+On a start with no password the server prints a one-time setup code to its
+output (`journalctl -u clankermux`, `docker logs`, …), and the dashboard asks
+for that code and a new password before showing anything else. Each restart
+prints a new code. From a shell, use
+`bun run auth:password --set|--clear|--status` in a checkout or
+`clankermux-server auth password --set|--clear|--status` with the compiled
+binary; `--db-path <file>` targets a specific database.
+
+That password covers management only. Agent traffic is gated separately: every
+request must present a valid client key, including on a fresh install where
+none exists yet.
 
 Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`

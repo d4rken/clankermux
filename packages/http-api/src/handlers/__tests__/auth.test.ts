@@ -1,5 +1,5 @@
 /**
- * The three auth endpoints.
+ * The auth endpoints.
  *
  * `GET /api/auth/status` gets the most attention here for one reason: it MUST
  * use the optional-session check, not the request gate. The gate answers "may
@@ -8,7 +8,7 @@
  * never logged in, and the dashboard would then never show its login screen.
  */
 import { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import {
 	AuthRepository,
@@ -18,6 +18,8 @@ import {
 	type PasswordBinding,
 	type StoredPasswordVerifier,
 } from "@clankermux/database";
+import { logBus } from "@clankermux/logger";
+import type { LogEvent } from "@clankermux/types";
 import {
 	LOGIN_MAX_BODY_BYTES,
 	LoginThrottle,
@@ -29,10 +31,13 @@ import {
 	SESSION_COOKIE_NAME,
 	SessionAuthService,
 	type SessionAuthStore,
+	validateNewPassword,
 } from "../../services/session-auth-service";
+import { SetupCodeService } from "../../services/setup-code";
 import {
 	createAuthLoginHandler,
 	createAuthLogoutHandler,
+	createAuthSetupHandler,
 	createAuthStatusHandler,
 } from "../auth";
 
@@ -42,6 +47,16 @@ class FakeStore implements SessionAuthStore {
 
 	async getManagementPassword() {
 		return this.password;
+	}
+	async setManagementPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	) {
+		if (this.password) return false;
+		this.password = { verifier, params, updatedAt };
+		this.sessions.clear();
+		return true;
 	}
 	async createManagementSession(
 		record: AuthSessionRecord,
@@ -366,22 +381,24 @@ describe("POST /api/auth/login", () => {
 	});
 });
 
-describe("a login that races a password rotation", () => {
-	/** SessionAuthStore over the real tables, so the SQL is what decides. */
-	function sqliteStore(repo: AuthRepository): SessionAuthStore {
-		return {
-			getManagementPassword: () => repo.getPassword(),
-			createManagementSession: (record, boundTo) =>
-				repo.createSession(record, boundTo),
-			getManagementSession: (tokenHash) => repo.getSession(tokenHash),
-			touchManagementSession: (tokenHash, now, staleBeforeMs) =>
-				repo.touchSession(tokenHash, now, staleBeforeMs),
-			deleteManagementSession: (tokenHash) => repo.deleteSession(tokenHash),
-			cleanupExpiredManagementSessions: (now, idleCutoff) =>
-				repo.deleteExpiredSessions(now, idleCutoff),
-		};
-	}
+/** SessionAuthStore over the real tables, so the SQL is what decides. */
+function sqliteStore(repo: AuthRepository): SessionAuthStore {
+	return {
+		getManagementPassword: () => repo.getPassword(),
+		setManagementPasswordIfAbsent: (verifier, params, updatedAt) =>
+			repo.setPasswordIfAbsent(verifier, params, updatedAt),
+		createManagementSession: (record, boundTo) =>
+			repo.createSession(record, boundTo),
+		getManagementSession: (tokenHash) => repo.getSession(tokenHash),
+		touchManagementSession: (tokenHash, now, staleBeforeMs) =>
+			repo.touchSession(tokenHash, now, staleBeforeMs),
+		deleteManagementSession: (tokenHash) => repo.deleteSession(tokenHash),
+		cleanupExpiredManagementSessions: (now, idleCutoff) =>
+			repo.deleteExpiredSessions(now, idleCutoff),
+	};
+}
 
+describe("a login that races a password rotation", () => {
 	it("issues NOTHING when the rotation commits between verify and insert", async () => {
 		const db = new Database(":memory:");
 		ensureSchema(db);
@@ -529,5 +546,402 @@ describe("GET /api/auth/status", () => {
 			configured: true,
 			authenticated: false,
 		});
+	});
+});
+
+/** The code the sequential source below always draws: bytes 0..11. */
+const SETUP_CODE = "0123-4567-89AB";
+
+function makeSetupCode(): {
+	setupCode: SetupCodeService;
+	announced: string[];
+	codeHasher: CountingHasher;
+} {
+	const announced: string[] = [];
+	const codeHasher = new CountingHasher();
+	const setupCode = new SetupCodeService({
+		announce: (code) => announced.push(code),
+		random: (bytes) => {
+			for (let i = 0; i < bytes.length; i++) bytes[i] = i;
+			return bytes;
+		},
+		hasher: codeHasher,
+	});
+	return { setupCode, announced, codeHasher };
+}
+
+function issue(setupCode: SetupCodeService): void {
+	setupCode.ensureIssued(setupCode.generation);
+}
+
+function setupRequest(body: unknown): Request {
+	return new Request("http://localhost/api/auth/setup", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+}
+
+const NEW_PASSWORD = "correct horse battery";
+const ALREADY_SET = {
+	error: "A management password is already set. Sign in instead.",
+};
+
+describe("POST /api/auth/setup", () => {
+	it("refuses an oversized body before anything else", async () => {
+		const { setupCode, codeHasher } = makeSetupCode();
+		issue(setupCode);
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(
+			setupRequest({
+				code: SETUP_CODE,
+				password: NEW_PASSWORD,
+				pad: "x".repeat(8_192),
+			}),
+		);
+		expect(res.status).toBe(413);
+		expect(await res.json()).toEqual({
+			error: "Request body too large",
+			limit: LOGIN_MAX_BODY_BYTES,
+		});
+		expect(codeHasher.verifyCalls).toBe(0);
+		expect(store.password).toBeNull();
+	});
+
+	it("requires both a code and a password", async () => {
+		const { setupCode, codeHasher } = makeSetupCode();
+		issue(setupCode);
+		const handler = createAuthSetupHandler(svc, setupCode);
+		for (const body of [
+			{},
+			{ code: SETUP_CODE },
+			{ password: NEW_PASSWORD },
+			{ code: 1, password: NEW_PASSWORD },
+			{ code: SETUP_CODE, password: 42 },
+			{ code: "", password: NEW_PASSWORD },
+			{ code: SETUP_CODE, password: "" },
+		]) {
+			const res = await handler(setupRequest(body));
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual({
+				error: "Setup code and password required",
+			});
+		}
+		expect(codeHasher.verifyCalls).toBe(0);
+	});
+
+	describe("with an over-long password", () => {
+		const LONG_PASSWORD = "a".repeat(MAX_PASSWORD_BYTES + 1);
+
+		it("answers 429 with Retry-After once the throttle is spent", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const throttle = new LoginThrottle(1, 5_000, 2, () => 0);
+			const handler = createAuthSetupHandler(svc, setupCode, throttle);
+
+			const first = await handler(
+				setupRequest({ code: "ZZZZ-ZZZZ-ZZZZ", password: NEW_PASSWORD }),
+			);
+			expect(first.status).toBe(403);
+
+			const res = await handler(
+				setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }),
+			);
+			expect(res.status).toBe(429);
+			expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+			expect(store.password).toBeNull();
+		});
+
+		it("answers 409 once a password exists, and revokes the code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const existing = await configure("hunter2");
+
+			const res = await createAuthSetupHandler(
+				svc,
+				setupCode,
+			)(setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }));
+
+			expect(res.status).toBe(409);
+			expect(await res.json()).toEqual(ALREADY_SET);
+			expect(store.password?.verifier).toBe(existing.verifier);
+			expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+		});
+
+		it("answers 403 for a wrong code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+
+			const res = await createAuthSetupHandler(
+				svc,
+				setupCode,
+			)(setupRequest({ code: "QQQQ-RRRR-SSSS", password: LONG_PASSWORD }));
+
+			expect(res.status).toBe(403);
+			expect(await res.json()).toEqual({ error: "Invalid setup code" });
+			expect(store.password).toBeNull();
+		});
+
+		it("answers the validator's 400 for the valid code, storing nothing and keeping the code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const handler = createAuthSetupHandler(svc, setupCode);
+
+			const long = await handler(
+				setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }),
+			);
+			expect(long.status).toBe(400);
+			expect(await long.json()).toEqual({
+				error: "Password must be at most 1024 bytes (UTF-8).",
+			});
+			expect(store.password).toBeNull();
+
+			const valid = await handler(
+				setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }),
+			);
+			expect(valid.status).toBe(200);
+		});
+	});
+
+	it("answers 429 with Retry-After once the throttle is spent, before checking the code", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const matches = spyOn(setupCode, "matches");
+		const throttle = new LoginThrottle(1, 5_000, 2, () => 0);
+		const handler = createAuthSetupHandler(svc, setupCode, throttle);
+
+		const first = await handler(
+			setupRequest({ code: "ZZZZ-ZZZZ-ZZZZ", password: NEW_PASSWORD }),
+		);
+		expect(first.status).toBe(403);
+		expect(matches).toHaveBeenCalledTimes(1);
+
+		const res = await handler(
+			setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }),
+		);
+		expect(res.status).toBe(429);
+		expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+		expect(matches).toHaveBeenCalledTimes(1);
+		expect(store.password).toBeNull();
+	});
+
+	it("releases its throttle slot when the claim throws", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const throttle = new LoginThrottle(10, 1_000, 1, () => 0);
+		store.setManagementPasswordIfAbsent = async () => {
+			throw new Error("database is locked");
+		};
+		const handler = createAuthSetupHandler(svc, setupCode, throttle);
+		await expect(
+			handler(setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD })),
+		).rejects.toThrow();
+		expect(throttle.tryAcquire().ok).toBe(true);
+	});
+
+	it("answers 409 once a password exists, even with the valid code, and revokes the code", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const existing = await configure("hunter2");
+
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }));
+
+		expect(res.status).toBe(409);
+		expect(await res.json()).toEqual(ALREADY_SET);
+		expect(res.headers.get("set-cookie")).toBeNull();
+		expect(store.password?.verifier).toBe(existing.verifier);
+		expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+	});
+
+	it("refuses a wrong code and never logs the candidate", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const events: LogEvent[] = [];
+		const onLog = (event: LogEvent) => events.push(event);
+		logBus.on("log", onLog);
+		let res: Response;
+		try {
+			res = await createAuthSetupHandler(
+				svc,
+				setupCode,
+			)(setupRequest({ code: "QQQQ-RRRR-SSSS", password: NEW_PASSWORD }));
+		} finally {
+			logBus.off("log", onLog);
+		}
+
+		expect(res.status).toBe(403);
+		expect(await res.json()).toEqual({ error: "Invalid setup code" });
+		expect(store.password).toBeNull();
+		expect(
+			events.some(
+				(event) =>
+					event.level === "WARN" && /invalid setup code/i.test(event.msg),
+			),
+		).toBe(true);
+		for (const event of events) {
+			expect(JSON.stringify(event)).not.toContain("QQQQ");
+		}
+	});
+
+	it("refuses a password the login could never accept, storing nothing and keeping the code", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(setupRequest({ code: SETUP_CODE, password: "short" }));
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({
+			error: validateNewPassword("short") ?? "",
+		});
+		expect(store.password).toBeNull();
+		expect(await setupCode.matches(SETUP_CODE)).toBe(true);
+	});
+
+	it("sets the first password and signs the caller in", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(setupRequest({ code: "0123 4567 89ab", password: NEW_PASSWORD }));
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ authenticated: true });
+		const cookie = res.headers.get("set-cookie") ?? "";
+		expect(cookie).toContain(`${SESSION_COOKIE_NAME}=`);
+		expect(cookie).toContain("HttpOnly");
+		expect(cookie).toContain("SameSite=Strict");
+
+		expect(await svc.verifyPassword(NEW_PASSWORD)).not.toBeNull();
+		const pair = cookie.split(";")[0] ?? "";
+		const protectedRequest = (headers: Record<string, string>) =>
+			new Request("http://localhost/api/accounts", { headers });
+		expect(await svc.authorizeRequest(protectedRequest({ cookie: pair }))).toBe(
+			true,
+		);
+		expect(await svc.authorizeRequest(protectedRequest({}))).toBe(false);
+	});
+
+	it("does not accept the same code twice", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const handler = createAuthSetupHandler(svc, setupCode);
+		expect(
+			(
+				await handler(
+					setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }),
+				)
+			).status,
+		).toBe(200);
+		const stored = store.password?.verifier;
+
+		const again = await handler(
+			setupRequest({ code: SETUP_CODE, password: "another password" }),
+		);
+		expect(again.status).toBe(409);
+		expect(store.password?.verifier).toBe(stored);
+		expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+	});
+
+	it("answers 409 when the CLI set a password while the claim was hashing", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		const cli = await hasher.hash("set from the shell");
+		store.setManagementPasswordIfAbsent = async () => {
+			store.password = { ...cli, updatedAt: 1 };
+			return false;
+		};
+
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }));
+
+		expect(res.status).toBe(409);
+		expect(await res.json()).toEqual(ALREADY_SET);
+		expect(res.headers.get("set-cookie")).toBeNull();
+		expect(store.password?.verifier).toBe(cli.verifier);
+		expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+	});
+
+	it("answers 409 when the password rotated between the claim and the session", async () => {
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+		spyOn(svc, "createSession").mockResolvedValue(null);
+
+		const res = await createAuthSetupHandler(
+			svc,
+			setupCode,
+		)(setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }));
+
+		expect(res.status).toBe(409);
+		expect(res.headers.get("set-cookie")).toBeNull();
+		expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+	});
+
+	it("claims through the real tables", async () => {
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const repo = new AuthRepository(new BunSqlAdapter(db));
+		const service = new SessionAuthService(
+			sqliteStore(repo),
+			new CountingHasher(),
+		);
+		const { setupCode } = makeSetupCode();
+		issue(setupCode);
+
+		const res = await createAuthSetupHandler(
+			service,
+			setupCode,
+		)(setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }));
+
+		expect(res.status).toBe(200);
+		expect(await repo.getPassword()).not.toBeNull();
+		expect(db.query(`SELECT COUNT(*) AS n FROM auth_sessions`).get()).toEqual({
+			n: 1,
+		});
+		db.close();
+	});
+});
+
+describe("GET /api/auth/status and the setup code", () => {
+	function statusRequest(): Request {
+		return new Request("http://localhost/api/auth/status");
+	}
+
+	it("issues a setup code while no password is configured", async () => {
+		const { setupCode, announced } = makeSetupCode();
+		const handler = createAuthStatusHandler(svc, setupCode);
+		const res = await handler(statusRequest());
+		expect(await res.json()).toEqual({
+			configured: false,
+			authenticated: false,
+		});
+		expect(announced).toEqual([SETUP_CODE]);
+
+		// Polling does not reprint it.
+		await handler(statusRequest());
+		expect(announced).toHaveLength(1);
+	});
+
+	it("revokes the setup code once a password is configured", async () => {
+		const { setupCode, announced } = makeSetupCode();
+		issue(setupCode);
+		await configure("hunter2");
+
+		const res = await createAuthStatusHandler(svc, setupCode)(statusRequest());
+
+		expect(await res.json()).toEqual({
+			configured: true,
+			authenticated: false,
+		});
+		expect(announced).toHaveLength(1);
+		expect(await setupCode.matches(SETUP_CODE)).toBe(false);
 	});
 });

@@ -1,5 +1,19 @@
 // Export router - the main public API
 
+// The management-password command behind `bun run auth:password` and
+// `clankermux-server auth password`
+export {
+	type AuthPasswordAction,
+	type AuthPasswordIo,
+	type AuthPasswordOptions,
+	authPasswordUsage,
+	findSchemaProblem,
+	type ParsedAuthPasswordArgs,
+	parseAuthPasswordArgs,
+	readPasswordFromTty,
+	runAuthPasswordCli,
+	runAuthPasswordCommand,
+} from "./cli/auth-password";
 // Export handlers
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 // Management session auth: the app-level login behind /api/*
@@ -69,6 +83,8 @@ export {
 	type PublicStopsSnapshot,
 } from "./services/public-stops";
 export {
+	MAX_PASSWORD_BYTES,
+	MIN_PASSWORD_LENGTH,
 	SESSION_ABSOLUTE_MAX_MS,
 	SESSION_COOKIE_NAME,
 	SESSION_IDLE_MAX_MS,
@@ -76,12 +92,20 @@ export {
 	type SessionAuthStore,
 	type SessionCheck,
 	scryptPasswordHasher,
+	validateNewPassword,
 } from "./services/session-auth-service";
 export {
 	closeStreamsForSession,
 	createSessionStreamGuard,
 	type StreamSessionGuard,
 } from "./services/session-stream-registry";
+export {
+	issueSetupCodeAtStartup,
+	printSetupCodeAnnouncement,
+	SETUP_CODE_ALPHABET,
+	SETUP_CODE_LENGTH,
+	SetupCodeService,
+} from "./services/setup-code";
 // Export SSE shutdown registry (used by server shutdown to close endless
 // dashboard streams before the HTTP drain)
 export { closeAllSseStreams, registerSseCloser } from "./sse-registry";
