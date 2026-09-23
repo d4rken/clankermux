@@ -31,5 +31,16 @@ export function extractRequestAffinity(headers: Headers): {
 		return { key: codexThread, scope: "codex_thread" };
 	}
 
+	// Codex is keyed by its thread or not at all; its `session-id` is broader.
+	// `x-client-request-id` is never a key: other SDKs send it per request.
+	const clientSession = isCodexClient(headers)
+		? null
+		: sanitizeAffinityHeader(
+				headers.get("session-id") ?? headers.get("session_id"),
+			);
+	if (clientSession) {
+		return { key: clientSession, scope: "client_session" };
+	}
+
 	return { key: null, scope: null };
 }

@@ -1187,6 +1187,51 @@ describe("SessionStrategy", () => {
 			);
 		});
 
+		it("keeps a client session on its account while another client's newer session starts elsewhere", () => {
+			const now = Date.now();
+			const accountA = makeAccount({
+				id: "codex-a",
+				name: "codex-a",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				session_start: now - 10 * 60 * 1000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "codex-b",
+				name: "codex-b",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const piTurn = (): RequestMeta => ({
+				...meta,
+				affinityKey: "pi-session-one",
+				affinityScope: "client_session",
+			});
+
+			mockStore.setUtilization("codex-a", 10);
+			mockStore.setUtilization("codex-b", 80);
+			expect(strategy.select([accountA, accountB], piTurn())[0]).toBe(accountA);
+
+			// Another client opens a session on codex-b, which makes it the newest
+			// global session. A keyless request follows it...
+			accountB.session_start = now;
+			expect(strategy.select([accountA, accountB], { ...meta })[0]).toBe(
+				accountB,
+			);
+
+			// ...but the next turn of the keyed session stays where its cache is.
+			const nextTurn = piTurn();
+			expect(strategy.select([accountA, accountB], nextTurn)[0]).toBe(accountA);
+			expect(nextTurn.routing?.decision).toBe("affinity_hit");
+			expect(nextTurn.routing?.affinityKey).toBe(
+				"client_session:pi-session-one",
+			);
+		});
+
 		it("assigns a new project by priority/utilization instead of inheriting an unrelated active session", () => {
 			const now = Date.now();
 			const projectMeta: RequestMeta = {

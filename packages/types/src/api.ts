@@ -116,6 +116,7 @@ export interface RequestMeta {
 export type RequestAffinityScope =
 	| "claude_session"
 	| "codex_thread"
+	| "client_session"
 	| "project";
 
 export interface RequestRoutingMeta {

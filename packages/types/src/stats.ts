@@ -1,4 +1,5 @@
 import type { RateLimitReason } from "./account";
+import type { RequestAffinityScope } from "./api";
 import type { CostCoverage } from "./request-cost";
 
 /** Whether a given integrity probe is a fast page-structure check or the
@@ -72,7 +73,7 @@ export interface IntegrityStatus {
  * affinity_key_hash) that made a routed request within the trailing
  * ACTIVE_SESSION_WINDOW_MS. Split by affinity scope.
  *
- * The three scope buckets are disjoint by construction — the affinity scope is
+ * The scope buckets are disjoint by construction — the affinity scope is
  * embedded in the pre-hash key (see routing-telemetry.ts), so a given hash only
  * ever appears under one scope — but `total` is computed independently server-
  * side (COUNT(DISTINCT) across all scopes) so it stays correct even if a future
@@ -86,9 +87,12 @@ export interface ActiveSessionCounts {
 	claude: number;
 	/** Sessions pinned by a Codex thread id (affinity_scope='codex_thread'). */
 	codex: number;
+	/** Sessions pinned by another client's own session id
+	 *  (affinity_scope='client_session'). */
+	client: number;
 	/** Sessions pinned only by project label (affinity_scope='project') — a
-	 *  fallback when no Claude/Codex session identifier was present, so it can't
-	 *  be attributed to either provider. Surfaced separately, never merged. */
+	 *  fallback when no client session identifier was present, so it can't
+	 *  be attributed to any client. Surfaced separately, never merged. */
 	other: number;
 	/** Distinct sessions across ALL scopes in the window. */
 	total: number;
@@ -305,7 +309,7 @@ export interface ToolCallErrorAnalytics {
  */
 export interface ActiveSessionsTimePoint {
 	ts: number; // bucket start (ms), same floor as TimePoint.ts
-	scope: "claude_session" | "codex_thread" | "project";
+	scope: RequestAffinityScope;
 	sessions: number; // COUNT(DISTINCT affinity_key_hash) within this bucket+scope
 }
 

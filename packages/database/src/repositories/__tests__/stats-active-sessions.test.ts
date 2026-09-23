@@ -65,7 +65,13 @@ describe("StatsRepository.getActiveSessionCounts", () => {
 
 	it("returns all zeros for an empty table", async () => {
 		const counts = await statsRepo.getActiveSessionCounts(0);
-		expect(counts).toEqual({ claude: 0, codex: 0, other: 0, total: 0 });
+		expect(counts).toEqual({
+			claude: 0,
+			codex: 0,
+			client: 0,
+			other: 0,
+			total: 0,
+		});
 	});
 
 	it("counts distinct hashes per scope (same hash+scope collapses to 1)", async () => {
@@ -82,7 +88,13 @@ describe("StatsRepository.getActiveSessionCounts", () => {
 		});
 
 		const counts = await statsRepo.getActiveSessionCounts(now - 1000);
-		expect(counts).toEqual({ claude: 1, codex: 0, other: 0, total: 1 });
+		expect(counts).toEqual({
+			claude: 1,
+			codex: 0,
+			client: 0,
+			other: 0,
+			total: 1,
+		});
 	});
 
 	it("excludes rows at or before sinceMs and includes rows after it", async () => {
@@ -107,7 +119,13 @@ describe("StatsRepository.getActiveSessionCounts", () => {
 		});
 
 		const counts = await statsRepo.getActiveSessionCounts(since);
-		expect(counts).toEqual({ claude: 1, codex: 0, other: 0, total: 1 });
+		expect(counts).toEqual({
+			claude: 1,
+			codex: 0,
+			client: 0,
+			other: 0,
+			total: 1,
+		});
 	});
 
 	it("excludes rows with a NULL affinity_key_hash entirely", async () => {
@@ -124,10 +142,16 @@ describe("StatsRepository.getActiveSessionCounts", () => {
 		});
 
 		const counts = await statsRepo.getActiveSessionCounts(now - 1000);
-		expect(counts).toEqual({ claude: 0, codex: 0, other: 0, total: 0 });
+		expect(counts).toEqual({
+			claude: 0,
+			codex: 0,
+			client: 0,
+			other: 0,
+			total: 0,
+		});
 	});
 
-	it("maps the three scopes to claude/codex/other and totals across them", async () => {
+	it("maps each scope to its bucket and totals across them", async () => {
 		const now = Date.now();
 		await seedRouting(db, requestRepo, {
 			affinityScope: "claude_session",
@@ -145,15 +169,28 @@ describe("StatsRepository.getActiveSessionCounts", () => {
 			createdAt: now,
 		});
 		await seedRouting(db, requestRepo, {
+			affinityScope: "client_session",
+			affinityKeyHash: "s-1",
+			createdAt: now,
+		});
+		await seedRouting(db, requestRepo, {
 			affinityScope: "project",
 			affinityKeyHash: "p-1",
 			createdAt: now,
 		});
 
 		const counts = await statsRepo.getActiveSessionCounts(now - 1000);
-		expect(counts).toEqual({ claude: 1, codex: 2, other: 1, total: 4 });
-		// total equals claude+codex+other when scopes use disjoint hashes
-		expect(counts.total).toBe(counts.claude + counts.codex + counts.other);
+		expect(counts).toEqual({
+			claude: 1,
+			codex: 2,
+			client: 1,
+			other: 1,
+			total: 5,
+		});
+		// total equals the per-scope sum when scopes use disjoint hashes
+		expect(counts.total).toBe(
+			counts.claude + counts.codex + counts.client + counts.other,
+		);
 	});
 
 	it("counts a hash shared across two scopes once in the distinct total", async () => {

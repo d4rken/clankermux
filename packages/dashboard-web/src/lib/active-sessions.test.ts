@@ -12,6 +12,7 @@ import {
 
 const CLAUDE_KEY = "scope:claude_session";
 const CODEX_KEY = "scope:codex_thread";
+const CLIENT_KEY = "scope:client_session";
 const PROJECT_KEY = "scope:project";
 const TOTAL_KEY = SESSION_TOTAL_KEY;
 
@@ -20,9 +21,10 @@ describe("buildActiveSessionsTrend", () => {
 		expect(buildActiveSessionsTrend([])).toEqual({ rows: [], series: [] });
 	});
 
-	it("orders series claude_session, codex_thread, project regardless of input order", () => {
+	it("orders series claude_session, codex_thread, client_session, project regardless of input order", () => {
 		const timeSeries: ActiveSessionsTimePoint[] = [
 			{ ts: 1, scope: "project", sessions: 3 },
+			{ ts: 1, scope: "client_session", sessions: 4 },
 			{ ts: 1, scope: "codex_thread", sessions: 2 },
 			{ ts: 1, scope: "claude_session", sessions: 1 },
 		];
@@ -31,6 +33,7 @@ describe("buildActiveSessionsTrend", () => {
 		expect(series).toEqual([
 			{ key: CLAUDE_KEY, label: "Claude" },
 			{ key: CODEX_KEY, label: "Codex" },
+			{ key: CLIENT_KEY, label: "Other (session)" },
 			{ key: PROJECT_KEY, label: "Other (project)" },
 		]);
 	});
@@ -46,6 +49,7 @@ describe("buildActiveSessionsTrend", () => {
 				ts: 10,
 				[CLAUDE_KEY]: 5,
 				[CODEX_KEY]: 0,
+				[CLIENT_KEY]: 0,
 				[PROJECT_KEY]: 0,
 				[TOTAL_KEY]: 5,
 			},
@@ -80,6 +84,7 @@ describe("buildActiveSessionsTrend", () => {
 				ts: 10,
 				[CLAUDE_KEY]: 1,
 				[CODEX_KEY]: 0,
+				[CLIENT_KEY]: 0,
 				[PROJECT_KEY]: 0,
 				[TOTAL_KEY]: 1,
 			},
@@ -87,6 +92,7 @@ describe("buildActiveSessionsTrend", () => {
 				ts: 20,
 				[CLAUDE_KEY]: 0,
 				[CODEX_KEY]: 0,
+				[CLIENT_KEY]: 0,
 				[PROJECT_KEY]: 3,
 				[TOTAL_KEY]: 3,
 			},
@@ -94,6 +100,7 @@ describe("buildActiveSessionsTrend", () => {
 				ts: 30,
 				[CLAUDE_KEY]: 0,
 				[CODEX_KEY]: 7,
+				[CLIENT_KEY]: 0,
 				[PROJECT_KEY]: 0,
 				[TOTAL_KEY]: 7,
 			},
@@ -112,6 +119,7 @@ describe("buildActiveSessionsTrend", () => {
 				ts: 5,
 				[CLAUDE_KEY]: 2,
 				[CODEX_KEY]: 3,
+				[CLIENT_KEY]: 0,
 				[PROJECT_KEY]: 0,
 				[TOTAL_KEY]: 5,
 			},
@@ -220,15 +228,17 @@ describe("sortActiveSessionsByAccount", () => {
 });
 
 describe("SCOPE_ORDER / SESSION_SCOPE_COLORS", () => {
-	it("declares the three scopes in fixed order with stable keys/labels", () => {
+	it("declares the four scopes in fixed order with stable keys/labels", () => {
 		expect(SCOPE_ORDER.map((s) => s.scope)).toEqual([
 			"claude_session",
 			"codex_thread",
+			"client_session",
 			"project",
 		]);
 		expect(SCOPE_ORDER.map((s) => s.key)).toEqual([
 			CLAUDE_KEY,
 			CODEX_KEY,
+			CLIENT_KEY,
 			PROJECT_KEY,
 		]);
 	});

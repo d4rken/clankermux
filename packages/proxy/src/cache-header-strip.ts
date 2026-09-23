@@ -33,6 +33,7 @@ export const CACHE_REPLAY_STRIP_HEADERS = new Set([
 	"x-claude-code-session-id",
 	"thread-id",
 	"session-id",
+	"session_id",
 	"x-client-request-id",
 	"x-codex-installation-id",
 	"x-codex-window-id",
