@@ -35,7 +35,6 @@
 import {
 	FAMILY_PRIORITY,
 	intervalManager,
-	isAccountAvailable,
 	type ModelFamily,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
@@ -64,6 +63,7 @@ import {
 	isOveragePause,
 	overagePauseVerdict,
 } from "./anthropic-banked-reset-coordinator";
+import { cooldownRulesOutAlternative } from "./banked-reset-alternative";
 import { weeklyResetCanLiftPause } from "./codex-reset-credit-applier";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
@@ -1131,7 +1131,9 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 	const usable = (account: Account, now: number) =>
 		account.provider === "anthropic" &&
 		Boolean(account.refresh_token) &&
-		isAccountAvailable(account, now) &&
+		!account.disabled &&
+		!account.paused &&
+		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH;
 	const readUsage = (accountId: string) =>
 		usage.get(accountId) as UsageData | null;
