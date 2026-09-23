@@ -1,5 +1,6 @@
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
+	claudeTokenRefreshHeaders,
 	isInvalidGrantMessage,
 	isReauthDueSoon,
 	OAuthRefreshTokenError,
@@ -185,9 +186,7 @@ export class AnthropicProvider extends BaseProvider {
 
 		const response = await fetch("https://platform.claude.com/v1/oauth/token", {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-			},
+			headers: claudeTokenRefreshHeaders(),
 			body: JSON.stringify(requestBody),
 		});
 

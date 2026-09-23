@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { baseUrlShapeProblem, parseCustomEndpointData } from "@clankermux/core";
+import {
+	baseUrlShapeProblem,
+	claudeModelPermissionsHeaders,
+	parseCustomEndpointData,
+} from "@clankermux/core";
 import type { RoutingRepository } from "@clankermux/database";
 import {
 	DevinClient,
@@ -341,12 +345,12 @@ export class AccountModelPermissionService {
 			if (endpoint && !endpoint.startsWith("https://api.anthropic.com/"))
 				throw new Error("Custom backend requires manual models");
 			url = new URL("https://api.anthropic.com/v1/models");
-			headers.set("anthropic-version", "2023-06-01");
-			if (account.api_key) headers.set("x-api-key", token);
-			else {
-				headers.set("authorization", `Bearer ${token}`);
-				headers.set("anthropic-beta", "oauth-2025-04-20");
-			}
+			for (const [name, value] of Object.entries(
+				claudeModelPermissionsHeaders(
+					account.api_key ? { apiKey: token } : { bearer: token },
+				),
+			))
+				headers.set(name, value);
 			url.searchParams.set("limit", "1000");
 		} else if (account.provider === "zai") {
 			// Z.ai speaks the Anthropic Messages protocol on a FIXED base that its

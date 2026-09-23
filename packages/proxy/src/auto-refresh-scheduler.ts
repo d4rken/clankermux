@@ -1,6 +1,6 @@
 import {
 	CLAUDE_MODEL_IDS,
-	getClientVersion,
+	claudeKeepaliveHeaders,
 	normalizeAnthropicUsage,
 	registerHeartbeat,
 } from "@clankermux/core";
@@ -798,26 +798,7 @@ export class AutoRefreshScheduler {
 
 			// Use same headers as normal Claude Code CLI requests, plus the special account ID header
 			const headers = new Headers({
-				accept: "application/json",
-				"accept-language": "*",
-				"anthropic-beta":
-					"oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-				"anthropic-dangerous-direct-browser-access": "true",
-				"anthropic-version": "2023-06-01",
-				connection: "keep-alive",
-				"content-type": "application/json",
-				"sec-fetch-mode": "cors",
-				"user-agent": `claude-cli/${getClientVersion()} (external, cli)`,
-				"x-app": "cli",
-				"x-stainless-arch": "x64",
-				"x-stainless-helper-method": "stream",
-				"x-stainless-lang": "js",
-				"x-stainless-os": "Linux",
-				"x-stainless-package-version": "0.60.0",
-				"x-stainless-retry-count": "0",
-				"x-stainless-runtime": "node",
-				"x-stainless-runtime-version": "v24.9.0",
-				"x-stainless-timeout": "600",
+				...claudeKeepaliveHeaders(),
 				// CRITICAL: Force the proxy to use this specific account
 				"x-clankermux-account-id": account.id,
 				// CRITICAL: Bypass session tracking for auto-refresh messages

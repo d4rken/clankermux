@@ -1,4 +1,8 @@
-import { CLAUDE_MODEL_IDS, MODEL_DISPLAY_NAMES } from "@clankermux/core";
+import {
+	CLAUDE_MODEL_IDS,
+	claudeModelCatalogueHeaders,
+	MODEL_DISPLAY_NAMES,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 
@@ -367,9 +371,7 @@ export class AnthropicModelCatalogCache {
 				// bearer has exactly one valid destination.
 				redirect: "error",
 				headers: {
-					authorization: `Bearer ${accessToken}`,
-					"anthropic-version": "2023-06-01",
-					"anthropic-beta": "oauth-2025-04-20",
+					...claudeModelCatalogueHeaders(accessToken),
 					accept: "application/json",
 				},
 			});
