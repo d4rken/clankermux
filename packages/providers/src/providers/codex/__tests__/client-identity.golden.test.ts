@@ -95,16 +95,21 @@ const MODELS_WITHOUT_ACCOUNT: Pairs = MODELS_WITH_ACCOUNT.filter(
 	([name]) => name !== "chatgpt-account-id",
 );
 
-/** What every translated request carries, before any session headers. */
-const EXEC_INFERENCE: Pairs = [
+/** The codex_exec persona before the body transform knows the endpoint. */
+const EXEC_BASE: Pairs = [
 	["accept", "text/event-stream"],
 	["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
-	["chatgpt-account-id", "acct-from-jwt"],
 	["content-type", "application/json"],
 	["originator", "codex_exec"],
 	["user-agent", EXEC_UA],
 	["version", "0.155.1"],
 ];
+
+/** What every translated request to chatgpt.com carries, before any session headers. */
+const EXEC_INFERENCE: Pairs = sortedPairs([
+	...EXEC_BASE,
+	["chatgpt-account-id", "acct-from-jwt"],
+]);
 
 function sortedPairs(pairs: Pairs): Pairs {
 	return [...pairs].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -203,24 +208,18 @@ describe("Codex identity golden: inference headers (prepareHeaders)", () => {
 		);
 		expect(headerPairs(outbound)).toEqual(
 			sortedPairs([
-				...EXEC_INFERENCE,
+				...EXEC_BASE,
 				["session-id", "client-session"],
 				["x-clankermux-request-id", "req-1"],
 			]),
 		);
 	});
 
-	it("sets neither Authorization nor ChatGPT-Account-ID without an access token", () => {
+	it("sets no Authorization without an access token", () => {
 		const outbound = provider.prepareHeaders(claudeCodeInbound());
 		expect(outbound.get("authorization")).toBeNull();
 		expect(outbound.get("chatgpt-account-id")).toBeNull();
 		expect(outbound.get("x-api-key")).toBeNull();
-	});
-
-	it("sends no ChatGPT-Account-ID for a token that carries none", () => {
-		const outbound = provider.prepareHeaders(claudeCodeInbound(), "opaque");
-		expect(outbound.get("authorization")).toBe("Bearer opaque");
-		expect(outbound.get("chatgpt-account-id")).toBeNull();
 	});
 
 	it("keeps a Codex client's continuity headers and parks its persona", () => {
@@ -230,7 +229,7 @@ describe("Codex identity golden: inference headers (prepareHeaders)", () => {
 		);
 		expect(headerPairs(outbound)).toEqual(
 			sortedPairs([
-				...EXEC_INFERENCE,
+				...EXEC_BASE,
 				...CODEX_TUI_CONTINUITY,
 				[
 					"x-clankermux-codex-client-user-agent",
@@ -250,7 +249,7 @@ describe("Codex identity golden: inference headers (prepareHeaders)", () => {
 			}),
 			TOKEN_WITH_ACCOUNT,
 		);
-		expect(headerPairs(outbound)).toEqual(EXEC_INFERENCE);
+		expect(headerPairs(outbound)).toEqual(EXEC_BASE);
 	});
 });
 
@@ -293,6 +292,54 @@ describe("Codex identity golden: translated request after body transform", () =>
 		);
 	});
 
+	it("sends no ChatGPT-Account-ID to a custom endpoint, or for a token without one", async () => {
+		const translate = async (token: string, custom_endpoint: string | null) => {
+			const request = new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: provider.prepareHeaders(claudeCodeInbound(), token),
+				body: JSON.stringify({
+					model: "gpt-5.4-mini",
+					max_tokens: 16,
+					messages: [{ role: "user", content: "hi" }],
+				}),
+			});
+			const out = await provider.transformRequestBody(request, {
+				id: "a",
+				name: "a",
+				custom_endpoint,
+			} as never);
+			return out.headers.get("chatgpt-account-id");
+		};
+		expect(await translate(TOKEN_WITH_ACCOUNT, null)).toBe("acct-from-jwt");
+		expect(
+			await translate(
+				TOKEN_WITH_ACCOUNT,
+				"https://chatgpt.com/backend-api/codex/responses",
+			),
+		).toBe("acct-from-jwt");
+		expect(
+			await translate(
+				TOKEN_WITH_ACCOUNT,
+				"https://llm.example.com/v1/responses",
+			),
+		).toBeNull();
+		expect(await translate("opaque", null)).toBeNull();
+	});
+
+	it("sends no ChatGPT-Account-ID to a custom endpoint when translation fails", async () => {
+		const request = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: provider.prepareHeaders(claudeCodeInbound(), TOKEN_WITH_ACCOUNT),
+			body: "{not json",
+		});
+		const out = await provider.transformRequestBody(request, {
+			id: "a",
+			name: "a",
+			custom_endpoint: "https://llm.example.com/v1/responses",
+		} as never);
+		expect(out.headers.get("chatgpt-account-id")).toBeNull();
+	});
+
 	it("keeps the pinned persona for a Codex client routed through the translator", async () => {
 		const request = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
@@ -325,6 +372,7 @@ describe("Codex identity golden: native Responses passthrough", () => {
 	async function nativeAttempt(
 		inbound: Headers,
 		body: Record<string, unknown>,
+		target = account,
 	) {
 		const headers = provider.prepareHeaders(inbound, TOKEN_WITH_ACCOUNT);
 		headers.set("x-clankermux-native-responses", "1");
@@ -333,7 +381,7 @@ describe("Codex identity golden: native Responses passthrough", () => {
 			headers,
 			body: JSON.stringify(body),
 		});
-		return provider.transformRequestBody(request, account);
+		return provider.transformRequestBody(request, target);
 	}
 
 	it("a Codex client keeps its own persona, version-aligned, and its continuity headers", async () => {
@@ -377,10 +425,75 @@ describe("Codex identity golden: native Responses passthrough", () => {
 			sortedPairs([
 				...EXEC_INFERENCE,
 				["session-id", "pi-session-1"],
+				["thread-id", "pi-session-1"],
+				["x-client-request-id", "pi-session-1"],
 				["x-clankermux-native-responses", "1"],
 				["x-clankermux-request-stream", "true"],
 			]),
 		);
+	});
+
+	it("any other client's own thread-id and per-request x-client-request-id follow its session-id", async () => {
+		const out = await nativeAttempt(
+			new Headers({
+				"content-type": "application/json",
+				originator: "pi",
+				"session-id": "pi-session-2",
+				"thread-id": "pi-thread",
+				"user-agent": "pi (linux 6.12.0; x64)",
+				"x-client-request-id": "req-0001",
+			}),
+			{ model: "gpt-5.4-mini", input: [], prompt_cache_key: "other-key" },
+		);
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				["session-id", "pi-session-2"],
+				["thread-id", "pi-session-2"],
+				["x-client-request-id", "pi-session-2"],
+				["x-clankermux-native-responses", "1"],
+				["x-clankermux-request-stream", "true"],
+			]),
+		);
+	});
+
+	it("any other client without a usable session id sends no thread-id or x-client-request-id", async () => {
+		const out = await nativeAttempt(
+			new Headers({
+				"content-type": "application/json",
+				"thread-id": "pi-thread",
+				"user-agent": "pi (linux 6.12.0; x64)",
+				"x-client-request-id": "req-0001",
+			}),
+			{ model: "gpt-5.4-mini", input: [] },
+		);
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				["x-clankermux-native-responses", "1"],
+				["x-clankermux-request-stream", "true"],
+			]),
+		);
+	});
+
+	it("a custom endpoint gets no ChatGPT-Account-ID, for a Codex client or any other", async () => {
+		const custom = {
+			id: "a",
+			name: "a",
+			custom_endpoint: "https://llm.example.com/v1/responses",
+		} as never;
+		const codex = await nativeAttempt(
+			codexTuiInbound(),
+			{ model: "gpt-5.4-mini", input: [] },
+			custom,
+		);
+		const other = await nativeAttempt(
+			new Headers({ "user-agent": "pi (linux 6.12.0; x64)" }),
+			{ model: "gpt-5.4-mini", input: [] },
+			custom,
+		);
+		expect(codex.headers.get("chatgpt-account-id")).toBeNull();
+		expect(other.headers.get("chatgpt-account-id")).toBeNull();
 	});
 });
 
@@ -492,6 +605,14 @@ describe("Codex identity golden: native ping", () => {
 		);
 		expect(calls[0].method).toBe("POST");
 		expect(calls[0].headers).toEqual(EXEC_INFERENCE);
+	});
+
+	it("sends no ChatGPT-Account-ID to a custom endpoint", async () => {
+		await sendCodexNativePing(
+			TOKEN_WITH_ACCOUNT,
+			"https://llm.example.com/v1/responses",
+		);
+		expect(calls[0].headers).toEqual(EXEC_BASE);
 	});
 });
 

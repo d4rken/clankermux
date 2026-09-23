@@ -99,7 +99,7 @@ describe("applyCodexTranslatedProfile", () => {
 			"x-codex-turn-state": "ts",
 			[CODEX_CLIENT_USER_AGENT_HEADER]: "codex-tui/0.155.1 (x)",
 		});
-		applyCodexTranslatedProfile(headers, "derived");
+		applyCodexTranslatedProfile(headers, "derived", true);
 		expect([...headers.entries()]).toEqual([
 			["originator", "codex_exec"],
 			["session-id", "derived"],
@@ -109,10 +109,18 @@ describe("applyCodexTranslatedProfile", () => {
 		]);
 	});
 
+	it("sends no session headers off the ChatGPT backend", () => {
+		const headers = new Headers({ "session-id": "client" });
+		applyCodexTranslatedProfile(headers, "derived", false);
+		expect(headers.has("session-id")).toBe(false);
+		expect(headers.has("thread-id")).toBe(false);
+		expect(headers.has("x-client-request-id")).toBe(false);
+	});
+
 	it("sends no session headers without a usable id", () => {
 		for (const id of [undefined, "", "  ", "é", 42]) {
 			const headers = new Headers({ "session-id": "client" });
-			applyCodexTranslatedProfile(headers, id);
+			applyCodexTranslatedProfile(headers, id, true);
 			expect(headers.has("session-id")).toBe(false);
 			expect(headers.has("thread-id")).toBe(false);
 			expect(headers.has("x-client-request-id")).toBe(false);

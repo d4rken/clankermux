@@ -646,9 +646,8 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.delete("content-length");
 			applyCodexTranslatedProfile(
 				newHeaders,
-				targetsChatGptCodexBackend(account)
-					? codexBody.prompt_cache_key
-					: undefined,
+				codexBody.prompt_cache_key,
+				targetsChatGptCodexBackend(account),
 			);
 			applyReasoningEffortAdaptation(newHeaders, reasoningAdaptation);
 

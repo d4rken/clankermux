@@ -149,8 +149,8 @@ export function alignCodexClientUserAgent(
 
 /**
  * The fixed part of every Responses request in the `codex_exec` persona:
- * credentials, the account the token belongs to, and the client identity.
- * `ChatGPT-Account-ID` comes from the token's claims only.
+ * credentials and the client identity. `ChatGPT-Account-ID` depends on the
+ * endpoint, so {@link applyChatGptAccountId} adds it.
  */
 function codexExecInferenceHeaders(accessToken?: string): Headers {
 	const headers = new Headers({
@@ -160,12 +160,29 @@ function codexExecInferenceHeaders(accessToken?: string): Headers {
 		"User-Agent": CODEX_USER_AGENT,
 		originator: CODEX_EXEC_ORIGINATOR,
 	});
-	if (accessToken) {
-		headers.set("Authorization", `Bearer ${accessToken}`);
-		const accountId = readChatgptAccountId(accessToken);
-		if (accountId) headers.set("ChatGPT-Account-ID", accountId);
-	}
+	if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
 	return headers;
+}
+
+const BEARER_PREFIX = "Bearer ";
+
+/**
+ * `ChatGPT-Account-ID` from the bearer token's own claims, and only for the
+ * ChatGPT backend: a custom endpoint has no use for the workspace id. Any
+ * other value is removed.
+ */
+function applyChatGptAccountId(
+	headers: Headers,
+	chatGptBackend: boolean,
+): void {
+	headers.delete("ChatGPT-Account-ID");
+	if (!chatGptBackend) return;
+	const authorization = headers.get("authorization");
+	if (!authorization?.startsWith(BEARER_PREFIX)) return;
+	const accountId = readChatgptAccountId(
+		authorization.slice(BEARER_PREFIX.length),
+	);
+	if (accountId) headers.set("ChatGPT-Account-ID", accountId);
 }
 
 /**
@@ -217,39 +234,55 @@ function usableHeaderValue(value: unknown): string | undefined {
 }
 
 /**
+ * `thread-id` and `x-client-request-id` set to the `session-id`, or removed
+ * when there is none: `codex_exec` sends its thread id in all three.
+ */
+function alignThreadHeadersToSession(headers: Headers): void {
+	const id = headers.get("session-id");
+	if (id) {
+		headers.set("thread-id", id);
+		headers.set("x-client-request-id", id);
+	} else {
+		headers.delete("thread-id");
+		headers.delete("x-client-request-id");
+	}
+}
+
+/**
  * A request ClankerMux translated into Codex format: always the `codex_exec`
- * persona, never the client's. `session-id`, `thread-id` and
- * `x-client-request-id` all carry `sessionId` (the body's `prompt_cache_key`),
- * as the real client sends its thread id in all three; without a usable id
- * none of them is sent. Every other continuity header is dropped.
+ * persona, never the client's. On the ChatGPT backend `session-id`,
+ * `thread-id` and `x-client-request-id` all carry `sessionId` (the body's
+ * `prompt_cache_key`); without a usable id, or off that backend, none of them
+ * is sent. Every other continuity header is dropped.
  */
 export function applyCodexTranslatedProfile(
 	headers: Headers,
 	sessionId: unknown,
+	chatGptBackend: boolean,
 ): void {
 	headers.delete(CODEX_CLIENT_USER_AGENT_HEADER);
 	for (const name of CODEX_CONTINUITY_HEADERS) headers.delete(name);
 	headers.set("User-Agent", CODEX_USER_AGENT);
 	headers.set("originator", CODEX_EXEC_ORIGINATOR);
-	const id = usableHeaderValue(sessionId);
-	if (!id) return;
-	headers.set("session-id", id);
-	headers.set("thread-id", id);
-	headers.set("x-client-request-id", id);
+	applyChatGptAccountId(headers, chatGptBackend);
+	const id = chatGptBackend ? usableHeaderValue(sessionId) : undefined;
+	if (id) headers.set("session-id", id);
+	alignThreadHeadersToSession(headers);
 }
 
 /**
  * The native Responses passthrough. A Codex client keeps its own persona (the
- * parked, version-aligned User-Agent and the originator it names); anything
- * else stays `codex_exec`. Continuity headers are kept when usable. When
- * `deriveSessionId` is set, a missing or unusable `session-id` is derived from
- * `promptCacheKey`: the ChatGPT backend keys prompt caching on that header and
+ * parked, version-aligned User-Agent and the originator it names) and its
+ * continuity headers as sent, when usable. Anything else is `codex_exec`, so
+ * its `thread-id` and `x-client-request-id` follow its `session-id`. On the
+ * ChatGPT backend a missing or unusable `session-id` is derived from
+ * `promptCacheKey`: that backend keys prompt caching on the header and
  * ignores the body's `prompt_cache_key`.
  */
 export function applyCodexNativeProfile(
 	headers: Headers,
 	promptCacheKey: unknown,
-	deriveSessionId: boolean,
+	chatGptBackend: boolean,
 ): void {
 	const clientUserAgent = headers.get(CODEX_CLIENT_USER_AGENT_HEADER);
 	headers.delete(CODEX_CLIENT_USER_AGENT_HEADER);
@@ -270,9 +303,12 @@ export function applyCodexNativeProfile(
 		if (usable) headers.set(name, usable);
 		else headers.delete(name);
 	}
-	if (!deriveSessionId || headers.has("session-id")) return;
-	const derived = usableHeaderValue(promptCacheKey);
-	if (derived) headers.set("session-id", derived);
+	applyChatGptAccountId(headers, chatGptBackend);
+	if (chatGptBackend && !headers.has("session-id")) {
+		const derived = usableHeaderValue(promptCacheKey);
+		if (derived) headers.set("session-id", derived);
+	}
+	if (!clientUserAgent) alignThreadHeadersToSession(headers);
 }
 
 /**
@@ -307,8 +343,13 @@ export function codexModelsHeaders(
 }
 
 /** The window-priming POST /backend-api/codex/responses. */
-export function codexNativePingHeaders(accessToken: string): Headers {
-	return codexExecInferenceHeaders(accessToken);
+export function codexNativePingHeaders(
+	accessToken: string,
+	chatGptBackend: boolean,
+): Headers {
+	const headers = codexExecInferenceHeaders(accessToken);
+	applyChatGptAccountId(headers, chatGptBackend);
+	return headers;
 }
 
 /** POST auth.openai.com/oauth/token, authorization-code grant. */

@@ -1,6 +1,10 @@
 import { Logger } from "@clankermux/logger";
 import { codexNativePingHeaders } from "./client-identity";
-import { CODEX_DEFAULT_ENDPOINT, CODEX_PING_MODEL } from "./provider";
+import {
+	CODEX_DEFAULT_ENDPOINT,
+	CODEX_PING_MODEL,
+	targetsChatGptCodexBackend,
+} from "./provider";
 
 const log = new Logger("CodexNativePing");
 
@@ -70,7 +74,10 @@ export async function sendCodexNativePing(
 		upstream = await fetch(endpoint, {
 			method: "POST",
 			signal: controller.signal,
-			headers: codexNativePingHeaders(accessToken),
+			headers: codexNativePingHeaders(
+				accessToken,
+				targetsChatGptCodexBackend({ custom_endpoint: endpoint }),
+			),
 			body,
 		});
 	} finally {
