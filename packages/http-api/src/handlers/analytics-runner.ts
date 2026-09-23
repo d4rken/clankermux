@@ -34,9 +34,9 @@ import { createUsageScopedHistoryHandler as createDirectUsageScopedHistoryHandle
 const log = new Logger("AnalyticsRunner");
 
 const DEFAULT_CACHE_TTL_MS = 10_000;
-// Per-request "soft" deadline. When it fires we reject only that request and
-// leave the shared worker running (see runDashboardWorker), so one slow query
-// can't take sibling dashboard panels down with it.
+// Per-caller "soft" deadline. When it fires that caller gets a 503 and the
+// read keeps running (see awaitDashboardJob), so one slow query can't take
+// sibling dashboard panels down with it.
 const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
 // The all-time analytics view sweeps the full requests table across ~15 serial
 // query phases (percentiles, window functions, per-model/per-account rollups),
@@ -44,8 +44,8 @@ const DEFAULT_WORKER_TIMEOUT_MS = 15_000;
 // It gets its own generous soft deadline; every other kind keeps the tight one
 // so a slow stats/history read still surfaces quickly.
 const ANALYTICS_WORKER_TIMEOUT_MS = 60_000;
-// Last-resort "hard" deadline. Only a genuinely wedged worker (no response to a
-// request long after even its soft deadline) trips this, and only this path
+// Last-resort "hard" deadline. Only a genuinely wedged worker (a lane silent
+// for this long while a read is outstanding) trips this, and only this path
 // terminates the shared worker. Kept well above the largest soft deadline so a
 // merely-slow query that finishes late is never mistaken for a wedge.
 const HARD_WORKER_TIMEOUT_MS = 120_000;
@@ -89,7 +89,7 @@ export function getCacheTtlMs(kind: DashboardWorkerKind): number {
 	return CACHE_TTL_MS_BY_KIND[kind] ?? DEFAULT_CACHE_TTL_MS;
 }
 
-/** Per-request soft timeout (ms) for a dashboard worker kind. */
+/** Per-caller soft timeout (ms) for a dashboard worker kind. */
 export function getWorkerTimeoutMs(kind: DashboardWorkerKind): number {
 	return WORKER_SOFT_TIMEOUT_MS_BY_KIND[kind] ?? DEFAULT_WORKER_TIMEOUT_MS;
 }
@@ -101,23 +101,37 @@ type CachedResponse = {
 };
 
 const responseCache = new Map<string, CachedResponse>();
-const inFlight = new Map<string, Promise<Response>>();
-
-// Per-kind invalidation epoch. Bumped by invalidateDashboardCache so a
-// pre-invalidation request that is still in flight can't re-prime the cache
-// with stale data when it completes (cacheIfSuccessful compares epochs).
-const invalidationEpochs = new Map<DashboardWorkerKind, number>();
 
 /**
- * Drop all cached responses (and in-flight dedup promises) for one dashboard
- * worker kind. Call after a mutation that changes the data backing that kind
- * (e.g. payment ledger writes invalidate "payments-summary") so an immediate
- * follow-up read reflects the write instead of a pre-mutation cache entry.
+ * One worker read per cache key, from the moment it is posted until the worker
+ * answers it or its lane is reset. Callers join the running job for their key
+ * and each wait under their own soft deadline; a caller giving up does not end
+ * the job, so a refresh after a timeout joins the read already running instead
+ * of queueing a duplicate behind it. The promise never rejects: failures
+ * resolve to the error response every caller of the job receives.
+ */
+const jobs = new Map<string, Promise<Response>>();
+
+// Per-kind invalidation epoch. Bumped by invalidateDashboardCache so a
+// pre-invalidation job that is still running can't re-prime the cache with
+// stale data when it completes (cacheIfSuccessful compares epochs).
+const invalidationEpochs = new Map<DashboardWorkerKind, number>();
+// Bumped by clearAnalyticsCachesForTests, which invalidates every kind at once.
+let cacheGeneration = 0;
+
+function cacheEpoch(kind: DashboardWorkerKind): string {
+	return `${cacheGeneration}:${invalidationEpochs.get(kind) ?? 0}`;
+}
+
+/**
+ * Drop all cached responses (and running jobs) for one dashboard worker kind.
+ * Call after a mutation that changes the data backing that kind (e.g. payment
+ * ledger writes invalidate "payments-summary") so an immediate follow-up read
+ * reflects the write instead of a pre-mutation cache entry.
  *
- * In-flight promises are only removed from the dedup map — their original
- * awaiters still resolve normally; new readers start a fresh worker request.
- * The epoch bump prevents those orphaned requests from writing stale results
- * into the cache when they finish.
+ * Running jobs are only removed from the registry — their current callers
+ * still resolve normally; new readers start a fresh job. The epoch bump keeps
+ * those orphaned jobs from writing stale results into the cache.
  */
 export function invalidateDashboardCache(kind: DashboardWorkerKind): void {
 	invalidationEpochs.set(kind, (invalidationEpochs.get(kind) ?? 0) + 1);
@@ -125,23 +139,17 @@ export function invalidateDashboardCache(kind: DashboardWorkerKind): void {
 	for (const key of responseCache.keys()) {
 		if (key.startsWith(prefix)) responseCache.delete(key);
 	}
-	for (const key of inFlight.keys()) {
-		if (key.startsWith(prefix)) inFlight.delete(key);
+	for (const key of jobs.keys()) {
+		if (key.startsWith(prefix)) jobs.delete(key);
 	}
 }
 
 type PendingWorkerRequest = {
 	resolve: (response: Response) => void;
 	reject: (error: Error) => void;
-	// Fires first: rejects this one request without touching the worker.
-	softTimeoutHandle: ReturnType<typeof setTimeout>;
-	// Fires much later if this request is still unanswered; terminates the
-	// worker only when it has gone fully silent (a genuine wedge).
-	hardTimeoutHandle: ReturnType<typeof setTimeout>;
-	// Set once the caller has been given an answer (result OR soft-timeout
-	// error). A late worker result for an already-settled request is dropped,
-	// and resetDashboardWorker won't reject it a second time.
-	settled: boolean;
+	// Tears the worker down if the lane stays silent for a whole hard deadline
+	// while this read is outstanding (a genuine wedge). Armed once posted.
+	hardTimeoutHandle?: ReturnType<typeof setTimeout>;
 };
 
 /**
@@ -211,11 +219,11 @@ type LaneState = {
 	worker: DashboardWorkerLike | undefined;
 	pending: Map<string, PendingWorkerRequest>;
 	// Wall-clock of this lane's worker's most recent sign of life: its creation,
-	// or any message it posts back (for any request, including ones already
-	// timed out). The hard watchdog only tears a worker down if it has stayed
-	// silent this entire time — a worker still answering other reads is
-	// demonstrably alive, so a merely-slow query aging out never triggers a
-	// collateral teardown of healthy sibling requests.
+	// or any message it posts back (for any request, including ones whose
+	// callers already gave up). The hard watchdog only tears a worker down if
+	// it has stayed silent this entire time — a worker still answering other
+	// reads is demonstrably alive, so a merely-slow query aging out never
+	// triggers a collateral teardown of healthy sibling requests.
 	lastActivityAt: number;
 };
 
@@ -473,28 +481,72 @@ function createIsolatedDashboardHandler(
 		}
 		if (cached) responseCache.delete(key);
 
-		const existing = inFlight.get(key);
-		if (existing) return (await existing).clone();
-
-		if (inFlight.size >= DEFAULT_MAX_IN_FLIGHT_ENTRIES) {
-			log.warn(
-				`Rejecting ${kind} request: ${inFlight.size} worker requests already in flight`,
-			);
-			return errorResponse(
-				ServiceUnavailable(KIND_LABELS[kind].tooManyMessage),
-			);
+		let job = jobs.get(key);
+		if (!job) {
+			if (jobs.size >= DEFAULT_MAX_IN_FLIGHT_ENTRIES) {
+				log.warn(
+					`Rejecting ${kind} request: ${jobs.size} worker jobs already running`,
+				);
+				return errorResponse(
+					ServiceUnavailable(KIND_LABELS[kind].tooManyMessage),
+				);
+			}
+			job = startDashboardJob(kind, dbPath, params, key);
 		}
-
-		const promise = runDashboardRequest(kind, dbPath, params, key);
-		inFlight.set(key, promise);
-		try {
-			return (await promise).clone();
-		} finally {
-			// Identity-checked: invalidateDashboardCache() may have evicted this
-			// entry and a fresh request may have claimed the key since.
-			if (inFlight.get(key) === promise) inFlight.delete(key);
-		}
+		return awaitDashboardJob(kind, job);
 	};
+}
+
+function startDashboardJob(
+	kind: DashboardWorkerKind,
+	dbPath: string,
+	params: URLSearchParams,
+	cacheKey: string,
+): Promise<Response> {
+	const epochAtStart = cacheEpoch(kind);
+	const job = runDashboardWorker(kind, dbPath, params)
+		.then(async (response) => {
+			await cacheIfSuccessful(kind, cacheKey, response, epochAtStart);
+			return response;
+		})
+		.catch((error: unknown) => {
+			log.error(`Dashboard worker failed (${kind}):`, error);
+			return errorResponse(
+				error instanceof DashboardWorkerTimeoutError
+					? ServiceUnavailable(KIND_LABELS[kind].timeoutMessage)
+					: InternalServerError(KIND_LABELS[kind].failureMessage),
+			);
+		})
+		.finally(() => {
+			// Identity-checked: invalidateDashboardCache() may have evicted this
+			// job and a fresh one may have claimed the key since.
+			if (jobs.get(cacheKey) === job) jobs.delete(cacheKey);
+		});
+	jobs.set(cacheKey, job);
+	return job;
+}
+
+/** Wait for a job under this caller's own soft deadline; the job runs on. */
+async function awaitDashboardJob(
+	kind: DashboardWorkerKind,
+	job: Promise<Response>,
+): Promise<Response> {
+	const softMs = workerTimeoutOverrideMs?.soft ?? getWorkerTimeoutMs(kind);
+	let softTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<null>((resolve) => {
+		softTimeoutHandle = setTimeout(() => resolve(null), softMs);
+	});
+	try {
+		const response = await Promise.race([job, deadline]);
+		if (response) return response.clone();
+		log.error(
+			`Dashboard worker failed (${kind}):`,
+			new DashboardWorkerTimeoutError(softMs),
+		);
+		return errorResponse(ServiceUnavailable(KIND_LABELS[kind].timeoutMessage));
+	} finally {
+		clearTimeout(softTimeoutHandle);
+	}
 }
 
 function canonicalParamsKey(params: URLSearchParams): string {
@@ -506,27 +558,11 @@ function canonicalParamsKey(params: URLSearchParams): string {
 	return new URLSearchParams(entries).toString();
 }
 
-async function runDashboardRequest(
-	kind: DashboardWorkerKind,
-	dbPath: string,
-	params: URLSearchParams,
-	cacheKey: string,
-): Promise<Response> {
-	const epochAtStart = invalidationEpochs.get(kind) ?? 0;
-	try {
-		const response = await runDashboardWorker(kind, dbPath, params);
-		await cacheIfSuccessful(kind, cacheKey, response, epochAtStart);
-		return response;
-	} catch (error) {
-		log.error(`Dashboard worker failed (${kind}):`, error);
-		return errorResponse(
-			error instanceof DashboardWorkerTimeoutError
-				? ServiceUnavailable(KIND_LABELS[kind].timeoutMessage)
-				: InternalServerError(KIND_LABELS[kind].failureMessage),
-		);
-	}
-}
-
+/**
+ * Post one read to its lane's worker. Resolves when the worker answers, however
+ * long that takes; rejects only when the lane is reset. Soft deadlines belong
+ * to the callers waiting on the job, not to the read itself.
+ */
 function runDashboardWorker(
 	kind: DashboardWorkerKind,
 	dbPath: string,
@@ -535,59 +571,35 @@ function runDashboardWorker(
 	const id = crypto.randomUUID();
 	const lane = LANE_BY_KIND[kind];
 	const state = lanes[lane];
-	const softMs = workerTimeoutOverrideMs?.soft ?? getWorkerTimeoutMs(kind);
 	const hardMs = workerTimeoutOverrideMs?.hard ?? HARD_WORKER_TIMEOUT_MS;
 
 	return new Promise<Response>((resolve, reject) => {
-		// Stamped immediately after this request's postMessage below. The hard
-		// watchdog asks "has this lane said anything SINCE we posted?", which an
-		// elapsed-duration comparison cannot answer: creating the worker writes
-		// `lastActivityAt` after these timers are armed, so `now - lastActivityAt`
-		// is always short of `hardMs` by however long the spawn took.
-		let postedAt = 0;
+		// The hard watchdog asks "has this lane said anything SINCE `since`?",
+		// which an elapsed-duration comparison cannot answer: a message for any
+		// read refreshes `lastActivityAt`. `since` starts as the instant of this
+		// request's postMessage, and the first deadline is armed from it.
+		let since = 0;
 
-		const softTimeoutHandle = setTimeout(() => {
-			const pending = state.pending.get(id);
-			if (!pending || pending.settled) return;
-			// Reject ONLY this request; leave the shared worker running so
-			// sibling dashboard panels keep their in-flight results. The entry
-			// stays registered (settled=true) so a late worker result is dropped
-			// cleanly and the hard watchdog can still recover a wedged worker.
-			pending.settled = true;
-			pending.reject(new DashboardWorkerTimeoutError(softMs));
-		}, softMs);
+		// Only a lane that stayed silent for a whole hard deadline is wedged, and
+		// only that lane is reset — a wedged heavy worker must not take the light
+		// worker's healthy reads down with it. A lane still answering other reads
+		// is alive: it answers every message, so this read keeps its job and the
+		// watchdog looks again one deadline later.
+		const watch = (): ReturnType<typeof setTimeout> =>
+			setTimeout(() => {
+				const pending = state.pending.get(id);
+				if (!pending) return;
+				if (state.lastActivityAt <= since) {
+					resetLane(lane, new DashboardWorkerTimeoutError(hardMs));
+					return;
+				}
+				since = Date.now();
+				pending.hardTimeoutHandle = watch();
+			}, hardMs);
 
-		const hardTimeoutHandle = setTimeout(() => {
-			const pending = state.pending.get(id);
-			if (!pending) return;
-			// This request has gone unanswered well past even its soft deadline.
-			// Only tear the worker down if it has been completely silent the whole
-			// time — that's a genuine wedge. If it has posted anything recently
-			// (other reads still completing), it's alive and merely slow on this
-			// query, so don't punish healthy siblings: quietly retire this
-			// abandoned entry and let the late result (if any) be dropped.
-			// Scoped to THIS lane: a wedged heavy worker must not take the light
-			// worker's healthy in-flight reads down with it.
-			if (state.lastActivityAt <= postedAt) {
-				resetLane(lane, new DashboardWorkerTimeoutError(hardMs));
-				return;
-			}
-			clearTimeout(pending.softTimeoutHandle);
-			clearTimeout(pending.hardTimeoutHandle);
-			state.pending.delete(id);
-			if (!pending.settled) {
-				pending.settled = true;
-				pending.reject(new DashboardWorkerTimeoutError(hardMs));
-			}
-		}, hardMs);
-
-		state.pending.set(id, {
-			resolve,
-			reject,
-			softTimeoutHandle,
-			hardTimeoutHandle,
-			settled: false,
-		});
+		// Registered before the post so a reply can never outrun its entry.
+		const entry: PendingWorkerRequest = { resolve, reject };
+		state.pending.set(id, entry);
 
 		try {
 			getDashboardWorker(lane).postMessage({
@@ -597,11 +609,11 @@ function runDashboardWorker(
 				params: params.toString(),
 				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
 			} satisfies AnalyticsWorkerRequest);
-			postedAt = Date.now();
+			since = Date.now();
+			if (state.pending.get(id) === entry) entry.hardTimeoutHandle = watch();
 		} catch (error) {
 			const pending = state.pending.get(id);
 			if (pending) {
-				clearTimeout(pending.softTimeoutHandle);
 				clearTimeout(pending.hardTimeoutHandle);
 				state.pending.delete(id);
 			}
@@ -723,14 +735,8 @@ function handleDashboardWorkerMessage(
 	const pending = state.pending.get(data.id);
 	if (!pending) return;
 
-	clearTimeout(pending.softTimeoutHandle);
 	clearTimeout(pending.hardTimeoutHandle);
 	state.pending.delete(data.id);
-
-	// The caller already got a soft-timeout error; the worker answered late but
-	// is healthy. Drop the stale result and keep the worker for the next read.
-	if (pending.settled) return;
-	pending.settled = true;
 
 	if (data.timings && data.timings.totalMs > 500) {
 		log.warn(
@@ -768,12 +774,8 @@ function resetLane(lane: WorkerLane, error: Error): void {
 	}
 
 	for (const [id, pending] of state.pending) {
-		clearTimeout(pending.softTimeoutHandle);
 		clearTimeout(pending.hardTimeoutHandle);
 		state.pending.delete(id);
-		// A soft-timed-out request has already been answered; don't reject twice.
-		if (pending.settled) continue;
-		pending.settled = true;
 		pending.reject(error);
 	}
 }
@@ -789,14 +791,15 @@ async function cacheIfSuccessful(
 	kind: DashboardWorkerKind,
 	cacheKey: string,
 	response: Response,
-	epochAtStart: number,
+	epochAtStart: string,
 ): Promise<void> {
 	if (!response.ok) return;
-	// The data was read before an invalidation landed — caching it would
-	// resurrect pre-mutation results for a full TTL.
-	if ((invalidationEpochs.get(kind) ?? 0) !== epochAtStart) return;
 	try {
 		const body = await response.clone().text();
+		// The data was read before an invalidation landed — caching it would
+		// resurrect pre-mutation results for a full TTL. Checked after the body
+		// read, right before the write, so an invalidation during it counts.
+		if (cacheEpoch(kind) !== epochAtStart) return;
 		responseCache.set(cacheKey, {
 			expiresAt: Date.now() + getCacheTtlMs(kind),
 			status: response.status,
@@ -840,8 +843,9 @@ class DashboardWorkerTimeoutError extends Error {
 }
 
 export function clearAnalyticsCachesForTests(): void {
+	cacheGeneration++;
 	responseCache.clear();
-	inFlight.clear();
+	jobs.clear();
 }
 
 /**
@@ -872,7 +876,7 @@ export function getAnalyticsCacheStatsForTests(): {
 } {
 	return {
 		responseCacheSize: responseCache.size,
-		inFlightSize: inFlight.size,
+		inFlightSize: jobs.size,
 	};
 }
 
