@@ -191,9 +191,10 @@ const PASSWORD_ALREADY_SET = {
  * `POST /api/auth/setup` — set the FIRST management password with the one-time
  * setup code the server printed to its output, and sign the caller in.
  *
- * Same ordering principle as login: size, shape and length are settled before
- * the throttle is claimed, and the throttle before either KDF runs. Once a
+ * Same ordering principle as login: size and shape are settled before the
+ * throttle is claimed, and the throttle before either KDF runs. Once a
  * password exists the endpoint answers 409 whatever the code, and revokes it.
+ * Password length is judged only after the code matches.
  */
 export function createAuthSetupHandler(
 	sessionAuth: SessionAuthService,
@@ -217,9 +218,6 @@ export function createAuthSetupHandler(
 			password.length === 0
 		) {
 			return jsonResponse({ error: "Setup code and password required" }, 400);
-		}
-		if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
-			return jsonResponse({ error: "Password too long" }, 400);
 		}
 
 		const claim = throttle.tryAcquire();

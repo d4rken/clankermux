@@ -632,28 +632,77 @@ describe("POST /api/auth/setup", () => {
 		expect(codeHasher.verifyCalls).toBe(0);
 	});
 
-	it("refuses an over-long password without claiming a throttle slot", async () => {
-		const { setupCode, codeHasher } = makeSetupCode();
-		issue(setupCode);
-		// One attempt in the bucket: if the long password spent it, the valid
-		// attempt after it would be answered 429.
-		const throttle = new LoginThrottle(1, 5_000, 2, () => 0);
-		const handler = createAuthSetupHandler(svc, setupCode, throttle);
+	describe("with an over-long password", () => {
+		const LONG_PASSWORD = "a".repeat(MAX_PASSWORD_BYTES + 1);
 
-		const long = await handler(
-			setupRequest({
-				code: SETUP_CODE,
-				password: "a".repeat(MAX_PASSWORD_BYTES + 1),
-			}),
-		);
-		expect(long.status).toBe(400);
-		expect(await long.json()).toEqual({ error: "Password too long" });
-		expect(codeHasher.verifyCalls).toBe(0);
+		it("answers 429 with Retry-After once the throttle is spent", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const throttle = new LoginThrottle(1, 5_000, 2, () => 0);
+			const handler = createAuthSetupHandler(svc, setupCode, throttle);
 
-		const valid = await handler(
-			setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }),
-		);
-		expect(valid.status).toBe(200);
+			const first = await handler(
+				setupRequest({ code: "ZZZZ-ZZZZ-ZZZZ", password: NEW_PASSWORD }),
+			);
+			expect(first.status).toBe(403);
+
+			const res = await handler(
+				setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }),
+			);
+			expect(res.status).toBe(429);
+			expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+			expect(store.password).toBeNull();
+		});
+
+		it("answers 409 once a password exists, and revokes the code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const existing = await configure("hunter2");
+
+			const res = await createAuthSetupHandler(
+				svc,
+				setupCode,
+			)(setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }));
+
+			expect(res.status).toBe(409);
+			expect(await res.json()).toEqual(ALREADY_SET);
+			expect(store.password?.verifier).toBe(existing.verifier);
+			expect(await setupCode.matches(SETUP_CODE)).toBe(false);
+		});
+
+		it("answers 403 for a wrong code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+
+			const res = await createAuthSetupHandler(
+				svc,
+				setupCode,
+			)(setupRequest({ code: "QQQQ-RRRR-SSSS", password: LONG_PASSWORD }));
+
+			expect(res.status).toBe(403);
+			expect(await res.json()).toEqual({ error: "Invalid setup code" });
+			expect(store.password).toBeNull();
+		});
+
+		it("answers the validator's 400 for the valid code, storing nothing and keeping the code", async () => {
+			const { setupCode } = makeSetupCode();
+			issue(setupCode);
+			const handler = createAuthSetupHandler(svc, setupCode);
+
+			const long = await handler(
+				setupRequest({ code: SETUP_CODE, password: LONG_PASSWORD }),
+			);
+			expect(long.status).toBe(400);
+			expect(await long.json()).toEqual({
+				error: "Password must be at most 1024 bytes (UTF-8).",
+			});
+			expect(store.password).toBeNull();
+
+			const valid = await handler(
+				setupRequest({ code: SETUP_CODE, password: NEW_PASSWORD }),
+			);
+			expect(valid.status).toBe(200);
+		});
 	});
 
 	it("answers 429 with Retry-After once the throttle is spent, before checking the code", async () => {
