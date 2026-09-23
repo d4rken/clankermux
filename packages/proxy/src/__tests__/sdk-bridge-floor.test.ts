@@ -15,6 +15,11 @@ import {
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import { setForcedAccount } from "../handlers";
+import * as rateLimitCooldown from "../handlers/rate-limit-cooldown";
+import {
+	markCapacityRestoredProbePending,
+	resetRateLimitProbeGatesForTests,
+} from "../handlers/rate-limit-cooldown";
 import * as tokenManager from "../handlers/token-manager";
 import { clearAliasAffinity } from "../model-alias-routing";
 import { getProviderOverloadUntil } from "../provider-overload-cooldown";
@@ -32,6 +37,7 @@ import {
 
 const MODEL = "claude-sonnet-4-5";
 const KEY = "key-pi";
+const realAdmission = rateLimitCooldown.getRateLimitProbeAdmission;
 const URL_ = new URL("https://proxy.local/v1/messages");
 
 const claudeA = () => makeBridgeAccount({ id: "claude-a", name: "A" });
@@ -483,5 +489,56 @@ describe("SDK bridge continuations", () => {
 		await run(messagesRequest(toolResults), h.ctx);
 
 		expect(bridge.lookups).toEqual([]);
+	});
+});
+
+describe("SDK bridge and the recovery-probe gate", () => {
+	afterEach(() => resetRateLimitProbeGatesForTests());
+
+	it("a bridged attempt takes no probe lease, so the turn's own model call on that account can", async () => {
+		// The account owes exactly one recovery probe.
+		const a = claudeA();
+		markCapacityRestoredProbePending(a.id);
+		const admissions: Array<{ account: string; decision: string }> = [];
+		const gate = spyOn(rateLimitCooldown, "getRateLimitProbeAdmission");
+		gate.mockImplementation((account, now, options) => {
+			const admission = realAdmission(account, now, options);
+			admissions.push({ account: account.id, decision: admission.decision });
+			return admission;
+		});
+		spies.push(gate);
+		const seen: { inner?: { status: number; leaseFreeDuringTurn: boolean } } =
+			{};
+		const bridge = makeFakeBridge(async () => {
+			const leaseFreeDuringTurn = !rateLimitCooldown.wouldSuppressProbe(a);
+			// Claude Code's model call: direct traffic on the same account, while
+			// the outer attempt is still in flight.
+			const response = await handleProxy(
+				messagesRequest(),
+				URL_,
+				harness?.ctx as BridgeHarness["ctx"],
+				KEY,
+				"pi-key",
+			);
+			await response.text();
+			seen.inner = { status: response.status, leaseFreeDuringTurn };
+			return Response.json({
+				type: "message",
+				role: "assistant",
+				content: [{ type: "text", text: "bridged" }],
+				stop_reason: "end_turn",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			});
+		});
+		harness = await makeBridgeHarness([a], { bridge });
+
+		const { response } = await run(flooredRequest(), harness.ctx);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(seen.inner).toEqual({ status: 200, leaseFreeDuringTurn: true });
+		// The gate was consulted once, by the inner call, which became the probe.
+		expect(admissions).toEqual([{ account: a.id, decision: "admitted" }]);
+		expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
 	});
 });
