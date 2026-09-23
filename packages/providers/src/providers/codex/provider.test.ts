@@ -2242,10 +2242,10 @@ describe("CodexProvider prompt_cache_key derivation", () => {
 			codexAccount({ custom_endpoint: "https://api.openai.com/v1" }),
 		);
 		expect(noAccount.prompt_cache_key).toMatch(
-			/^clankermux-convo-[0-9a-f]{45}$/,
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
 		);
 		expect(openaiAccount.prompt_cache_key).toMatch(
-			/^clankermux-convo-[0-9a-f]{45}$/,
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
 		);
 	});
 
@@ -2290,8 +2290,9 @@ describe("CodexProvider prompt_cache_key derivation", () => {
 			messages: [{ role: "user", content: "task B" }],
 		});
 
-		expect(turn1.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
-		expect((turn1.prompt_cache_key as string).length).toBeLessThanOrEqual(64);
+		expect(turn1.prompt_cache_key).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
 		expect(turn1.prompt_cache_key).not.toContain("11111111");
 		expect(turn2.prompt_cache_key).toBe(turn1.prompt_cache_key);
 		expect(sibling.prompt_cache_key).not.toBe(turn1.prompt_cache_key);
@@ -2311,7 +2312,9 @@ describe("CodexProvider prompt_cache_key derivation", () => {
 			system: "main loop system prompt @ 2026-07-16 (new commit abc123)",
 			messages: [{ role: "user", content: "task A" }],
 		});
-		expect(first.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(first.prompt_cache_key).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
 		expect(laterSameConvo.prompt_cache_key).toBe(first.prompt_cache_key);
 	});
 
@@ -2739,7 +2742,7 @@ describe("CodexProvider session-id prompt-cache header", () => {
 		expect(body.prompt_cache_key).toBe("  padded-key  ");
 	});
 
-	it("native: a non-chatgpt.com endpoint gets no session-id and keeps inbound headers as they arrived", async () => {
+	it("native: a non-chatgpt.com endpoint derives no session-id and drops an unusable inbound one", async () => {
 		const account = codexAccount({
 			custom_endpoint: "https://my-openai-proxy.example.com/v1",
 		});
@@ -2757,17 +2760,21 @@ describe("CodexProvider session-id prompt-cache header", () => {
 			{ "session-id": `bad${String.fromCharCode(1)}value` },
 			account,
 		);
-		expect(inbound.transformed.headers.get("session-id")).toBe(
-			`bad${String.fromCharCode(1)}value`,
-		);
+		expect(inbound.transformed.headers.get("session-id")).toBeNull();
 		expect(inbound.body.prompt_cache_key).toBe("body-key");
 	});
 
-	it("translated: the derived key is sent as session-id and stays in the body", async () => {
+	it("translated: the derived key is sent as session-id, thread-id and x-client-request-id and stays in the body", async () => {
 		const { transformed, body } = await translatedTransform({});
 
-		expect(body.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(body.prompt_cache_key).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
 		expect(transformed.headers.get("session-id")).toBe(body.prompt_cache_key);
+		expect(transformed.headers.get("thread-id")).toBe(body.prompt_cache_key);
+		expect(transformed.headers.get("x-client-request-id")).toBe(
+			body.prompt_cache_key,
+		);
 	});
 
 	it("translated: api.openai.com keeps the body key and gets no session-id header", async () => {
@@ -2776,7 +2783,9 @@ describe("CodexProvider session-id prompt-cache header", () => {
 			codexAccount({ custom_endpoint: "https://api.openai.com/v1" }),
 		);
 
-		expect(body.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(body.prompt_cache_key).toMatch(
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+		);
 		expect(transformed.headers.get("session-id")).toBeNull();
 	});
 });

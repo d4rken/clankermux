@@ -3,6 +3,8 @@
  * function per endpoint profile. Golden record of the output:
  * `__tests__/client-identity.golden.test.ts`.
  */
+import { NATIVE_RESPONSES_REQUEST_HEADER } from "@clankermux/types";
+import { readChatgptAccountId } from "./identity";
 
 /**
  * Codex CLI version advertised via the `Version` header, the User-Agent and the
@@ -17,11 +19,16 @@
 export const CODEX_VERSION = "0.155.1";
 
 /** The OS/arch segment of the User-Agent. Pinned, not read from the host. */
-export const CODEX_PLATFORM = "Windows 10.0.26100; x64";
+export const CODEX_PLATFORM = "Debian 13.0.0; x86_64";
 
-export const CODEX_ORIGINATOR = "codex_cli_rs";
+/** The terminal segment of the User-Agent. */
+export const CODEX_TERMINAL = "xterm-256color";
 
-export const CODEX_OPENAI_BETA = "responses=experimental";
+/** `codex exec`, the persona of all traffic ClankerMux originates itself. */
+export const CODEX_EXEC_ORIGINATOR = "codex_exec";
+
+/** The CLI before any client names itself: `codex login`. */
+export const CODEX_LOGIN_ORIGINATOR = "codex_cli_rs";
 
 /** OpenAI's OAuth client id for the Codex CLI, shared by every account. */
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -35,198 +42,318 @@ export const CODEX_OAUTH_SCOPES: readonly string[] = Object.freeze([
 	"api.connectors.invoke",
 ]);
 
-export function codexUserAgent(
-	version: string = CODEX_VERSION,
-	platform: string = CODEX_PLATFORM,
-): string {
-	return `codex-cli/${version} (${platform})`;
+function userAgentPrefix(originator: string): string {
+	return `${originator}/${CODEX_VERSION} (${CODEX_PLATFORM}) ${CODEX_TERMINAL}`;
 }
 
-export const CODEX_USER_AGENT = codexUserAgent();
+/**
+ * `codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)`.
+ * The trailing group names the client that initialized the session.
+ */
+export const CODEX_USER_AGENT = `${userAgentPrefix(CODEX_EXEC_ORIGINATOR)} (${CODEX_EXEC_ORIGINATOR}; ${CODEX_VERSION})`;
 
-/** Headers that belong to the inbound Anthropic client and never go upstream. */
-const INBOUND_ANTHROPIC_HEADERS: readonly string[] = [
-	"authorization",
-	"anthropic-version",
-	"anthropic-dangerous-direct-browser-access",
-	"anthropic-beta",
-	"x-api-key",
-	"host",
-];
+/** `codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color`: no client yet. */
+export const CODEX_LOGIN_USER_AGENT = userAgentPrefix(CODEX_LOGIN_ORIGINATOR);
 
 /**
- * Exact SDK identity headers to drop before forwarding to the Codex backend.
+ * Where prepareHeaders parks a Codex client's own User-Agent (already
+ * version-aligned) until the body transform knows whether the attempt is a
+ * native passthrough. Swept with every other `x-clankermux-*` header before
+ * the upstream fetch.
+ */
+export const CODEX_CLIENT_USER_AGENT_HEADER =
+	"x-clankermux-codex-client-user-agent";
+
+/** Originators of the first-party Codex clients whose persona we may keep. */
+const CODEX_CLIENT_ORIGINATORS: ReadonlySet<string> = new Set([
+	"codex_cli_rs",
+	"codex-tui",
+	"codex_exec",
+	"codex_vscode",
+]);
+
+/** The desktop app's originator is `Codex <surface>`. */
+const CODEX_DESKTOP_ORIGINATOR_PREFIX = "Codex ";
+
+/**
+ * Per-turn and per-thread state a Codex client sends on a Responses request,
+ * by exact name. The native passthrough forwards these; the translated path
+ * replaces the session ones with its own and drops the rest.
+ */
+const CODEX_CONTINUITY_HEADERS: readonly string[] = [
+	"session-id",
+	"thread-id",
+	"x-client-request-id",
+	"x-codex-beta-features",
+	"x-codex-parent-thread-id",
+	"x-codex-routing-hint",
+	"x-codex-turn-metadata",
+	"x-codex-turn-state",
+	"x-codex-window-id",
+	"x-oai-attestation",
+	"x-openai-internal-codex-responses-lite",
+	"x-openai-memgen-request",
+	"x-openai-subagent",
+];
+
+const CODEX_CONTINUITY_HEADER_SET: ReadonlySet<string> = new Set(
+	CODEX_CONTINUITY_HEADERS,
+);
+
+/** Internal control headers only ClankerMux itself may set on this leg. */
+const PROVIDER_OWNED_INTERNAL_HEADERS: ReadonlySet<string> = new Set([
+	NATIVE_RESPONSES_REQUEST_HEADER,
+	CODEX_CLIENT_USER_AGENT_HEADER,
+]);
+
+const INTERNAL_HEADER_PREFIX = "x-clankermux-";
+
+function isCodexClientOriginator(originator: string): boolean {
+	return (
+		CODEX_CLIENT_ORIGINATORS.has(originator) ||
+		originator.startsWith(CODEX_DESKTOP_ORIGINATOR_PREFIX)
+	);
+}
+
+/**
+ * A Codex client's User-Agent with its build version replaced by
+ * CODEX_VERSION, or null when the request is not from a Codex client. It has
+ * to name a first-party originator and begin with that same originator.
  *
- * Deliberately an exact list rather than an `x-openai-client-` prefix sweep:
- * only this family identifies the calling SDK. Other `x-openai-*` headers
- * (`x-openai-internal-codex-responses-lite`, `x-openai-subagent`) are Codex
- * protocol surface and have to survive.
+ *   originator "codex-tui",
+ *   "codex-tui/0.160.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.160.0)"
+ *   → "codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)"
+ *
+ * The trailing group is only rewritten when it repeats the build version: a
+ * client like the VS Code extension reports its own version there.
  */
-const SDK_FINGERPRINT_HEADERS: readonly string[] = [
-	"x-openai-client-arch",
-	"x-openai-client-id",
-	"x-openai-client-os",
-	"x-openai-client-user-agent",
-	"x-openai-client-version",
-];
-
-/**
- * Prefix for the Stainless generator's header family. A prefix rather than a
- * list because the suffixes are open-ended — the generator adds new ones
- * (`-retry-count`, `-timeout`, `-helper-method` …) as the SDK evolves, and an
- * enumeration would silently start leaking on the next SDK release.
- */
-const SDK_FINGERPRINT_HEADER_PREFIX = "x-stainless-";
-
-/**
- * Drop the calling SDK's identity headers from an outbound header set, in
- * place. `x-codex-*` continuity headers are untouched: the native Responses
- * passthrough forwards the Codex CLI's own turn/session state and the backend
- * needs it.
- */
-function stripSdkFingerprintHeaders(headers: Headers): void {
-	for (const name of SDK_FINGERPRINT_HEADERS) {
-		headers.delete(name);
+export function alignCodexClientUserAgent(
+	userAgent: string | null,
+	originator: string | null,
+): string | null {
+	if (!userAgent || !originator || !isCodexClientOriginator(originator)) {
+		return null;
 	}
-	// Collect before deleting — mutating a Headers object mid-iteration is not
-	// specified to be safe.
-	const stainless: string[] = [];
-	for (const [name] of headers) {
-		if (name.toLowerCase().startsWith(SDK_FINGERPRINT_HEADER_PREFIX)) {
-			stainless.push(name);
-		}
+	const prefix = `${originator}/`;
+	if (!userAgent.startsWith(prefix)) return null;
+	const versionEnd = userAgent.indexOf(" ", prefix.length);
+	if (versionEnd <= prefix.length) return null;
+	const version = userAgent.slice(prefix.length, versionEnd);
+	let rest = userAgent.slice(versionEnd);
+	const suffix = ` (${originator}; ${version})`;
+	if (rest.endsWith(suffix)) {
+		rest = `${rest.slice(0, -suffix.length)} (${originator}; ${CODEX_VERSION})`;
 	}
-	for (const name of stainless) {
-		headers.delete(name);
-	}
+	return `${prefix}${CODEX_VERSION}${rest}`;
 }
 
 /**
- * POST /backend-api/codex/responses: the inbound client's headers with its
- * credentials and SDK fingerprint removed and the Codex identity stamped on.
- * Everything else the client sent is forwarded.
+ * The fixed part of every Responses request in the `codex_exec` persona:
+ * credentials, the account the token belongs to, and the client identity.
+ * `ChatGPT-Account-ID` comes from the token's claims only.
+ */
+function codexExecInferenceHeaders(accessToken?: string): Headers {
+	const headers = new Headers({
+		Accept: "text/event-stream",
+		"Content-Type": "application/json",
+		Version: CODEX_VERSION,
+		"User-Agent": CODEX_USER_AGENT,
+		originator: CODEX_EXEC_ORIGINATOR,
+	});
+	if (accessToken) {
+		headers.set("Authorization", `Bearer ${accessToken}`);
+		const accountId = readChatgptAccountId(accessToken);
+		if (accountId) headers.set("ChatGPT-Account-ID", accountId);
+	}
+	return headers;
+}
+
+/**
+ * POST /backend-api/codex/responses, before the body transform. An allowlist:
+ * the `codex_exec` persona, the inbound Codex continuity headers and
+ * ClankerMux's own `x-clankermux-*` control headers. Nothing else the client
+ * sent survives. A Codex client's own User-Agent is parked under
+ * CODEX_CLIENT_USER_AGENT_HEADER for {@link applyCodexNativeProfile}.
  */
 export function codexInferenceHeaders(
 	inbound: Headers,
 	accessToken?: string,
 ): Headers {
-	const headers = new Headers(inbound);
-	for (const name of INBOUND_ANTHROPIC_HEADERS) {
-		headers.delete(name);
+	const headers = codexExecInferenceHeaders(accessToken);
+	for (const [name, value] of inbound) {
+		const lower = name.toLowerCase();
+		if (
+			CODEX_CONTINUITY_HEADER_SET.has(lower) ||
+			(lower.startsWith(INTERNAL_HEADER_PREFIX) &&
+				!PROVIDER_OWNED_INTERNAL_HEADERS.has(lower))
+		) {
+			headers.set(lower, value);
+		}
 	}
-
-	// The client that got here is usually Claude Code on the Stainless-generated
-	// Anthropic SDK, which attaches the whole `x-stainless-*` family. Forwarding
-	// it hands the backend two contradictory identities for one request: an
-	// `x-stainless-*` set is an SDK signal in its own right, so leaving it on is
-	// what makes the persona incoherent rather than merely redundant. Same
-	// applies to opencode and anything else on the ai-sdk.
-	stripSdkFingerprintHeaders(headers);
-
-	if (accessToken) {
-		headers.set("Authorization", `Bearer ${accessToken}`);
+	const clientUserAgent = alignCodexClientUserAgent(
+		inbound.get("user-agent"),
+		inbound.get("originator"),
+	);
+	if (clientUserAgent) {
+		headers.set(CODEX_CLIENT_USER_AGENT_HEADER, clientUserAgent);
 	}
-	headers.set("Version", CODEX_VERSION);
-	headers.set("Openai-Beta", CODEX_OPENAI_BETA);
-	headers.set("User-Agent", CODEX_USER_AGENT);
-	headers.set("originator", CODEX_ORIGINATOR);
 	return headers;
 }
 
 /**
- * The ChatGPT Codex backend keys prompt caching on the `session-id` REQUEST
- * HEADER and ignores the body's `prompt_cache_key`, so the documented body
- * field is translated into the header the backend reads.
- *
  * Usable means: a string that is non-empty and printable ASCII after trim().
  * The upper bound is U+007E rather than "no control characters" because
  * `Headers.set` throws on code points above U+00FF, and a throw on this path
  * would drop the request onto the passthrough fallback.
  */
-const USABLE_SESSION_ID = /^[\x20-\x7E]+$/;
+const USABLE_HEADER_VALUE = /^[\x20-\x7E]+$/;
 
-function usableSessionId(value: unknown): string | undefined {
+function usableHeaderValue(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
-	if (trimmed.length === 0 || !USABLE_SESSION_ID.test(trimmed))
+	if (trimmed.length === 0 || !USABLE_HEADER_VALUE.test(trimmed))
 		return undefined;
 	return trimmed;
 }
 
 /**
- * Derives `session-id` from `promptCacheKey` unless the client already supplied
- * a usable one of its own, which is never overwritten. An inbound value that is
- * present but unusable is DELETED, not forwarded: `headers` is a copy of the
- * inbound set, so skipping it would relay the very value that was rejected.
- * Only call this for accounts that reach the ChatGPT backend.
+ * A request ClankerMux translated into Codex format: always the `codex_exec`
+ * persona, never the client's. `session-id`, `thread-id` and
+ * `x-client-request-id` all carry `sessionId` (the body's `prompt_cache_key`),
+ * as the real client sends its thread id in all three; without a usable id
+ * none of them is sent. Every other continuity header is dropped.
  */
-export function applyCodexSessionIdHeader(
+export function applyCodexTranslatedProfile(
 	headers: Headers,
-	promptCacheKey: unknown,
+	sessionId: unknown,
 ): void {
-	if (usableSessionId(headers.get("session-id"))) return;
-	const derived = usableSessionId(promptCacheKey);
-	if (derived) {
-		headers.set("session-id", derived);
-	} else {
-		headers.delete("session-id");
-	}
+	headers.delete(CODEX_CLIENT_USER_AGENT_HEADER);
+	for (const name of CODEX_CONTINUITY_HEADERS) headers.delete(name);
+	headers.set("User-Agent", CODEX_USER_AGENT);
+	headers.set("originator", CODEX_EXEC_ORIGINATOR);
+	const id = usableHeaderValue(sessionId);
+	if (!id) return;
+	headers.set("session-id", id);
+	headers.set("thread-id", id);
+	headers.set("x-client-request-id", id);
 }
 
 /**
- * The zero-cost ChatGPT backend reads and the reset-credit consume: model
- * catalogue, subscription, `wham/usage`, rate-limit-reset-credits.
- * `ChatGPT-Account-ID` is sent only when `chatgptAccountId` is non-empty; the
- * caller decides whether to trim it.
+ * The native Responses passthrough. A Codex client keeps its own persona (the
+ * parked, version-aligned User-Agent and the originator it names); anything
+ * else stays `codex_exec`. Continuity headers are kept when usable. When
+ * `deriveSessionId` is set, a missing or unusable `session-id` is derived from
+ * `promptCacheKey`: the ChatGPT backend keys prompt caching on that header and
+ * ignores the body's `prompt_cache_key`.
  */
-export function codexSideCallHeaders(
+export function applyCodexNativeProfile(
+	headers: Headers,
+	promptCacheKey: unknown,
+	deriveSessionId: boolean,
+): void {
+	const clientUserAgent = headers.get(CODEX_CLIENT_USER_AGENT_HEADER);
+	headers.delete(CODEX_CLIENT_USER_AGENT_HEADER);
+	if (clientUserAgent) {
+		headers.set("User-Agent", clientUserAgent);
+		headers.set(
+			"originator",
+			clientUserAgent.slice(0, clientUserAgent.indexOf("/")),
+		);
+	} else {
+		headers.set("User-Agent", CODEX_USER_AGENT);
+		headers.set("originator", CODEX_EXEC_ORIGINATOR);
+	}
+	for (const name of CODEX_CONTINUITY_HEADERS) {
+		const value = headers.get(name);
+		if (value === null) continue;
+		const usable = usableHeaderValue(value);
+		if (usable) headers.set(name, usable);
+		else headers.delete(name);
+	}
+	if (!deriveSessionId || headers.has("session-id")) return;
+	const derived = usableHeaderValue(promptCacheKey);
+	if (derived) headers.set("session-id", derived);
+}
+
+/**
+ * The ChatGPT backend client: `wham/usage`, the reset-credit list and consume,
+ * and the subscription record. No originator and no `Version`: this client
+ * sets its own headers instead of the default ones. `ChatGPT-Account-ID` is
+ * sent only when `chatgptAccountId` is non-empty; the caller decides whether
+ * to trim it.
+ */
+export function codexBackendClientHeaders(
 	accessToken: string,
 	chatgptAccountId?: string | null,
 ): Headers {
 	const headers = new Headers({
-		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
-		Version: CODEX_VERSION,
 		"User-Agent": CODEX_USER_AGENT,
-		originator: CODEX_ORIGINATOR,
+		Authorization: `Bearer ${accessToken}`,
+		Accept: "*/*",
 	});
 	if (chatgptAccountId) headers.set("ChatGPT-Account-ID", chatgptAccountId);
 	return headers;
 }
 
-/** The window-priming POST /backend-api/codex/responses. */
-export function codexNativePingHeaders(
+/** GET /backend-api/codex/models: the default client plus `Version`. */
+export function codexModelsHeaders(
 	accessToken: string,
-): Record<string, string> {
+	chatgptAccountId?: string | null,
+): Headers {
+	const headers = codexBackendClientHeaders(accessToken, chatgptAccountId);
+	headers.set("originator", CODEX_EXEC_ORIGINATOR);
+	headers.set("Version", CODEX_VERSION);
+	return headers;
+}
+
+/** The window-priming POST /backend-api/codex/responses. */
+export function codexNativePingHeaders(accessToken: string): Headers {
+	return codexExecInferenceHeaders(accessToken);
+}
+
+/** POST auth.openai.com/oauth/token, authorization-code grant. */
+export function codexLoginTokenHeaders(): Record<string, string> {
 	return {
-		Authorization: `Bearer ${accessToken}`,
-		"Content-Type": "application/json",
-		Version: CODEX_VERSION,
-		"Openai-Beta": CODEX_OPENAI_BETA,
-		"User-Agent": CODEX_USER_AGENT,
-		originator: CODEX_ORIGINATOR,
-		Accept: "text/event-stream",
+		"Content-Type": "application/x-www-form-urlencoded",
+		"User-Agent": CODEX_LOGIN_USER_AGENT,
 	};
 }
 
-/** POST auth.openai.com/oauth/token, every grant type. */
+/** POST auth.openai.com/oauth/token, refresh grant. */
 export function codexTokenEndpointHeaders(): Record<string, string> {
 	return { "Content-Type": "application/x-www-form-urlencoded" };
 }
 
 /** POST auth.openai.com/api/accounts/deviceauth/{usercode,token}. */
 export function codexDeviceAuthHeaders(): Record<string, string> {
-	return { "Content-Type": "application/json" };
+	return {
+		"Content-Type": "application/json",
+		"User-Agent": CODEX_LOGIN_USER_AGENT,
+	};
 }
 
-/**
- * The Codex-specific tail of the authorize URL's query string, already
- * encoded, in the order the URL carries them.
- */
-export function codexAuthorizeUrlParams(): string[] {
+export interface CodexAuthorizeUrlInput {
+	clientId: string;
+	redirectUri: string;
+	scopes: readonly string[];
+	codeChallenge: string;
+	state: string;
+}
+
+/** The authorize URL's query parameters, encoded, in the real client's order. */
+export function codexAuthorizeUrlParams(
+	input: CodexAuthorizeUrlInput,
+): string[] {
 	return [
+		"response_type=code",
+		`client_id=${encodeURIComponent(input.clientId)}`,
+		`redirect_uri=${encodeURIComponent(input.redirectUri)}`,
+		`scope=${encodeURIComponent(input.scopes.join(" "))}`,
+		`code_challenge=${encodeURIComponent(input.codeChallenge)}`,
+		"code_challenge_method=S256",
 		"id_token_add_organizations=true",
 		"codex_cli_simplified_flow=true",
-		`originator=${encodeURIComponent(CODEX_ORIGINATOR)}`,
+		`state=${encodeURIComponent(input.state)}`,
+		`originator=${encodeURIComponent(CODEX_LOGIN_ORIGINATOR)}`,
 	];
 }

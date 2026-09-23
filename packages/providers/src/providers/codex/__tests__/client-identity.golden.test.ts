@@ -70,133 +70,200 @@ const TOKEN_WITH_ACCOUNT = jwt({
 	"https://api.openai.com/auth": { chatgpt_account_id: "acct-from-jwt" },
 });
 
-const SIDE_CALL_WITH_ACCOUNT: Pairs = [
-	["accept", "application/json"],
+const EXEC_UA =
+	"codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)";
+const LOGIN_UA = "codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color";
+
+const BACKEND_CLIENT_WITH_ACCOUNT: Pairs = [
+	["accept", "*/*"],
 	["authorization", "Bearer access-token"],
 	["chatgpt-account-id", "acct-123"],
-	["originator", "codex_cli_rs"],
-	["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
+	["user-agent", EXEC_UA],
+];
+
+const BACKEND_CLIENT_WITHOUT_ACCOUNT: Pairs =
+	BACKEND_CLIENT_WITH_ACCOUNT.filter(([name]) => name !== "chatgpt-account-id");
+
+const MODELS_WITH_ACCOUNT: Pairs = [
+	["accept", "*/*"],
+	["authorization", "Bearer access-token"],
+	["chatgpt-account-id", "acct-123"],
+	["originator", "codex_exec"],
+	["user-agent", EXEC_UA],
 	["version", "0.155.1"],
 ];
 
-const SIDE_CALL_WITHOUT_ACCOUNT: Pairs = SIDE_CALL_WITH_ACCOUNT.filter(
+const MODELS_WITHOUT_ACCOUNT: Pairs = MODELS_WITH_ACCOUNT.filter(
 	([name]) => name !== "chatgpt-account-id",
 );
+
+/** What every translated request carries, before any session headers. */
+const EXEC_INFERENCE: Pairs = [
+	["accept", "text/event-stream"],
+	["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
+	["chatgpt-account-id", "acct-from-jwt"],
+	["content-type", "application/json"],
+	["originator", "codex_exec"],
+	["user-agent", EXEC_UA],
+	["version", "0.155.1"],
+];
+
+function sortedPairs(pairs: Pairs): Pairs {
+	return [...pairs].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+// Shaped like Claude Code 2.1.x on the Stainless Anthropic SDK.
+const claudeCodeInbound = () =>
+	new Headers({
+		accept: "application/json",
+		"accept-encoding": "gzip, deflate, br, zstd",
+		"accept-language": "*",
+		"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+		"anthropic-dangerous-direct-browser-access": "true",
+		"anthropic-version": "2023-06-01",
+		authorization: "Bearer client-key",
+		"chatgpt-account-id": "client-workspace",
+		connection: "keep-alive",
+		"content-length": "1234",
+		"content-type": "application/json",
+		cookie: "a=b",
+		host: "localhost:8080",
+		"openai-beta": "responses=experimental",
+		"sec-fetch-mode": "cors",
+		"session-id": "client-session",
+		"user-agent": "claude-cli/2.1.237 (external, cli)",
+		"x-api-key": "client-api-key",
+		"x-app": "cli",
+		"x-claude-code-session-id": "4b1f5c1e-8f0e-4d7a-9c3b-2a6d7e8f9a0b",
+		"x-clankermux-request-id": "req-1",
+		"x-openai-client-version": "1.2.3",
+		"x-stainless-arch": "x64",
+		"x-stainless-helper-method": "stream",
+		"x-stainless-lang": "js",
+		"x-stainless-os": "Linux",
+		"x-stainless-package-version": "0.60.0",
+		"x-stainless-retry-count": "0",
+		"x-stainless-runtime": "node",
+		"x-stainless-runtime-version": "v24.9.0",
+		"x-stainless-timeout": "600",
+	});
+
+// Shaped like Codex 0.160 codex-tui on its HTTP Responses transport.
+const codexTuiInbound = () =>
+	new Headers({
+		accept: "text/event-stream",
+		authorization: "Bearer client-key",
+		"chatgpt-account-id": "client-workspace",
+		"content-type": "application/json",
+		"openai-beta": "responses=experimental",
+		originator: "codex-tui",
+		"session-id": "0198a0b1-0000-7000-8000-000000000001",
+		session_id: "0198a0b1-0000-7000-8000-000000000001",
+		"thread-id": "0198a0b1-0000-7000-8000-000000000002",
+		"user-agent":
+			"codex-tui/0.160.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.160.0)",
+		version: "0.160.0",
+		"x-client-request-id": "0198a0b1-0000-7000-8000-000000000002",
+		"x-codex-beta-features": "feature_a",
+		"x-codex-installation-id": "inst-1",
+		"x-codex-parent-thread-id": "0198a0b1-0000-7000-8000-000000000003",
+		"x-codex-routing-hint": "hint-1",
+		"x-codex-turn-metadata": '{"turn_id":"t-1"}',
+		"x-codex-turn-state": "ts-1",
+		"x-codex-window-id": "0198a0b1-0000-7000-8000-000000000002:0",
+		"x-oai-attestation": "att-1",
+		"x-openai-client-version": "1.2.3",
+		"x-openai-internal-codex-responses-lite": "true",
+		"x-openai-memgen-request": "true",
+		"x-openai-subagent": "review",
+	});
+
+/** The continuity headers a Codex client's own request keeps. */
+const CODEX_TUI_CONTINUITY: Pairs = [
+	["session-id", "0198a0b1-0000-7000-8000-000000000001"],
+	["thread-id", "0198a0b1-0000-7000-8000-000000000002"],
+	["x-client-request-id", "0198a0b1-0000-7000-8000-000000000002"],
+	["x-codex-beta-features", "feature_a"],
+	["x-codex-parent-thread-id", "0198a0b1-0000-7000-8000-000000000003"],
+	["x-codex-routing-hint", "hint-1"],
+	["x-codex-turn-metadata", '{"turn_id":"t-1"}'],
+	["x-codex-turn-state", "ts-1"],
+	["x-codex-window-id", "0198a0b1-0000-7000-8000-000000000002:0"],
+	["x-oai-attestation", "att-1"],
+	["x-openai-internal-codex-responses-lite", "true"],
+	["x-openai-memgen-request", "true"],
+	["x-openai-subagent", "review"],
+];
 
 describe("Codex identity golden: inference headers (prepareHeaders)", () => {
 	const provider = new CodexProvider();
 
-	// Shaped like Claude Code 2.1.x on the Stainless Anthropic SDK.
-	const claudeCodeInbound = () =>
-		new Headers({
-			accept: "application/json",
-			"accept-encoding": "gzip, deflate, br, zstd",
-			"accept-language": "*",
-			"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-			"anthropic-dangerous-direct-browser-access": "true",
-			"anthropic-version": "2023-06-01",
-			authorization: "Bearer client-key",
-			connection: "keep-alive",
-			"content-length": "1234",
-			"content-type": "application/json",
-			host: "localhost:8080",
-			"sec-fetch-mode": "cors",
-			"user-agent": "claude-cli/2.1.237 (external, cli)",
-			"x-api-key": "client-api-key",
-			"x-app": "cli",
-			"x-claude-code-session-id": "4b1f5c1e-8f0e-4d7a-9c3b-2a6d7e8f9a0b",
-			"x-stainless-arch": "x64",
-			"x-stainless-helper-method": "stream",
-			"x-stainless-lang": "js",
-			"x-stainless-os": "Linux",
-			"x-stainless-package-version": "0.60.0",
-			"x-stainless-retry-count": "0",
-			"x-stainless-runtime": "node",
-			"x-stainless-runtime-version": "v24.9.0",
-			"x-stainless-timeout": "600",
-		});
-
-	it("rewrites a Claude Code inbound set", () => {
+	it("reduces a Claude Code inbound set to the pinned codex_exec persona", () => {
 		const outbound = provider.prepareHeaders(
 			claudeCodeInbound(),
-			"access-token",
+			TOKEN_WITH_ACCOUNT,
 		);
-		expect(headerPairs(outbound)).toEqual([
-			["accept", "application/json"],
-			["accept-encoding", "gzip, deflate, br, zstd"],
-			["accept-language", "*"],
-			["authorization", "Bearer access-token"],
-			["connection", "keep-alive"],
-			["content-length", "1234"],
-			["content-type", "application/json"],
-			["openai-beta", "responses=experimental"],
-			["originator", "codex_cli_rs"],
-			["sec-fetch-mode", "cors"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
-			["x-app", "cli"],
-			["x-claude-code-session-id", "4b1f5c1e-8f0e-4d7a-9c3b-2a6d7e8f9a0b"],
-		]);
+		expect(headerPairs(outbound)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				["session-id", "client-session"],
+				["x-clankermux-request-id", "req-1"],
+			]),
+		);
 	});
 
-	it("sets no Authorization without an access token", () => {
+	it("sets neither Authorization nor ChatGPT-Account-ID without an access token", () => {
 		const outbound = provider.prepareHeaders(claudeCodeInbound());
 		expect(outbound.get("authorization")).toBeNull();
+		expect(outbound.get("chatgpt-account-id")).toBeNull();
 		expect(outbound.get("x-api-key")).toBeNull();
 	});
 
-	it("rewrites a Codex CLI inbound set", () => {
-		const inbound = new Headers({
-			accept: "text/event-stream",
-			authorization: "Bearer client-key",
-			"chatgpt-account-id": "client-workspace",
-			"content-type": "application/json",
-			"openai-beta": "responses=experimental",
-			originator: "codex-tui",
-			session_id: "0198a0b1-0000-7000-8000-000000000001",
-			"user-agent":
-				"codex-tui/0.160.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.160.0)",
-			version: "0.160.0",
-			"x-codex-installation-id": "inst-1",
-			"x-codex-turn-state": "ts-1",
-			"x-openai-client-version": "1.2.3",
-			"x-openai-subagent": "review",
-		});
-		const outbound = provider.prepareHeaders(inbound, "access-token");
-		expect(headerPairs(outbound)).toEqual([
-			["accept", "text/event-stream"],
-			["authorization", "Bearer access-token"],
-			["chatgpt-account-id", "client-workspace"],
-			["content-type", "application/json"],
-			["openai-beta", "responses=experimental"],
-			["originator", "codex_cli_rs"],
-			["session_id", "0198a0b1-0000-7000-8000-000000000001"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
-			["x-codex-installation-id", "inst-1"],
-			["x-codex-turn-state", "ts-1"],
-			["x-openai-subagent", "review"],
-		]);
+	it("sends no ChatGPT-Account-ID for a token that carries none", () => {
+		const outbound = provider.prepareHeaders(claudeCodeInbound(), "opaque");
+		expect(outbound.get("authorization")).toBe("Bearer opaque");
+		expect(outbound.get("chatgpt-account-id")).toBeNull();
+	});
+
+	it("keeps a Codex client's continuity headers and parks its persona", () => {
+		const outbound = provider.prepareHeaders(
+			codexTuiInbound(),
+			TOKEN_WITH_ACCOUNT,
+		);
+		expect(headerPairs(outbound)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				...CODEX_TUI_CONTINUITY,
+				[
+					"x-clankermux-codex-client-user-agent",
+					"codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)",
+				],
+			]),
+		);
+	});
+
+	it("drops an inbound native-responses flag and a forged persona header", () => {
+		const outbound = provider.prepareHeaders(
+			new Headers({
+				"user-agent": "pi (linux 6.12; x64)",
+				originator: "pi",
+				"x-clankermux-native-responses": "1",
+				"x-clankermux-codex-client-user-agent": "codex-tui/9.9.9 (forged)",
+			}),
+			TOKEN_WITH_ACCOUNT,
+		);
+		expect(headerPairs(outbound)).toEqual(EXEC_INFERENCE);
 	});
 });
 
-describe("Codex identity golden: inference request after body transform", () => {
+describe("Codex identity golden: translated request after body transform", () => {
 	const provider = new CodexProvider();
 	const account = { id: "a", name: "a", custom_endpoint: null } as never;
 
-	it("translated Claude Code request derives session-id from prompt_cache_key", async () => {
-		const prepared = provider.prepareHeaders(
-			new Headers({
-				"content-type": "application/json",
-				"user-agent": "claude-cli/2.1.237 (external, cli)",
-				"x-app": "cli",
-				"x-claude-code-session-id": "4b1f5c1e-8f0e-4d7a-9c3b-2a6d7e8f9a0b",
-			}),
-			"access-token",
-		);
+	it("sends the derived UUID as session-id, thread-id and x-client-request-id", async () => {
 		const request = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
-			headers: prepared,
+			headers: provider.prepareHeaders(claudeCodeInbound(), TOKEN_WITH_ACCOUNT),
 			body: JSON.stringify({
 				model: "gpt-5.4-mini",
 				max_tokens: 16,
@@ -210,28 +277,45 @@ describe("Codex identity golden: inference request after body transform", () => 
 		});
 		const out = await provider.transformRequestBody(request, account);
 		const body = JSON.parse(await out.text()) as { prompt_cache_key?: string };
-		expect(body.prompt_cache_key).toBe(
-			"clankermux-convo-29e8c3bb751b608dd200322ecc0efcee196d1f89de10f",
+		const derived = "29e8c3bb-751b-408d-9200-322ecc0efcee";
+		expect(body.prompt_cache_key).toBe(derived);
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				["session-id", derived],
+				["thread-id", derived],
+				["x-client-request-id", derived],
+				[
+					"x-clankermux-reasoning-effort",
+					"eyJyZXF1ZXN0ZWQiOm51bGwsImVmZmVjdGl2ZSI6Im1lZGl1bSIsInJlYXNvbiI6InByb3h5X2RlZmF1bHQifQ==",
+				],
+				["x-clankermux-request-id", "req-1"],
+				["x-clankermux-request-stream", "false"],
+			]),
 		);
-		expect(headerPairs(out.headers)).toEqual([
-			["authorization", "Bearer access-token"],
-			["content-type", "application/json"],
-			["openai-beta", "responses=experimental"],
-			["originator", "codex_cli_rs"],
-			[
-				"session-id",
-				"clankermux-convo-29e8c3bb751b608dd200322ecc0efcee196d1f89de10f",
-			],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
-			["x-app", "cli"],
-			[
-				"x-clankermux-reasoning-effort",
-				"eyJyZXF1ZXN0ZWQiOm51bGwsImVmZmVjdGl2ZSI6Im1lZGl1bSIsInJlYXNvbiI6InByb3h5X2RlZmF1bHQifQ==",
-			],
-			["x-clankermux-request-stream", "false"],
-			["x-claude-code-session-id", "4b1f5c1e-8f0e-4d7a-9c3b-2a6d7e8f9a0b"],
-		]);
+	});
+
+	it("keeps the pinned persona for a Codex client routed through the translator", async () => {
+		const request = new Request("https://proxy.local/v1/messages", {
+			method: "POST",
+			headers: provider.prepareHeaders(codexTuiInbound(), TOKEN_WITH_ACCOUNT),
+			body: JSON.stringify({
+				model: "gpt-5.4-mini",
+				max_tokens: 16,
+				messages: [{ role: "user", content: "hi" }],
+			}),
+		});
+		const out = await provider.transformRequestBody(request, account);
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				[
+					"x-clankermux-reasoning-effort",
+					"eyJyZXF1ZXN0ZWQiOm51bGwsImVmZmVjdGl2ZSI6Im1lZGl1bSIsInJlYXNvbiI6InByb3h5X2RlZmF1bHQifQ==",
+				],
+				["x-clankermux-request-stream", "false"],
+			]),
+		);
 	});
 });
 
@@ -239,40 +323,66 @@ describe("Codex identity golden: native Responses passthrough", () => {
 	const provider = new CodexProvider();
 	const account = { id: "a", name: "a", custom_endpoint: null } as never;
 
-	it("Codex CLI request keeps its session_id and gains a derived session-id", async () => {
-		const prepared = provider.prepareHeaders(
-			new Headers({
-				"content-type": "application/json",
-				originator: "codex-tui",
-				session_id: "0198a0b1-0000-7000-8000-000000000001",
-				"user-agent": "codex-tui/0.160.0 (Mac OS 15.5.0; arm64)",
-				version: "0.160.0",
-				"x-clankermux-native-responses": "1",
-			}),
-			"access-token",
-		);
+	// The proxy sets the native flag after prepareHeaders, never the client.
+	async function nativeAttempt(
+		inbound: Headers,
+		body: Record<string, unknown>,
+	) {
+		const headers = provider.prepareHeaders(inbound, TOKEN_WITH_ACCOUNT);
+		headers.set("x-clankermux-native-responses", "1");
 		const request = new Request("https://proxy.local/v1/responses", {
 			method: "POST",
-			headers: prepared,
-			body: JSON.stringify({
-				model: "gpt-5.4-mini",
-				input: [],
-				prompt_cache_key: "0198a0b1-0000-7000-8000-000000000001",
-			}),
+			headers,
+			body: JSON.stringify(body),
 		});
-		const out = await provider.transformRequestBody(request, account);
-		expect(headerPairs(out.headers)).toEqual([
-			["authorization", "Bearer access-token"],
-			["content-type", "application/json"],
-			["openai-beta", "responses=experimental"],
-			["originator", "codex_cli_rs"],
-			["session-id", "0198a0b1-0000-7000-8000-000000000001"],
-			["session_id", "0198a0b1-0000-7000-8000-000000000001"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
-			["x-clankermux-native-responses", "1"],
-			["x-clankermux-request-stream", "true"],
-		]);
+		return provider.transformRequestBody(request, account);
+	}
+
+	it("a Codex client keeps its own persona, version-aligned, and its continuity headers", async () => {
+		const out = await nativeAttempt(codexTuiInbound(), {
+			model: "gpt-5.4-mini",
+			input: [],
+			prompt_cache_key: "0198a0b1-0000-7000-8000-000000000001",
+		});
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				["accept", "text/event-stream"],
+				["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
+				["chatgpt-account-id", "acct-from-jwt"],
+				["content-type", "application/json"],
+				["originator", "codex-tui"],
+				[
+					"user-agent",
+					"codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)",
+				],
+				["version", "0.155.1"],
+				...CODEX_TUI_CONTINUITY,
+				["x-clankermux-native-responses", "1"],
+				["x-clankermux-request-stream", "true"],
+			]),
+		);
+	});
+
+	it("any other client gets the pinned persona and a session-id from prompt_cache_key", async () => {
+		const out = await nativeAttempt(
+			new Headers({
+				"chatgpt-account-id": "client-workspace",
+				"content-type": "application/json",
+				"openai-beta": "responses=experimental",
+				originator: "pi",
+				session_id: "pi-session-1",
+				"user-agent": "pi (linux 6.12.0; x64)",
+			}),
+			{ model: "gpt-5.4-mini", input: [], prompt_cache_key: "pi-session-1" },
+		);
+		expect(headerPairs(out.headers)).toEqual(
+			sortedPairs([
+				...EXEC_INFERENCE,
+				["session-id", "pi-session-1"],
+				["x-clankermux-native-responses", "1"],
+				["x-clankermux-request-stream", "true"],
+			]),
+		);
 	});
 });
 
@@ -298,8 +408,8 @@ describe("Codex identity golden: side calls", () => {
 				"GET",
 			],
 		]);
-		expect(calls[0].headers).toEqual(SIDE_CALL_WITH_ACCOUNT);
-		expect(calls[1].headers).toEqual(SIDE_CALL_WITHOUT_ACCOUNT);
+		expect(calls[0].headers).toEqual(MODELS_WITH_ACCOUNT);
+		expect(calls[1].headers).toEqual(MODELS_WITHOUT_ACCOUNT);
 	});
 
 	it("subscription", async () => {
@@ -313,7 +423,7 @@ describe("Codex identity golden: side calls", () => {
 			"https://chatgpt.com/backend-api/subscriptions?account_id=acct-123",
 		);
 		expect(calls[0].method).toBe("GET");
-		expect(calls[0].headers).toEqual(SIDE_CALL_WITH_ACCOUNT);
+		expect(calls[0].headers).toEqual(BACKEND_CLIENT_WITH_ACCOUNT);
 	});
 
 	it("usage status", async () => {
@@ -331,31 +441,27 @@ describe("Codex identity golden: side calls", () => {
 			["https://chatgpt.com/backend-api/wham/usage", "GET"],
 			["https://chatgpt.com/backend-api/wham/usage", "GET"],
 		]);
-		expect(calls[0].headers).toEqual(SIDE_CALL_WITH_ACCOUNT);
-		expect(calls[1].headers).toEqual(SIDE_CALL_WITHOUT_ACCOUNT);
+		expect(calls[0].headers).toEqual(BACKEND_CLIENT_WITH_ACCOUNT);
+		expect(calls[1].headers).toEqual(BACKEND_CLIENT_WITHOUT_ACCOUNT);
 	});
 
 	it("reset-credit read takes the account id from the JWT", async () => {
 		await fetchCodexRateLimitResetCredits(TOKEN_WITH_ACCOUNT);
 		await fetchCodexRateLimitResetCredits("opaque-token");
 		expect(calls.map(({ url, method }) => [url, method])).toEqual([
-			["https://chatgpt.com/backend-api/codex/rate-limit-reset-credits", "GET"],
-			["https://chatgpt.com/backend-api/codex/rate-limit-reset-credits", "GET"],
+			["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", "GET"],
+			["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", "GET"],
 		]);
 		expect(calls[0].headers).toEqual([
-			["accept", "application/json"],
+			["accept", "*/*"],
 			["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
 			["chatgpt-account-id", "acct-from-jwt"],
-			["originator", "codex_cli_rs"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
+			["user-agent", EXEC_UA],
 		]);
 		expect(calls[1].headers).toEqual([
-			["accept", "application/json"],
+			["accept", "*/*"],
 			["authorization", "Bearer opaque-token"],
-			["originator", "codex_cli_rs"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
+			["user-agent", EXEC_UA],
 		]);
 	});
 
@@ -370,40 +476,38 @@ describe("Codex identity golden: side calls", () => {
 		);
 		expect(calls[0].method).toBe("POST");
 		expect(calls[0].headers).toEqual([
-			["accept", "application/json"],
+			["accept", "*/*"],
 			["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
 			["chatgpt-account-id", "acct-from-jwt"],
 			["content-type", "application/json"],
-			["originator", "codex_cli_rs"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
+			["user-agent", EXEC_UA],
 		]);
 	});
 });
 
 describe("Codex identity golden: native ping", () => {
-	it("sends no ChatGPT-Account-ID", async () => {
+	it("sends the translated inference identity", async () => {
 		await sendCodexNativePing(TOKEN_WITH_ACCOUNT);
 		expect(calls).toHaveLength(1);
 		expect(calls[0].url).toBe(
 			"https://chatgpt.com/backend-api/codex/responses",
 		);
 		expect(calls[0].method).toBe("POST");
-		expect(calls[0].headers).toEqual([
-			["accept", "text/event-stream"],
-			["authorization", `Bearer ${TOKEN_WITH_ACCOUNT}`],
-			["content-type", "application/json"],
-			["openai-beta", "responses=experimental"],
-			["originator", "codex_cli_rs"],
-			["user-agent", "codex-cli/0.155.1 (Windows 10.0.26100; x64)"],
-			["version", "0.155.1"],
-		]);
+		expect(calls[0].headers).toEqual(EXEC_INFERENCE);
 	});
 });
 
 describe("Codex identity golden: OAuth", () => {
-	const FORM: Pairs = [["content-type", "application/x-www-form-urlencoded"]];
-	const JSON_BODY: Pairs = [["content-type", "application/json"]];
+	// Real login requests carry no User-Agent at all; Bun cannot omit one, so
+	// they carry the pre-init CLI identity instead of Bun's own.
+	const LOGIN_FORM: Pairs = [
+		["content-type", "application/x-www-form-urlencoded"],
+		["user-agent", LOGIN_UA],
+	];
+	const LOGIN_JSON: Pairs = [
+		["content-type", "application/json"],
+		["user-agent", LOGIN_UA],
+	];
 	const tokenResponse = () =>
 		Response.json({
 			access_token: "new-access",
@@ -419,15 +523,15 @@ describe("Codex identity golden: OAuth", () => {
 		});
 		expect(url.replace(/state=[0-9a-f]{64}/, "state=STATE")).toBe(
 			"https://auth.openai.com/oauth/authorize" +
-				"?client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
-				"&response_type=code" +
+				"?response_type=code" +
+				"&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
 				"&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" +
 				"&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke" +
 				"&code_challenge=challenge" +
 				"&code_challenge_method=S256" +
-				"&state=STATE" +
 				"&id_token_add_organizations=true" +
 				"&codex_cli_simplified_flow=true" +
+				"&state=STATE" +
 				"&originator=codex_cli_rs",
 		);
 	});
@@ -440,7 +544,7 @@ describe("Codex identity golden: OAuth", () => {
 			{
 				url: "https://auth.openai.com/oauth/token",
 				method: "POST",
-				headers: FORM,
+				headers: LOGIN_FORM,
 				body:
 					"grant_type=authorization_code&code=code-1" +
 					"&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" +
@@ -459,7 +563,7 @@ describe("Codex identity golden: OAuth", () => {
 			{
 				url: "https://auth.openai.com/oauth/token",
 				method: "POST",
-				headers: FORM,
+				headers: [["content-type", "application/x-www-form-urlencoded"]],
 				body:
 					"grant_type=refresh_token&refresh_token=old-refresh" +
 					"&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
@@ -485,19 +589,19 @@ describe("Codex identity golden: OAuth", () => {
 			{
 				url: "https://auth.openai.com/api/accounts/deviceauth/usercode",
 				method: "POST",
-				headers: JSON_BODY,
+				headers: LOGIN_JSON,
 				body: '{"client_id":"app_EMoamEEZ73f0CkXaXp7hrann"}',
 			},
 			{
 				url: "https://auth.openai.com/api/accounts/deviceauth/token",
 				method: "POST",
-				headers: JSON_BODY,
+				headers: LOGIN_JSON,
 				body: '{"device_auth_id":"dev-1","user_code":"ABCD"}',
 			},
 			{
 				url: "https://auth.openai.com/oauth/token",
 				method: "POST",
-				headers: FORM,
+				headers: LOGIN_FORM,
 				body:
 					"grant_type=authorization_code&code=auth-code" +
 					"&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback" +

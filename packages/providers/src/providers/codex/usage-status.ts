@@ -1,6 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { UsageData, UsageWindow } from "../../usage-fetcher";
-import { codexSideCallHeaders } from "./client-identity";
+import { codexBackendClientHeaders } from "./client-identity";
 import { type CodexCreditsInfo, normalizeCodexWindow } from "./usage";
 
 const log = new Logger("CodexUsageStatus");
@@ -255,7 +255,7 @@ export async function fetchCodexUsageStatus(
 		const response = await fetchImpl(CODEX_USAGE_STATUS_ENDPOINT, {
 			method: "GET",
 			signal: controller.signal,
-			headers: codexSideCallHeaders(accessToken, chatgptAccountId?.trim()),
+			headers: codexBackendClientHeaders(accessToken, chatgptAccountId?.trim()),
 		});
 
 		if (!response.ok) {

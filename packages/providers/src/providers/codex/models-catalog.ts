@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import { CODEX_VERSION, codexSideCallHeaders } from "./client-identity";
+import { CODEX_VERSION, codexModelsHeaders } from "./client-identity";
 
 const log = new Logger("CodexModelCatalog");
 
@@ -137,7 +137,7 @@ export async function fetchCodexModelCatalog(
 			// but say so structurally rather than relying on that: this bearer has
 			// exactly one valid destination.
 			redirect: "error",
-			headers: codexSideCallHeaders(accessToken, chatgptAccountId?.trim()),
+			headers: codexModelsHeaders(accessToken, chatgptAccountId?.trim()),
 		});
 
 		if (!response.ok) {

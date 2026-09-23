@@ -4,13 +4,13 @@ import type {
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
 } from "@clankermux/types";
-import { decodeJwtPayloadSafe } from "../../oauth/jwt";
-import { codexSideCallHeaders } from "./client-identity";
+import { codexBackendClientHeaders } from "./client-identity";
+import { readChatgptAccountId } from "./identity";
 
 const log = new Logger("CodexRateLimitResetCredits");
 
 export const CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT =
-	"https://chatgpt.com/backend-api/codex/rate-limit-reset-credits";
+	"https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 /**
  * Internal ChatGPT backend route used by Codex's app-server. This is not a
  * public OpenAI developer API and may change without notice.
@@ -82,12 +82,6 @@ function unixSeconds(value: unknown): number | null {
 
 function nullableString(value: unknown): string | null {
 	return typeof value === "string" ? value : null;
-}
-
-export function readChatgptAccountId(accessToken: string): string | null {
-	const claims = decodeJwtPayloadSafe(accessToken);
-	const auth = asRecord(claims?.["https://api.openai.com/auth"]);
-	return nullableString(auth?.chatgpt_account_id);
 }
 
 function normalizeResetType(value: unknown): CodexRateLimitResetType {
@@ -190,7 +184,10 @@ export function parseCodexRateLimitResetCreditConsumeResult(
 }
 
 function createResetCreditsHeaders(accessToken: string): Headers {
-	return codexSideCallHeaders(accessToken, readChatgptAccountId(accessToken));
+	return codexBackendClientHeaders(
+		accessToken,
+		readChatgptAccountId(accessToken),
+	);
 }
 
 /**

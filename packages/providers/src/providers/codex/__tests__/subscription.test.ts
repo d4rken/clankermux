@@ -162,8 +162,8 @@ describe("fetchCodexSubscription", () => {
 
 		expect(seenUrl).toBe(`${CODEX_SUBSCRIPTION_ENDPOINT}?account_id=acct-uuid`);
 		expect(seenHeaders.get("ChatGPT-Account-Id")).toBe("acct-uuid");
-		expect(seenHeaders.get("originator")).toBe("codex_cli_rs");
-		expect(seenHeaders.get("User-Agent")).toContain("codex-cli/");
+		expect(seenHeaders.get("originator")).toBeNull();
+		expect(seenHeaders.get("User-Agent")).toStartWith("codex_exec/");
 		expect(subscription.ok).toBe(true);
 	});
 

@@ -4,7 +4,7 @@ export {
 	initiateCodexDeviceFlow,
 	pollCodexForToken,
 } from "./device-oauth";
-export { extractCodexIdentity } from "./identity";
+export { extractCodexIdentity, readChatgptAccountId } from "./identity";
 export type {
 	CodexModelCatalogResult,
 	FetchCodexModelCatalogArgs,
@@ -39,7 +39,6 @@ export {
 	fetchCodexRateLimitResetCredits,
 	parseCodexRateLimitResetCreditConsumeResult,
 	parseCodexRateLimitResetCredits,
-	readChatgptAccountId,
 } from "./rate-limit-reset-credits";
 export type {
 	CodexSubscription,

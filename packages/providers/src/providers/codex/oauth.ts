@@ -10,7 +10,7 @@ import {
 	CODEX_CLIENT_ID,
 	CODEX_OAUTH_SCOPES,
 	codexAuthorizeUrlParams,
-	codexTokenEndpointHeaders,
+	codexLoginTokenHeaders,
 } from "./client-identity";
 import { extractCodexIdentity } from "./identity";
 
@@ -32,20 +32,13 @@ export class CodexOAuthProvider implements OAuthProvider {
 	}
 
 	generateAuthUrl(config: OAuthProviderConfig, pkce: PKCEChallenge): string {
-		// Use manual string building with encodeURIComponent (not URLSearchParams
-		// which uses + for spaces instead of %20)
-		const state = this.generateSecureRandomState();
-
-		const params = [
-			`client_id=${encodeURIComponent(config.clientId)}`,
-			`response_type=code`,
-			`redirect_uri=${encodeURIComponent(config.redirectUri)}`,
-			`scope=${encodeURIComponent(config.scopes.join(" "))}`,
-			`code_challenge=${encodeURIComponent(pkce.challenge)}`,
-			`code_challenge_method=S256`,
-			`state=${encodeURIComponent(state)}`,
-			...codexAuthorizeUrlParams(),
-		].join("&");
+		const params = codexAuthorizeUrlParams({
+			clientId: config.clientId,
+			redirectUri: config.redirectUri,
+			scopes: config.scopes,
+			codeChallenge: pkce.challenge,
+			state: this.generateSecureRandomState(),
+		}).join("&");
 
 		return `${config.authorizeUrl}?${params}`;
 	}
@@ -67,7 +60,7 @@ export class CodexOAuthProvider implements OAuthProvider {
 
 		const response = await fetch(config.tokenUrl, {
 			method: "POST",
-			headers: codexTokenEndpointHeaders(),
+			headers: codexLoginTokenHeaders(),
 			body: body.toString(),
 		});
 

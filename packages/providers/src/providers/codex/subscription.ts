@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import { codexSideCallHeaders } from "./client-identity";
+import { codexBackendClientHeaders } from "./client-identity";
 
 const log = new Logger("CodexSubscription");
 
@@ -227,7 +227,7 @@ export async function fetchCodexSubscription(
 			// The Codex CLI's own identity, NOT browser-shaped headers: a comparison
 			// project measured browser spoofing drawing a Cloudflare challenge on
 			// this host where the CLI identity got a 200.
-			headers: codexSideCallHeaders(accessToken, accountId),
+			headers: codexBackendClientHeaders(accessToken, accountId),
 		});
 
 		if (response.status === 404) {
