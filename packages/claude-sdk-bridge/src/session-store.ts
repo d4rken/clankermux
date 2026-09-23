@@ -1,20 +1,24 @@
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
 	SessionKey,
 	SessionStore,
 	SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
+import {
+	appendPrivateFile,
+	ensurePrivateDir,
+	removeTree,
+	writePrivateFile,
+} from "./work-dirs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUBPATH = /^[A-Za-z0-9_./-]{1,200}$/;
+
+function assertSessionId(sessionId: string): void {
+	if (!UUID.test(sessionId))
+		throw new Error(`Invalid session id ${JSON.stringify(sessionId)}`);
+}
 
 /**
  * Claude Code session transcripts as JSONL files under one directory. With a
@@ -24,12 +28,11 @@ const SUBPATH = /^[A-Za-z0-9_./-]{1,200}$/;
  */
 export class FileSessionStore implements SessionStore {
 	constructor(private readonly dir: string) {
-		mkdirSync(dir, { recursive: true });
+		ensurePrivateDir(dir);
 	}
 
 	private path(key: Pick<SessionKey, "sessionId" | "subpath">): string {
-		if (!UUID.test(key.sessionId))
-			throw new Error(`Invalid session id ${JSON.stringify(key.sessionId)}`);
+		assertSessionId(key.sessionId);
 		if (key.subpath === undefined)
 			return join(this.dir, `${key.sessionId}.jsonl`);
 		if (!SUBPATH.test(key.subpath) || key.subpath.includes(".."))
@@ -42,7 +45,7 @@ export class FileSessionStore implements SessionStore {
 
 	async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
 		if (!entries.length) return;
-		appendFileSync(
+		appendPrivateFile(
 			this.path(key),
 			`${entries.map((e) => JSON.stringify(e)).join("\n")}\n`,
 		);
@@ -62,7 +65,7 @@ export class FileSessionStore implements SessionStore {
 	}
 
 	write(sessionId: string, entries: SessionStoreEntry[]): void {
-		writeFileSync(
+		writePrivateFile(
 			this.path({ sessionId }),
 			entries.length
 				? `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`
@@ -72,10 +75,16 @@ export class FileSessionStore implements SessionStore {
 
 	/**
 	 * Copy a session under a new id, so a turn that fails or is aborted leaves
-	 * the conversation's last good session untouched.
+	 * the conversation's last good session untouched. False when there is no
+	 * readable session to copy; the turn then rebuilds instead.
 	 */
 	fork(fromId: string, toId: string): boolean {
-		const entries = this.read(fromId);
+		let entries: SessionStoreEntry[] | null;
+		try {
+			entries = this.read(fromId);
+		} catch {
+			return false;
+		}
 		if (!entries) return false;
 		this.write(
 			toId,
@@ -90,9 +99,58 @@ export class FileSessionStore implements SessionStore {
 		this.remove(key.sessionId);
 	}
 
+	/** The session's main transcript and every subpath transcript beside it. */
 	remove(sessionId: string): void {
 		try {
-			rmSync(this.path({ sessionId }), { force: true });
-		} catch {}
+			assertSessionId(sessionId);
+		} catch {
+			return;
+		}
+		let names: string[] = [];
+		try {
+			names = readdirSync(this.dir);
+		} catch {
+			return;
+		}
+		for (const name of names)
+			if (
+				name === `${sessionId}.jsonl` ||
+				(name.startsWith(`${sessionId}.`) && name.endsWith(".jsonl"))
+			)
+				removeTree(join(this.dir, name));
+	}
+}
+
+/**
+ * Claude Code keeps its own copy of every session under
+ * `<configDir>/projects/<project>/`: `<id>.jsonl`, and a `<id>/` directory for
+ * sub-agent transcripts. The bridge resumes only from its session store, so
+ * these copies are dead weight once the query is over.
+ */
+export function removeClaudeCodeTranscripts(
+	configDir: string,
+	sessionId: string,
+): void {
+	try {
+		assertSessionId(sessionId);
+	} catch {
+		return;
+	}
+	const projects = join(configDir, "projects");
+	let names: string[] = [];
+	try {
+		names = readdirSync(projects);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const project = join(projects, name);
+		try {
+			if (!lstatSync(project).isDirectory()) continue;
+		} catch {
+			continue;
+		}
+		removeTree(join(project, `${sessionId}.jsonl`));
+		removeTree(join(project, sessionId));
 	}
 }
