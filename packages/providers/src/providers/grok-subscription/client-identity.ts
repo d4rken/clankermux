@@ -41,3 +41,37 @@ export const GROK_CLI_IDENTITY_HEADERS: Readonly<Record<string, string>> = {
 	"x-authenticateresponse": "authenticate-response",
 	"User-Agent": GROK_CLI_USER_AGENT,
 };
+
+/**
+ * The only request headers that travel from the inbound client to the chat
+ * proxy. An allowlist because every harness routed here (Claude Code, Codex,
+ * pi, whatever comes next) sends its own identity headers, and a denylist
+ * leaks the next one it has never seen. `authorization` is the account's own
+ * bearer by the time this applies, never the client's; `anthropic-version` is
+ * the Messages protocol version, which every request the proxy has answered
+ * so far carried.
+ */
+const FORWARDED_REQUEST_HEADERS = [
+	"content-type",
+	"accept",
+	"authorization",
+	"anthropic-version",
+	"x-grok-conv-id",
+] as const;
+
+/**
+ * The header set sent upstream: {@link FORWARDED_REQUEST_HEADERS} from
+ * `prepared`, then {@link GROK_CLI_IDENTITY_HEADERS}, so the Grok CLI is the
+ * only client identity the proxy sees.
+ */
+export function grokUpstreamHeaders(prepared: Headers): Headers {
+	const upstream = new Headers();
+	for (const name of FORWARDED_REQUEST_HEADERS) {
+		const value = prepared.get(name);
+		if (value !== null) upstream.set(name, value);
+	}
+	for (const [name, value] of Object.entries(GROK_CLI_IDENTITY_HEADERS)) {
+		upstream.set(name, value);
+	}
+	return upstream;
+}

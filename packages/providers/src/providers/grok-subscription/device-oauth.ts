@@ -1,6 +1,8 @@
 // xAI OAuth 2.0 Device Authorization Grant (RFC 8628), as published by
 // https://auth.x.ai/.well-known/openid-configuration.
 
+import { GROK_CLI_USER_AGENT } from "./client-identity";
+
 const XAI_AUTH_BASE = "https://auth.x.ai";
 export const XAI_DEVICE_CODE_ENDPOINT = `${XAI_AUTH_BASE}/oauth2/device/code`;
 export const XAI_TOKEN_ENDPOINT = `${XAI_AUTH_BASE}/oauth2/token`;
@@ -75,7 +77,10 @@ function postForm(
 ): Promise<Response> {
 	return (options.fetchImpl ?? fetch)(url, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: {
+			"Content-Type": "application/x-www-form-urlencoded",
+			"User-Agent": GROK_CLI_USER_AGENT,
+		},
 		body: form.toString(),
 		signal: budgetedSignal(options.signal),
 	});
