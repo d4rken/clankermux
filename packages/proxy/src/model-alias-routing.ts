@@ -156,6 +156,7 @@ export async function handleAliasProxy(
 			gates.applySoftDemotionReorder(gates.applyContextWindowGate(family)),
 		);
 		gates.reconcileAffinity(accounts);
+		const followServedAccount = gates.prepareSoftDemotionFollow(accounts);
 		setPoolHeadroomCandidates(meta, accounts);
 		if (meta.routing) {
 			meta.routing.selectedAccountId = accounts[0]?.id ?? null;
@@ -230,8 +231,10 @@ export async function handleAliasProxy(
 				);
 			});
 			if (result.response) {
-				if (result.response.ok && stage.alias)
-					remember(key, stage.alias.targetIndex);
+				if (result.response.ok) {
+					if (stage.alias) remember(key, stage.alias.targetIndex);
+					followServedAccount?.(account);
+				}
 				return result.response;
 			}
 			if (result.suppressed) {

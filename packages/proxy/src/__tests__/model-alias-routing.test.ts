@@ -6,6 +6,8 @@ import {
 	ModelAliasRepository,
 	RoutingRepository,
 } from "@clankermux/database";
+import { SessionStrategy } from "@clankermux/load-balancer";
+import { usageCache } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
 import type { ModelAlias } from "@clankermux/types";
 import {
@@ -246,6 +248,36 @@ it("keeps a successful fallback for the conversation after primary capacity retu
 		"backup-model",
 		"primary-model",
 	]);
+});
+it("keeps a conversation on the account it moved to when the pinned one was held in reserve", async () => {
+	const { ctx, accounts } = await setup();
+	ctx.strategy = new SessionStrategy() as never;
+	const seedWeekly = (accountId: string, weekly: number) =>
+		usageCache.set(accountId, {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: weekly,
+				resets_at: new Date(Date.now() + 5 * 86_400_000).toISOString(),
+			},
+		} as never);
+	try {
+		seedWeekly(accounts[0].id, 95);
+		seedWeekly(accounts[1].id, 20);
+		const seen = upstream((model) => success(model));
+		expect((await run(ctx, request("conversation-one"))).status).toBe(200);
+		// The reserve lifts; the conversation stays where its cache is.
+		seedWeekly(accounts[0].id, 10);
+		expect((await run(ctx, request("conversation-one"))).status).toBe(200);
+		expect(seen.map((s) => s.url)).toEqual([
+			"https://upstream-1.test/v1/messages",
+			"https://upstream-1.test/v1/messages",
+		]);
+	} finally {
+		for (const a of accounts) usageCache.delete(a.id);
+	}
 });
 it("invalidates conversation target preference when the alias is edited", async () => {
 	const { ctx, accounts, modelAliases } = await setup();

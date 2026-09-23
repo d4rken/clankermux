@@ -354,6 +354,21 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		meta.routing.heldAccountId = account.id;
 	}
 
+	followAffinity(
+		meta: RequestMeta,
+		fromAccountId: string,
+		account: Account,
+	): void {
+		if (meta.routing?.strategy !== "session") return;
+		const key = this.getAffinityKey(meta);
+		if (!key || this.affinityByKey.get(key)?.accountId !== fromAccountId)
+			return;
+		this.rememberAffinity(meta, account, Date.now());
+		this.log.info(
+			`Moved ${this.getAffinityLabel(meta)} affinity to ${account.name}, which served it while the pinned account was held in reserve`,
+		);
+	}
+
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
 		// The map is maintained in least-recently-used order: recordAffinity()

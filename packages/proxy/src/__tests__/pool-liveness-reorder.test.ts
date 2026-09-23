@@ -7,6 +7,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { SessionStrategy } from "@clankermux/load-balancer";
 import { Logger, LogLevel } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import {
@@ -856,5 +857,50 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		} finally {
 			debug.restore();
 		}
+	});
+
+	it("keeps a conversation on the peer it moved to after the reserve lifts", async () => {
+		const pinned = makeAccount({
+			id: "pinned",
+			name: "Pinned",
+			access_token: "at-pinned",
+			priority: 0,
+		});
+		const peer = makeAccount({
+			id: "peer",
+			name: "Peer",
+			access_token: "at-peer",
+			priority: 1,
+		});
+		seedUsage(pinned.id, 0, 95);
+		seedUsage(peer.id, 20, 20);
+
+		const ctx = makeContext([pinned, peer], new SessionStrategy() as never);
+		const attempts = recordAttempts(originalFetch);
+		const conversationTurn = () =>
+			new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-claude-code-session-id": "conversation-1",
+				},
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 10,
+				}),
+			});
+		const url = new URL("https://proxy.local/v1/messages");
+
+		expect((await callHandleProxy(conversationTurn(), url, ctx)).status).toBe(
+			200,
+		);
+		// The reserve lifts; the conversation stays where its cache is.
+		seedUsage(pinned.id, 0, 10);
+		expect((await callHandleProxy(conversationTurn(), url, ctx)).status).toBe(
+			200,
+		);
+
+		expect(attempts).toEqual(["at-peer", "at-peer"]);
 	});
 });

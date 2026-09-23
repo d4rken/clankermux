@@ -1187,6 +1187,44 @@ describe("SessionStrategy", () => {
 			);
 		});
 
+		it("followAffinity moves the pin without rewriting the request's routing", () => {
+			const now = Date.now();
+			const accountA = makeAccount({
+				id: "codex-a",
+				name: "codex-a",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 0,
+			});
+			const accountB = makeAccount({
+				id: "codex-b",
+				name: "codex-b",
+				provider: "codex",
+				created_at: now,
+				expires_at: now + 3600_000,
+				priority: 1,
+			});
+			const turn = (): RequestMeta => ({
+				...meta,
+				affinityKey: "pi-session-follow",
+				affinityScope: "client_session",
+			});
+
+			const first = turn();
+			expect(strategy.select([accountA, accountB], first)[0]).toBe(accountA);
+			// A stale source pin is ignored.
+			strategy.followAffinity(first, "codex-b", accountA);
+			expect(strategy.select([accountA, accountB], turn())[0]).toBe(accountA);
+			strategy.followAffinity(first, "codex-a", accountB);
+			expect(first.routing?.decision).toBe("affinity_miss");
+			expect(first.routing?.selectedAccountId).toBe("codex-a");
+
+			const next = turn();
+			expect(strategy.select([accountA, accountB], next)[0]).toBe(accountB);
+			expect(next.routing?.decision).toBe("affinity_hit");
+		});
+
 		it("keeps a client session on its account while another client's newer session starts elsewhere", () => {
 			const now = Date.now();
 			const accountA = makeAccount({
