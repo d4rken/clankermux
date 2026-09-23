@@ -21,7 +21,9 @@ import {
 	createIsolatedStatsHandler,
 	createIsolatedUsageHistoryHandler,
 	type DashboardWorkerLike,
+	getAnalyticsCacheStatsForTests,
 	getWorkerTimeoutMs,
+	invalidateDashboardCache,
 	terminateAnalyticsWorker,
 } from "../analytics-runner";
 import type {
@@ -71,13 +73,13 @@ class FakeDashboardWorker implements DashboardWorkerLike {
 	}
 
 	/** Post a result for an arbitrary id — used to simulate a LATE message. */
-	reply(id: string): void {
+	reply(id: string, body: unknown = { ok: true }): void {
 		this.onmessage?.({
 			data: {
 				id,
 				ok: true,
 				status: 200,
-				body: JSON.stringify({ ok: true }),
+				body: JSON.stringify(body),
 			},
 		} as MessageEvent<AnalyticsWorkerResponse>);
 	}
@@ -327,5 +329,223 @@ describe("worker lanes", () => {
 		// The successor's own wedge is still detected on schedule.
 		await Bun.sleep(80);
 		expect(successor.terminateCount).toBe(1);
+	});
+});
+
+describe("one worker job per request key", () => {
+	// The soft deadline answers a caller; it must not end the job. On
+	// 2026-09-23 a 7-day analytics read outlived its caller, the next tab
+	// refresh posted the same read again behind it, and one waited 49s in the
+	// heavy queue before it even started.
+	const analytics = (params: Record<string, string>) =>
+		createIsolatedAnalyticsHandler(fakeContext)(new URLSearchParams(params));
+	const HUNG = { range: "7d", hang: "1" };
+
+	/** Hang every message that carries `hang`; answer the rest after 2ms. */
+	function hangTagged() {
+		return trackWorkers(
+			() =>
+				new FakeDashboardWorker({
+					shouldReply: (message) =>
+						!new URLSearchParams(message.params).has("hang"),
+					replyDelayMs: 2,
+				}),
+		);
+	}
+
+	it("keeps the job running past a caller's soft deadline and lets the next caller join it", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 30, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		const second = analytics(HUNG);
+		await Bun.sleep(5);
+		const [heavy] = created;
+		expect(heavy.posted).toHaveLength(1);
+
+		heavy.reply(heavy.posted[0].id, { answer: 42 });
+		const response = await second;
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ answer: 42 });
+	});
+
+	it("caches a result that arrives after every caller gave up", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		const [heavy] = created;
+		heavy.reply(heavy.posted[0].id, { answer: "late" });
+		await Bun.sleep(5);
+
+		const response = await analytics(HUNG);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("X-ClankerMux-Analytics-Mode")).toBe(
+			"worker-cache",
+		);
+		expect(await response.json()).toEqual({ answer: "late" });
+		expect(heavy.posted).toHaveLength(1);
+	});
+
+	it("gives two callers of one job independent bodies", async () => {
+		const created = trackWorkers(
+			() =>
+				new FakeDashboardWorker({ shouldReply: () => true, replyDelayMs: 20 }),
+		);
+		__setDashboardWorkerTimeoutsForTests({ soft: 500, hard: 5_000 });
+
+		const [a, b] = await Promise.all([
+			analytics({ range: "7d" }),
+			analytics({ range: "7d" }),
+		]);
+		expect(await a.json()).toEqual({ ok: true });
+		expect(await b.json()).toEqual({ ok: true });
+		expect(created[0].posted).toHaveLength(1);
+	});
+
+	it("orphans a running job on invalidation and never caches its result", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		invalidateDashboardCache("analytics");
+		const fresh = analytics(HUNG);
+		await Bun.sleep(5);
+		const [heavy] = created;
+		expect(heavy.posted).toHaveLength(2);
+
+		heavy.reply(heavy.posted[0].id, { stale: true });
+		await Bun.sleep(5);
+		expect(getAnalyticsCacheStatsForTests().responseCacheSize).toBe(0);
+
+		heavy.reply(heavy.posted[1].id, { stale: false });
+		expect(await (await fresh).json()).toEqual({ stale: false });
+	});
+
+	it("honours an invalidation that lands while the result is being cached", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		const [heavy] = created;
+		heavy.reply(heavy.posted[0].id);
+		// Queued behind the job's own continuation, so it lands after the
+		// result reached the cache writer and before the write.
+		queueMicrotask(() => invalidateDashboardCache("analytics"));
+		await Bun.sleep(5);
+
+		expect(getAnalyticsCacheStatsForTests().responseCacheSize).toBe(0);
+	});
+
+	it("keeps a cleared job's late result out of the cache and starts afresh", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		clearAnalyticsCachesForTests();
+		const [heavy] = created;
+		heavy.reply(heavy.posted[0].id);
+		await Bun.sleep(5);
+		expect(getAnalyticsCacheStatsForTests()).toEqual({
+			responseCacheSize: 0,
+			inFlightSize: 0,
+		});
+
+		const again = analytics(HUNG);
+		await Bun.sleep(5);
+		expect(heavy.posted).toHaveLength(2);
+		heavy.reply(heavy.posted[1].id);
+		expect((await again).status).toBe(200);
+	});
+
+	it("rejects every queued job once on a lane reset, so each key starts fresh", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		// Key one has lost its caller; key two still has one waiting.
+		expect((await analytics({ ...HUNG, n: "1" })).status).toBe(503);
+		__setDashboardWorkerTimeoutsForTests({ soft: 2_000, hard: 5_000 });
+		const waiting = analytics({ ...HUNG, n: "2" });
+		await Bun.sleep(5);
+		const [heavy] = created;
+		expect(heavy.posted).toHaveLength(2);
+
+		heavy.onerror?.({ message: "heavy worker exploded" } as ErrorEvent);
+		expect((await waiting).status).toBe(500);
+		await Bun.sleep(1);
+		expect(getAnalyticsCacheStatsForTests().inFlightSize).toBe(0);
+
+		const retries = [
+			analytics({ ...HUNG, n: "1" }),
+			analytics({ ...HUNG, n: "2" }),
+		];
+		await Bun.sleep(5);
+		const successor = created[1];
+		expect(successor).not.toBe(heavy);
+		expect(successor.posted).toHaveLength(2);
+		for (const message of successor.posted) successor.reply(message.id);
+		for (const retry of retries) expect((await retry).status).toBe(200);
+	});
+
+	it("drops a job whose worker fails after every caller left, without an unhandled rejection", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		created[0].onerror?.({ message: "late failure" } as ErrorEvent);
+		await Bun.sleep(5);
+		expect(getAnalyticsCacheStatsForTests()).toEqual({
+			responseCacheSize: 0,
+			inFlightSize: 0,
+		});
+	});
+
+	it("keeps a job past its hard deadline while its worker keeps answering others", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 60 });
+
+		expect((await analytics(HUNG)).status).toBe(503);
+		// Other heavy reads keep the lane demonstrably alive past the hard
+		// deadline of the hung one.
+		const start = Date.now();
+		while (Date.now() - start < 150) {
+			const other = await analytics({ range: "24h", n: String(Date.now()) });
+			expect(other.status).toBe(200);
+		}
+		const [heavy] = created;
+		expect(heavy.terminateCount).toBe(0);
+
+		const joined = analytics(HUNG);
+		await Bun.sleep(5);
+		const hungPosts = heavy.posted.filter((message) =>
+			new URLSearchParams(message.params).has("hang"),
+		);
+		expect(hungPosts).toHaveLength(1);
+		heavy.reply(hungPosts[0].id, { finally: true });
+		expect(await (await joined).json()).toEqual({ finally: true });
+	});
+
+	it("caps the number of running jobs, not callers", async () => {
+		const created = hangTagged();
+		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 5_000 });
+
+		const first = await Promise.all(
+			Array.from({ length: 64 }, (_, n) =>
+				analytics({ ...HUNG, n: String(n) }),
+			),
+		);
+		for (const response of first) expect(response.status).toBe(503);
+		const [heavy] = created;
+		expect(heavy.posted).toHaveLength(64);
+
+		// A 65th key is refused without reaching the worker...
+		expect((await analytics({ ...HUNG, n: "64" })).status).toBe(503);
+		expect(heavy.posted).toHaveLength(64);
+		// ...while a caller for a running key still joins its job.
+		const joined = analytics({ ...HUNG, n: "7" });
+		await Bun.sleep(5);
+		expect(heavy.posted).toHaveLength(64);
+		heavy.reply(heavy.posted[7].id, { n: 7 });
+		expect(await (await joined).json()).toEqual({ n: 7 });
 	});
 });
