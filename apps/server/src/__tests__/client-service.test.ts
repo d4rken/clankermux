@@ -1064,6 +1064,72 @@ describe("client service integration", () => {
 		expect(rules().map((r) => r.name)).toEqual([`Short: ${longId}`]);
 	});
 
+	it("keeps the routes of removed aliases unless the bulk edit drops them", async () => {
+		await service.bootstrap();
+		const shape = (d: ClientDraft) => {
+			d.catalogues.openai.models = [alias("gone"), alias("stays")];
+		};
+		const kept = await makeClient("Kept", shape);
+		const dropped = await makeClient("Dropped", shape);
+		const edit = (id: string, dropRoutes?: boolean) =>
+			service.bulkReview({
+				clientIds: [id],
+				operation: {
+					format: "openai",
+					mode: "edit",
+					add: [],
+					remove: ["gone"],
+					...(dropRoutes === undefined ? {} : { dropRoutes }),
+				},
+			});
+		const keep = await edit(kept.apiKeyId);
+		expect(keep.clients[0]?.keptRoutes).toEqual(["gone"]);
+		expect(keep.clients[0]?.droppedRoutes).toEqual([]);
+		await service.bulkCommit(keep.token);
+		const drop = await edit(dropped.apiKeyId, true);
+		expect(drop.clients[0]?.droppedRoutes).toEqual(["gone"]);
+		expect(drop.clients[0]?.keptRoutes).toEqual([]);
+		await service.bulkCommit(drop.token);
+		const listed = await dbOps.routing.listRules();
+		expect(matchRoutingRule(listed, kept.apiKeyId, "gone")?.target_model).toBe(
+			"gpt-static",
+		);
+		expect(matchRoutingRule(listed, dropped.apiKeyId, "gone")).toBe(null);
+		expect(
+			matchRoutingRule(listed, dropped.apiKeyId, "stays")?.target_model,
+		).toBe("gpt-static");
+	});
+
+	it("drops the routes a replace removes, and reports routes kept from earlier edits", async () => {
+		await service.bootstrap();
+		const client = await makeClient("Replaced", (d) => {
+			d.catalogues.openai.models = [alias("old"), alias("older")];
+		});
+		const hide = await service.bulkReview({
+			clientIds: [client.apiKeyId],
+			operation: { format: "openai", mode: "edit", add: [], remove: ["older"] },
+		});
+		await service.bulkCommit(hide.token);
+		const review = await service.bulkReview({
+			clientIds: [client.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "replace",
+				models: [alias("new")],
+				defaultModel: "new",
+				dropRoutes: true,
+			},
+		});
+		// `older` left the catalogue in an earlier edit, so this replace does not
+		// remove it and its route stays.
+		expect(review.clients[0]?.droppedRoutes).toEqual(["old"]);
+		expect(review.clients[0]?.keptRoutes).toEqual(["older"]);
+		await service.bulkCommit(review.token);
+		const listed = await dbOps.routing.listRules();
+		expect(matchRoutingRule(listed, client.apiKeyId, "old")).toBe(null);
+		expect(matchRoutingRule(listed, client.apiKeyId, "older")).not.toBe(null);
+	});
+
 	it("rejects malformed bulk requests before touching any client", async () => {
 		const a = await makeClient("Alpha");
 		const operation = (add: unknown, remove: unknown = []) => ({
@@ -1123,6 +1189,18 @@ describe("client service integration", () => {
 			await bulkStatus({
 				clientIds: [a.apiKeyId],
 				operation: { format: "openai", mode: "merge", models: [] },
+			}),
+		).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [a.apiKeyId],
+				operation: {
+					format: "openai",
+					mode: "edit",
+					add: [],
+					remove: [],
+					dropRoutes: "yes",
+				},
 			}),
 		).toBe(400);
 	});

@@ -96,6 +96,8 @@ const previewWithEverything = {
 			removed: ["removed-one"],
 			modified: ["fast"],
 			defaultModelChange: { from: "shared", to: null },
+			droppedRoutes: ["gone-alias"],
+			keptRoutes: ["kept-alias"],
 			notices: ["Removing a discovery entry retains its alias route."],
 		},
 		{
@@ -107,6 +109,8 @@ const previewWithEverything = {
 			removed: [],
 			modified: [],
 			defaultModelChange: null,
+			droppedRoutes: [],
+			keptRoutes: [],
 			notices: [],
 		},
 		{
@@ -118,6 +122,8 @@ const previewWithEverything = {
 			removed: [],
 			modified: [],
 			defaultModelChange: null,
+			droppedRoutes: [],
+			keptRoutes: [],
 			notices: [],
 		},
 	],
@@ -168,6 +174,8 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 						removed: [],
 						modified: [],
 						defaultModelChange: null,
+						droppedRoutes: [],
+						keptRoutes: [],
 						notices: [],
 					})),
 				},
@@ -462,6 +470,8 @@ describe("bulk catalogue editing", () => {
 		expect(preview?.textContent).toContain(
 			"Removing a discovery entry retains its alias route.",
 		);
+		expect(preview?.textContent).toContain("Routes removedgone-alias");
+		expect(preview?.textContent).toContain("Routes keptkept-alias");
 		await click("Apply to 1 client");
 		expect(posted.at(-1)).toEqual({
 			path: "/api/clients/bulk/commit",
@@ -497,6 +507,8 @@ describe("bulk catalogue editing", () => {
 					removed: [],
 					modified: [],
 					defaultModelChange: null,
+					droppedRoutes: [],
+					keptRoutes: [],
 					notices: [],
 				},
 			],
@@ -507,6 +519,32 @@ describe("bulk catalogue editing", () => {
 		expect(button("Apply to 0 clients").disabled).toBe(true);
 		await click("Back");
 		expect(rowText(IN, "new")).toContain("Adding to 2 clients");
+	});
+
+	it("asks both an edit and a replace to drop the routes of removed aliases", async () => {
+		await mount();
+		await click("Remove shared");
+		await check("Delete the routes of removed aliases");
+		await click("Review changes");
+		const operation = () =>
+			(posted.at(-1)?.body as { operation?: unknown } | undefined)?.operation;
+		expect(operation()).toEqual({
+			format: "openai",
+			mode: "edit",
+			add: [],
+			remove: ["shared"],
+			dropRoutes: true,
+		});
+		await click("Back");
+		await click("Discard changes");
+		await choose("Start from", "alpha");
+		await click("Replace catalogue for 2 clients");
+		expect(checkbox("Delete the routes of removed aliases").checked).toBe(true);
+		await click("Replace catalogues");
+		expect(operation()).toMatchObject({
+			mode: "replace",
+			dropRoutes: true,
+		});
 	});
 
 	it("sends no replace until the confirmation, and starts from that client's own entries", async () => {

@@ -158,7 +158,7 @@ export interface ClientReview {
 	precedingRules: string[];
 	notices: string[];
 }
-export type ClientBulkOperation =
+export type ClientBulkOperation = (
 	| {
 			format: ClientFormat;
 			/**
@@ -174,7 +174,14 @@ export type ClientBulkOperation =
 			mode: "replace";
 			models: ClientModel[];
 			defaultModel?: string | null;
-	  };
+	  }
+) & {
+	/**
+	 * Also delete the routes of the aliases this operation takes out of a
+	 * client's catalogues. Without it their routes are kept.
+	 */
+	dropRoutes?: boolean;
+};
 export type ClientBulkMode = ClientBulkOperation["mode"];
 export interface ClientBulkClientResult {
 	apiKeyId: string;
@@ -194,6 +201,10 @@ export interface ClientBulkClientResult {
 	modified: string[];
 	/** Non-null when the format's default model changes. */
 	defaultModelChange: { from: string | null; to: string | null } | null;
+	/** Alias IDs whose routes the operation deletes. */
+	droppedRoutes: string[];
+	/** Alias IDs whose routes stay although no catalogue publishes them. */
+	keptRoutes: string[];
 	notices: string[];
 }
 export interface ClientBulkReview {
