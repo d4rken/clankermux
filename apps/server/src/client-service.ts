@@ -42,9 +42,12 @@ import {
 	type ClientBulkMode,
 	type ClientBulkOperation,
 	type ClientBulkReview,
+	type ClientCatalogue,
 	type ClientDestinations,
 	type ClientDraft,
 	type ClientFormat,
+	type ClientGlobalDelta,
+	type ClientGlobalState,
 	type ClientModel,
 	type ClientModelMetadata,
 	type ClientModelMetadataResponse,
@@ -52,9 +55,23 @@ import {
 	type ClientReview,
 	type ClientSuggestions,
 	type ClientView,
+	composeGlobalCatalogue,
+	type GlobalCatalogue,
+	type GlobalCatalogueClientResult,
+	type GlobalCatalogueDraft,
+	type GlobalCatalogueFormat,
+	type GlobalCatalogueFormatChange,
+	type GlobalCatalogueModel,
+	type GlobalCatalogueReview,
+	type GlobalCatalogueSkip,
+	type GlobalCatalogueView,
+	globalCatalogueFormats,
+	globalDeltaFromList,
+	globalEntry,
 	isKnownProvider,
 	NodeCryptoUtils,
 	type RoutingRule,
+	sameGlobalEntry,
 	toApiKeyResponse,
 } from "@clankermux/types";
 import {
@@ -126,6 +143,18 @@ type Prepared = { fingerprint: string; expires: number } & (
 			operation: ClientBulkOperation;
 			records: PreparedDraft[];
 	  }
+	| {
+			kind: "global";
+			/** Carries the revision the commit will store. */
+			global: GlobalCatalogue;
+			records: PreparedDraft[];
+			/** Subscribers whose catalogues already match; only their applied revision moves. */
+			stamps: Array<{
+				id: string;
+				revision: number;
+				global: ClientGlobalState;
+			}>;
+	  }
 );
 const emptyCatalogues = (): ClientProfile["catalogues"] => ({
 	anthropic: { models: [], defaultModel: null },
@@ -174,6 +203,214 @@ const rejectedClient = (
 	defaultModelChange: null,
 	notices: [],
 });
+
+const rejectedGlobal = (
+	apiKeyId: string,
+	name: string,
+	reason: string,
+): GlobalCatalogueClientResult => ({
+	apiKeyId,
+	name,
+	status: "rejected",
+	reason,
+	subscription: "joins",
+	formats: {},
+	notices: [],
+});
+
+/** What {@link ClientService.prepareModel} needs to know about the client. */
+interface ModelContext {
+	application: ClientDraft["application"];
+	accounts: Account[];
+	scopeFor: (ids: string[] | null) => string;
+	existing: ClientProfile | null;
+	pinUnchanged: boolean;
+}
+
+/** Throws unless `value` is an entry whose ID, target and display name are usable. */
+function checkEntryFields(value: unknown): asserts value is ClientModel {
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw BadRequest("Invalid model entry");
+	const entry = value as ClientModel;
+	for (const [name, field] of [
+		["model ID", entry.id],
+		["target model", entry.targetModel],
+		["display name", entry.displayName],
+	] as const)
+		if (
+			typeof field !== "string" ||
+			!field.trim() ||
+			field !== field.trim() ||
+			field.length > 256
+		)
+			throw BadRequest(`Invalid ${name}`);
+}
+
+const emptyDelta = (): ClientGlobalDelta => ({
+	additions: [],
+	removals: [],
+	inheritDefault: true,
+	defaultModel: null,
+});
+
+const withoutSkips = (
+	formats: ClientGlobalState["formats"],
+): Partial<Record<ClientFormat, ClientGlobalDelta>> =>
+	Object.fromEntries(
+		Object.entries(formats).map(([format, { skipped: _, ...delta }]) => [
+			format,
+			delta,
+		]),
+	);
+
+/**
+ * Omitted keeps what the client stored, so a caller that knows nothing about
+ * the global catalogue can never end a subscription by leaving the field out.
+ */
+function globalChoice(
+	value: ClientDraft["global"],
+	existing: ClientProfile | null,
+): { formats: Partial<Record<ClientFormat, unknown>> } | null {
+	if (value === undefined)
+		return existing?.global
+			? { formats: withoutSkips(existing.global.formats) }
+			: null;
+	if (value === null) return null;
+	if (
+		typeof value !== "object" ||
+		Array.isArray(value) ||
+		!value.formats ||
+		typeof value.formats !== "object" ||
+		Array.isArray(value.formats)
+	)
+		throw BadRequest("Invalid global catalogue choice");
+	return value;
+}
+
+/**
+ * Validates one format's differences from the global catalogue. An addition
+ * identical to its global entry is dropped: an override means a different
+ * value, and keeping a copy would stop the client following later global edits.
+ */
+function normalizeDelta(
+	value: unknown,
+	global: GlobalCatalogueFormat,
+): ClientGlobalDelta {
+	if (value === undefined) return emptyDelta();
+	const invalid = () => BadRequest("Invalid global catalogue differences");
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw invalid();
+	const { additions, removals, inheritDefault, defaultModel } =
+		value as ClientGlobalDelta;
+	if (
+		!Array.isArray(additions) ||
+		additions.length > 10000 ||
+		!Array.isArray(removals) ||
+		removals.length > 10000 ||
+		removals.some((id) => typeof id !== "string") ||
+		typeof inheritDefault !== "boolean" ||
+		(defaultModel !== null && typeof defaultModel !== "string")
+	)
+		throw invalid();
+	const byId = new Map(global.models.map((m) => [m.id, m]));
+	// A removal only means something while the global catalogue lists the ID;
+	// one kept past that would hide the model again when it returns.
+	const removed = [...new Set(removals)].filter((id) => byId.has(id)).sort();
+	const seen = new Set<string>();
+	const kept: GlobalCatalogueModel[] = [];
+	for (const addition of additions) {
+		checkEntryFields(addition);
+		if (seen.has(addition.id))
+			throw BadRequest(`Duplicate model ${addition.id}`);
+		seen.add(addition.id);
+		if (removed.includes(addition.id))
+			throw BadRequest(`${addition.id} cannot be both added and removed`);
+		const model = globalEntry(addition);
+		const entry = byId.get(model.id);
+		if (entry && sameGlobalEntry(entry, model)) continue;
+		kept.push(model);
+	}
+	return {
+		additions: kept,
+		removals: removed,
+		inheritDefault,
+		defaultModel: inheritDefault ? null : defaultModel,
+	};
+}
+
+/** An alias's route, comparable the way `prepareModel` normalizes it. */
+const aliasRoute = (model: GlobalCatalogueModel): string => {
+	const { targetModel, accountIds } = globalEntry(model);
+	return JSON.stringify([targetModel, accountIds]);
+};
+
+/** Per-ID differences between two versions of one format's catalogue. */
+function catalogueChange(
+	before: ClientCatalogue,
+	after: ClientCatalogue,
+): Omit<GlobalCatalogueFormatChange, "skipped"> {
+	const beforeById = new Map(before.models.map((m) => [m.id, m]));
+	const afterById = new Map(after.models.map((m) => [m.id, m]));
+	return {
+		added: [...afterById.keys()].filter((k) => !beforeById.has(k)),
+		removed: [...beforeById.keys()].filter((k) => !afterById.has(k)),
+		modified: [...afterById.keys()].filter((k) => {
+			const old = beforeById.get(k);
+			const next = afterById.get(k);
+			return (
+				!!old &&
+				!!next &&
+				(old.targetModel !== next.targetModel ||
+					old.displayName !== next.displayName ||
+					pinOf(old) !== pinOf(next))
+			);
+		}),
+		defaultModelChange:
+			before.defaultModel === after.defaultModel
+				? null
+				: { from: before.defaultModel, to: after.defaultModel },
+	};
+}
+
+/**
+ * A bulk operation applied to a subscriber's differences instead of to what it
+ * publishes. `edit` keeps its add-only-where-absent rule, so it never creates
+ * an override; `replace` derives the differences that publish exactly its list.
+ */
+function subscriberEdit(
+	global: GlobalCatalogueFormat,
+	delta: ClientGlobalDelta,
+	operation: ClientBulkOperation,
+	skipped: Set<string>,
+): ClientGlobalDelta {
+	const globalById = new Map(global.models.map((m) => [m.id, m]));
+	if (operation.mode === "replace")
+		return {
+			...globalDeltaFromList(global, delta, operation.models, skipped),
+			inheritDefault: false,
+			defaultModel: operation.defaultModel ?? null,
+		};
+	let additions = [...delta.additions];
+	const removals = new Set(delta.removals);
+	for (const id of operation.remove) {
+		additions = additions.filter((m) => m.id !== id);
+		if (globalById.has(id)) removals.add(id);
+	}
+	for (const model of operation.add) {
+		if (
+			additions.some((m) => m.id === model.id) ||
+			(globalById.has(model.id) && !removals.has(model.id))
+		)
+			continue;
+		if (globalById.has(model.id)) removals.delete(model.id);
+		else additions.push(globalEntry(model));
+	}
+	return {
+		...delta,
+		additions,
+		removals: [...removals].filter((id) => globalById.has(id)).sort(),
+	};
+}
 
 export class ClientService {
 	private readonly pending = new Map<string, Prepared>();
@@ -288,6 +525,7 @@ export class ClientService {
 			revision: 1,
 			catalogues,
 			notices,
+			global: null,
 		};
 	}
 	async initialProfile(
@@ -336,6 +574,7 @@ export class ClientService {
 						]
 					: []),
 			],
+			global: null,
 		};
 	}
 	private missingProfile(id: string): ClientProfile {
@@ -347,9 +586,14 @@ export class ClientService {
 			notices: [
 				"Client catalogue is missing. Configure and review this client to restore discovery; its existing key and routing still apply.",
 			],
+			global: null,
 		};
 	}
-	private async view(key: ApiKey, rules: RoutingRule[]): Promise<ClientView> {
+	private async view(
+		key: ApiKey,
+		rules: RoutingRule[],
+		globalRevision: number,
+	): Promise<ClientView> {
 		const { dbOps } = this.deps;
 		const stored = await dbOps.clients.getProfile(key.id);
 		const profile = stored ?? this.missingProfile(key.id);
@@ -369,6 +613,10 @@ export class ClientService {
 					`Alias ${model.id} no longer has its expected routing rule. Review this client or its routing configuration.`,
 				);
 		}
+		if (profile.global && profile.global.appliedRevision !== globalRevision)
+			notices.push(
+				`This client has not taken global catalogue revision ${globalRevision} yet. Review it to apply the global catalogue.`,
+			);
 		if (profile.catalogues.codex.models.some((m) => !m.codexMetadata))
 			notices.push(
 				"Some selected Codex IDs have no saved target metadata. Live metadata is used when available; otherwise Codex may use its built-in catalogue.",
@@ -387,8 +635,11 @@ export class ClientService {
 	}
 	async list(): Promise<ClientView[]> {
 		const rules = await this.deps.dbOps.routing.listRules();
+		const { revision } = await this.deps.dbOps.clients.getGlobal();
 		return Promise.all(
-			(await this.deps.dbOps.getApiKeys()).map((key) => this.view(key, rules)),
+			(await this.deps.dbOps.getApiKeys()).map((key) =>
+				this.view(key, rules, revision),
+			),
 		);
 	}
 	private metadataScope(
@@ -916,9 +1167,137 @@ export class ClientService {
 							.all() as Account[]
 					).map((a) => [a.id, modelPermissionScope(a)]),
 					db.query("SELECT * FROM client_alias_rules ORDER BY rule_id").all(),
+					db.query("SELECT revision FROM global_catalogue").all(),
+					db
+						.query(
+							"SELECT api_key_id FROM client_profiles WHERE global_state IS NOT NULL ORDER BY api_key_id",
+						)
+						.all(),
 				]),
 			)
 			.digest("hex");
+	}
+	/**
+	 * Validates one catalogue entry for one client and completes it with what
+	 * only that client can supply: its Anthropic `createdAt`, its Codex
+	 * metadata. Throws `BadRequest` naming the entry.
+	 */
+	private async prepareModel(
+		format: ClientFormat,
+		value: ClientModel,
+		context: ModelContext,
+	): Promise<ClientModel> {
+		const { accounts, existing } = context;
+		checkEntryFields(value);
+		if (
+			value.accountIds !== null &&
+			(!Array.isArray(value.accountIds) ||
+				!value.accountIds.length ||
+				value.accountIds.some(
+					(a) => !accounts.some((account) => account.id === a),
+				))
+		)
+			throw BadRequest(`Choose allowed accounts for ${value.id}`);
+		const model: ClientModel = {
+			id: value.id,
+			displayName: value.displayName,
+			targetModel: value.targetModel,
+			accountIds:
+				value.accountIds === null
+					? null
+					: [...new Set(value.accountIds)].sort(),
+		};
+		if (format === "anthropic") {
+			model.createdAt =
+				existing?.catalogues.anthropic.models.find((m) => m.id === value.id)
+					?.createdAt ?? new Date().toISOString();
+			if (
+				context.application === "claude-code" &&
+				!/claude|anthropic/i.test(model.id)
+			)
+				throw BadRequest(
+					`Claude Code requires a compatible alias for ${model.id}`,
+				);
+		}
+		const reusableAlias = model.targetModel.startsWith("alias:")
+			? await this.deps.dbOps.modelAliases.get(model.targetModel)
+			: null;
+		if (model.targetModel.startsWith("alias:") && !reusableAlias)
+			throw BadRequest(`Alias ${model.targetModel} does not exist`);
+		if (
+			reusableAlias &&
+			!reusableAlias.targets.some((target) =>
+				accounts.some(
+					(account) =>
+						(!model.accountIds || model.accountIds.includes(account.id)) &&
+						(!target.accountIds || target.accountIds.includes(account.id)),
+				),
+			)
+		)
+			throw BadRequest(
+				`Alias ${model.targetModel} has no allowed destination accounts`,
+			);
+		if (format === "codex" && reusableAlias) {
+			model.codexMetadata = aliasCodexMetadata(model);
+		} else if (format === "codex") {
+			const old = existing?.catalogues.codex.models.find(
+				(m) => m.id === model.id && m.targetModel === model.targetModel,
+			);
+
+			const scope = context.scopeFor(model.accountIds);
+			if (
+				old?.codexMetadata &&
+				old.metadataScope === scope &&
+				context.pinUnchanged &&
+				JSON.stringify(old.accountIds) === JSON.stringify(model.accountIds)
+			) {
+				model.codexMetadata = old.codexMetadata;
+				model.metadataCapturedAt = old.metadataCapturedAt;
+				model.metadataScope = scope;
+			} else {
+				const candidates = model.accountIds
+					? accounts.filter((a) => model.accountIds?.includes(a.id))
+					: accounts;
+				for (const account of candidates.filter(
+					(a) => a.provider === "codex",
+				)) {
+					const rich = await this.deps.codexCatalog.getForPin({
+						accountId: account.id,
+						providers: null,
+					});
+					const metadata = rich
+						? (readCodexEnvelope(rich)?.models ?? []).find(
+								(m: { slug: string }) => m.slug === model.targetModel,
+							)
+						: null;
+					if (metadata) {
+						model.codexMetadata = metadata;
+						model.metadataCapturedAt = Date.now();
+						model.metadataScope = scope;
+						break;
+					}
+				}
+			}
+			if (!model.codexMetadata) {
+				const unchangedCopy =
+					old &&
+					!old.codexMetadata &&
+					model.targetModel === old.targetModel &&
+					model.id === old.id &&
+					JSON.stringify(model.accountIds) === JSON.stringify(old.accountIds);
+				if (!unchangedCopy)
+					throw BadRequest(
+						`Known Codex metadata is required for target ${model.targetModel}`,
+					);
+			}
+		}
+		if (
+			model.id !== model.targetModel &&
+			!reusableAlias &&
+			!model.accountIds?.length
+		)
+			throw BadRequest(`Choose upstream accounts for alias ${model.id}`);
+		return model;
 	}
 	/**
 	 * Validates one draft against the current database and builds everything a
@@ -926,7 +1305,10 @@ export class ClientService {
 	 * batch prepares many drafts under one fingerprint reading, so neither can
 	 * belong here.
 	 */
-	private async prepareDraft(input: unknown): Promise<PreparedDraft> {
+	private async prepareDraft(
+		input: unknown,
+		options: { global?: GlobalCatalogue } = {},
+	): Promise<PreparedDraft> {
 		if (!input || typeof input !== "object" || Array.isArray(input))
 			throw BadRequest("Client must be an object");
 		const draft = structuredClone(input) as ClientDraft;
@@ -979,10 +1361,47 @@ export class ClientService {
 				JSON.stringify(draft.destinations.providers) &&
 			JSON.stringify(existingKey?.excludedProviders?.slice().sort() ?? null) ===
 				JSON.stringify(draft.destinations.excludedProviders ?? null);
+		const choice = globalChoice(draft.global, existing);
+		const global = choice
+			? (options.global ?? (await this.deps.dbOps.clients.getGlobal()))
+			: null;
+		const covered = new Set(
+			choice ? globalCatalogueFormats(draft.application) : [],
+		);
+		const globalState: ClientGlobalState | null = global
+			? { appliedRevision: global.revision, formats: {} }
+			: null;
+		const globalNotices: string[] = [];
+		const context: ModelContext = {
+			application: draft.application,
+			accounts,
+			scopeFor,
+			existing,
+			pinUnchanged,
+		};
 		const catalogue = emptyCatalogues();
 		catalogue.codex.envelope = existing?.catalogues.codex.envelope;
 		const aliasModels = new Map<string, ClientModel>();
-		for (const format of FORMATS) {
+		const plans = FORMATS.map((format) => {
+			const delta =
+				global && covered.has(format)
+					? normalizeDelta(choice?.formats[format], global.catalogues[format])
+					: null;
+			if (delta && global)
+				return {
+					format,
+					delta,
+					candidates: composeGlobalCatalogue(
+						global.catalogues[format],
+						delta,
+					).map(({ model, provenance }) => ({
+						value: { ...model } as ClientModel,
+						fromGlobal: provenance === "global",
+					})),
+					requestedDefault: (delta.inheritDefault
+						? global.catalogues[format].defaultModel
+						: delta.defaultModel) as unknown,
+				};
 			const selected = draft.catalogues?.[format];
 			if (
 				!selected ||
@@ -990,151 +1409,100 @@ export class ClientService {
 				selected.models.length > 10000
 			)
 				throw BadRequest(`Invalid ${format} catalogue`);
+			return {
+				format,
+				delta,
+				candidates: selected.models.map((value) => ({
+					value,
+					fromGlobal: false,
+				})),
+				requestedDefault: selected.defaultModel as unknown,
+			};
+		});
+		// The client's own aliases win over global ones in every format, so which
+		// of two conflicting entries is refused never depends on format order.
+		const ownAliases = new Map<string, string>();
+		for (const { candidates } of plans)
+			for (const { value, fromGlobal } of candidates)
+				if (
+					!fromGlobal &&
+					value &&
+					typeof value === "object" &&
+					value.id !== value.targetModel
+				)
+					ownAliases.set(value.id, aliasRoute(value));
+		for (const { format, delta, candidates, requestedDefault } of plans) {
 			const seen = new Set<string>();
-			for (const value of selected.models) {
-				if (!value || typeof value !== "object")
-					throw BadRequest("Invalid model entry");
-				for (const [name, field] of [
-					["model ID", value.id],
-					["target model", value.targetModel],
-					["display name", value.displayName],
-				] as const)
-					if (
-						typeof field !== "string" ||
-						!field.trim() ||
-						field !== field.trim() ||
-						field.length > 256
-					)
-						throw BadRequest(`Invalid ${name}`);
-				if (seen.has(value.id)) throw BadRequest(`Duplicate model ${value.id}`);
-				seen.add(value.id);
+			const skipped: GlobalCatalogueSkip[] = [];
+			for (const { value, fromGlobal } of candidates) {
+				// Global entries are well-formed; a client's may not be, and
+				// prepareModel is what refuses those.
+				const own = fromGlobal ? ownAliases.get(value.id) : undefined;
 				if (
-					value.accountIds !== null &&
-					(!Array.isArray(value.accountIds) ||
-						!value.accountIds.length ||
-						value.accountIds.some(
-							(a) => !accounts.some((account) => account.id === a),
-						))
-				)
-					throw BadRequest(`Choose allowed accounts for ${value.id}`);
-				const model: ClientModel = {
-					id: value.id,
-					displayName: value.displayName,
-					targetModel: value.targetModel,
-					accountIds:
-						value.accountIds === null
-							? null
-							: [...new Set(value.accountIds)].sort(),
-				};
-				if (format === "anthropic") {
-					model.createdAt =
-						existing?.catalogues.anthropic.models.find((m) => m.id === value.id)
-							?.createdAt ?? new Date().toISOString();
-					if (
-						draft.application === "claude-code" &&
-						!/claude|anthropic/i.test(model.id)
-					)
-						throw BadRequest(
-							`Claude Code requires a compatible alias for ${model.id}`,
-						);
+					own !== undefined &&
+					value.id !== value.targetModel &&
+					own !== aliasRoute(value)
+				) {
+					skipped.push({
+						id: value.id,
+						reason: `This client publishes alias ${value.id} with a different target`,
+					});
+					continue;
 				}
-				const reusableAlias = model.targetModel.startsWith("alias:")
-					? await this.deps.dbOps.modelAliases.get(model.targetModel)
-					: null;
-				if (model.targetModel.startsWith("alias:") && !reusableAlias)
-					throw BadRequest(`Alias ${model.targetModel} does not exist`);
-				if (
-					reusableAlias &&
-					!reusableAlias.targets.some((target) =>
-						accounts.some(
-							(account) =>
-								(!model.accountIds || model.accountIds.includes(account.id)) &&
-								(!target.accountIds || target.accountIds.includes(account.id)),
-						),
-					)
-				)
-					throw BadRequest(
-						`Alias ${model.targetModel} has no allowed destination accounts`,
-					);
-				if (format === "codex" && reusableAlias) {
-					model.codexMetadata = aliasCodexMetadata(model);
-				} else if (format === "codex") {
-					const old = existing?.catalogues.codex.models.find(
-						(m) => m.id === model.id && m.targetModel === model.targetModel,
-					);
-
-					const scope = scopeFor(model.accountIds);
-					if (
-						old?.codexMetadata &&
-						old.metadataScope === scope &&
-						pinUnchanged &&
-						JSON.stringify(old.accountIds) === JSON.stringify(model.accountIds)
-					) {
-						model.codexMetadata = old.codexMetadata;
-						model.metadataCapturedAt = old.metadataCapturedAt;
-						model.metadataScope = scope;
-					} else {
-						const candidates = model.accountIds
-							? accounts.filter((a) => model.accountIds?.includes(a.id))
-							: accounts;
-						for (const account of candidates.filter(
-							(a) => a.provider === "codex",
-						)) {
-							const rich = await this.deps.codexCatalog.getForPin({
-								accountId: account.id,
-								providers: null,
-							});
-							const metadata = rich
-								? (readCodexEnvelope(rich)?.models ?? []).find(
-										(m: { slug: string }) => m.slug === model.targetModel,
-									)
-								: null;
-							if (metadata) {
-								model.codexMetadata = metadata;
-								model.metadataCapturedAt = Date.now();
-								model.metadataScope = scope;
-								break;
-							}
-						}
-					}
-					if (!model.codexMetadata) {
-						const unchangedCopy =
-							old &&
-							!old.codexMetadata &&
-							model.targetModel === old.targetModel &&
-							model.id === old.id &&
-							JSON.stringify(model.accountIds) ===
-								JSON.stringify(old.accountIds);
-						if (!unchangedCopy)
+				try {
+					const model = await this.prepareModel(format, value, context);
+					if (seen.has(model.id))
+						throw BadRequest(`Duplicate model ${model.id}`);
+					if (model.id !== model.targetModel) {
+						const prior = aliasModels.get(model.id);
+						if (
+							prior &&
+							(prior.targetModel !== model.targetModel ||
+								JSON.stringify(prior.accountIds) !==
+									JSON.stringify(model.accountIds))
+						)
 							throw BadRequest(
-								`Known Codex metadata is required for target ${model.targetModel}`,
+								`Alias ${model.id} has conflicting targets across catalogues`,
 							);
+						aliasModels.set(model.id, model);
 					}
-				}
-				catalogue[format].models.push(model);
-				if (model.id !== model.targetModel) {
-					if (!reusableAlias && !model.accountIds?.length)
-						throw BadRequest(`Choose upstream accounts for alias ${model.id}`);
-					const prior = aliasModels.get(model.id);
+					seen.add(model.id);
+					catalogue[format].models.push(model);
+				} catch (error) {
+					// A global entry passed every check that holds for all clients
+					// before it was saved, so what fails here is this client's own
+					// context: its destinations, its application, its Codex scope.
 					if (
-						prior &&
-						(prior.targetModel !== model.targetModel ||
-							JSON.stringify(prior.accountIds) !==
-								JSON.stringify(model.accountIds))
+						!fromGlobal ||
+						!(error instanceof HttpError && error.status === 400)
 					)
-						throw BadRequest(
-							`Alias ${model.id} has conflicting targets across catalogues`,
-						);
-					aliasModels.set(model.id, model);
+						throw error;
+					skipped.push({ id: value.id, reason: error.message });
 				}
 			}
+			if (delta && globalState) {
+				const published =
+					typeof requestedDefault === "string" && seen.has(requestedDefault);
+				if (requestedDefault !== null && !published)
+					globalNotices.push(
+						`Default model ${requestedDefault} is not published in the ${format} catalogue, so this client has no ${format} default.`,
+					);
+				catalogue[format].defaultModel = published
+					? (requestedDefault as string)
+					: null;
+				globalState.formats[format] = { ...delta, skipped };
+				for (const skip of skipped)
+					globalNotices.push(
+						`Global entry ${skip.id} is not published in the ${format} catalogue: ${skip.reason}`,
+					);
+				continue;
+			}
 			if (
-				selected.defaultModel !== null &&
-				(typeof selected.defaultModel !== "string" ||
-					!seen.has(selected.defaultModel))
+				requestedDefault !== null &&
+				(typeof requestedDefault !== "string" || !seen.has(requestedDefault))
 			)
 				throw BadRequest(`Select a published ${format} default model`);
-			catalogue[format].defaultModel = selected.defaultModel;
+			catalogue[format].defaultModel = requestedDefault as string | null;
 		}
 		const owned = draft.id
 			? await this.deps.dbOps.clients.ownedRuleIds(draft.id)
@@ -1214,16 +1582,24 @@ export class ClientService {
 			notices.push(
 				"Reviewed alias rules take precedence over existing rules for this client and model ID.",
 			);
+		notices.push(...globalNotices);
 		const profile: ClientProfile = {
 			apiKeyId: id,
 			application: draft.application,
 			revision: existing?.revision ?? 1,
 			catalogues: catalogue,
 			notices: [],
+			global: globalState,
 		};
 		return {
 			review: {
-				draft: { ...draft, catalogues: catalogue },
+				draft: {
+					...draft,
+					catalogues: catalogue,
+					global: globalState
+						? { formats: withoutSkips(globalState.formats) }
+						: null,
+				},
 				aliasRules,
 				precedingRules,
 				notices,
@@ -1316,16 +1692,27 @@ export class ClientService {
 			).run(profile.apiKeyId, rule.id);
 		}
 	}
-	/** Drops expired reviews, then oldest-first until the client cap holds. */
-	private trimPending(): void {
+	/**
+	 * Drops expired reviews, then oldest-first until the client cap holds. The
+	 * review just stored is never dropped. A global review counts once, since
+	 * only the newest can be held: whichever commits first makes the rest stale.
+	 */
+	private trimPending(stored: string): void {
 		for (const [key, value] of this.pending)
-			if (value.expires < Date.now()) this.pending.delete(key);
+			if (
+				value.expires < Date.now() ||
+				(key !== stored &&
+					value.kind === "global" &&
+					this.pending.get(stored)?.kind === "global")
+			)
+				this.pending.delete(key);
 		const held = (entry: Prepared) =>
 			entry.kind === "bulk" ? entry.records.length : 1;
 		let total = 0;
 		for (const [, entry] of this.pending) total += held(entry);
 		for (const [key, entry] of this.pending) {
 			if (total <= PENDING_CLIENT_CAP) break;
+			if (key === stored) continue;
 			total -= held(entry);
 			this.pending.delete(key);
 		}
@@ -1344,7 +1731,7 @@ export class ClientService {
 			fingerprint: fingerprintBefore,
 			expires: Date.now() + PENDING_TTL_MS,
 		});
-		this.trimPending();
+		this.trimPending(token);
 		return { token, ...record.review };
 	}
 	async commit(
@@ -1379,6 +1766,7 @@ export class ClientService {
 				// biome-ignore lint/style/noNonNullAssertion: the transaction above wrote a client_profiles row for this id, and that row is a cascading reference to api_keys
 				(await dbOps.getApiKey(profile.apiKeyId))!,
 				await dbOps.routing.listRules(),
+				(await dbOps.clients.getGlobal()).revision,
 			),
 			...(apiKey ? { apiKey } : {}),
 		};
@@ -1491,6 +1879,7 @@ export class ClientService {
 		const fingerprintBefore = this.fingerprint();
 		const clients: ClientBulkClientResult[] = [];
 		const records: PreparedDraft[] = [];
+		let global: GlobalCatalogue | undefined;
 		for (const id of clientIds) {
 			const key = await dbOps.getApiKey(id);
 			if (!key) {
@@ -1523,83 +1912,99 @@ export class ClientService {
 				catalogues: structuredClone(profile.catalogues),
 			};
 			const before = profile.catalogues[operation.format];
-			const after = draft.catalogues[operation.format];
 			const notices: string[] = [];
-			if (operation.mode === "replace") {
-				after.models = structuredClone(operation.models);
-				after.defaultModel = operation.defaultModel ?? null;
-			} else {
-				const dropped = new Set(operation.remove);
-				after.models = after.models.filter((m) => !dropped.has(m.id));
-				const present = new Set(after.models.map((m) => m.id));
-				for (const model of operation.add)
-					if (!present.has(model.id)) after.models.push(structuredClone(model));
-				if (
-					after.defaultModel !== null &&
-					!after.models.some((m) => m.id === after.defaultModel)
-				) {
+			if (profile.global) {
+				global ??= await dbOps.clients.getGlobal();
+				// Saving recomposes every format the global catalogue covers.
+				if (profile.global.appliedRevision !== global.revision)
 					notices.push(
-						`Default model cleared: ${after.defaultModel} is no longer in this catalogue.`,
+						`Saving also brings this client up to global catalogue revision ${global.revision}, which can change its other covered formats too.`,
 					);
-					after.defaultModel = null;
-				}
 			}
-			const beforeById = new Map(before.models.map((m) => [m.id, m]));
-			const afterById = new Map(after.models.map((m) => [m.id, m]));
-			const added = [...afterById.keys()].filter((k) => !beforeById.has(k));
-			const removed = [...beforeById.keys()].filter((k) => !afterById.has(k));
+			let untouched: boolean;
+			if (
+				global &&
+				profile.global &&
+				globalCatalogueFormats(profile.application).includes(operation.format)
+			) {
+				const formats = withoutSkips(profile.global.formats);
+				const delta = formats[operation.format] ?? emptyDelta();
+				const next = subscriberEdit(
+					global.catalogues[operation.format],
+					delta,
+					operation,
+					new Set(
+						profile.global.formats[operation.format]?.skipped.map((s) => s.id),
+					),
+				);
+				draft.global = { formats: { ...formats, [operation.format]: next } };
+				untouched = deepEqual(next, delta);
+			} else {
+				const after = draft.catalogues[operation.format];
+				if (operation.mode === "replace") {
+					after.models = structuredClone(operation.models);
+					after.defaultModel = operation.defaultModel ?? null;
+				} else {
+					const dropped = new Set(operation.remove);
+					after.models = after.models.filter((m) => !dropped.has(m.id));
+					const present = new Set(after.models.map((m) => m.id));
+					for (const model of operation.add)
+						if (!present.has(model.id))
+							after.models.push(structuredClone(model));
+					if (
+						after.defaultModel !== null &&
+						!after.models.some((m) => m.id === after.defaultModel)
+					) {
+						notices.push(
+							`Default model cleared: ${after.defaultModel} is no longer in this catalogue.`,
+						);
+						after.defaultModel = null;
+					}
+				}
+				untouched = deepEqual(after, before);
+			}
 			const result: ClientBulkClientResult = {
 				apiKeyId: id,
 				name: key.name,
 				status: "unchanged",
 				reason: null,
-				added,
-				removed,
+				added: [],
+				removed: [],
 				modified: [],
 				defaultModelChange: null,
 				notices,
 			};
 			// An identical raw draft prepares to an identical record for every
 			// format, so this fast path only ever skips work.
-			if (deepEqual(after, before)) {
+			if (untouched) {
 				clients.push(result);
 				continue;
 			}
 			try {
-				const record = await this.prepareDraft(draft);
+				const record = await this.prepareDraft(draft, { global });
 				// Everything past here diffs the prepared catalogue rather than
 				// the raw draft: preparation is what validates an entry,
 				// normalizes its account pin, and resolves an Anthropic entry's
 				// `createdAt` from this client's own stored one. Diffing the raw
 				// draft would both read unvalidated fields and call a
 				// replacement carrying another client's timestamps a change.
-				const prepared = record.profile.catalogues[operation.format];
-				if (deepEqual(prepared, before)) {
+				// A subscriber's differences can change while what it publishes
+				// does not, as when it removes an entry it was skipping.
+				if (
+					deepEqual(record.profile.catalogues, profile.catalogues) &&
+					deepEqual(record.profile.global, profile.global)
+				) {
 					clients.push(result);
 					continue;
 				}
-				const preparedById = new Map(prepared.models.map((m) => [m.id, m]));
 				records.push(record);
 				clients.push({
 					...result,
+					...catalogueChange(
+						before,
+						record.profile.catalogues[operation.format],
+					),
 					status: "changed",
-					added: [...preparedById.keys()].filter((k) => !beforeById.has(k)),
-					removed: [...beforeById.keys()].filter((k) => !preparedById.has(k)),
-					modified: [...preparedById.keys()].filter((k) => {
-						const old = beforeById.get(k);
-						const next = preparedById.get(k);
-						return (
-							!!old &&
-							!!next &&
-							(old.targetModel !== next.targetModel ||
-								old.displayName !== next.displayName ||
-								pinOf(old) !== pinOf(next))
-						);
-					}),
-					defaultModelChange:
-						before.defaultModel === prepared.defaultModel
-							? null
-							: { from: before.defaultModel, to: prepared.defaultModel },
 					notices: [...notices, ...record.review.notices],
 				});
 			} catch (error) {
@@ -1640,7 +2045,7 @@ export class ClientService {
 			fingerprint: fingerprintBefore,
 			expires: Date.now() + PENDING_TTL_MS,
 		});
-		this.trimPending();
+		this.trimPending(token);
 		return { token, operation, clients };
 	}
 	/**
@@ -1670,17 +2075,308 @@ export class ClientService {
 				this.applyPreparedInTransaction(record, { createdAt });
 		});
 		this.pending.delete(token);
+		return { clients: await this.views(records) };
+	}
+	private async views(records: PreparedDraft[]): Promise<ClientView[]> {
+		const { dbOps } = this.deps;
 		const rules = await dbOps.routing.listRules();
-		const clients: ClientView[] = [];
+		const { revision } = await dbOps.clients.getGlobal();
+		const views: ClientView[] = [];
 		for (const record of records)
-			clients.push(
+			views.push(
 				await this.view(
-					// biome-ignore lint/style/noNonNullAssertion: the transaction above wrote a client_profiles row for this id, and that row is a cascading reference to api_keys
+					// biome-ignore lint/style/noNonNullAssertion: the caller's transaction wrote a client_profiles row for this id, and that row is a cascading reference to api_keys
 					(await dbOps.getApiKey(record.profile.apiKeyId))!,
 					rules,
+					revision,
 				),
 			);
-		return { clients };
+		return views;
+	}
+	async globalCatalogue(): Promise<GlobalCatalogueView> {
+		const { clients } = this.deps.dbOps;
+		return {
+			...(await clients.getGlobal()),
+			subscribers: await clients.subscribers(),
+		};
+	}
+	/**
+	 * Checks everything about a global catalogue that holds for every client,
+	 * so that what a subscriber can still refuse is its own context.
+	 */
+	private async globalDraft(input: unknown): Promise<GlobalCatalogueDraft> {
+		if (!input || typeof input !== "object" || Array.isArray(input))
+			throw BadRequest("Global catalogue must be an object");
+		const body = structuredClone(input) as Partial<GlobalCatalogueDraft>;
+		const { revision, subscribers, droppedAliasRoutes } = body;
+		if (
+			typeof revision !== "number" ||
+			!Number.isInteger(revision) ||
+			revision < 0
+		)
+			throw BadRequest("Global catalogue revision is required");
+		if (
+			!Array.isArray(subscribers) ||
+			subscribers.some((id) => typeof id !== "string" || !id) ||
+			new Set(subscribers).size !== subscribers.length
+		)
+			throw BadRequest("Invalid subscriber list");
+		if (
+			droppedAliasRoutes !== undefined &&
+			(!Array.isArray(droppedAliasRoutes) ||
+				droppedAliasRoutes.some((id) => typeof id !== "string"))
+		)
+			throw BadRequest("Invalid dropped alias routes");
+		const { dbOps } = this.deps;
+		const accounts = new Set((await dbOps.getAllAccounts()).map((a) => a.id));
+		const aliasRoutes = new Map<string, string>();
+		const catalogues = emptyCatalogues() as GlobalCatalogue["catalogues"];
+		for (const format of FORMATS) {
+			const value = body.catalogues?.[format];
+			if (
+				!value ||
+				typeof value !== "object" ||
+				!Array.isArray(value.models) ||
+				value.models.length > 10000 ||
+				(value.defaultModel !== null && typeof value.defaultModel !== "string")
+			)
+				throw BadRequest(`Invalid ${format} catalogue`);
+			const seen = new Set<string>();
+			for (const raw of value.models) {
+				checkEntryFields(raw);
+				if (seen.has(raw.id)) throw BadRequest(`Duplicate model ${raw.id}`);
+				seen.add(raw.id);
+				if (
+					raw.accountIds !== null &&
+					(!Array.isArray(raw.accountIds) ||
+						!raw.accountIds.length ||
+						raw.accountIds.some(
+							(a) => typeof a !== "string" || !accounts.has(a),
+						))
+				)
+					throw BadRequest(`Choose existing accounts for ${raw.id}`);
+				const model = globalEntry(raw);
+				const reusable = model.targetModel.startsWith("alias:");
+				if (reusable && !(await dbOps.modelAliases.get(model.targetModel)))
+					throw BadRequest(`Alias ${model.targetModel} does not exist`);
+				if (model.id !== model.targetModel) {
+					if (!reusable && !model.accountIds?.length)
+						throw BadRequest(`Choose upstream accounts for alias ${model.id}`);
+					const route = JSON.stringify([model.targetModel, model.accountIds]);
+					if ((aliasRoutes.get(model.id) ?? route) !== route)
+						throw BadRequest(
+							`Alias ${model.id} has conflicting targets across catalogues`,
+						);
+					aliasRoutes.set(model.id, route);
+				}
+				catalogues[format].models.push(model);
+			}
+			if (value.defaultModel !== null && !seen.has(value.defaultModel))
+				throw BadRequest(`Select a listed ${format} default model`);
+			catalogues[format].defaultModel = value.defaultModel;
+		}
+		for (const id of subscribers)
+			if (!(await dbOps.getApiKey(id)))
+				throw BadRequest(`Unknown client ${id}`);
+		return {
+			revision,
+			catalogues,
+			subscribers: [...subscribers].sort(),
+			...(droppedAliasRoutes ? { droppedAliasRoutes } : {}),
+		};
+	}
+	/**
+	 * Recomposes every client that uses the global catalogue, or joins or leaves
+	 * it, against the proposed one. A client that refuses is reported and left
+	 * as it is; it shows as behind the global revision until it is reviewed.
+	 */
+	async globalReview(input: unknown): Promise<GlobalCatalogueReview> {
+		const draft = await this.globalDraft(input);
+		const { dbOps } = this.deps;
+		const stored = await dbOps.clients.getGlobal();
+		if (stored.revision !== draft.revision)
+			throw Conflict("The global catalogue changed; reload and review again");
+		const global: GlobalCatalogue = {
+			revision: stored.revision + 1,
+			catalogues: draft.catalogues,
+		};
+		const fingerprintBefore = this.fingerprint();
+		const wanted = new Set(draft.subscribers);
+		const rules = await dbOps.routing.listRules();
+		const routes = (list: RoutingRule[]) =>
+			JSON.stringify(list.map((r) => r.match_model_value).sort());
+		const clients: GlobalCatalogueClientResult[] = [];
+		const records: PreparedDraft[] = [];
+		const stamps: Extract<Prepared, { kind: "global" }>["stamps"] = [];
+		const keys = await dbOps.getApiKeys();
+		for (const id of draft.subscribers)
+			if (!keys.some((key) => key.id === id))
+				clients.push(rejectedGlobal(id, id, "Client not found"));
+		for (const key of keys) {
+			const profile = await dbOps.clients.getProfile(key.id);
+			if (!profile) {
+				if (wanted.has(key.id))
+					clients.push(
+						rejectedGlobal(
+							key.id,
+							key.name,
+							"Client catalogue is missing; configure this client first",
+						),
+					);
+				continue;
+			}
+			const subscription = wanted.has(key.id)
+				? profile.global
+					? "stays"
+					: "joins"
+				: profile.global
+					? "leaves"
+					: null;
+			if (!subscription) continue;
+			const result: GlobalCatalogueClientResult = {
+				apiKeyId: key.id,
+				name: key.name,
+				status: "unchanged",
+				reason: null,
+				subscription,
+				formats: {},
+				notices: [],
+			};
+			clients.push(result);
+			try {
+				const record = await this.prepareDraft(
+					{
+						id: key.id,
+						revision: profile.revision,
+						name: key.name,
+						application: profile.application,
+						destinations: {
+							accountId: key.pinnedAccountId,
+							providers: key.pinnedProviders,
+							excludedProviders: key.excludedProviders ?? null,
+						},
+						// A leaving client keeps what it publishes now as its own.
+						catalogues: structuredClone(profile.catalogues),
+						global:
+							subscription === "joins"
+								? { formats: {} }
+								: subscription === "leaves"
+									? null
+									: undefined,
+						...(subscription !== "leaves" && draft.droppedAliasRoutes
+							? { droppedAliasRoutes: draft.droppedAliasRoutes }
+							: {}),
+					},
+					{ global },
+				);
+				const next = record.profile;
+				if (next.global)
+					for (const format of globalCatalogueFormats(next.application))
+						result.formats[format] = {
+							...catalogueChange(
+								profile.catalogues[format],
+								next.catalogues[format],
+							),
+							skipped: next.global.formats[format]?.skipped ?? [],
+						};
+				const owned = await dbOps.clients.ownedRuleIds(key.id);
+				const unchanged =
+					subscription === "stays" &&
+					deepEqual(next.catalogues, profile.catalogues) &&
+					deepEqual(
+						{ ...next.global, appliedRevision: 0 },
+						{ ...profile.global, appliedRevision: 0 },
+					) &&
+					routes(rules.filter((r) => owned.includes(r.id))) ===
+						routes(record.review.aliasRules);
+				if (unchanged && next.global)
+					stamps.push({
+						id: key.id,
+						revision: profile.revision,
+						global: next.global,
+					});
+				else {
+					records.push(record);
+					result.status = "changed";
+					result.notices = record.review.notices;
+				}
+			} catch (error) {
+				if (
+					!isClientInputError(error) &&
+					!(
+						error instanceof HttpError &&
+						(error.status === 400 || error.status === 409)
+					)
+				)
+					throw error;
+				result.status = "rejected";
+				result.reason = error instanceof Error ? error.message : String(error);
+				result.formats = {};
+			}
+		}
+		if (
+			records.reduce((n, r) => n + r.review.aliasRules.length, 0) >
+			BULK_MAX_ALIAS_WRITES
+		)
+			throw BadRequest(
+				"This edit would rewrite too many routing rules; publish fewer alias models globally",
+			);
+		if (this.fingerprint() !== fingerprintBefore)
+			throw Conflict(
+				"Routing or account identity changed during review; review again",
+			);
+		const token = crypto.randomUUID();
+		this.pending.set(token, {
+			kind: "global",
+			global,
+			records,
+			stamps,
+			fingerprint: fingerprintBefore,
+			expires: Date.now() + PENDING_TTL_MS,
+		});
+		this.trimPending(token);
+		return { token, draft, clients };
+	}
+	/** Saves the global catalogue and every recomposed subscriber in one transaction. */
+	async globalCommit(
+		token: string,
+	): Promise<{ global: GlobalCatalogueView; clients: ClientView[] }> {
+		const prepared = this.pending.get(token);
+		if (
+			!prepared ||
+			prepared.expires < Date.now() ||
+			prepared.kind !== "global"
+		)
+			throw Conflict("Review expired; review the global catalogue again");
+		const { records, stamps, global, fingerprint } = prepared;
+		const { dbOps } = this.deps;
+		const createdAt = Date.now();
+		const ordered = [...records].sort((a, b) =>
+			a.profile.apiKeyId.localeCompare(b.profile.apiKeyId),
+		);
+		await dbOps.getAdapter().runTransaction(() => {
+			if (this.fingerprint() !== fingerprint)
+				throw new RoutingConflictError(
+					"Routing or destinations changed; review the global catalogue again",
+				);
+			dbOps.clients.saveGlobalInTransaction(
+				global.catalogues,
+				global.revision - 1,
+			);
+			for (const record of ordered)
+				this.applyPreparedInTransaction(record, { createdAt });
+			for (const stamp of stamps)
+				dbOps.clients.markGlobalAppliedInTransaction(
+					stamp.id,
+					stamp.revision,
+					stamp.global,
+				);
+		});
+		this.pending.delete(token);
+		return {
+			global: await this.globalCatalogue(),
+			clients: await this.views(records),
+		};
 	}
 	async remove(id: string): Promise<void> {
 		const adapter = this.deps.dbOps.getAdapter();

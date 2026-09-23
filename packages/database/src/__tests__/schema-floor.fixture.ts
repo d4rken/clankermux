@@ -448,6 +448,12 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["api_key_id", "application", "revision", "catalogues", "notices"],
 		source: "create-table-at-intro",
 	},
+	global_catalogue: {
+		shipped: "2026-09-23",
+		commit: "unreleased",
+		columns: ["id", "revision", "catalogues"],
+		source: "create-table-at-intro",
+	},
 	client_alias_rules: {
 		shipped: "2026-09-11",
 		commit: "unreleased",

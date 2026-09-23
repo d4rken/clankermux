@@ -22,6 +22,7 @@ function makeClient(name: string): ClientView {
 		revision: 1,
 		aliasRules: [],
 		notices: [],
+		global: null,
 		key: {
 			id: name,
 			name,
@@ -67,6 +68,7 @@ it("sorts each client header in both directions and retains sorting after refres
 		revision: 1,
 		aliasRules: [],
 		notices: [],
+		global: null,
 		key: {
 			id: name,
 			name,

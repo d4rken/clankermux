@@ -105,12 +105,158 @@ export interface ClientCatalogue {
 	defaultModel: string | null;
 	envelope?: Record<string, unknown>;
 }
+/**
+ * A global catalogue entry: the part of a {@link ClientModel} that means the
+ * same for every client. Codex metadata and Anthropic `createdAt` depend on the
+ * client they are published to, so each client supplies its own.
+ */
+export type GlobalCatalogueModel = Pick<
+	ClientModel,
+	"id" | "displayName" | "targetModel" | "accountIds"
+>;
+export interface GlobalCatalogueFormat {
+	models: GlobalCatalogueModel[];
+	defaultModel: string | null;
+}
+export interface GlobalCatalogue {
+	/** 0 until the first global catalogue is saved. */
+	revision: number;
+	catalogues: Record<ClientFormat, GlobalCatalogueFormat>;
+}
+export interface GlobalCatalogueView extends GlobalCatalogue {
+	/** IDs of the clients that use the global catalogue. */
+	subscribers: string[];
+}
+/**
+ * How one client's catalogue differs from the global one in one format.
+ *
+ * An addition whose ID is also global replaces that entry for this client. The
+ * default follows the global one while `inheritDefault` is set, and is
+ * `defaultModel` otherwise; either way it is published only while that model
+ * is.
+ */
+export interface ClientGlobalDelta {
+	additions: GlobalCatalogueModel[];
+	removals: string[];
+	inheritDefault: boolean;
+	defaultModel: string | null;
+}
+/** A global entry this client cannot publish, and why. */
+export interface GlobalCatalogueSkip {
+	id: string;
+	reason: string;
+}
+export interface ClientGlobalState {
+	/** Global revision the published catalogues were last composed from. */
+	appliedRevision: number;
+	/** One entry per format the global catalogue covers for this application. */
+	formats: Partial<
+		Record<ClientFormat, ClientGlobalDelta & { skipped: GlobalCatalogueSkip[] }>
+	>;
+}
+/**
+ * Formats the global catalogue fills for a client of this application. A
+ * generic client may speak any of the three; every other application reads
+ * exactly one.
+ */
+export const globalCatalogueFormats = (
+	application: ClientApplication,
+): ClientFormat[] =>
+	application === "generic"
+		? ["anthropic", "openai", "codex"]
+		: application === "claude-code"
+			? ["anthropic"]
+			: application === "codex"
+				? ["codex"]
+				: ["openai"];
+/** The client-independent fields of an entry, with a canonical account pin. */
+export const globalEntry = (
+	model: GlobalCatalogueModel,
+): GlobalCatalogueModel => ({
+	id: model.id,
+	displayName: model.displayName,
+	targetModel: model.targetModel,
+	accountIds: Array.isArray(model.accountIds)
+		? [...new Set(model.accountIds)].sort()
+		: model.accountIds,
+});
+/** Whether two entries mean the same thing for every client. */
+export const sameGlobalEntry = (
+	a: GlobalCatalogueModel,
+	b: GlobalCatalogueModel,
+): boolean => JSON.stringify(globalEntry(a)) === JSON.stringify(globalEntry(b));
+/** Where an entry of a format the global catalogue covers comes from. */
+export type GlobalProvenance = "global" | "override" | "added";
+/**
+ * One client's view of a global format: global entries in global order, each
+ * replaced by the client's same-ID addition and dropped when removed, then the
+ * client's other additions. Nothing here is validated for the client.
+ */
+export function composeGlobalCatalogue(
+	global: GlobalCatalogueFormat,
+	delta: Pick<ClientGlobalDelta, "additions" | "removals">,
+): Array<{ model: GlobalCatalogueModel; provenance: GlobalProvenance }> {
+	const overrides = new Map(delta.additions.map((m) => [m.id, m]));
+	const removed = new Set(delta.removals);
+	const globalIds = new Set(global.models.map((m) => m.id));
+	return [
+		...global.models
+			.filter((m) => !removed.has(m.id))
+			.map((m) => {
+				const override = overrides.get(m.id);
+				return override
+					? { model: override, provenance: "override" as const }
+					: { model: m, provenance: "global" as const };
+			}),
+		...delta.additions
+			.filter((m) => !globalIds.has(m.id))
+			.map((m) => ({ model: m, provenance: "added" as const })),
+	];
+}
+/**
+ * The additions and removals that make a client publish exactly `list`.
+ *
+ * A list read from what a client publishes never holds the global entries it
+ * skips, so their absence says nothing and each keeps the removal state it had
+ * in `previous`. An entry identical to its global one is not an addition.
+ */
+export function globalDeltaFromList(
+	global: GlobalCatalogueFormat,
+	previous: Pick<ClientGlobalDelta, "removals">,
+	list: GlobalCatalogueModel[],
+	skipped: ReadonlySet<string>,
+): Pick<ClientGlobalDelta, "additions" | "removals"> {
+	const byId = new Map(global.models.map((m) => [m.id, m]));
+	const listed = new Set(list.map((m) => m.id));
+	return {
+		additions: list
+			.filter((m) => {
+				const entry = byId.get(m.id);
+				return !entry || !sameGlobalEntry(entry, m);
+			})
+			.map(globalEntry),
+		removals: global.models
+			.filter(
+				(m) =>
+					!listed.has(m.id) &&
+					(!skipped.has(m.id) || previous.removals.includes(m.id)),
+			)
+			.map((m) => m.id)
+			.sort(),
+	};
+}
 export interface ClientProfile {
 	apiKeyId: string;
 	application: ClientApplication;
 	revision: number;
+	/**
+	 * What each format publishes. For a format the global catalogue covers, this
+	 * is composed from the global catalogue and {@link global}.
+	 */
 	catalogues: Record<ClientFormat, ClientCatalogue>;
 	notices: string[];
+	/** Null when this client does not use the global catalogue. */
+	global: ClientGlobalState | null;
 }
 export interface ClientDestinations {
 	accountId: string | null;
@@ -130,6 +276,15 @@ export interface ClientDraft {
 	 * the ID keeps working.
 	 */
 	droppedAliasRoutes?: string[];
+	/**
+	 * Omitted: keep the stored choice. Null: stop using the global catalogue,
+	 * publishing `catalogues` as given. An object: use it, with these
+	 * differences; `catalogues` is then ignored for every format it covers, and
+	 * a covered format missing here follows the global catalogue unchanged.
+	 */
+	global?: {
+		formats: Partial<Record<ClientFormat, ClientGlobalDelta>>;
+	} | null;
 }
 export interface ClientView extends ClientProfile {
 	key: ApiKeyResponse;
@@ -200,4 +355,35 @@ export interface ClientBulkReview {
 	token: string;
 	operation: ClientBulkOperation;
 	clients: ClientBulkClientResult[];
+}
+export interface GlobalCatalogueDraft {
+	/** The revision this edit was made against. */
+	revision: number;
+	catalogues: Record<ClientFormat, GlobalCatalogueFormat>;
+	/** Every client that should use the global catalogue after this edit. */
+	subscribers: string[];
+	/** Alias IDs whose leftover routes every subscriber drops, as in {@link ClientDraft}. */
+	droppedAliasRoutes?: string[];
+}
+export interface GlobalCatalogueFormatChange {
+	added: string[];
+	removed: string[];
+	modified: string[];
+	defaultModelChange: { from: string | null; to: string | null } | null;
+	skipped: GlobalCatalogueSkip[];
+}
+export interface GlobalCatalogueClientResult {
+	apiKeyId: string;
+	name: string;
+	status: "changed" | "unchanged" | "rejected";
+	/** Set only when `status` is `rejected`: the client keeps what it publishes now. */
+	reason: string | null;
+	subscription: "joins" | "leaves" | "stays";
+	formats: Partial<Record<ClientFormat, GlobalCatalogueFormatChange>>;
+	notices: string[];
+}
+export interface GlobalCatalogueReview {
+	token: string;
+	draft: GlobalCatalogueDraft;
+	clients: GlobalCatalogueClientResult[];
 }

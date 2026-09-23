@@ -65,6 +65,12 @@ describe("client endpoint dispatch", () => {
 			commit: record("commit", { client: {} }),
 			bulkReview: record("bulkReview", { token: "bulk-review" }),
 			bulkCommit: record("bulkCommit", { clients: [] }),
+			globalCatalogue: async () => {
+				calls.push({ method: "globalCatalogue", argument: undefined });
+				return { revision: 3 };
+			},
+			globalReview: record("globalReview", { token: "global-review" }),
+			globalCommit: record("globalCommit", { clients: [] }),
 		} as unknown as ClientManager,
 		{} as DatabaseOperations,
 	);
@@ -123,10 +129,32 @@ describe("client endpoint dispatch", () => {
 			},
 		]);
 	});
-	it("requires a token on either commit path", async () => {
+	it("requires a token on every commit path", async () => {
 		expect((await post("/api/clients/commit", {})).status).toBe(400);
 		expect((await post("/api/clients/bulk/commit", {})).status).toBe(400);
+		expect(
+			(await post("/api/clients/global-catalogue/commit", {})).status,
+		).toBe(400);
 		expect(calls).toEqual([]);
+	});
+	// The global catalogue's path also fits the `/api/clients/:id` pattern.
+	it("routes the global catalogue paths before the per-client ones", async () => {
+		const url = new URL("http://test/api/clients/global-catalogue");
+		const read = await handle(new Request(url), url);
+		expect(read.status).toBe(200);
+		expect((await read.json()).data).toEqual({ revision: 3 });
+		expect(
+			await post("/api/clients/global-catalogue/review", { revision: 3 }),
+		).toEqual({ status: 200, data: { token: "global-review" } });
+		expect(
+			(await post("/api/clients/global-catalogue/commit", { token: "g" }))
+				.status,
+		).toBe(200);
+		expect(calls).toEqual([
+			{ method: "globalCatalogue", argument: undefined },
+			{ method: "globalReview", argument: { revision: 3 } },
+			{ method: "globalCommit", argument: "g" },
+		]);
 	});
 });
 

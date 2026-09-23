@@ -11,6 +11,8 @@ import type {
 	ClientReview,
 	ClientSuggestions,
 	ClientView,
+	GlobalCatalogueReview,
+	GlobalCatalogueView,
 } from "@clankermux/types";
 import { apiKeyLookupSuffix, NodeCryptoUtils } from "@clankermux/types";
 import { errorResponse } from "../utils/http-error";
@@ -27,6 +29,11 @@ export interface ClientManager {
 		format: ClientFormat,
 	): Promise<ClientModelMetadataResponse>;
 	remove(id: string): Promise<void>;
+	globalCatalogue(): Promise<GlobalCatalogueView>;
+	globalReview(input: unknown): Promise<GlobalCatalogueReview>;
+	globalCommit(
+		token: string,
+	): Promise<{ global: GlobalCatalogueView; clients: ClientView[] }>;
 }
 const FORMATS: ClientFormat[] = ["anthropic", "openai", "codex"];
 export function createClientsHandler(
@@ -43,6 +50,8 @@ export function createClientsHandler(
 			const path = url.pathname;
 			if (path === "/api/clients" && req.method === "GET")
 				return ok(await manager.list());
+			if (path === "/api/clients/global-catalogue" && req.method === "GET")
+				return ok(await manager.globalCatalogue());
 			if (
 				req.method === "POST" &&
 				[
@@ -51,6 +60,8 @@ export function createClientsHandler(
 					"/api/clients/commit",
 					"/api/clients/bulk/review",
 					"/api/clients/bulk/commit",
+					"/api/clients/global-catalogue/review",
+					"/api/clients/global-catalogue/commit",
 				].includes(path)
 			) {
 				let body: Record<string, unknown>;
@@ -72,10 +83,14 @@ export function createClientsHandler(
 					return ok(await manager.review(body));
 				if (path === "/api/clients/bulk/review")
 					return ok(await manager.bulkReview(body));
+				if (path === "/api/clients/global-catalogue/review")
+					return ok(await manager.globalReview(body));
 				if (typeof body.token !== "string")
 					throw BadRequest("Review token is required");
 				if (path === "/api/clients/bulk/commit")
 					return ok(await manager.bulkCommit(body.token));
+				if (path === "/api/clients/global-catalogue/commit")
+					return ok(await manager.globalCommit(body.token));
 				return ok(await manager.commit(body.token));
 			}
 			const match =

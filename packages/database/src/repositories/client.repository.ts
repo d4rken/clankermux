@@ -1,4 +1,8 @@
-import type { ClientProfile } from "@clankermux/types";
+import type {
+	ClientGlobalState,
+	ClientProfile,
+	GlobalCatalogue,
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 import { RoutingConflictError } from "./routing.repository";
 
@@ -12,7 +16,16 @@ interface ProfileRow {
 	revision: number;
 	catalogues: string;
 	notices: string;
+	global_state: string | null;
 }
+const emptyGlobal = (): GlobalCatalogue => ({
+	revision: 0,
+	catalogues: {
+		anthropic: { models: [], defaultModel: null },
+		openai: { models: [], defaultModel: null },
+		codex: { models: [], defaultModel: null },
+	},
+});
 export class ClientRepository extends BaseRepository<ClientProfile> {
 	async getProfile(id: string): Promise<ClientProfile | null> {
 		const row = await this.get<ProfileRow>(
@@ -26,6 +39,7 @@ export class ClientRepository extends BaseRepository<ClientProfile> {
 					revision: row.revision,
 					catalogues: JSON.parse(row.catalogues),
 					notices: JSON.parse(row.notices),
+					global: row.global_state ? JSON.parse(row.global_state) : null,
 				}
 			: null;
 	}
@@ -53,13 +67,14 @@ export class ClientRepository extends BaseRepository<ClientProfile> {
 		if (!db.query("SELECT 1 FROM api_keys WHERE id=?").get(profile.apiKeyId))
 			throw new Error("Client key does not exist");
 		db.query(
-			"INSERT INTO client_profiles(api_key_id,application,revision,catalogues,notices) VALUES(?,?,?,?,?)",
+			"INSERT INTO client_profiles(api_key_id,application,revision,catalogues,notices,global_state) VALUES(?,?,?,?,?,?)",
 		).run(
 			profile.apiKeyId,
 			profile.application,
 			profile.revision,
 			JSON.stringify(profile.catalogues),
 			JSON.stringify(profile.notices),
+			profile.global ? JSON.stringify(profile.global) : null,
 		);
 	}
 	async bootstrap(profiles: ClientProfile[]): Promise<boolean> {
@@ -99,12 +114,13 @@ export class ClientRepository extends BaseRepository<ClientProfile> {
 		const changes = this.adapter
 			.getSQLiteDb()
 			.query(
-				"UPDATE client_profiles SET application=?,revision=revision+1,catalogues=?,notices=? WHERE api_key_id=? AND revision=?",
+				"UPDATE client_profiles SET application=?,revision=revision+1,catalogues=?,notices=?,global_state=? WHERE api_key_id=? AND revision=?",
 			)
 			.run(
 				profile.application,
 				JSON.stringify(profile.catalogues),
 				JSON.stringify(profile.notices),
+				profile.global ? JSON.stringify(profile.global) : null,
 				profile.apiKeyId,
 				expectedRevision,
 			).changes;
@@ -126,5 +142,64 @@ export class ClientRepository extends BaseRepository<ClientProfile> {
 				[id],
 			)
 		).map((r) => r.rule_id);
+	}
+	/**
+	 * Records that a client's published catalogues already match a global
+	 * revision, without rewriting them. Leaves the client's own revision alone:
+	 * nothing it publishes changed.
+	 */
+	markGlobalAppliedInTransaction(
+		id: string,
+		expectedRevision: number,
+		global: ClientGlobalState,
+	): void {
+		const changes = this.adapter
+			.getSQLiteDb()
+			.query(
+				"UPDATE client_profiles SET global_state=? WHERE api_key_id=? AND revision=? AND global_state IS NOT NULL",
+			)
+			.run(JSON.stringify(global), id, expectedRevision).changes;
+		if (!changes)
+			throw new RoutingConflictError(
+				"Client changed; review the global catalogue again",
+			);
+	}
+	async subscribers(): Promise<string[]> {
+		return (
+			await this.query<{ api_key_id: string }>(
+				"SELECT api_key_id FROM client_profiles WHERE global_state IS NOT NULL ORDER BY api_key_id",
+			)
+		).map((r) => r.api_key_id);
+	}
+	async getGlobal(): Promise<GlobalCatalogue> {
+		const row = await this.get<{ revision: number; catalogues: string }>(
+			"SELECT revision, catalogues FROM global_catalogue WHERE id=1",
+		);
+		return row
+			? { revision: row.revision, catalogues: JSON.parse(row.catalogues) }
+			: emptyGlobal();
+	}
+	/** Stores `catalogues` as the revision after `expectedRevision`. */
+	saveGlobalInTransaction(
+		catalogues: GlobalCatalogue["catalogues"],
+		expectedRevision: number,
+	): void {
+		const db = this.adapter.getSQLiteDb();
+		const changes =
+			expectedRevision === 0
+				? db
+						.query(
+							"INSERT OR IGNORE INTO global_catalogue(id,revision,catalogues) VALUES(1,1,?)",
+						)
+						.run(JSON.stringify(catalogues)).changes
+				: db
+						.query(
+							"UPDATE global_catalogue SET revision=revision+1, catalogues=? WHERE id=1 AND revision=?",
+						)
+						.run(JSON.stringify(catalogues), expectedRevision).changes;
+		if (!changes)
+			throw new RoutingConflictError(
+				"The global catalogue changed; reload and review again",
+			);
 	}
 }
