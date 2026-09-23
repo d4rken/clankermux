@@ -9,8 +9,9 @@
  * turn has happened for longer than Anthropic's longest prompt-cache TTL, there
  * is no warm Fable prefix left to protect.
  *
- * A routing hint, not persisted state: a restart forgets it, which at worst
- * lets one side request move a pin whose Fable cache was cold anyway.
+ * A routing hint, not persisted state. Pins survive a restart and this does
+ * not, so until a conversation's next Fable turn after a restart, a side
+ * request of it follows the ordinary reserve.
  */
 
 const PROTECTED_TIER_WINDOW_MS = 60 * 60 * 1000;
