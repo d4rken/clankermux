@@ -3,6 +3,7 @@ import {
 	type Account,
 	getNativeResponsesMetaContext,
 	type RequestMeta,
+	SdkBridgeCapacityError,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
@@ -15,6 +16,7 @@ import {
 	type RoutingAttemptAudit,
 	sendAuthorizedRequest,
 } from "../routing-dispatch";
+import { priorSdkBridgeCapacity } from "../sdk-bridge-capacity";
 import { createClientAbortResponse } from "./client-abort-response";
 import type { ProxyContext } from "./proxy-types";
 
@@ -126,8 +128,12 @@ export function sdkBridgeRequest(
 
 export type SdkBridgeAttemptResult =
 	| { kind: "response"; response: Response }
-	/** Nothing ran; the caller may move on to its next candidate. */
-	| { kind: "unavailable"; reason: string };
+	/**
+	 * Nothing ran; the caller may move on to its next candidate. `capacity`
+	 * is set when every Claude Code slot was taken, and carries the answer for
+	 * a request no other candidate serves.
+	 */
+	| { kind: "unavailable"; reason: string; capacity?: SdkBridgeCapacityError };
 
 /**
  * One attempt served by the SDK bridge. It runs none of the direct path's
@@ -167,6 +173,9 @@ export async function proxyViaSdkBridge(input: {
 					? availability.reason
 					: "shutting down",
 		};
+	const prior = priorSdkBridgeCapacity(requestMeta);
+	if (prior)
+		return { kind: "unavailable", reason: prior.message, capacity: prior };
 	const plan = buildSdkBridgeRoutePlan(
 		requestMeta,
 		account,
@@ -196,6 +205,8 @@ export async function proxyViaSdkBridge(input: {
 		return { kind: "response", response };
 	} catch (error) {
 		if (error instanceof RoutingPolicyError) throw error;
+		if (error instanceof SdkBridgeCapacityError)
+			return { kind: "unavailable", reason: error.message, capacity: error };
 		if (error instanceof SdkBridgeUnavailableError)
 			return { kind: "unavailable", reason: error.message };
 		// The transport promises to answer inference failures as Responses, so
@@ -212,27 +223,31 @@ export async function proxyViaSdkBridge(input: {
 }
 
 /**
- * The tool_use ids answered by the request's last user message: the ids a
- * parked bridge turn is waiting on when this request continues it.
+ * The tool_use ids answered by the request's final user message: the ids a
+ * parked bridge turn is waiting on when this request continues it. Trailing
+ * user messages count as one, as the bridge reads them (Chat sends text typed
+ * with the results as a user message after them).
  */
 export function lastUserToolResultIds(body: unknown): string[] {
 	const messages = (body as { messages?: unknown } | null)?.messages;
 	if (!Array.isArray(messages)) return [];
-	const last = [...messages]
-		.reverse()
-		.find(
-			(m): m is { content: unknown } =>
-				!!m &&
-				typeof m === "object" &&
-				(m as { role?: unknown }).role === "user",
-		);
-	if (!last || !Array.isArray(last.content)) return [];
-	return last.content.flatMap((block: unknown) => {
-		const b = block as { type?: unknown; tool_use_id?: unknown } | null;
-		return b?.type === "tool_result" && typeof b.tool_use_id === "string"
-			? [b.tool_use_id]
-			: [];
-	});
+	const trailing: unknown[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i] as { role?: unknown; content?: unknown } | null;
+		if (m?.role === "system") continue;
+		if (m?.role !== "user") break;
+		trailing.unshift(m.content);
+	}
+	return trailing.flatMap((content) =>
+		Array.isArray(content)
+			? content.flatMap((block: unknown) => {
+					const b = block as { type?: unknown; tool_use_id?: unknown } | null;
+					return b?.type === "tool_result" && typeof b.tool_use_id === "string"
+						? [b.tool_use_id]
+						: [];
+				})
+			: [],
+	);
 }
 
 function errorResponse(status: number, type: string, message: string) {
@@ -264,12 +279,7 @@ export async function continueParkedSdkBridgeTurn(input: {
 	if (!ids.length) return null;
 	const parked = bridge.findContinuation(ids);
 	if (!parked) return null;
-	if (parked.ownerApiKeyId !== input.apiKeyId)
-		return errorResponse(
-			409,
-			"sdk_bridge_turn_conflict",
-			"These tool results answer a turn that belongs to another API key",
-		);
+	// The bridge refuses another key's continuation itself, recording the leg.
 	try {
 		return await bridge.continueTurn({
 			turnId: parked.turnId,

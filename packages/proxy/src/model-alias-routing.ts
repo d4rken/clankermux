@@ -19,6 +19,7 @@ import {
 	RoutingPolicyError,
 	selectAliasRoute,
 } from "./resolved-route";
+import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 
 const AFFINITY_TTL_MS = 60 * 60 * 1000;
@@ -255,6 +256,17 @@ export async function handleAliasProxy(
 	}
 	cacheBodyStore.discardStaged(meta.id);
 	if (req.signal.aborted) return createClientAbortResponse();
+	// As in the ordinary give-up: the bridge's capacity 529 says when to retry.
+	const bridgeCapacity =
+		terminalStatus === 503 ? sdkBridgeCapacityTerminal(meta) : null;
+	if (bridgeCapacity) {
+		const capacityResponse = bridgeCapacity.terminalResponse();
+		if (!ctx.requestRecorder.hasRecord(meta.id))
+			await record(capacityResponse, "sdk_bridge_capacity", {
+				failoverAttempts: attempts,
+			});
+		return capacityResponse;
+	}
 	const response = Response.json(
 		{
 			type: "error",

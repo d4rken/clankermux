@@ -9,6 +9,7 @@ import {
 	type Account,
 	type ChatRequirements,
 	type ModelAlias,
+	SdkBridgeCapacityError,
 	SdkBridgeUnavailableError,
 	setChatContext,
 	setNativeResponsesRequestContext,
@@ -258,6 +259,116 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(response.status).toBe(200);
 		expect(bridge.starts).toEqual([]);
 		expect(sends(harness).map((r) => r.account_id)).toEqual(["other"]);
+	});
+
+	describe("at the bridge's capacity", () => {
+		const atCapacity = () =>
+			makeFakeBridge(() => {
+				throw new SdkBridgeCapacityError({
+					reason: "process_cap",
+					status: 529,
+					type: "overloaded_error",
+					message: "The SDK bridge is running its maximum of 8 processes",
+					retryAfter: "10",
+				});
+			});
+
+		it("fails over to the next candidate", async () => {
+			const bridge = atCapacity();
+			harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(200);
+			const rows = sends(harness);
+			expect(rows.map((r) => r.account_id)).toEqual(["claude-a", "other"]);
+			expect(rows[0].status).toBe(529);
+		});
+
+		it("answers its 529 and Retry-After when no other candidate serves", async () => {
+			const bridge = atCapacity();
+			harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+			const { response, text } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(529);
+			expect(response.headers.get("retry-after")).toBe("10");
+			expect(JSON.parse(text).error).toEqual({
+				type: "overloaded_error",
+				message: "The SDK bridge is running its maximum of 8 processes",
+			});
+			// One refusal is enough: the second official candidate is the same bridge.
+			expect(bridge.starts).toHaveLength(1);
+			expect(harness.upstreamKeys).toEqual([]);
+			const recorded = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof spyOn>;
+			expect(recorded.mock.calls[0]?.[2]).toBe("sdk_bridge_capacity");
+		});
+
+		it("answers its 529 when it was the last candidate to fail", async () => {
+			const bridge = atCapacity();
+			harness = await makeBridgeHarness([other(), claudeA()], {
+				bridge,
+				upstream: () => new Response("down", { status: 500 }),
+			});
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(529);
+			expect(sends(harness).map((r) => r.account_id)).toEqual([
+				"other",
+				"claude-a",
+			]);
+		});
+
+		it("answers a forced official account with the 529 directly", async () => {
+			const bridge = atCapacity();
+			harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+			setForcedAccount("claude-a");
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(529);
+			expect(response.headers.get("retry-after")).toBe("10");
+			expect(response.headers.get("x-clankermux-forced-account")).toBe(
+				"claude-a",
+			);
+			expect(harness.upstreamKeys).toEqual([]);
+		});
+
+		it("answers its 529 after the last alias stage, not the alias 503", async () => {
+			const bridge = atCapacity();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([o, a], {
+				bridge,
+				model: "alias:mixed",
+				upstream: () => new Response("down", { status: 503 }),
+			});
+			const alias: ModelAlias = {
+				id: "alias:mixed",
+				displayName: "Mixed",
+				revision: 0,
+				targets: [
+					{ model: "gpt-x", accountIds: [o.id] },
+					{ model: MODEL, accountIds: [a.id] },
+				],
+			};
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: { get: async () => alias },
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(529);
+			expect(response.headers.get("retry-after")).toBe("10");
+			expect(bridge.starts).toHaveLength(1);
+		});
 	});
 
 	it("bridges an alias stage that lands on Claude, planning that stage only", async () => {
@@ -557,14 +668,40 @@ describe("SDK bridge continuations", () => {
 		expect(routingAttempts(h.ctx)).toEqual([]);
 	});
 
-	it("are refused with 409 for another key's turn", async () => {
+	it("leave another key's turn to the bridge, which refuses and records it", async () => {
 		const { bridge, h } = await withContinuation("someone-else");
+		bridge.continueTurn = async ({ turnId, meta }) => {
+			bridge.continues.push({ turnId, body: {}, meta });
+			return Response.json(
+				{ type: "error", error: { type: "invalid_request_error" } },
+				{ status: 409 },
+			);
+		};
 
 		const { response } = await run(flooredRequest(toolResults), h.ctx);
 
 		expect(response.status).toBe(409);
-		expect(bridge.continues).toEqual([]);
+		// Handed over exactly once, so exactly one leg records the refusal.
+		expect(bridge.continues).toHaveLength(1);
 		expect(bridge.starts).toEqual([]);
+	});
+
+	it("find the results when Chat sends the user's text in a message after them", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+
+		const { response } = await run(
+			flooredRequest({
+				messages: [
+					...toolResults.messages,
+					{ role: "user", content: [{ type: "text", text: "and also" }] },
+				],
+			}),
+			h.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.lookups).toEqual([["toolu_1"]]);
+		expect(bridge.continues).toHaveLength(1);
 	});
 
 	it("route normally when the bridge knows none of the ids", async () => {

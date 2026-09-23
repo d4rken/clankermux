@@ -14,6 +14,7 @@ import type {
 import { setSdkBridgeInnerRequestContext } from "@clankermux/types";
 import { dispatchProxyRequest } from "../dispatch";
 import { setForcedAccount } from "../handlers";
+import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { routingAttempts } from "./fixtures/routing-harness";
 import {
 	type BridgeHarness,
@@ -100,6 +101,7 @@ afterEach(() => {
 	harness?.restore();
 	harness = null;
 	setForcedAccount(null);
+	clearProviderOverloadCooldown();
 });
 
 describe("SDK bridge inner calls", () => {
@@ -299,6 +301,167 @@ describe("SDK bridge inner calls", () => {
 		expect(outcomes[0].errorType).toBe("invalid_request_error");
 		expect(outcomes[0].message).toBe("bad");
 		expect(outcomes[0].accountId).toBe(a.id);
+	});
+
+	describe("a streamed reply", () => {
+		const sse = (...events: Array<Record<string, unknown>>) =>
+			events
+				.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+				.join("");
+		const start = { type: "message_start", message: { model: MODEL } };
+		const stop = { type: "message_stop" };
+
+		async function streamed(body: string) {
+			// A fresh account each time: a mid-stream 429 cools the one it hit.
+			const fresh = makeBridgeAccount({ id: a.id, name: "A", priority: 0 });
+			harness = await makeBridgeHarness([fresh], {
+				upstream: () =>
+					new Response(body, {
+						headers: { "content-type": "text/event-stream" },
+					}),
+			});
+			const outcomes: SdkBridgeInnerOutcome[] = [];
+			const started: string[] = [];
+			const ctx = innerContext({
+				plan: plan({
+					candidates: [
+						{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
+					],
+					preferredAccountId: a.id,
+				}),
+				onInnerRequestStarted: (id) => started.push(id),
+				onInnerOutcome: (o) => outcomes.push(o),
+			});
+			const res = await dispatchProxyRequest(
+				innerRequest(ctx, { stream: true }),
+				new URL("https://proxy.local/v1/messages"),
+				harness.ctx,
+				KEY,
+				"outer",
+			);
+			return { res, outcomes, started };
+		}
+
+		it("is reported when it ends, not when its head arrives", async () => {
+			const { res, outcomes, started } = await streamed(
+				sse(start, { type: "content_block_delta" }, stop),
+			);
+			expect(res.status).toBe(200);
+			expect(outcomes).toEqual([]);
+			const begin = harness?.ctx.requestRecorder.begin as ReturnType<
+				typeof mock
+			>;
+			expect(started).toEqual([begin.mock.calls[0][0].requestId]);
+			expect(await res.text()).toContain("message_stop");
+			await Bun.sleep(0);
+			expect(outcomes).toEqual([
+				expect.objectContaining({ status: 200, errorType: null }),
+			]);
+			expect(outcomes[0]?.requestId).toBe(started[0]);
+		});
+
+		it("counts an error event inside the 200 as that error", async () => {
+			for (const [type, status] of [
+				["overloaded_error", 529],
+				["rate_limit_error", 429],
+				["api_error", 500],
+				["invalid_request_error", 502],
+			] as const) {
+				const { res, outcomes } = await streamed(
+					sse(start, {
+						type: "error",
+						error: { type, message: `mid-stream ${type}` },
+					}),
+				);
+				await res.text();
+				await Bun.sleep(0);
+				expect(outcomes).toEqual([
+					expect.objectContaining({
+						status,
+						errorType: type,
+						message: `mid-stream ${type}`,
+					}),
+				]);
+				harness?.restore();
+				// A mid-stream overload trips the provider's breaker; the next
+				// iteration must not wait on it.
+				clearProviderOverloadCooldown();
+			}
+		});
+
+		it("counts a stream that ends without message_stop as a 502", async () => {
+			const { res, outcomes } = await streamed(sse(start));
+			await res.text();
+			await Bun.sleep(0);
+			expect(outcomes).toEqual([
+				expect.objectContaining({ status: 502, errorType: "api_error" }),
+			]);
+		});
+
+		it("reports once when Claude Code stops reading", async () => {
+			const { res, outcomes } = await streamed(
+				sse(start, { type: "content_block_delta" }),
+			);
+			const reader = res.body?.getReader();
+			await reader?.read();
+			await reader?.cancel();
+			await Bun.sleep(0);
+			expect(outcomes).toEqual([
+				expect.objectContaining({ status: 502, errorType: "api_error" }),
+			]);
+		});
+	});
+
+	it("report their row's start once, apart from the outcome", async () => {
+		harness = await makeBridgeHarness([a]);
+		const started: string[] = [];
+		const ctx = innerContext({
+			plan: plan({
+				candidates: [
+					{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
+				],
+				preferredAccountId: a.id,
+			}),
+			onInnerRequestStarted: (id) => started.push(id),
+		});
+		const res = await dispatchProxyRequest(
+			innerRequest(ctx),
+			new URL("https://proxy.local/v1/messages"),
+			harness.ctx,
+			KEY,
+			"outer",
+		);
+		await res.text();
+		expect(started).toHaveLength(1);
+		const begin = harness.ctx.requestRecorder.begin as ReturnType<typeof mock>;
+		expect(started[0]).toBe(begin.mock.calls[0][0].requestId);
+	});
+
+	it("report a synthetic terminal row's start as well", async () => {
+		harness = await makeBridgeHarness([a]);
+		const started: string[] = [];
+		const outcomes: SdkBridgeInnerOutcome[] = [];
+		const res = await dispatchProxyRequest(
+			innerRequest(
+				innerContext({
+					deadlineAt: Date.now() - 1,
+					onInnerRequestStarted: (id) => started.push(id),
+					onInnerOutcome: (o) => outcomes.push(o),
+				}),
+			),
+			new URL("https://proxy.local/v1/messages"),
+			harness.ctx,
+			KEY,
+			"outer",
+		);
+		await res.text();
+		const synthetic = harness.ctx.requestRecorder.recordSynthetic as ReturnType<
+			typeof mock
+		>;
+		expect(synthetic).toHaveBeenCalledTimes(1);
+		expect(started).toEqual([synthetic.mock.calls[0][0].requestId]);
+		expect(outcomes).toHaveLength(1);
+		expect(outcomes[0]?.status).toBeGreaterThanOrEqual(400);
 	});
 
 	it("cannot be entered through headers: without the in-process context the key's pin applies", async () => {

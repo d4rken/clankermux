@@ -104,6 +104,10 @@ import {
 	isDefinitiveModelError,
 	isModelRouteRestriction,
 } from "../routing-response-audit";
+import {
+	noteAttemptStarted,
+	noteSdkBridgeCapacity,
+} from "../sdk-bridge-capacity";
 import { dispatchObservationSource } from "../should-record-request";
 import { getRoutingAffinity } from "./account-selector";
 import {
@@ -1183,6 +1187,7 @@ export async function proxyWithAccount(
 	).upstreamModel;
 	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
+	noteAttemptStarted(requestMeta);
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
 	// never disagree about whether this attempt is terminal.
@@ -1397,6 +1402,9 @@ export async function proxyWithAccount(
 				bumpIdleTimeout,
 			});
 			if (bridged.kind === "response") return bridged.response;
+			// Answered by the give-up terminal if no later candidate serves.
+			if (bridged.capacity)
+				noteSdkBridgeCapacity(requestMeta, bridged.capacity);
 			log.info(
 				`SDK bridge cannot serve ${account.name} (${bridged.reason}) — failing over`,
 			);
@@ -1404,7 +1412,7 @@ export async function proxyWithAccount(
 				{ kind: "sdk_bridge_unavailable" },
 				null,
 				undefined,
-				`sdk_bridge_unavailable: ${bridged.reason}`,
+				`${bridged.capacity ? "sdk_bridge_capacity" : "sdk_bridge_unavailable"}: ${bridged.reason}`,
 			);
 		}
 
@@ -3515,11 +3523,15 @@ export async function proxyForcedAccount(
 				requestMeta,
 				account,
 				ctx,
-				`sdk_bridge_unavailable: ${bridged.reason}`,
-				503,
+				`${bridged.capacity ? "sdk_bridge_capacity" : "sdk_bridge_unavailable"}: ${bridged.reason}`,
+				bridged.capacity?.status ?? 503,
 			).catch((error: unknown) =>
 				log.warn("Could not persist forced routing outcome", error),
 			);
+			if (bridged.capacity)
+				return bridged.capacity.terminalResponse({
+					"x-clankermux-forced-account": account.id,
+				});
 			return Response.json(
 				{
 					type: "error",

@@ -7,6 +7,7 @@ import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	getChatContext,
 	readReasoningEffortAdaptation,
+	SdkBridgeCapacityError,
 	SdkBridgeUnavailableError,
 } from "@clankermux/types";
 import { AccountIdentityChangedError } from "./account-model-permissions";
@@ -274,15 +275,19 @@ export async function sendAuthorizedRequest(
 		attempt.status =
 			error instanceof RoutingPolicyError
 				? 403
-				: error instanceof SdkBridgeUnavailableError
-					? 503
-					: 502;
+				: error instanceof SdkBridgeCapacityError
+					? error.status
+					: error instanceof SdkBridgeUnavailableError
+						? 503
+						: 502;
 		attempt.error =
 			error instanceof RoutingPolicyError
 				? error.message
-				: error instanceof SdkBridgeUnavailableError
-					? `SDK bridge unavailable: ${error.message}`
-					: "Upstream transport failed";
+				: error instanceof SdkBridgeCapacityError
+					? `SDK bridge at capacity: ${error.message}`
+					: error instanceof SdkBridgeUnavailableError
+						? `SDK bridge unavailable: ${error.message}`
+						: "Upstream transport failed";
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else

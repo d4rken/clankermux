@@ -1,5 +1,9 @@
-import type { RequestMeta } from "@clankermux/types";
+import {
+	getSdkBridgeInnerMetaContext,
+	type RequestMeta,
+} from "@clankermux/types";
 import type { ResponseHandlerOptions } from "../response-handler";
+import { noteSdkBridgeInnerRequestStarted } from "../sdk-bridge-inner-outcome";
 
 /** The `forwardToClient` options that come straight from `requestMeta`. */
 export type RecordFieldsFromMeta = Pick<
@@ -22,6 +26,7 @@ export type RecordFieldsFromMeta = Pick<
 	| "comboName"
 	| "routing"
 	| "sdkBridgeTurnId"
+	| "onRecordBegun"
 >;
 
 /**
@@ -51,5 +56,8 @@ export function recordFieldsFromMeta(
 		comboName: requestMeta.comboName,
 		routing: requestMeta.routing ?? null,
 		sdkBridgeTurnId: requestMeta.sdkBridgeTurnId,
+		onRecordBegun: getSdkBridgeInnerMetaContext(requestMeta)
+			? () => noteSdkBridgeInnerRequestStarted(requestMeta)
+			: undefined,
 	};
 }

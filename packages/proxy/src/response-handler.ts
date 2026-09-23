@@ -573,6 +573,8 @@ export interface ResponseHandlerOptions {
 	clientHarness?: string | null;
 	/** See RequestMeta.sdkBridgeTurnId. */
 	sdkBridgeTurnId?: string | null;
+	/** Called once the request's row has begun (`requestRecorder.begin`). */
+	onRecordBegun?: () => void;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -952,6 +954,7 @@ async function forwardToClientInner(
 			failoverAttempts,
 		};
 		ctx.requestRecorder.begin(recordMeta);
+		options.onRecordBegun?.();
 	}
 
 	// Emit request start event for real-time dashboard. `project`,

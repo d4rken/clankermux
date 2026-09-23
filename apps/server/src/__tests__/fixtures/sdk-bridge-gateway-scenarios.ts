@@ -8,9 +8,16 @@
  * It refuses to start when 1.1.1.1 is reachable.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	lstatSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ClaudeSdkBridgeDeps } from "@clankermux/claude-sdk-bridge";
 import { clearProviderOverloadCooldown } from "@clankermux/proxy";
 import {
 	type MockRequest,
@@ -303,9 +310,30 @@ interface Account {
 	token: string;
 }
 
+/** Every file under `dir`, relative, without following symlinks. */
+function filesUnder(dir: string): string[] {
+	const out: string[] = [];
+	const walk = (path: string, rel: string) => {
+		let names: string[] = [];
+		try {
+			names = readdirSync(path);
+		} catch {
+			return;
+		}
+		for (const name of names) {
+			const child = join(path, name);
+			if (lstatSync(child).isDirectory()) walk(child, `${rel}${name}/`);
+			else out.push(`${rel}${name}`);
+		}
+	};
+	walk(dir, "");
+	return out;
+}
+
 async function withGateway<T>(
 	name: string,
 	run: (gw: Gateway, accounts: Account[]) => Promise<T>,
+	bridge?: Partial<ClaudeSdkBridgeDeps>,
 ): Promise<void> {
 	const n = crypto.randomUUID().slice(0, 8);
 	const accounts = [
@@ -331,6 +359,7 @@ async function withGateway<T>(
 			upstreamUrl: mock.url,
 			accounts,
 			models: [MODEL],
+			...(bridge ? { bridge } : {}),
 		});
 		const detail = (await run(gw, accounts)) as Record<string, unknown>;
 		// Every turn over: no Claude Code process may outlive it.
@@ -357,6 +386,10 @@ async function withGateway<T>(
 	} finally {
 		mock.clearFailures();
 		await gw?.stop();
+		// The bridge's work root, once the gateway has stopped: nothing left.
+		const result = results[name] as Record<string, unknown> | undefined;
+		if (result)
+			result.workFilesAfterStop = filesUnder(join(root, "claude-agent-sdk"));
 		rmSync(root, { recursive: true, force: true });
 		save();
 		console.log(
@@ -388,6 +421,18 @@ async function turnRows(gw: Gateway) {
 	return gw.query<Record<string, unknown>>(
 		"SELECT id, status, history_mode, rebuild_reason, account_id, client_harness, http_status, error_type FROM sdk_bridge_turns ORDER BY started_at",
 	);
+}
+
+/** The turn rows once every turn has finished and its row says so. */
+async function finishedTurnRows(gw: Gateway) {
+	await waitFor(() => gw.bridge.status().live === 0, 20_000);
+	const until = Date.now() + 5_000;
+	let rows = await turnRows(gw);
+	while (rows.some((r) => r.status === "running") && Date.now() < until) {
+		await Bun.sleep(100);
+		rows = await turnRows(gw);
+	}
+	return rows;
 }
 
 async function legRows(gw: Gateway) {
@@ -642,6 +687,81 @@ for (const endpoint of ["responses", "chat"] as const) {
 			),
 		};
 	});
+
+	await withGateway(
+		key("g7DeadContinuation"),
+		async (gw) => {
+			const c = new Conversation(endpoint, `g7-${endpoint}`);
+			c.user("TOOL via gateway, answered late");
+			const r1 = asReply(await c.send(gw));
+			// The parked call times out and its query ends before the answer.
+			const ended = await waitFor(() => gw.bridge.status().live === 0, 20_000);
+			c.absorb(r1, "GW-LATE-RESULT");
+			const from = mock.requests.length;
+			const r2 = asReply(await c.send(gw));
+			const sent = messagesCalls(from).at(-1)?.body as {
+				messages?: Array<{ role: string; content: unknown }>;
+			};
+			const lastUser = JSON.stringify(
+				sent?.messages?.filter((m) => m.role === "user").at(-1) ?? null,
+			);
+			return {
+				ended,
+				r1,
+				r2,
+				upstreamCarriesResult: lastUser.includes("GW-LATE-RESULT"),
+				upstreamCarriesCall: lastUser.includes(`id=${r1.toolCalls[0]?.id}`),
+				turns: await finishedTurnRows(gw),
+				legs: await legRows(gw),
+			};
+		},
+		{ limits: () => ({ parkedTimeoutMs: 1_500 }) },
+	);
+
+	await withGateway(key("g8TextWithToolResults"), async (gw) => {
+		const c = new Conversation(endpoint, `g8-${endpoint}`);
+		c.user("TOOL via gateway, with a note");
+		const r1 = asReply(await c.send(gw));
+		c.absorb(r1, "GW-TXT-RESULT");
+		c.user("ALSO-GW-USER-TEXT");
+		const from = mock.requests.length;
+		const r2 = asReply(await c.send(gw));
+		const carrying = messagesCalls(from).filter((q) =>
+			JSON.stringify(q.body).includes("ALSO-GW-USER-TEXT"),
+		);
+		const text = JSON.stringify(
+			(carrying.at(-1)?.body as { messages?: unknown })?.messages ?? [],
+		);
+		return {
+			r1,
+			r2,
+			upstreamCalls: messagesCalls(from).length,
+			textReachedUpstream: carrying.length > 0,
+			resultBeforeText:
+				text.indexOf("GW-TXT-RESULT") >= 0 &&
+				text.indexOf("GW-TXT-RESULT") < text.indexOf("ALSO-GW-USER-TEXT"),
+			legs: await legRows(gw),
+		};
+	});
+
+	await withGateway(
+		key("g9OversizedInnerBody"),
+		async (gw) => {
+			const from = mock.requests.length;
+			const c = new Conversation(endpoint, `g9-${endpoint}`);
+			c.user("small request, large model call");
+			const reply = asReply(await c.send(gw));
+			await finishedTurnRows(gw);
+			return {
+				reply,
+				upstreamCalls: messagesCalls(from).length,
+				turns: await gw.query(
+					"SELECT status, inner_call_count, inner_error_count FROM sdk_bridge_turns",
+				),
+			};
+		},
+		{ limits: () => ({ maxHistoryBytes: 8_000 }) },
+	);
 }
 
 // The same overage answers to a direct Claude Code request on /wire/anthropic:

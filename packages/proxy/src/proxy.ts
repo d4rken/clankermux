@@ -85,6 +85,7 @@ import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
 } from "./routing-service";
+import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
 import {
 	reportSdkBridgeInnerFailure,
 	reportSdkBridgeInnerResponse,
@@ -327,9 +328,9 @@ export async function handleProxy(
 			burstHoldTimingOverride,
 		);
 		retractIfNeverStarted(response.status);
-		const stamped = withRequestId(response);
-		reportSdkBridgeInnerResponse(requestMeta, stamped);
-		return stamped;
+		// A streamed inner reply is reported when its body ends, so Claude Code
+		// must read the response this returns.
+		return reportSdkBridgeInnerResponse(requestMeta, withRequestId(response));
 	} catch (error) {
 		// A later alias stage can reject after an earlier attempt staged a cache body.
 		cacheBodyStore.discardStaged(requestMeta.id);
@@ -384,9 +385,7 @@ export async function handleProxy(
 				apiKeyId,
 				apiKeyName,
 			)(response, error.code);
-			const stamped = withRequestId(response);
-			reportSdkBridgeInnerResponse(requestMeta, stamped);
-			return stamped;
+			return reportSdkBridgeInnerResponse(requestMeta, withRequestId(response));
 		}
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.
@@ -1438,6 +1437,18 @@ async function handleIngestedProxy(
 	// return, which emits no worker end/summary, cannot leak it) and BEFORE the
 	// attempted-accounts computation below (so it covers the needsReauth throw too).
 	if (req.signal.aborted) return createClientAbortResponse();
+
+	// The last candidate tried was the SDK bridge, refused for capacity: its
+	// 529 and Retry-After say when to come back, a generic 503 would not.
+	const bridgeCapacity = sdkBridgeCapacityTerminal(requestMeta);
+	if (bridgeCapacity) {
+		const response = bridgeCapacity.terminalResponse();
+		if (!ctx.requestRecorder.hasRecord(requestMeta.id))
+			await recordSyntheticErrorResponse(response, "sdk_bridge_capacity", {
+				failoverAttempts: upstreamAttempts,
+			});
+		return response;
+	}
 
 	// Check if OAuth token issues are the cause
 	const allAttemptedAccounts = accounts;

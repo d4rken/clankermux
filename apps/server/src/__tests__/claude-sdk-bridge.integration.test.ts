@@ -107,6 +107,8 @@ async function scenario(name: string): Promise<Scenario> {
 	expect(
 		(s.blockedEgress as string[]).filter((h) => /anthropic|claude/i.test(h)),
 	).toEqual([]);
+	// And the stopped bridge left nothing on disk: no transcript, no directory.
+	expect(s.workFilesAfterStop).toEqual([]);
 	return s;
 }
 
@@ -278,6 +280,64 @@ describe.skipIf(reason !== null)(
 					expect(new Set(upstream.map((u) => u.cliRetry))).toEqual(
 						new Set(["0"]),
 					);
+				},
+				TIMEOUT,
+			);
+
+			it(
+				`${endpoint}: G7 tool results that arrive after their query ended are rebuilt and served`,
+				async () => {
+					const s = await scenario(name("g7DeadContinuation"));
+					const [r1, r2] = [s.r1, s.r2] as Reply[];
+					expect(s.ended).toBe(true);
+					expect(r1?.toolCalls).toHaveLength(1);
+					expect(r2?.status).toBe(200);
+					expect(r2?.answer).toBe("done: GW-LATE-RESULT");
+					expect(s.upstreamCarriesResult).toBe(true);
+					expect(s.upstreamCarriesCall).toBe(true);
+					const turns = s.turns as Row[];
+					expect(turns.map((t) => t.status)).toEqual([
+						"timed_out",
+						"completed",
+					]);
+					expect(turns[1]).toMatchObject({
+						history_mode: "rebuild_flattened",
+						rebuild_reason: "dead_continuation",
+					});
+					expect((s.legs as Row[]).map((l) => [l.id, l.kind])).toEqual([
+						[r1?.requestId, "start"],
+						[r2?.requestId, "start"],
+					]);
+				},
+				TIMEOUT,
+			);
+
+			it(
+				`${endpoint}: G8 text the user sends with tool results reaches the model after them`,
+				async () => {
+					const s = await scenario(name("g8TextWithToolResults"));
+					expect((s.r2 as Reply).status).toBe(200);
+					// In the one model call whose reply the client gets.
+					expect(s.upstreamCalls).toBe(1);
+					expect(s.textReachedUpstream).toBe(true);
+					expect(s.resultBeforeText).toBe(true);
+					expect((s.legs as Row[]).map((l) => l.kind)).toEqual([
+						"start",
+						"continue",
+					]);
+				},
+				TIMEOUT,
+			);
+
+			it(
+				`${endpoint}: G9 a model call larger than maxHistoryBytes is refused with 413 before any upstream call`,
+				async () => {
+					const s = await scenario(name("g9OversizedInnerBody"));
+					expect((s.reply as Reply).status).toBe(413);
+					expect(s.upstreamCalls).toBe(0);
+					expect(s.turns).toEqual([
+						{ status: "failed", inner_call_count: 0, inner_error_count: 1 },
+					]);
 				},
 				TIMEOUT,
 			);
