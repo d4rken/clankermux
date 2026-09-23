@@ -1,4 +1,5 @@
 import type { Config } from "@clankermux/config";
+import { claudeCreateApiKeyHeaders } from "@clankermux/core";
 import {
 	type DatabaseOperations,
 	insertAccountUnique,
@@ -391,11 +392,7 @@ export class OAuthFlow {
 			"https://api.anthropic.com/api/oauth/claude_cli/create_api_key",
 			{
 				method: "POST",
-				headers: {
-					Authorization: `Bearer ${accessToken}`,
-					"Content-Type": "application/x-www-form-urlencoded",
-					Accept: "application/json, text/plain, */*",
-				},
+				headers: claudeCreateApiKeyHeaders(accessToken),
 			},
 		);
 

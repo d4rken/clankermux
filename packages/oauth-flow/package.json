@@ -8,6 +8,7 @@
 	},
 	"dependencies": {
 		"@clankermux/config": "workspace:*",
+		"@clankermux/core": "workspace:*",
 		"@clankermux/database": "workspace:*",
 		"@clankermux/providers": "workspace:*"
 	}

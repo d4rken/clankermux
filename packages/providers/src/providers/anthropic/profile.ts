@@ -1,4 +1,4 @@
-import { CLAUDE_CLI_VERSION } from "@clankermux/core";
+import { claudeProfileReadHeaders } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AccountIdentity } from "@clankermux/types";
 import { extractAnthropicIdentity } from "./identity";
@@ -46,12 +46,7 @@ export async function fetchAnthropicProfile(
 	try {
 		const response = await fetch(ANTHROPIC_PROFILE_ENDPOINT, {
 			method: "GET",
-			headers: {
-				Authorization: `Bearer ${accessToken}`,
-				"anthropic-beta": "oauth-2025-04-20",
-				"Content-Type": "application/json",
-				"User-Agent": `claude-code/${CLAUDE_CLI_VERSION}`,
-			},
+			headers: claudeProfileReadHeaders(accessToken),
 			signal: controller.signal,
 		});
 

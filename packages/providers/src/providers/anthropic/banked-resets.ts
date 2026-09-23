@@ -1,4 +1,4 @@
-import { CLAUDE_CLI_VERSION, getClientVersion } from "@clankermux/core";
+import { claudeBankedResetHeaders } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	ANTHROPIC_BANKED_RESET_CLAIM_REASONS,
@@ -14,6 +14,8 @@ import {
 } from "@clankermux/types";
 import { parseRetryAfterMs } from "../../usage-fetcher";
 
+export { newerClaudeCliVersion } from "@clankermux/core";
+
 const log = new Logger("AnthropicBankedResets");
 
 /**
@@ -28,28 +30,11 @@ export function anthropicBankedResetClaimEndpoint(orgUuid: string): string {
 	return `https://api.anthropic.com/api/organizations/${encodeURIComponent(orgUuid)}/reset_rate_limits`;
 }
 
-/** The newer of two Claude Code versions by semver precedence: `2.1.280` beats `2.1.63`. */
-export function newerClaudeCliVersion(a: string, b: string): string {
-	return Bun.semver.order(a, b) >= 0 ? a : b;
-}
-
-/**
- * Claude Code's headers for the banked-reset status read and claim, which it
- * sends from its API client. The server answers `ineligible_reason: surface` to
- * any other User-Agent, and `cli_version` to a version below its floor, so the
- * version is the newer of the last client seen and the pinned one.
- */
 export function anthropicBankedResetHeaders(
 	accessToken: string,
-	clientVersion: string = getClientVersion(),
+	clientVersion?: string,
 ): Record<string, string> {
-	const version = newerClaudeCliVersion(clientVersion, CLAUDE_CLI_VERSION);
-	return {
-		Authorization: `Bearer ${accessToken}`,
-		"anthropic-beta": "oauth-2025-04-20",
-		"Content-Type": "application/json",
-		"User-Agent": `claude-cli/${version} (external, cli)`,
-	};
+	return claudeBankedResetHeaders(accessToken, clientVersion);
 }
 
 const STATUS_TIMEOUT_MS = 5_000;

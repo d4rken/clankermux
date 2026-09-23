@@ -1,4 +1,4 @@
-import { OAuthError } from "@clankermux/core";
+import { claudeCodeExchangeHeaders, OAuthError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type {
 	OAuthProvider,
@@ -103,7 +103,7 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 
 		const response = await fetch(config.tokenUrl, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: claudeCodeExchangeHeaders(),
 			body: JSON.stringify(requestBody),
 		});
 
