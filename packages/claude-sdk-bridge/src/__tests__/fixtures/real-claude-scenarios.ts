@@ -366,7 +366,19 @@ await scenario("abortCleanup", async () => {
 	).catch((e) => ({
 		error: String(e),
 	}));
-	await Bun.sleep(1_500);
+	// Abort once Claude Code's model call is waiting on the slow answer. A
+	// fixed delay raced process start-up under a loaded full-suite run and
+	// aborted before any upstream call existed.
+	const from = mock.requests.length;
+	const t = performance.now();
+	while (
+		!mock.requests
+			.slice(from)
+			.some((q) => /SLOW hello/.test(JSON.stringify(q.body))) &&
+		performance.now() - t < 30_000
+	)
+		await Bun.sleep(50);
+	await Bun.sleep(300);
 	const during = childPids();
 	controller.abort();
 	await pending;
