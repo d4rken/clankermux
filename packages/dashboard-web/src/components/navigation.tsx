@@ -295,6 +295,7 @@ export function Navigation() {
 						<UpdateStatusPanel
 							status={updateStatus}
 							info={updateInfo}
+							repoUrl={repoUrl}
 							error={updateError}
 							onCheck={checkForUpdates}
 						/>

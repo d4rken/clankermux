@@ -38,6 +38,7 @@ function render(
 		<UpdateStatusPanel
 			status={status}
 			info={info(overrides)}
+			repoUrl="https://github.com/d4rken/clankermux"
 			error={error}
 			onCheck={() => {}}
 		/>,
@@ -105,6 +106,15 @@ describe("UpdateStatusPanel", () => {
 		expect(html).toContain("4444444");
 		expect(html).toContain("2 commits behind");
 		expect(html).toContain(asMarkup(UPDATE_COMMAND));
+	});
+
+	it("links the commit relationship to the GitHub repository", () => {
+		const html = render("current", { restartPending: false });
+
+		expect(html).toContain(
+			'<a href="https://github.com/d4rken/clankermux" target="_blank" rel="noopener noreferrer"',
+		);
+		expect(html).toContain(">Up to date with main</a>");
 	});
 
 	it("keeps today's behaviour when nothing changed since boot", () => {
