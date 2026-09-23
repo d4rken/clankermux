@@ -10,7 +10,7 @@ import type { APIContext } from "../types";
  * gauges) that the read-only dashboard worker can't see, so this MUST run on
  * the main thread (unlike the DB-backed *-history endpoints). Returns the
  * current live gauges (warm/promoted sessions, total bytes) alongside the
- * cumulative-since-restart counters from bridgeStats.snapshot() and the
+ * cumulative counters from bridgeStats.snapshot() and the
  * configured warming mode/threshold.
  */
 export function createCacheKeepaliveHandler(context: APIContext) {

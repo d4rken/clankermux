@@ -17,14 +17,14 @@ import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
  *
  * Scope note: the selected window drives the *history* chart and the
  * *effectiveness* summary. The live headline tiles in the first panel are
- * cumulative-since-restart and are NOT range-scoped — the description says so.
+ * running totals and are NOT range-scoped — the description says so.
  */
 export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
 		<section className="space-y-section border-t pt-section">
 			<SectionHeading
 				title="Cache Keep-Alive"
-				description="Live cache status, historical activity, and effectiveness. The selected window applies to history and effectiveness; live counters are cumulative since the last restart."
+				description="Live cache status, historical activity, and effectiveness. The selected window applies to history and effectiveness; live counters are running totals that carry across restarts."
 			/>
 			<CacheKeepalivePanel range={range} />
 			<CacheEffectivenessPanel range={range} />

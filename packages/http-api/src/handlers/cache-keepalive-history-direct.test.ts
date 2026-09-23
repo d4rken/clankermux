@@ -182,6 +182,30 @@ describe("cache-keepalive-history direct handler", () => {
 			expect(reset.hitRate).toBeCloseTo(4 / 5);
 		});
 
+		it("fills buckets between samples with zero activity and the previous gauges", async () => {
+			// The sampler writes nothing while the bridge state is unchanged, so an
+			// empty bucket between two samples is an idle bucket, not missing data.
+			const t = 1_700_000_000_000;
+			const rows = [
+				row(t, { warmSessions: 2, keepalivesSent: 10, spentUsd: 1 }),
+				row(t + HOUR, { warmSessions: 2, keepalivesSent: 14, spentUsd: 2 }),
+				row(t + 4 * HOUR, { warmSessions: 3, keepalivesSent: 20, spentUsd: 3 }),
+			];
+			const { body } = await callHandler(createSources({ rows }), "24h");
+
+			expect(body.points.map((p) => p.ts)).toEqual([
+				t,
+				t + HOUR,
+				t + 2 * HOUR,
+				t + 3 * HOUR,
+				t + 4 * HOUR,
+			]);
+			expect(body.points.map((p) => p.keepalivesSent)).toEqual([0, 4, 0, 0, 6]);
+			expect(body.points.map((p) => p.spentUsd)).toEqual([0, 1, 0, 0, 1]);
+			expect(body.points.map((p) => p.warmSessions)).toEqual([2, 2, 2, 2, 3]);
+			expect(body.points[2]?.hitRate).toBe(0);
+		});
+
 		it("returns an empty points array when there is no history", async () => {
 			const { body } = await callHandler(createSources({ rows: [] }), "7d");
 			expect(body.points).toEqual([]);

@@ -31,7 +31,7 @@ const MODE_LABELS: Record<string, string> = {
 };
 
 const EMPTY_MESSAGE =
-	"No keep-alive history yet — this chart fills in as snapshots accumulate over time. It starts empty after a restart and a full range needs the corresponding uptime.";
+	"No keep-alive activity recorded in this range. A snapshot is recorded only when the bridge's counters or sessions change.";
 
 /** One Recharts row keyed by bucket timestamp. */
 interface KeepaliveRow {
@@ -44,7 +44,7 @@ interface KeepaliveRow {
 
 /**
  * Analytics-tab cache-keepalive "Live Status & History" panel. Headline tiles
- * come from the live endpoint (cumulative-since-restart); the chart plots
+ * come from the live endpoint (running totals); the chart plots
  * per-bucket spent vs saved USD plus the hit-rate line over the `range` supplied
  * by the enclosing CacheKeepaliveSection. Built directly on recharts primitives
  * like MemoryUsageChart since it composes a dual-axis chart.
@@ -79,7 +79,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 				</CardTitle>
 			</CardHeader>
 			<CardContent className="space-y-group">
-				{/* Live headline tiles (cumulative since the last restart). */}
+				{/* Live headline tiles (running totals, not range-scoped). */}
 				<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-row">
 					<StatTile label="Mode" value={modeLabel} />
 					<StatTile
@@ -215,8 +215,8 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 
 				<p className="text-xs text-muted-foreground">
 					Headline counters (hit rate, spent, saved, net, resumes, failures) are
-					cumulative since the last restart; the chart shows per-bucket activity
-					over the selected range.
+					running totals that carry across restarts; the chart shows per-bucket
+					activity over the selected range.
 				</p>
 			</CardContent>
 		</Card>

@@ -22,7 +22,10 @@ import {
 	stopEventLoopMonitor,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
-import type { DatabaseOperations } from "@clankermux/database";
+import type {
+	CacheKeepaliveSnapshotRow,
+	DatabaseOperations,
+} from "@clankermux/database";
 import {
 	AsyncDbWriter,
 	DatabaseFactory,
@@ -1874,8 +1877,10 @@ Available endpoints:
 	// live ledger (and the dashboard's cumulative figures) continues across restarts
 	// instead of resetting to zero. Gauges are NOT seeded — they re-warm from the
 	// live store. Best-effort: any failure just leaves the counters at zero.
+	let priorKeepaliveSnapshot: CacheKeepaliveSnapshotRow | null = null;
 	try {
 		const prior = await dbOps.getLatestCacheKeepaliveSnapshot();
+		priorKeepaliveSnapshot = prior;
 		if (prior) {
 			bridgeStats.seed({
 				keepalivesSent: prior.keepalivesSent,
@@ -1899,11 +1904,14 @@ Available endpoints:
 	// Bridge's live gauges + cumulative economics into the
 	// cache_keepalive_snapshots time-series (the dashboard keepalive analytics
 	// panel). Same 2-minute cadence and deferred first tick as the usage sampler.
+	// It compares against the row the counters were seeded from, so an idle
+	// restart writes nothing.
 	cacheKeepaliveSnapshotSampler = new CacheKeepaliveSnapshotSampler({
 		getGauges: liveGauges,
 		getStats: liveStats,
 		insertSnapshot: (row) => dbOps.insertCacheKeepaliveSnapshot(row),
 		getPollIntervalMs: () => config.getUsagePollIntervalMs(),
+		lastSnapshot: priorKeepaliveSnapshot,
 	});
 	cacheKeepaliveSnapshotSampler.start();
 
