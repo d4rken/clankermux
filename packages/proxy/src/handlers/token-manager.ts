@@ -1482,6 +1482,8 @@ export type AnthropicBankedResetClaimDispatchOutcome =
 			cleared: AnthropicBankedResetWindow[];
 			/** ms epoch before which a still-pending claim should not be retried. */
 			nextAttemptAt: number | null;
+			/** ms epoch from which a still-pending claim is no longer replayed; null once resolved. */
+			replayUntil: number | null;
 			windowsRestored: boolean;
 			statusRefreshed: boolean;
 	  }
@@ -1501,6 +1503,8 @@ export type AnthropicBankedResetClaimDispatchOutcome =
 			message: string;
 			pendingRequestId: string;
 			pendingGrantId: string;
+			/** ms epoch at which that claim is given up and stops blocking. */
+			pendingReplayUntil: number;
 	  };
 
 // Anthropic banked resets (Claude Code's `cedar_ember`): a status read on the

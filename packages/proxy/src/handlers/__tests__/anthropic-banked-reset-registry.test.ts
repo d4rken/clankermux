@@ -40,6 +40,7 @@ function completed(): AnthropicBankedResetClaimDispatchOutcome {
 		resetsLeft: 1,
 		cleared: ["seven_day"],
 		nextAttemptAt: null,
+		replayUntil: null,
 		windowsRestored: true,
 		statusRefreshed: true,
 	};

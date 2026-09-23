@@ -72,6 +72,7 @@ function completed(
 		resetsLeft: 1,
 		cleared: ["seven_day"],
 		nextAttemptAt: null,
+		replayUntil: null,
 		windowsRestored: true,
 		statusRefreshed: true,
 		...overrides,
@@ -156,6 +157,7 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 					errorMessage: "Banked-reset claim was rate-limited",
 				},
 				nextAttemptAt: NOW + 60_000,
+				replayUntil: NOW + 10 * 60_000,
 				windowsRestored: false,
 				statusRefreshed: false,
 			}),
@@ -169,7 +171,32 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 			status: "pending",
 			result: "rate_limited",
 			nextAttemptAt: new Date(NOW + 60_000).toISOString(),
+			replayUntil: new Date(NOW + 10 * 60_000).toISOString(),
 		});
+	});
+
+	it("reports a claim given up when its replay window closed", async () => {
+		const claim = mock(async () =>
+			completed({
+				ledgerStatus: "failed",
+				result: null,
+				reason: "unconfirmed",
+				cleared: [],
+				windowsRestored: false,
+				statusRefreshed: false,
+			}),
+		);
+		const res = await createAnthropicBankedResetClaimHandler(dbOps({}), claim)(
+			post({ grantId: "g1", requestId: "r1" }),
+			"acct-1",
+		);
+		const body = await res.json();
+		expect(body).toMatchObject({
+			status: "failed",
+			reason: "unconfirmed",
+			replayUntil: null,
+		});
+		expect(body.message).toContain("start a new one");
 	});
 
 	it("reports a never-sent claim with its recorded refusal, not as given up", async () => {
@@ -237,6 +264,7 @@ describe("POST /api/accounts/:id/banked-resets/claim — pending claim", () => {
 			message: "An earlier claim is unconfirmed",
 			pendingRequestId: "req-pending",
 			pendingGrantId: "g0",
+			pendingReplayUntil: NOW + 10 * 60_000,
 		}));
 		const res = await createAnthropicBankedResetClaimHandler(
 			dbOps({}),
@@ -247,6 +275,7 @@ describe("POST /api/accounts/:id/banked-resets/claim — pending claim", () => {
 			message: "An earlier claim is unconfirmed",
 			pendingRequestId: "req-pending",
 			pendingGrantId: "g0",
+			pendingReplayUntil: new Date(NOW + 10 * 60_000).toISOString(),
 		});
 	});
 });

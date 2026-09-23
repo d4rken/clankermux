@@ -19,11 +19,12 @@ import {
 	USAGE_RATE_LIMITED_DEFAULT_MS,
 } from "@clankermux/providers";
 import { makeAccount, tempDbTracker } from "@clankermux/test-support";
-import type {
-	Account,
-	AccountIdentity,
-	AnthropicBankedResetClaimResult,
-	AnthropicBankedResetStatus,
+import {
+	type Account,
+	type AccountIdentity,
+	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
+	type AnthropicBankedResetClaimResult,
+	type AnthropicBankedResetStatus,
 } from "@clankermux/types";
 import {
 	AnthropicBankedResetCoordinator,
@@ -1114,5 +1115,243 @@ describe("a pause that cannot be read before the POST", () => {
 		);
 		expect(row?.status).toBe("pending");
 		expect(row?.next_attempt_at).toBe(NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS);
+	});
+});
+
+describe("the replay window", () => {
+	const WINDOW = ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS;
+	const unanswered = async () =>
+		claimResult({ result: "error", httpStatus: null, errorMessage: "timeout" });
+
+	async function openUnconfirmed(requestId: string): Promise<void> {
+		claimImpl = unanswered;
+		const first = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId,
+		});
+		expect(first.status === "completed" && first.ledgerStatus).toBe("pending");
+		expect(first.status === "completed" && first.replayUntil).toBe(
+			NOW + WINDOW,
+		);
+		claim.mockClear();
+	}
+
+	it("replays a manual claim with its request id at 9m59s", async () => {
+		await openUnconfirmed("req-window");
+		clock = NOW + 9 * 60_000 + 59_000;
+		claimImpl = async () => claimResult({ result: "already_used" });
+		const replay = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-window",
+		});
+		expect(claim.mock.calls.map((call) => call[2].requestId)).toEqual([
+			"req-window",
+		]);
+		expect(replay.status === "completed" && replay.ledgerStatus).toBe(
+			"already_used",
+		);
+	});
+
+	it("resolves a manual claim failed/unconfirmed at 10 minutes, without a POST", async () => {
+		await openUnconfirmed("req-window");
+		clock = NOW + WINDOW;
+		const late = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-window",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(late).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+			result: null,
+			replayUntil: null,
+		});
+		const row = await realDbOps.getAnthropicBankedResetEventByRequestId(
+			ACCOUNT_ID,
+			"req-window",
+		);
+		expect(row?.status).toBe("failed");
+		expect(row?.reason).toBe("unconfirmed");
+		expect(row?.error_message).toContain("timeout");
+	});
+
+	it("records the answer to a claim given up while its POST was in flight", async () => {
+		claimImpl = async () => {
+			clock = NOW + WINDOW;
+			await realDbOps.expireStaleAnthropicBankedResetAttempts(clock);
+			return claimResult();
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-in-flight",
+		});
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"reset",
+		);
+		expect(
+			(
+				await realDbOps.getAnthropicBankedResetEventByRequestId(
+					ACCOUNT_ID,
+					"req-in-flight",
+				)
+			)?.status,
+		).toBe("reset");
+	});
+
+	it("does not replay an auto claim at 10 minutes", async () => {
+		const auto = await realDbOps.claimAnthropicBankedResetAutoAttempt({
+			accountId: ACCOUNT_ID,
+			accountName: "claude-one",
+			grantId: "g1",
+			grantEndsAt: null,
+			cause: "weekly-limit",
+			now: NOW - WINDOW,
+		});
+		if (!auto) throw new Error("expected an auto claim");
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: auto.requestId,
+			autoApply: { ledgerRowId: auto.id, cause: "weekly-limit", replay: true },
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"failed",
+		);
+	});
+
+	it("holds the account's claim guard until the window closes, then lets a new claim through", async () => {
+		await openUnconfirmed("req-old");
+		clock = NOW + WINDOW - 1;
+		const blocked = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-new",
+		});
+		expect(blocked).toMatchObject({
+			status: "failed",
+			code: "pending_claim",
+			pendingRequestId: "req-old",
+			pendingReplayUntil: NOW + WINDOW,
+		});
+		expect(claim).not.toHaveBeenCalled();
+
+		clock = NOW + WINDOW;
+		claimImpl = async () => claimResult();
+		const fresh = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-new",
+		});
+		expect(claim.mock.calls.map((call) => call[2].requestId)).toEqual([
+			"req-new",
+		]);
+		expect(fresh.status === "completed" && fresh.ledgerStatus).toBe("reset");
+		expect(
+			(
+				await realDbOps.getAnthropicBankedResetEventByRequestId(
+					ACCOUNT_ID,
+					"req-old",
+				)
+			)?.reason,
+		).toBe("unconfirmed");
+	});
+
+	it("sends nothing when the window closes between the ledger sweep and the POST", async () => {
+		await openUnconfirmed("req-slow");
+		clock = NOW + WINDOW - 1;
+		dbOverrides = {
+			getAccountPauseMarker: async () => {
+				clock = NOW + WINDOW;
+				return {
+					paused: false,
+					pauseReason: null,
+					autoPauseOnOverageEnabled: false,
+					pauseEpoch: PAUSE_EPOCH,
+					pauseChangedAt: null,
+				};
+			},
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-slow",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
+	it("does not retry after an auth error once the window has closed", async () => {
+		await openUnconfirmed("req-401-late");
+		clock = NOW + WINDOW - 1;
+		claimImpl = async () => {
+			clock = NOW + WINDOW;
+			return claimResult({
+				result: "auth_error",
+				httpStatus: 401,
+				errorMessage: "401",
+			});
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-401-late",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
+	it("gives up a claim past its window whose token refresh after an auth error failed", async () => {
+		await openUnconfirmed("req-401-norefresh");
+		clock = NOW + WINDOW - 1;
+		refreshAccessTokenSafe.mockImplementationOnce(async () => {
+			clock = NOW + WINDOW;
+			throw new Error("refresh failed");
+		});
+		claimImpl = async () =>
+			claimResult({
+				result: "auth_error",
+				httpStatus: 401,
+				errorMessage: "401",
+			});
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-401-norefresh",
+		});
+		expect(claim).toHaveBeenCalledTimes(1);
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "unconfirmed",
+		});
+	});
+
+	it("records a new manual claim whose window closes before its POST as not sent", async () => {
+		dbOverrides = {
+			getAccountPauseMarker: async () => {
+				clock = NOW + WINDOW;
+				return {
+					paused: false,
+					pauseReason: null,
+					autoPauseOnOverageEnabled: false,
+					pauseEpoch: PAUSE_EPOCH,
+					pauseChangedAt: null,
+				};
+			},
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-never-left",
+		});
+		expect(claim).not.toHaveBeenCalled();
+		expect(outcome).toMatchObject({
+			status: "completed",
+			ledgerStatus: "failed",
+			reason: "not_sent",
+		});
 	});
 });

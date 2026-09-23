@@ -955,9 +955,18 @@ export interface AnthropicBankedResetClaimResult {
 }
 
 /**
+ * How long after its ledger row opened a banked-reset claim is replayed under
+ * the same request id. Claude Code mints a new id 10 minutes after the first
+ * unconfirmed POST; a replay the server no longer deduplicates could spend a
+ * second reset, so a claim still unconfirmed then is given up.
+ */
+export const ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS = 10 * 60_000;
+
+/**
  * Lifecycle status of an `anthropic_banked_reset_events` ledger row. Every
  * claim is written `pending` before its POST; the rest are resolutions, with
- * `failed` for a claim that stayed unconfirmed for an hour.
+ * `failed` for a claim never sent (`not_sent`) or still unconfirmed when its
+ * replay window closed (`unconfirmed`).
  */
 export type AnthropicBankedResetEventStatus =
 	| "pending"
@@ -1026,7 +1035,10 @@ export interface AnthropicBankedResetClaimResponse {
 	status: AnthropicBankedResetEventStatus;
 	/** What the server or transport answered; null when a resolved row was returned without a new request. */
 	result: AnthropicBankedResetClaimResult["result"] | null;
-	/** `not_sent` on a claim refused before its request was ever sent. */
+	/**
+	 * `not_sent` on a claim refused before its request was ever sent,
+	 * `unconfirmed` on one given up when its replay window closed.
+	 */
 	reason: string | null;
 	/** The ledger row's recorded error, e.g. why a claim was not sent. */
 	errorMessage?: string | null;
@@ -1035,6 +1047,8 @@ export interface AnthropicBankedResetClaimResponse {
 	cooldownUntil: string | null; // ISO
 	/** When a pending claim may be retried; null once resolved. */
 	nextAttemptAt: string | null; // ISO
+	/** Until when a pending claim may be retried with its request id; null once resolved. */
+	replayUntil: string | null; // ISO
 	/** Whether the banked-reset status was re-read after a restoring claim. */
 	statusRefreshed: boolean;
 }

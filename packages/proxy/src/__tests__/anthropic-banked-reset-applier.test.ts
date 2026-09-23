@@ -366,6 +366,7 @@ function completedOutcome(): AnthropicBankedResetClaimDispatchOutcome {
 		resetsLeft: 1,
 		cleared: [],
 		nextAttemptAt: null,
+		replayUntil: null,
 		windowsRestored: true,
 		statusRefreshed: true,
 	};
