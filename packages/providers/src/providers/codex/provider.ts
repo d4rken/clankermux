@@ -30,6 +30,13 @@ import {
 	clampChatGptBackendReasoningEffort,
 	sanitizeChatGptBackendBody,
 } from "./backend-params";
+import {
+	applyCodexSessionIdHeader,
+	CODEX_CLIENT_ID,
+	CODEX_OAUTH_SCOPES,
+	codexInferenceHeaders,
+	codexTokenEndpointHeaders,
+} from "./client-identity";
 import { extractCodexIdentity } from "./identity";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
@@ -66,7 +73,7 @@ function sanitizeResponseHeaders(headers: Headers): Headers {
 // wording, so a genuinely dead token reliably surfaces the reauth prompt.
 // Only refresh-token-specific codes belong here. `invalid_client` and
 // `unauthorized_client` describe the OAuth CLIENT/application (Codex uses a
-// fixed shared CLIENT_ID), NOT an individual account's refresh token — treating
+// fixed shared CODEX_CLIENT_ID), NOT an individual account's refresh token — treating
 // them as OAuthRefreshTokenError would pause EVERY account with a reauth prompt
 // that reauth (through the same client) can't fix, and they'd stay paused after
 // the client config is corrected. They deliberately fall through to the generic
@@ -78,7 +85,6 @@ const TERMINAL_OAUTH_ERROR_CODES = new Set([
 ]);
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_DEFAULT_ENDPOINT =
 	"https://chatgpt.com/backend-api/codex/responses";
 /** The ChatGPT/Codex backend host (the default endpoint's host). */
@@ -95,63 +101,6 @@ const OPENAI_PROMPT_CACHE_HOSTS = new Set([
  * (session: 19+45=64, convo: 17+45=62) while retaining 180 bits of digest.
  */
 const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
-// Codex CLI version advertised to the ChatGPT/Codex backend via the `Version`
-// header + User-Agent (see prepareHeaders / on-demand-fetch). The backend GATES
-// newer models behind a minimum client version: too-old here → 400 "The '<model>'
-// model requires a newer version of Codex." We override the real client's header
-// with this value, so it must track a version new enough for the models we route
-// (gpt-5.6-sol needs >= 0.144; gpt-6-astra carries `minimal_client_version:
-// 0.153.0` in the Codex catalog, gpt-6-sol and gpt-6-luna carry 0.155.0).
-// Bump this when a new Codex model 400s on the version gate.
-export const CODEX_VERSION = "0.155.1";
-export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
-
-/**
- * Exact SDK identity headers to drop before forwarding to the Codex backend.
- *
- * Deliberately an exact list rather than an `x-openai-client-` prefix sweep:
- * only this family identifies the calling SDK. Other `x-openai-*` headers
- * (`x-openai-internal-codex-responses-lite`, `x-openai-subagent`) are Codex
- * protocol surface and have to survive.
- */
-const SDK_FINGERPRINT_HEADERS: readonly string[] = [
-	"x-openai-client-arch",
-	"x-openai-client-id",
-	"x-openai-client-os",
-	"x-openai-client-user-agent",
-	"x-openai-client-version",
-];
-
-/**
- * Prefix for the Stainless generator's header family. A prefix rather than a
- * list because the suffixes are open-ended — the generator adds new ones
- * (`-retry-count`, `-timeout`, `-helper-method` …) as the SDK evolves, and an
- * enumeration would silently start leaking on the next SDK release.
- */
-const SDK_FINGERPRINT_HEADER_PREFIX = "x-stainless-";
-
-/**
- * Drop the calling SDK's identity headers from an outbound header set, in
- * place. `x-codex-*` continuity headers are untouched: the native Responses
- * passthrough forwards the Codex CLI's own turn/session state and the backend
- * needs it.
- */
-function stripSdkFingerprintHeaders(headers: Headers): void {
-	for (const name of SDK_FINGERPRINT_HEADERS) {
-		headers.delete(name);
-	}
-	// Collect before deleting — mutating a Headers object mid-iteration is not
-	// specified to be safe.
-	const stainless: string[] = [];
-	for (const [name] of headers) {
-		if (name.toLowerCase().startsWith(SDK_FINGERPRINT_HEADER_PREFIX)) {
-			stainless.push(name);
-		}
-	}
-	for (const name of stainless) {
-		headers.delete(name);
-	}
-}
 // Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
 // CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
 // silently breaks usage sampling ("Codex returned no usage headers (status
@@ -488,46 +437,6 @@ function nativeReasoningEffort(body: Record<string, unknown>): string | null {
 }
 
 /**
- * The ChatGPT Codex backend keys prompt caching on the `session-id` REQUEST
- * HEADER and ignores the body's `prompt_cache_key`, so the documented body
- * field is translated into the header the backend reads.
- *
- * Usable means: a string that is non-empty and printable ASCII after trim().
- * The upper bound is U+007E rather than "no control characters" because
- * `Headers.set` throws on code points above U+00FF, and a throw on this path
- * would drop the request onto the passthrough fallback.
- */
-const USABLE_SESSION_ID = /^[\x20-\x7E]+$/;
-
-function usableSessionId(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const trimmed = value.trim();
-	if (trimmed.length === 0 || !USABLE_SESSION_ID.test(trimmed))
-		return undefined;
-	return trimmed;
-}
-
-/**
- * Derives `session-id` from `promptCacheKey` unless the client already supplied
- * a usable one of its own, which is never overwritten. An inbound value that is
- * present but unusable is DELETED, not forwarded: `headers` is a copy of the
- * inbound set, so skipping it would relay the very value that was rejected.
- * Only call this for accounts that reach the ChatGPT backend.
- */
-function applyCodexSessionIdHeader(
-	headers: Headers,
-	promptCacheKey: unknown,
-): void {
-	if (usableSessionId(headers.get("session-id"))) return;
-	const derived = usableSessionId(promptCacheKey);
-	if (derived) {
-		headers.set("session-id", derived);
-	} else {
-		headers.delete("session-id");
-	}
-}
-
-/**
  * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
  * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
  * only attach it when the account resolves to OpenAI's own hosts.
@@ -581,14 +490,13 @@ export class CodexProvider extends BaseProvider {
 		const body = new URLSearchParams({
 			grant_type: "refresh_token",
 			refresh_token: account.refresh_token,
-			client_id: CLIENT_ID,
-			scope:
-				"openid profile email offline_access api.connectors.read api.connectors.invoke",
+			client_id: CODEX_CLIENT_ID,
+			scope: CODEX_OAUTH_SCOPES.join(" "),
 		});
 
 		const response = await fetch(TOKEN_URL, {
 			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			headers: codexTokenEndpointHeaders(),
 			body: body.toString(),
 		});
 
@@ -681,37 +589,7 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	prepareHeaders(headers: Headers, accessToken?: string): Headers {
-		const newHeaders = new Headers(headers);
-
-		// Remove client auth and Anthropic-specific headers
-		newHeaders.delete("authorization");
-		newHeaders.delete("anthropic-version");
-		newHeaders.delete("anthropic-dangerous-direct-browser-access");
-		newHeaders.delete("anthropic-beta");
-		newHeaders.delete("x-api-key");
-		newHeaders.delete("host");
-
-		// Remove the calling SDK's identity fingerprint. Below we claim to be the
-		// Codex CLI (User-Agent + originator), but the client that got here is
-		// usually Claude Code on the Stainless-generated Anthropic SDK, which
-		// attaches the whole `x-stainless-*` family (see the header block in
-		// auto-refresh-scheduler.ts, copied from real CLI traffic). Forwarding it
-		// hands the backend two contradictory identities for one request: an
-		// `x-stainless-*` set is an SDK signal in its own right, so leaving it on
-		// is what makes the persona incoherent rather than merely redundant.
-		// Same applies to opencode and anything else on the ai-sdk.
-		stripSdkFingerprintHeaders(newHeaders);
-
-		// Set Codex-required headers
-		if (accessToken) {
-			newHeaders.set("Authorization", `Bearer ${accessToken}`);
-		}
-		newHeaders.set("Version", CODEX_VERSION);
-		newHeaders.set("Openai-Beta", "responses=experimental");
-		newHeaders.set("User-Agent", CODEX_USER_AGENT);
-		newHeaders.set("originator", "codex_cli_rs");
-
-		return newHeaders;
+		return codexInferenceHeaders(headers, accessToken);
 	}
 
 	async transformRequestBody(

@@ -1,6 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { UsageData, UsageWindow } from "../../usage-fetcher";
-import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
+import { codexSideCallHeaders } from "./client-identity";
 import { type CodexCreditsInfo, normalizeCodexWindow } from "./usage";
 
 const log = new Logger("CodexUsageStatus");
@@ -230,22 +230,6 @@ export function parseCodexUsageStatus(
 	};
 }
 
-function createUsageStatusHeaders(
-	accessToken: string,
-	chatgptAccountId: string | null,
-): Headers {
-	const headers = new Headers({
-		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
-		Version: CODEX_VERSION,
-		"User-Agent": CODEX_USER_AGENT,
-		originator: "codex_cli_rs",
-	});
-	const accountId = chatgptAccountId?.trim();
-	if (accountId) headers.set("ChatGPT-Account-ID", accountId);
-	return headers;
-}
-
 /**
  * Read Codex free usage/rate-limit status via `GET /backend-api/wham/usage`.
  * Zero quota cost. Fail-clean: any non-200, parse error, or network throw
@@ -271,7 +255,7 @@ export async function fetchCodexUsageStatus(
 		const response = await fetchImpl(CODEX_USAGE_STATUS_ENDPOINT, {
 			method: "GET",
 			signal: controller.signal,
-			headers: createUsageStatusHeaders(accessToken, chatgptAccountId),
+			headers: codexSideCallHeaders(accessToken, chatgptAccountId?.trim()),
 		});
 
 		if (!response.ok) {

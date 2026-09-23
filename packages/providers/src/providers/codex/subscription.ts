@@ -1,5 +1,5 @@
 import { Logger } from "@clankermux/logger";
-import { CODEX_USER_AGENT, CODEX_VERSION } from "./provider";
+import { codexSideCallHeaders } from "./client-identity";
 
 const log = new Logger("CodexSubscription");
 
@@ -197,25 +197,6 @@ export function renewalCadenceFromBillingPeriod(
 }
 
 /**
- * The Codex CLI's own identity, NOT browser-shaped headers: a comparison
- * project measured browser spoofing drawing a Cloudflare challenge on this
- * host where the CLI identity got a 200.
- */
-function createSubscriptionHeaders(
-	accessToken: string,
-	chatgptAccountId: string,
-): Headers {
-	return new Headers({
-		Authorization: `Bearer ${accessToken}`,
-		Accept: "application/json",
-		Version: CODEX_VERSION,
-		"User-Agent": CODEX_USER_AGENT,
-		originator: "codex_cli_rs",
-		"ChatGPT-Account-ID": chatgptAccountId,
-	});
-}
-
-/**
  * Read one workspace's subscription record. Zero quota cost. Fail-clean: any
  * transport error, non-200 status or unusable body returns `ok: false` (never
  * throws), so the caller keeps whatever it already stored.
@@ -243,7 +224,10 @@ export async function fetchCodexSubscription(
 		const response = await fetchImpl(url, {
 			method: "GET",
 			signal: controller.signal,
-			headers: createSubscriptionHeaders(accessToken, accountId),
+			// The Codex CLI's own identity, NOT browser-shaped headers: a comparison
+			// project measured browser spoofing drawing a Cloudflare challenge on
+			// this host where the CLI identity got a 200.
+			headers: codexSideCallHeaders(accessToken, accountId),
 		});
 
 		if (response.status === 404) {

@@ -14,6 +14,7 @@ import {
 } from "@clankermux/database";
 import { OAuthFlow } from "@clankermux/oauth-flow";
 import { usageCache } from "@clankermux/providers";
+import * as codexProviders from "@clankermux/providers/codex";
 import {
 	clearAllPendingRotationsForTests,
 	getPendingRotation,
@@ -217,10 +218,9 @@ describe("OAuth Handler - Backward Compatibility", () => {
 // Codex reauth handler
 // ---------------------------------------------------------------------------
 
-// Mock initiateCodexDeviceFlow so tests never hit the network.
-// bun:test mock.module must be called at top-level (before imports resolve),
-// so we set up a module-level mock here and override its return value per-test
-// via the exported spy.
+// Stub the Codex device flow so tests never hit the network. Spies, not
+// mock.module: a module mock is process-wide and cannot be undone, and through
+// the barrel's re-exports it replaced the real functions for every later file.
 const mockInitiateCodexDeviceFlow = mock(async () => ({
 	deviceAuthId: "test-device-auth-id",
 	userCode: "TEST-CODE",
@@ -228,17 +228,27 @@ const mockInitiateCodexDeviceFlow = mock(async () => ({
 	interval: 5,
 }));
 
-mock.module("@clankermux/providers/codex", () => ({
-	initiateCodexDeviceFlow: mockInitiateCodexDeviceFlow,
-	pollCodexForToken: mock(async () => ({
-		access_token: "at",
-		refresh_token: "rt",
-		expires_in: 3600,
-	})),
-	// The handler calls this on the success path before writing the tokens;
-	// without it the whole post-token block throws and never runs.
-	extractCodexIdentity: () => null,
-}));
+const codexSpies: { mockRestore(): void }[] = [];
+beforeAll(() => {
+	codexSpies.push(
+		spyOn(codexProviders, "initiateCodexDeviceFlow").mockImplementation(
+			mockInitiateCodexDeviceFlow,
+		),
+		spyOn(codexProviders, "pollCodexForToken").mockImplementation(async () => ({
+			access_token: "at",
+			refresh_token: "rt",
+			expires_in: 3600,
+		})),
+		// The handler calls this on the success path before writing the tokens;
+		// without it the whole post-token block throws and never runs.
+		spyOn(codexProviders, "extractCodexIdentity").mockImplementation(
+			() => null,
+		),
+	);
+});
+afterAll(() => {
+	for (const spy of codexSpies.splice(0)) spy.mockRestore();
+});
 
 describe("createCodexReauthHandler", () => {
 	let dbOps: DatabaseOperations;

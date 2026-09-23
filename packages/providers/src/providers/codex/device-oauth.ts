@@ -1,10 +1,14 @@
 // Codex device code auth flow (RFC 8628 variant)
 // Matches codex-rs/login/src/device_code_auth.rs
 import { Logger } from "@clankermux/logger";
+import {
+	CODEX_CLIENT_ID,
+	codexDeviceAuthHeaders,
+	codexTokenEndpointHeaders,
+} from "./client-identity";
 
 const log = new Logger("CodexDeviceOAuth");
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_BASE = "https://auth.openai.com";
 const USERCODE_ENDPOINT = `${AUTH_BASE}/api/accounts/deviceauth/usercode`;
 const TOKEN_POLL_ENDPOINT = `${AUTH_BASE}/api/accounts/deviceauth/token`;
@@ -39,8 +43,8 @@ export interface CodexTokenResponse {
 export async function initiateCodexDeviceFlow(): Promise<CodexDeviceFlowResult> {
 	const response = await fetch(USERCODE_ENDPOINT, {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ client_id: CLIENT_ID }),
+		headers: codexDeviceAuthHeaders(),
+		body: JSON.stringify({ client_id: CODEX_CLIENT_ID }),
 	});
 
 	if (!response.ok) {
@@ -84,7 +88,7 @@ export async function pollCodexForToken(
 
 		const response = await fetch(TOKEN_POLL_ENDPOINT, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: codexDeviceAuthHeaders(),
 			body: JSON.stringify({
 				device_auth_id: deviceAuthId,
 				user_code: userCode,
@@ -132,13 +136,13 @@ async function exchangeCodexDeviceCode(
 		grant_type: "authorization_code",
 		code: authorizationCode,
 		redirect_uri: DEVICE_REDIRECT_URI,
-		client_id: CLIENT_ID,
+		client_id: CODEX_CLIENT_ID,
 		code_verifier: codeVerifier,
 	});
 
 	const response = await fetch(TOKEN_EXCHANGE_ENDPOINT, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: codexTokenEndpointHeaders(),
 		body: body.toString(),
 	});
 
