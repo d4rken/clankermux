@@ -16,22 +16,24 @@ import {
 import { QwenProvider } from "../provider";
 
 const INFERENCE_HEADERS: Array<[string, string]> = [
+	["accept", "application/json"],
 	["accept-encoding", "gzip, deflate"],
 	["accept-language", "*"],
 	["connection", "keep-alive"],
 	["content-type", "application/json"],
 	["sec-fetch-mode", "cors"],
-	["user-agent", "QwenCode/sdk-typescript-v0.1.7 (darwin; arm64)"],
+	["user-agent", "QwenCode/0.24.4 (linux; x64)"],
 	["x-dashscope-authtype", "qwen-oauth"],
 	["x-dashscope-cachecontrol", "enable"],
-	["x-dashscope-useragent", "QwenCode/sdk-typescript-v0.1.7 (darwin; arm64)"],
-	["x-stainless-arch", "arm64"],
+	["x-dashscope-useragent", "QwenCode/0.24.4 (linux; x64)"],
+	["x-stainless-arch", "x64"],
 	["x-stainless-lang", "js"],
-	["x-stainless-os", "MacOS"],
+	["x-stainless-os", "Linux"],
 	["x-stainless-package-version", "5.11.0"],
 	["x-stainless-retry-count", "0"],
 	["x-stainless-runtime", "node"],
 	["x-stainless-runtime-version", "v22.17.0"],
+	["x-stainless-timeout", "120"],
 ];
 
 /** What Claude Code 2.1.280 sends on /v1/messages, trimmed to headers only. */
@@ -102,15 +104,23 @@ describe("Qwen OAuth identity at the fetch boundary", () => {
 		);
 	}
 
-	/** Form fields in wire order, with the per-call PKCE values masked. */
-	function formFields(index = 0): Array<[string, string]> {
-		return Array.from(
-			new URLSearchParams(String(calls[index]?.[1]?.body)).entries(),
-		).map(([name, value]) =>
-			name === "code_challenge" || name === "code_verifier"
-				? [name, "<pkce>"]
-				: [name, value],
+	/** The form body as sent, with the per-call PKCE challenge masked. */
+	function wireBody(index = 0): string {
+		return String(calls[index]?.[1]?.body).replace(
+			/code_challenge=[\w-]+/,
+			"code_challenge=<pkce>",
 		);
+	}
+
+	/** Headers sorted, with the per-request id checked as a v4 UUID and masked. */
+	function wireHeaders(index = 0): Array<[string, string]> {
+		return sorted(calls[index]?.[1]?.headers).map(([name, value]) => {
+			if (name !== "x-request-id") return [name, value];
+			expect(value).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+			);
+			return [name, "<uuid>"];
+		});
 	}
 
 	beforeEach(() => {
@@ -132,19 +142,22 @@ describe("Qwen OAuth identity at the fetch boundary", () => {
 			interval: 5,
 		});
 		await initiateDeviceFlow();
+		await initiateDeviceFlow();
 		expect(calls[0]?.[0]).toBe(
 			"https://chat.qwen.ai/api/v1/oauth2/device/code",
 		);
 		expect(calls[0]?.[1]?.method).toBe("POST");
-		expect(sorted(calls[0]?.[1]?.headers)).toEqual([
+		expect(wireHeaders()).toEqual([
+			["accept", "application/json"],
 			["content-type", "application/x-www-form-urlencoded"],
+			["x-request-id", "<uuid>"],
 		]);
-		expect(formFields()).toEqual([
-			["client_id", "f0304373b74a44d2b584a3fb70ca9e56"],
-			["scope", "openid profile email model.completion"],
-			["code_challenge", "<pkce>"],
-			["code_challenge_method", "S256"],
-		]);
+		expect(wireBody()).toBe(
+			"client_id=f0304373b74a44d2b584a3fb70ca9e56&scope=openid%20profile%20email%20model.completion&code_challenge=<pkce>&code_challenge_method=S256",
+		);
+		expect(new Headers(calls[1]?.[1]?.headers).get("x-request-id")).not.toBe(
+			new Headers(calls[0]?.[1]?.headers).get("x-request-id"),
+		);
 	});
 
 	it("device-code token poll", async () => {
@@ -158,30 +171,27 @@ describe("Qwen OAuth identity at the fetch boundary", () => {
 		await pollForToken("dc", { verifier: "v", challenge: "c" }, 0, 1);
 		expect(calls[0]?.[0]).toBe("https://chat.qwen.ai/api/v1/oauth2/token");
 		expect(calls[0]?.[1]?.method).toBe("POST");
-		expect(sorted(calls[0]?.[1]?.headers)).toEqual([
+		expect(wireHeaders()).toEqual([
+			["accept", "application/json"],
 			["content-type", "application/x-www-form-urlencoded"],
 		]);
-		expect(formFields()).toEqual([
-			["grant_type", "urn:ietf:params:oauth:grant-type:device_code"],
-			["client_id", "f0304373b74a44d2b584a3fb70ca9e56"],
-			["device_code", "dc"],
-			["code_verifier", "<pkce>"],
-		]);
+		expect(wireBody()).toBe(
+			"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id=f0304373b74a44d2b584a3fb70ca9e56&device_code=dc&code_verifier=v",
+		);
 	});
 
 	it("refresh-token grant", async () => {
 		stubFetch({ access_token: "at2", refresh_token: "rt2", expires_in: 21600 });
-		await refreshQwenTokens("rt");
+		await refreshQwenTokens("rt~*");
 		expect(calls[0]?.[0]).toBe("https://chat.qwen.ai/api/v1/oauth2/token");
 		expect(calls[0]?.[1]?.method).toBe("POST");
-		expect(sorted(calls[0]?.[1]?.headers)).toEqual([
+		expect(wireHeaders()).toEqual([
+			["accept", "application/json"],
 			["content-type", "application/x-www-form-urlencoded"],
 		]);
-		expect(formFields()).toEqual([
-			["grant_type", "refresh_token"],
-			["client_id", "f0304373b74a44d2b584a3fb70ca9e56"],
-			["refresh_token", "rt"],
-		]);
+		expect(wireBody()).toBe(
+			"grant_type=refresh_token&refresh_token=rt~*&client_id=f0304373b74a44d2b584a3fb70ca9e56",
+		);
 	});
 });
 
