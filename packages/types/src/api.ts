@@ -5,6 +5,7 @@ import type {
 	ProjectAttributionSource,
 	ToolCallStat,
 } from "./request";
+import type { SdkBridgeRefusedField } from "./sdk-bridge-field-policy";
 
 export interface RequestMeta {
 	id: string;
@@ -124,6 +125,12 @@ export interface RequestMeta {
 	 * Null when nothing was excluded on that ground.
 	 */
 	officialAnthropicExcluded?: string | null;
+	/**
+	 * For an `"sdk-bridge"` request, the body field the bridge would refuse.
+	 * Route construction then leaves official Anthropic accounts out, so another
+	 * candidate that can honour the field serves the request.
+	 */
+	sdkBridgeRefusedField?: SdkBridgeRefusedField | null;
 	/**
 	 * The SDK bridge turn this request is an inner model call of. Set only from
 	 * the in-process inner context, never from a header.

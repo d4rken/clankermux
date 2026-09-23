@@ -513,7 +513,7 @@ for (const endpoint of ["responses", "chat"] as const) {
 			});
 		});
 
-		it("refuses a tool_choice that forces a tool, naming it, before Claude Code starts", async () => {
+		it("refuses a tool_choice that forces a tool, naming it, while routing", async () => {
 			const h = await harness();
 			const seen = await read(
 				await send(h.gw, endpoint, undefined, {
@@ -524,11 +524,18 @@ for (const endpoint of ["responses", "chat"] as const) {
 
 			expect(seen.status).toBe(400);
 			expect(jsonError(seen).message).toContain('tool_choice "any"');
+			// Route construction refused it: no turn was admitted, so there is
+			// no leg, and the refusal is the request's routing attempt.
 			expect(h.sdk.queries).toEqual([]);
-			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
-				http_status: 400,
-				error_phase: "pre_head",
-			});
+			expect(await h.gw.query("SELECT id FROM sdk_bridge_turns", [])).toEqual(
+				[],
+			);
+			expect(
+				await h.gw.query(
+					"SELECT kind, status FROM routing_attempts WHERE kind = 'local_reject'",
+					[],
+				),
+			).toEqual([{ kind: "local_reject", status: 400 }]);
 		});
 
 		if (endpoint === "chat")

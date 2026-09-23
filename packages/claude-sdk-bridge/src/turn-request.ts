@@ -1,5 +1,8 @@
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
-import type { SdkBridgeTranslationGaps } from "@clankermux/types";
+import {
+	type SdkBridgeTranslationGaps,
+	sdkBridgeRefusedField,
+} from "@clankermux/types";
 import { type BridgeError, bridgeErrors } from "./errors";
 
 export type Block = { type: string; [key: string]: unknown };
@@ -139,14 +142,12 @@ function parseTools(
 }
 
 const IGNORED_FIELDS = ["temperature", "top_p"] as const;
-const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
 
 /**
  * What a bridged turn does with the request fields Claude Code sets itself:
  * - `max_tokens` is honoured, as Claude Code's own output limit;
  * - `temperature` and `top_p` are accepted and not applied;
- * - stop sequences, and a `tool_choice` that forces or forbids tool use, are
- *   refused, since the answer would not be the one the client asked for.
+ * - the fields `sdkBridgeRefusedField` names are refused.
  * `gaps` names what the body cannot show: an adapter's default `max_tokens`
  * is no limit of the client's, and a dropped field was still asked for.
  */
@@ -154,16 +155,8 @@ function applyFieldPolicy(
 	body: Record<string, unknown>,
 	gaps: SdkBridgeTranslationGaps | null,
 ): { maxOutputTokens: number | null; ignoredFields: string[] } | BridgeError {
-	const stops = body.stop_sequences;
-	if (Array.isArray(stops) ? stops.length > 0 : stops != null)
-		return bridgeErrors.invalid(
-			"stop_sequences (stop in Chat Completions) is not supported through the SDK bridge",
-		);
-	const choice = isRecord(body.tool_choice) ? body.tool_choice.type : null;
-	if (typeof choice === "string" && FORCING_TOOL_CHOICES.has(choice))
-		return bridgeErrors.invalid(
-			`tool_choice "${choice}" is not supported through the SDK bridge; Claude Code decides when to call tools`,
-		);
+	const refused = sdkBridgeRefusedField(body);
+	if (refused) return bridgeErrors.invalid(refused.message);
 	let maxOutputTokens: number | null = null;
 	if (body.max_tokens !== undefined && !gaps?.maxTokensDefaulted) {
 		const limit = body.max_tokens;

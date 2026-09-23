@@ -326,6 +326,67 @@ describe("Chat capability boundary", () => {
 	});
 });
 
+describe("fields the SDK bridge refuses", () => {
+	const refusal = {
+		field: "stop_sequences",
+		message: "stop_sequences is not supported through the SDK bridge",
+	} as const;
+	const mixed = {
+		rules: [],
+		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+		chatRequirements: { fields: ["stop"] },
+	};
+
+	it("leave a bridged account out of a route with another candidate", () => {
+		const route = build({
+			...mixed,
+			bridgesOfficialAnthropic: true,
+			sdkBridgeRefusal: refusal,
+		});
+		expect(route.accountIds()).toEqual(["o"]);
+		expect(JSON.parse(route.snapshot).sdkBridgeRefusedField).toBe(
+			"stop_sequences",
+		);
+	});
+
+	it("raise the bridge's 400 when nothing else remains", () => {
+		expect(() =>
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				bridgesOfficialAnthropic: true,
+				sdkBridgeRefusal: refusal,
+			}),
+		).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "invalid_request_error",
+				param: "stop_sequences",
+				message: refusal.message,
+			}),
+		);
+	});
+
+	it("change nothing without a bridge serving the account", () => {
+		expect(
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				sdkBridgeRefusal: refusal,
+			}).accountIds(),
+		).toEqual(["a"]);
+		expect(
+			[
+				...build({
+					...mixed,
+					bridgesOfficialAnthropic: true,
+					sdkBridgeRefusal: null,
+				}).accountIds(),
+			].sort(),
+		).toEqual(["a", "o"]);
+	});
+});
+
 it("disabled accounts cannot be forced by header, global override, pin, or maintenance", () => {
 	const disabled = { ...c, disabled: true };
 	for (const restriction of [

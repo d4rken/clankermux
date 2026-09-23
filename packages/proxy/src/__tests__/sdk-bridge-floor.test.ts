@@ -429,6 +429,93 @@ describe("Chat Completions through the SDK bridge", () => {
 	});
 });
 
+describe("fields the SDK bridge refuses", () => {
+	const refusals = [
+		["stop_sequences", { stop_sequences: ["END"] }],
+		["tool_choice", { tool_choice: { type: "any" } }],
+	] as const;
+
+	it("leave the request to a candidate that is not bridged", async () => {
+		for (const [, body] of refusals) {
+			const bridge = makeFakeBridge();
+			harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+
+			const { response } = await run(flooredRequest(body), harness.ctx);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toEqual([]);
+			expect(sends(harness).map((r) => r.account_id)).toEqual(["other"]);
+			harness.restore();
+			harness = null;
+		}
+	});
+
+	it("answer 400 naming the field when only bridged accounts remain", async () => {
+		for (const [field, body] of refusals) {
+			const bridge = makeFakeBridge();
+			harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+			const { response, text } = await run(flooredRequest(body), harness.ctx);
+
+			expect(response.status).toBe(400);
+			const { error } = JSON.parse(text);
+			expect(error.type).toBe("invalid_request_error");
+			expect(error.param).toBe(field);
+			expect(error.message).toContain(field);
+			expect(bridge.starts).toEqual([]);
+			expect(harness.upstreamKeys).toEqual([]);
+			harness.restore();
+			harness = null;
+		}
+	});
+
+	it("answer a Chat request the same way", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+		const req = messagesRequest({ stream: true, stop_sequences: ["END"] });
+		setChatContext(req, {
+			requirements: { fields: ["stop"] },
+			defaultMaxTokens: 8192,
+			denyDirectOfficialAnthropic: true,
+		});
+
+		const { response, text } = await run(req, harness.ctx);
+
+		expect(response.status).toBe(400);
+		expect(JSON.parse(text).error.message).toContain(
+			"stop_sequences (stop in Chat Completions)",
+		);
+		expect(bridge.starts).toEqual([]);
+	});
+
+	it("leave a request without them bridged", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+
+		const { response } = await run(
+			flooredRequest({ stop_sequences: [], tool_choice: { type: "auto" } }),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(sends(harness).map((r) => r.account_id)).toEqual(["claude-a"]);
+	});
+
+	it("do not touch a direct request", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		const { response } = await run(
+			messagesRequest({ stop_sequences: ["END"] }),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
+	});
+});
+
 describe("SDK bridge continuations", () => {
 	const toolResults = {
 		messages: [
