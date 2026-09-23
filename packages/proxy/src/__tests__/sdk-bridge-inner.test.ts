@@ -173,6 +173,51 @@ describe("SDK bridge inner calls", () => {
 		expect(harness.upstreamKeys).toEqual([]);
 	});
 
+	it("route a planned [1m] model under the bare id Claude Code sends for it", async () => {
+		harness = await makeBridgeHarness([a, b]);
+		const oneMillion = plan({
+			candidates: [
+				{
+					accountId: a.id,
+					provider: "anthropic",
+					upstreamModel: `${MODEL}[1m]`,
+				},
+				{
+					accountId: b.id,
+					provider: "anthropic",
+					upstreamModel: `${MODEL}[1m]`,
+				},
+			],
+		});
+
+		const res = await dispatchProxyRequest(
+			innerRequest(innerContext({ plan: oneMillion }), { model: MODEL }),
+			new URL("https://proxy.local/v1/messages"),
+			harness.ctx,
+			KEY,
+			"outer",
+		);
+
+		expect(res.status).toBe(200);
+		const sends = routingAttempts(harness.ctx).filter(
+			(row) => row.kind === "upstream_send",
+		);
+		expect(sends.map((row) => [row.account_id, row.resolved_model])).toEqual([
+			[b.id, MODEL],
+		]);
+
+		const other = await dispatchProxyRequest(
+			innerRequest(innerContext({ plan: oneMillion }), {
+				model: "claude-opus-4-7",
+			}),
+			new URL("https://proxy.local/v1/messages"),
+			harness.ctx,
+			KEY,
+			"outer",
+		);
+		expect(other.status).toBe(403);
+	});
+
 	it("are refused once the turn's deadline has passed", async () => {
 		harness = await makeBridgeHarness([a, b]);
 

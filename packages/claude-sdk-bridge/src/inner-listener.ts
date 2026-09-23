@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import type {
-	SdkBridgeInnerContext,
-	SdkBridgeInnerOutcome,
+import {
+	type SdkBridgeInnerContext,
+	type SdkBridgeInnerOutcome,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 import type { BridgeLog } from "./types";
 
@@ -80,7 +81,14 @@ export class InnerListener {
 		const key = hash(token);
 		const entry: TokenEntry = {
 			context: Object.freeze({ ...context }),
-			models: new Set(context.plan.candidates.map((c) => c.upstreamModel)),
+			// Both forms of each planned model: Claude Code sends a `[1m]` model
+			// without its suffix.
+			models: new Set(
+				context.plan.candidates.flatMap((c) => [
+					c.upstreamModel,
+					sdkBridgeWireModel(c.upstreamModel),
+				]),
+			),
 			revoked: false,
 		};
 		this.tokens.set(key, entry);

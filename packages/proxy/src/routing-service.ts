@@ -16,6 +16,7 @@ import type {
 import {
 	getChatContext,
 	getSdkBridgeInnerMetaContext,
+	sdkBridgeCandidatesForModel,
 } from "@clankermux/types";
 import {
 	AccountIdentityChangedError,
@@ -443,9 +444,10 @@ async function initializeSdkBridgeInnerRoute(
 ): Promise<void> {
 	if (Date.now() > inner.deadlineAt)
 		throw new RoutingPolicyError("The SDK bridge turn's deadline has passed");
-	const planned = inner.plan.candidates.filter(
-		(c) => c.upstreamModel === model,
-	);
+	// A plan model with a `[1m]` suffix arrives bare: Claude Code resolved the
+	// suffix into its beta header. The call routes on the model it names, as a
+	// direct Claude Code request for the same catalogue entry does.
+	const planned = sdkBridgeCandidatesForModel(inner.plan, model);
 	if (!planned.length)
 		throw new RoutingPolicyError(
 			`Model "${model}" is not a destination model of this SDK bridge turn`,

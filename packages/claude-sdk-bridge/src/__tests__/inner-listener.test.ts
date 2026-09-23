@@ -140,6 +140,30 @@ describe("InnerListener", () => {
 		expect(outcomes[0]?.status).toBe(400);
 	});
 
+	it("accepts a planned [1m] model in the bare form Claude Code sends, and nothing wider", async () => {
+		const { inner, listener } = setup();
+		const plan = makePlan({
+			candidates: [
+				{
+					accountId: "acct-a",
+					provider: "anthropic",
+					upstreamModel: `${MODEL}[1m]`,
+				},
+			],
+		});
+		const { token } = listener.register({ ...context(), plan });
+		expect((await call(listener, token, { model: MODEL })).status).toBe(200);
+		expect(
+			(await call(listener, token, { model: `${MODEL}[1m]` })).status,
+		).toBe(200);
+		expect(
+			(await call(listener, token, { model: "claude-opus-5" })).status,
+		).toBe(400);
+		expect(inner.calls.map((c) => (c.body as { model: string }).model)).toEqual(
+			[MODEL, `${MODEL}[1m]`],
+		);
+	});
+
 	it("serves only the messages endpoints", async () => {
 		const { inner, listener } = setup();
 		const { token } = listener.register(context());

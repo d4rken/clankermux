@@ -58,6 +58,33 @@ export interface SdkBridgeRoutePlan {
 	readonly apiKeyName: string | null;
 }
 
+/**
+ * The model id Claude Code puts on the wire for a planned upstream model.
+ * Claude Code resolves a `[1m]` suffix itself (it turns on the 1M-context beta
+ * header) and sends the bare id:
+ *
+ *   "claude-fable-5-1[1m]" → "claude-fable-5-1"
+ *   "claude-sonnet-5"      → "claude-sonnet-5"
+ */
+export function sdkBridgeWireModel(upstreamModel: string): string {
+	return upstreamModel.replace(/\[1m\]$/i, "");
+}
+
+/**
+ * The plan candidates an inner call for `model` may use: those whose upstream
+ * model is `model`, either as planned or in the form Claude Code sends.
+ */
+export function sdkBridgeCandidatesForModel(
+	plan: SdkBridgeRoutePlan,
+	model: string,
+): SdkBridgeRouteCandidate[] {
+	return plan.candidates.filter(
+		(c) =>
+			c.upstreamModel === model ||
+			sdkBridgeWireModel(c.upstreamModel) === model,
+	);
+}
+
 /** Facts about the outer request that the bridge records and forwards. */
 export interface SdkBridgeTurnMeta {
 	/** The outer request id, which the client sees as `x-clankermux-request-id`. */
