@@ -4,7 +4,7 @@ import { Logger } from "@clankermux/logger";
 import {
 	CODEX_CLIENT_ID,
 	codexDeviceAuthHeaders,
-	codexTokenEndpointHeaders,
+	codexLoginTokenHeaders,
 } from "./client-identity";
 
 const log = new Logger("CodexDeviceOAuth");
@@ -142,7 +142,7 @@ async function exchangeCodexDeviceCode(
 
 	const response = await fetch(TOKEN_EXCHANGE_ENDPOINT, {
 		method: "POST",
-		headers: codexTokenEndpointHeaders(),
+		headers: codexLoginTokenHeaders(),
 		body: body.toString(),
 	});
 

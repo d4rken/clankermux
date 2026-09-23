@@ -54,9 +54,9 @@ describe("sendCodexNativePing", () => {
 		expect(headers.get("Authorization")).toBe("Bearer test-token");
 		expect(headers.get("Content-Type")).toBe("application/json");
 		expect(headers.get("Version")).toBe(CODEX_VERSION);
-		expect(headers.get("Openai-Beta")).toBe("responses=experimental");
+		expect(headers.get("Openai-Beta")).toBeNull();
 		expect(headers.get("User-Agent")).toBe(CODEX_USER_AGENT);
-		expect(headers.get("originator")).toBe("codex_cli_rs");
+		expect(headers.get("originator")).toBe("codex_exec");
 		expect(headers.get("Accept")).toBe("text/event-stream");
 	});
 

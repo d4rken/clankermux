@@ -98,7 +98,7 @@ describe("fetchCodexModelCatalog", () => {
 
 		const headers = new Headers(calls[0].init?.headers);
 		expect(headers.get("Authorization")).toBe("Bearer token-abc");
-		expect(headers.get("originator")).toBe("codex_cli_rs");
+		expect(headers.get("originator")).toBe("codex_exec");
 		expect(headers.get("ChatGPT-Account-ID")).toBe("acct-42");
 		expect(headers.get("User-Agent")).toBeTruthy();
 	});
