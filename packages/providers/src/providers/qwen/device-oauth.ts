@@ -5,6 +5,7 @@ import {
 	QWEN_OAUTH_CLIENT_ID,
 	QWEN_OAUTH_SCOPE,
 	qwenDeviceAuthorizationHeaders,
+	qwenFormBody,
 	qwenTokenHeaders,
 } from "./client-identity";
 
@@ -42,7 +43,7 @@ export interface QwenTokenResponse {
 export async function initiateDeviceFlow(): Promise<DeviceFlowResult> {
 	const pkce = await generatePKCE();
 
-	const body = new URLSearchParams({
+	const body = qwenFormBody({
 		client_id: QWEN_OAUTH_CLIENT_ID,
 		scope: QWEN_OAUTH_SCOPE,
 		code_challenge: pkce.challenge,
@@ -52,7 +53,7 @@ export async function initiateDeviceFlow(): Promise<DeviceFlowResult> {
 	const response = await fetch(DEVICE_CODE_ENDPOINT, {
 		method: "POST",
 		headers: qwenDeviceAuthorizationHeaders(),
-		body: body.toString(),
+		body,
 	});
 
 	if (!response.ok) {
@@ -105,7 +106,7 @@ export async function pollForToken(
 
 		await sleep(currentInterval * 1000);
 
-		const body = new URLSearchParams({
+		const body = qwenFormBody({
 			grant_type: DEVICE_CODE_GRANT_TYPE,
 			client_id: QWEN_OAUTH_CLIENT_ID,
 			device_code: deviceCode,
@@ -115,7 +116,7 @@ export async function pollForToken(
 		const response = await fetch(TOKEN_ENDPOINT, {
 			method: "POST",
 			headers: qwenTokenHeaders(),
-			body: body.toString(),
+			body,
 		});
 
 		if (response.ok) {
@@ -168,16 +169,16 @@ export async function pollForToken(
 export async function refreshQwenTokens(
 	refreshToken: string,
 ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-	const body = new URLSearchParams({
+	const body = qwenFormBody({
 		grant_type: "refresh_token",
-		client_id: QWEN_OAUTH_CLIENT_ID,
 		refresh_token: refreshToken,
+		client_id: QWEN_OAUTH_CLIENT_ID,
 	});
 
 	const response = await fetch(TOKEN_ENDPOINT, {
 		method: "POST",
 		headers: qwenTokenHeaders(),
-		body: body.toString(),
+		body,
 	});
 
 	if (!response.ok) {
