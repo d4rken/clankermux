@@ -90,6 +90,44 @@ providers, all except selected providers, or one account. For example, excluding
 you add later. Claude API-key accounts (`claude-console-api`) are a separate
 provider. These restrictions also apply to explicit account requests and fallbacks.
 
+## Claude subscription accounts from pi, Codex and other non-Claude-Code clients
+
+A client on `/wire/openai` (pi, Codex, OpenCode in OpenAI mode) never reaches
+a Claude account (Anthropic OAuth or Claude API key) directly. When routing
+picks one for such a request, ClankerMux runs real Claude Code for that turn
+through the Claude Agent SDK, and Claude Code's model calls go to the account
+through the normal pipeline. The client keeps executing its own tools: each
+tool call is handed back to it, and its results resume the same Claude Code
+run.
+
+There is nothing to configure beyond having the Claude models in the client's
+catalogue, which follows from the client's allowed destinations. To keep a
+client off Claude accounts, exclude the Anthropic providers in its
+destinations.
+
+What differs from a direct request:
+
+* The client's system prompt is not sent; Claude Code's own is. Its
+  instructions and project context (pi's `AGENTS.md`, for example) do not
+  reach the model.
+* `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
+  `tool_choice` that forces or forbids tool use are rejected with a 400 naming
+  the field, unless another destination in the route can serve the request.
+* `max_tokens` applies to each model call, not to the whole reply.
+* Each user turn starts a Claude Code process, which adds 1–3 s. A
+  conversation resumes across turns only when the client sends a session
+  header (pi does); otherwise each turn rebuilds it from the history.
+* Each process uses about 250 MB of memory. At most 8 run at once
+  (`sdk_bridge_max_processes` in `clankermux.json`); requests beyond that get
+  a 529 with Retry-After.
+* A Codex request whose model alias or fallback lands on a Claude account is
+  answered by Claude through this path; that account is not skipped.
+
+Anthropic's legal and compliance terms for Claude Code state that Anthropic
+"does not permit third-party developers to … route requests through Free, Pro,
+or Max plan credentials on behalf of their users". Whether this use of your
+accounts is permitted is for you, as the operator, to judge.
+
 ## Integrations
 
 * Model metadata discovery: client keys can add `?clankermux_metadata=1` to
