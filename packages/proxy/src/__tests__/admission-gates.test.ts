@@ -20,6 +20,10 @@ import {
 	resetCodexTransientHealthForTests,
 } from "../codex-transient-health";
 import {
+	recordProtectedTierTurn,
+	resetConversationTierMemoryForTests,
+} from "../conversation-tier-memory";
+import {
 	recordFamilyWeeklyExhausted,
 	resetFamilyWeeklyMemoForTests,
 } from "../family-weekly-memo";
@@ -210,6 +214,7 @@ describe("createAdmissionGates", () => {
 		resetRateLimitProbeGatesForTests();
 		resetFamilyWeeklyMemoForTests();
 		resetCodexTransientHealthForTests();
+		resetConversationTierMemoryForTests();
 		for (const id of SEEDED_IDS) usageCache.delete(id);
 	};
 
@@ -646,6 +651,7 @@ describe("createAdmissionGates", () => {
 				served?: string;
 				isSyntheticProbeRequest?: boolean;
 				path?: string;
+				model?: string;
 			} = {},
 		) => {
 			const meta = sessionTurn();
@@ -658,12 +664,13 @@ describe("createAdmissionGates", () => {
 					config: makeConfig({ fiveHour: false, weekly: false }),
 					strategy,
 				},
-				MODEL,
+				options.model ?? MODEL,
 			);
 			const candidates = gates.applyFailureMemoDemotion(
 				gates.applySoftDemotionReorder(strategy.select(accounts, meta)),
 			);
 			gates.reconcileAffinity(candidates);
+			gates.noteConversationTier(candidates);
 			const follow = gates.prepareSoftDemotionFollow(candidates);
 			const served =
 				candidates.find((a) => a.id === options.served) ?? candidates[0];
@@ -763,17 +770,51 @@ describe("createAdmissionGates", () => {
 			expect(follow).toBeNull();
 		});
 
-		it("never follows a reserve that only the request's own tier imposes", () => {
-			const accounts = pool();
-			const strategy = new SessionStrategy();
-			// 85% used: inside the ordinary 20% reserve, outside Fable's 10%.
+		// 85% used: inside the ordinary 20% reserve, outside Fable's 10%.
+		const reserveOnlyForOrdinaryTraffic = () => {
 			seedUsage("acc-a", 0, 85);
 			seedUsage("acc-b", 20, 20);
 			seedUsage("acc-c", 20, 20);
+		};
+
+		it("follows the ordinary reserve for a conversation with no Fable turns", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveOnlyForOrdinaryTraffic();
 
 			const { candidates, follow } = route(strategy, accounts);
 			expect(candidates[0].id).toBe("acc-b");
-			expect(follow).toBeNull();
+			expect(follow).not.toBeNull();
+
+			seedUsage("acc-a", 0, 10);
+			expect(pinnedTo(strategy, accounts)).toBe("acc-b");
+		});
+
+		it("does not let a side request move a conversation that just had a Fable turn", () => {
+			const accounts = pool();
+			const strategy = new SessionStrategy();
+			reserveOnlyForOrdinaryTraffic();
+
+			// The Fable turn stays on acc-a: its own tier may spend down to 10%.
+			const fable = route(strategy, accounts, { model: "claude-fable-5-1" });
+			expect(fable.candidates[0].id).toBe("acc-a");
+
+			const side = route(strategy, accounts);
+			expect(side.candidates[0].id).toBe("acc-b");
+			expect(side.follow).toBeNull();
+		});
+
+		it("follows again once the last Fable turn is older than any prompt cache", () => {
+			const accounts = pool();
+			const key = "client_session:pi-conversation";
+
+			recordProtectedTierTurn(key, Date.now() - 1_000);
+			reserveOnlyForOrdinaryTraffic();
+			expect(route(new SessionStrategy(), accounts).follow).toBeNull();
+
+			resetConversationTierMemoryForTests();
+			recordProtectedTierTurn(key, Date.now() - HOUR - 1_000);
+			expect(route(new SessionStrategy(), accounts).follow).not.toBeNull();
 		});
 
 		it("ignores token counts, which the proxy may answer itself", () => {

@@ -10,6 +10,10 @@ import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { getCodexTransientFailureUntil } from "./codex-transient-health";
+import {
+	hasRecentProtectedTierTurn,
+	recordProtectedTierTurn,
+} from "./conversation-tier-memory";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
 	type ContextWindowExcludedBackend,
@@ -102,6 +106,13 @@ export interface AdmissionGates {
 	prepareSoftDemotionFollow: (
 		candidates: Account[],
 	) => ((served: Account) => void) | null;
+	/**
+	 * Remember that this request's conversation can be served as the protected
+	 * family (Fable), so a later side request of it does not move its pin off an
+	 * account only the side request's tier holds in reserve. Call after every
+	 * selection pass, hold wakes included.
+	 */
+	noteConversationTier: (candidates: Account[]) => void;
 	modelForAccount: (account: Account) => string | null;
 	applyProviderOverloadGate: (accounts: Account[]) => {
 		available: Account[];
@@ -745,9 +756,24 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// A liveness reserve lasts hours, so a conversation pinned behind it runs on
 	// the peer and moves back whenever the reserve lifts or a failure memo flips
 	// the order, re-reading its prompt on an account that never cached it.
-	// Only a reserve that holds at every tier is followed: family reservation and
-	// the ordinary liveness tier depend on the request's model, and a side request
-	// must not move a conversation off an account its Fable turns may still use.
+	const noteConversationTier = (candidates: Account[]) => {
+		const conversationKey = requestMeta.routing?.affinityKey;
+		if (
+			!conversationKey ||
+			isSyntheticProbeRequest ||
+			requestMeta.path === "/v1/messages/count_tokens" ||
+			!candidates.some((account) =>
+				isProtectedFamily(getModelFamily(modelForAccount(account))),
+			)
+		)
+			return;
+		recordProtectedTierTurn(conversationKey, Date.now());
+	};
+
+	// Family reservation depends on the request's model and is never followed.
+	// The liveness reserve is tiered by model too: a conversation with a recent
+	// Fable turn follows only a reserve that would also hold Fable back, so a
+	// side request cannot move it off an account its Fable turns may still use.
 	const prepareSoftDemotionFollow = (
 		candidates: Account[],
 	): ((served: Account) => void) | null => {
@@ -755,10 +781,12 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		if (
 			isSyntheticProbeRequest ||
 			requestMeta.path === "/v1/messages/count_tokens" ||
-			routing?.strategy !== "session" ||
-			!FOLLOWABLE_AFFINITY_DECISIONS.has(routing.decision)
+			routing?.strategy !== "session"
 		)
 			return null;
+		if (!FOLLOWABLE_AFFINITY_DECISIONS.has(routing.decision)) return null;
+		const now = Date.now();
+		const conversationKey = routing.affinityKey;
 		const pinnedId = routing.heldAccountId ?? routing.selectedAccountId;
 		const pinned = candidates.find((a) => a.id === pinnedId);
 		const head = softDemotionHead;
@@ -770,7 +798,8 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 			head.id === pinned.id ||
 			head.provider !== pinned.provider ||
 			softDemotionReasons.get(pinned.id) !== "pool liveness" ||
-			!livenessHeldAtEveryTier.has(pinned.id)
+			(!livenessHeldAtEveryTier.has(pinned.id) &&
+				(!conversationKey || hasRecentProtectedTierTurn(conversationKey, now)))
 		)
 			return null;
 		return (served) => {
@@ -781,6 +810,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 
 	return {
 		reconcileAffinity,
+		noteConversationTier,
 		prepareSoftDemotionFollow,
 		modelForAccount,
 		applyProviderOverloadGate,
