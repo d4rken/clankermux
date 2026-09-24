@@ -17,11 +17,14 @@ export interface AccountPredictionInput {
 	accountId: string;
 	/** Live current 5h reading (from usageData), or null if unknown. */
 	fiveHour: LiveWindowUsage | null;
+	/** When the live reading was observed; null means it is not appended. */
+	observedAtMs: number | null;
 }
 
 /**
  * Build per-account predictions from stored snapshots + the live reading. Pure
- * & deterministic (pass `now`). Injects the live point so the prediction never
+ * & deterministic (pass `now`). Injects the live point, at its observation
+ * time, so the prediction never
  * lags the ~2-min sampler and self-corrects across a reset (stale-window points
  * get segmented out by computeUsagePrediction -> insufficient_data -> the
  * client falls back to the legacy burn-rate).
@@ -71,10 +74,21 @@ export function buildAccountUsagePredictions(
 			}
 		}
 
-		// Append the live point so the prediction never lags the sampler.
-		if (input.fiveHour?.utilization != null) {
+		// Append the live point so the prediction never lags the sampler, at the
+		// instant it was observed. A reading no newer than the last snapshot is
+		// already in the series, or older than it.
+		const lastSampledAt = fiveHourPoints.reduce(
+			(latest, p) => Math.max(latest, p.t),
+			Number.NEGATIVE_INFINITY,
+		);
+		if (
+			input.fiveHour?.utilization != null &&
+			input.observedAtMs !== null &&
+			input.observedAtMs >= fiveHourCutoff &&
+			input.observedAtMs > lastSampledAt
+		) {
 			fiveHourPoints.push({
-				t: now,
+				t: input.observedAtMs,
 				utilization: input.fiveHour.utilization,
 				resetsAt: input.fiveHour.resetsAtMs,
 			});

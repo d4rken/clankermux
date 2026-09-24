@@ -34,6 +34,7 @@ export {
 export * from "./types";
 // Export usage fetcher
 export * from "./usage-fetcher";
+export * from "./usage-header-view";
 export * from "./usage-read-budget";
 export * from "./usage-reporting";
 // Export window-reset timestamp helpers

@@ -17,10 +17,11 @@
  *
  * Two deliberate choices worth not undoing:
  *
- *  - **`peekWithAge`, never `getFreshCapacity`.** That helper reads through the
- *    EVICTING `get`/`getAge` accessors. A display-only observer must not evict
- *    cache entries that account selection depends on; `peek-primary.ts` reaches
- *    for the same non-evicting pair for the same reason.
+ *  - **`peekUsageView`, never `getFreshPollCapacity`.** That helper reads
+ *    through the EVICTING `get`/`getAge` accessors. A display-only observer must
+ *    not evict cache entries that account selection depends on. The view also
+ *    carries the 5h/7d windows later responses' headers reported, each with its
+ *    own age, so a busy account between polls still counts.
  *
  *  - **Per-window presence, never `CapacitySignal`.** `sessionHeadroom` and
  *    `weeklyHeadroom` both report 100 when their window is ABSENT, which is
@@ -108,17 +109,23 @@ type MemberReading =
  * account holding purchased credits (which let it serve past 100% while
  * reporting 100%, so its reading cannot bound anything).
  */
-function readWindow(account: Account, kind: WindowKind): MemberReading {
+function readWindow(
+	account: Account,
+	kind: WindowKind,
+	nowMs: number,
+): MemberReading {
 	const eligible =
 		kind === "session"
 			? FIVE_HOUR_ELIGIBLE_PROVIDERS
 			: SEVEN_DAY_ELIGIBLE_PROVIDERS;
 	if (!eligible.has(account.provider)) return "unknown";
 
-	const entry = usageCache.peekWithAge(account.id);
-	if (entry === null || entry.ageMs > MAX_USAGE_AGE_MS) return "unknown";
+	const view = usageCache.peekUsageView(account.id, account.provider, nowMs);
+	if (view === null) return "unknown";
+	const axis = kind === "session" ? view.fiveHour : view.sevenDay;
+	if (nowMs - axis.freshAtMs > MAX_USAGE_AGE_MS) return "unknown";
 
-	const credits = (entry.data as { codexCredits?: unknown }).codexCredits as
+	const credits = (view.data as { codexCredits?: unknown }).codexCredits as
 		| { hasCredits?: boolean; unlimited?: boolean }
 		| null
 		| undefined;
@@ -131,7 +138,7 @@ function readWindow(account: Account, kind: WindowKind): MemberReading {
 	// dispatch on shape and return null for anything they cannot read, so an
 	// unmodelled payload lands on the "unknown" branch below rather than being
 	// misread — which is exactly what the widening cast has to guarantee.
-	const data = entry.data as FullUsageData;
+	const data = view.data as FullUsageData;
 	const extracted =
 		kind === "session" ? extractFiveHour(data) : extractSevenDay(data);
 	if (extracted === null || extracted.pct === null) return "unknown";
@@ -289,7 +296,7 @@ export function computePoolHeadroom(
 	const fold = (kind: WindowKind): PooledWindowFigure | null =>
 		foldWindow(
 			[...members.values()].map((account) => {
-				const cached = readWindow(account, kind);
+				const cached = readWindow(account, kind, nowMs);
 				return account.id === servingAccount.id
 					? preferWire(cached, readWire(upstreamHeaders, kind))
 					: cached;

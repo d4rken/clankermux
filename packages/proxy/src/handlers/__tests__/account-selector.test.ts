@@ -8,7 +8,7 @@ import {
 	spyOn,
 } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
-import { usageCache } from "@clankermux/providers";
+import { buildUsageView, usageCache } from "@clankermux/providers";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
@@ -347,23 +347,34 @@ describe("ensureUsageFreshForSelection", () => {
 		};
 	}
 
-	let getAgeSpy: ReturnType<typeof spyOn>;
-	let getSpy: ReturnType<typeof spyOn>;
+	/** A routing view over a poll reading written 1s ago. */
+	function freshView() {
+		const writtenAtMs = Date.now() - 1_000;
+		return buildUsageView(
+			{
+				data: freshUsageData() as never,
+				writtenAtMs,
+				observedAtMs: writtenAtMs,
+			},
+			null,
+			Date.now(),
+		);
+	}
+
+	let peekViewSpy: ReturnType<typeof spyOn>;
 	let getRlSpy: ReturnType<typeof spyOn>;
 	let refreshSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
 		__resetColdRefreshState();
 		// Default: everything unknown, not rate-limited, refresh resolves true.
-		getAgeSpy = spyOn(usageCache, "getAge").mockReturnValue(null);
-		getSpy = spyOn(usageCache, "get").mockReturnValue(null);
+		peekViewSpy = spyOn(usageCache, "peekUsageView").mockReturnValue(null);
 		getRlSpy = spyOn(usageCache, "getRateLimitedUntil").mockReturnValue(null);
 		refreshSpy = spyOn(usageCache, "refreshNow").mockResolvedValue(true);
 	});
 
 	afterEach(() => {
-		getAgeSpy.mockRestore();
-		getSpy.mockRestore();
+		peekViewSpy.mockRestore();
 		getRlSpy.mockRestore();
 		refreshSpy.mockRestore();
 	});
@@ -392,12 +403,87 @@ describe("ensureUsageFreshForSelection", () => {
 		const acc = makeAccount({ id: "acc-fresh", provider: "anthropic" });
 		const ctx = makeUsageCtx();
 		// Fresh age (well under maxAge) + valid windowed data with a future reset.
-		getAgeSpy.mockReturnValue(1_000);
-		getSpy.mockReturnValue(freshUsageData());
+		peekViewSpy.mockReturnValue(freshView());
 
 		await ensureUsageFreshForSelection([acc], ctx, Date.now());
 
 		expect(refreshSpy).not.toHaveBeenCalled();
+	});
+
+	it("skips an Anthropic account whose header readings are fresh though its poll is not", async () => {
+		peekViewSpy.mockRestore();
+		const ctx = makeUsageCtx();
+		const HOUR = 3_600_000;
+		const fiveReset = Math.floor((Date.now() + 2 * HOUR) / 1000) * 1000;
+		const weekReset = Math.floor((Date.now() + 90 * HOUR) / 1000) * 1000;
+		const seed = (id: string) => {
+			usageCache.startPolling(
+				id,
+				async () => "token",
+				"anthropic",
+				POLL_INTERVAL_MS,
+				null,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ initialDelayMs: 10 * HOUR },
+			);
+			usageCache.setWithAgeForTests(
+				id,
+				{
+					five_hour: {
+						utilization: 10,
+						resets_at: new Date(fiveReset).toISOString(),
+					},
+					seven_day: {
+						utilization: 20,
+						resets_at: new Date(weekReset).toISOString(),
+					},
+				},
+				400_000,
+			);
+		};
+		const headerFed = makeAccount({ id: "acc-hdr-fed", provider: "anthropic" });
+		const pollOnly = makeAccount({ id: "acc-hdr-none", provider: "anthropic" });
+		seed(headerFed.id);
+		seed(pollOnly.id);
+		try {
+			usageCache.recordUsageHeaders(
+				headerFed.id,
+				usageCache.usageHeaderEpoch(headerFed.id),
+				[
+					{
+						claim: "5h",
+						status: "allowed",
+						utilization: 0.1,
+						resetMs: fiveReset,
+						surpassedThreshold: null,
+					},
+					{
+						claim: "7d",
+						status: "allowed",
+						utilization: 0.2,
+						resetMs: weekReset,
+						surpassedThreshold: null,
+					},
+				],
+				Date.now(),
+			);
+
+			await ensureUsageFreshForSelection(
+				[headerFed, pollOnly],
+				ctx,
+				Date.now(),
+			);
+
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+			expect(refreshSpy).toHaveBeenCalledWith(pollOnly.id);
+		} finally {
+			usageCache.stopPolling(headerFed.id);
+			usageCache.stopPolling(pollOnly.id);
+		}
 	});
 
 	it("does not refresh the same account again within the cooldown window", async () => {
@@ -478,11 +564,8 @@ describe("ensureUsageFreshForSelection", () => {
 		const ctx = makeUsageCtx();
 
 		// Top-tier account (priority 0) is fresh; lower-priority is unknown.
-		getAgeSpy.mockImplementation((id: string) =>
-			id === "acc-top-fresh" ? 1_000 : null,
-		);
-		getSpy.mockImplementation((id: string) =>
-			id === "acc-top-fresh" ? freshUsageData() : null,
+		peekViewSpy.mockImplementation((id: string) =>
+			id === "acc-top-fresh" ? freshView() : null,
 		);
 
 		// Background refresh must NOT be awaited: make it never resolve and assert

@@ -43,6 +43,7 @@ import {
 	devinClient,
 	extractDevinIdentity,
 	fetchUsageData,
+	getFreshRoutingUsage,
 	getRepresentativeDevinWindow,
 	getRepresentativeGrokSubscriptionUtilization,
 	getRepresentativeGrokSubscriptionWindow,
@@ -51,9 +52,11 @@ import {
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
 	type MinimaxUsageData,
+	UI_STALE_HORIZON_MS,
 	USAGE_CACHE_TTL_MS,
 	USAGE_RATE_LIMITED_DEFAULT_MS,
 	type UsageData,
+	type UsageView,
 	usageCache,
 } from "@clankermux/providers";
 import {
@@ -108,7 +111,10 @@ import {
 	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
-import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
+import {
+	buildPredictionsForAccounts,
+	predictionLiveReading,
+} from "../services/build-account-predictions-for";
 import {
 	readOpenRouterAccountMetadata,
 	refreshOpenRouterAccountMetadata,
@@ -425,6 +431,25 @@ export interface ListAccountResponsesOptions {
 }
 
 /**
+ * The observation time of each window a response header fed into the served
+ * reading, for `AccountResponse.usageWindowAsOfIso`; null when none was.
+ */
+function headerFedWindowAsOf(
+	view: UsageView | null,
+): AccountResponse["usageWindowAsOfIso"] {
+	if (view === null) return null;
+	const stamps: NonNullable<AccountResponse["usageWindowAsOfIso"]> = {};
+	for (const [window, axis] of [
+		["five_hour", view.fiveHour],
+		["seven_day", view.sevenDay],
+	] as const) {
+		if (axis.source !== "poll" && axis.observedAtMs !== null)
+			stamps[window] = new Date(axis.observedAtMs).toISOString();
+	}
+	return Object.keys(stamps).length > 0 ? stamps : null;
+}
+
+/**
  * Build the account list `GET /api/accounts` serves.
  *
  * Extracted from the handler so a SECOND surface can consume the same array:
@@ -689,44 +714,84 @@ export async function listAccountResponses(
 		// fixes by carrying the age to the UI; the hoisting is kept anyway so the
 		// whole response is built from ONE consistent snapshot per account.
 		//
-		// TWO VIEWS, deliberately different — classify every new consumer:
+		// THREE VIEWS, deliberately different — classify every new consumer:
 		//  - `liveUsageByAccount` (UI horizon, up to 30 min): DISPLAY only. What the
-		//    dashboard renders, annotated with `usageAsOfIso`. Used by the
-		//    stale-snapshot fallback filter, the rendered `usageData`/utilization/
-		//    window, the weekly-exhaustion label, the throttle annotation and the
-		//    Codex credits chip — all of which describe a reading AS OF a stated
-		//    time and stay honest when that time is minutes ago.
-		//  - `routingFreshUsageByAccount` (ROUTING TTL, 10 min): anything that
-		//    DERIVES a value modelling "now". That is the exhaustion prediction,
-		//    which appends the live reading as a data point stamped `t: now` (see
-		//    build-account-predictions.ts) — an aged reading injected there would
-		//    read as a fresh sample and skew the regression — and the SESSION half
-		//    of the account-wide exhaustion verdict (below).
-		// The account-wide exhaustion verdict is the one consumer that reads BOTH,
-		// deliberately: the weekly windows move over days, so asserting them from a
-		// reading up to 30 min old is honest, while the 5h session window moves fast
-		// enough that a half-hour-old 100% is no longer evidence of anything. It
-		// therefore passes the display view for the weekly class and the
-		// routing-fresh view for the session class (see `accountWideExhaustion`'s
-		// third parameter).
-		// (The `isPrimary` routing simulation reads the cache itself via
-		// usageCache.peek(), which is TTL-gated independently of both maps.)
+		//    dashboard renders: the poll reading with its 5h/7d windows brought up
+		//    to date from response headers (Anthropic), annotated with
+		//    `usageAsOfIso` (the poll's time) and `usageWindowAsOfIso` (each
+		//    header-fed window's own). Used by the stale-snapshot fallback filter,
+		//    the rendered `usageData`/utilization/window, the weekly-exhaustion
+		//    label and the Codex credits chip — all of which describe a reading AS
+		//    OF a stated time and stay honest when that time is minutes ago.
+		//  - `routingFreshUsageByAccount` (ROUTING TTL, 10 min, poll only): the
+		//    exhaustion prediction, which appends the live reading as a data point
+		//    at its observation time. It fits the poll's own snapshot series, so it
+		//    takes the poll's reading.
+		//  - `routingViewUsageByAccount` (ROUTING TTL, header-fed): what the proxy
+		//    routes and throttles on right now. Used by the throttle annotation and
+		//    the SESSION half of the account-wide exhaustion verdict (below).
+		// The account-wide exhaustion verdict reads two of them deliberately: the
+		// weekly windows move over days, so asserting them from a reading up to
+		// 30 min old is honest, while the 5h session window moves fast enough that
+		// a half-hour-old 100% is no longer evidence of anything. It therefore
+		// passes the display view for the weekly class and the routing view for
+		// the session class (see `accountWideExhaustion`'s third parameter).
+		// (The `isPrimary` routing simulation reads the cache itself through the
+		// routing lookups, independently of these maps.)
 		const liveUsageEntryByAccount = new Map(
 			accounts.map((a) => [a.id, usageCache.peekWithAge(a.id)] as const),
 		);
+		const viewReadAt = Date.now();
+		const liveUsageViewByAccount = new Map(
+			accounts.map(
+				(a) =>
+					[
+						a.id,
+						liveUsageEntryByAccount.get(a.id)
+							? usageCache.peekUsageView(
+									a.id,
+									a.provider ?? "anthropic",
+									viewReadAt,
+									UI_STALE_HORIZON_MS,
+								)
+							: null,
+					] as const,
+			),
+		);
 		const liveUsageByAccount = new Map(
 			accounts.map(
-				(a) => [a.id, liveUsageEntryByAccount.get(a.id)?.data ?? null] as const,
+				(a) =>
+					[
+						a.id,
+						liveUsageViewByAccount.get(a.id)?.data ??
+							liveUsageEntryByAccount.get(a.id)?.data ??
+							null,
+					] as const,
+			),
+		);
+		const routingViewUsageByAccount = new Map(
+			accounts.map(
+				(a) =>
+					[
+						a.id,
+						getFreshRoutingUsage(
+							usageCache,
+							a.id,
+							a.provider ?? "anthropic",
+							viewReadAt,
+							USAGE_CACHE_TTL_MS,
+						),
+					] as const,
 			),
 		);
 		const routingFreshUsageByAccount = new Map(
-			accounts.map((a) => {
-				const entry = liveUsageEntryByAccount.get(a.id);
-				return [
-					a.id,
-					entry && entry.ageMs <= USAGE_CACHE_TTL_MS ? entry.data : null,
-				] as const;
-			}),
+			accounts.map(
+				(a) =>
+					[
+						a.id,
+						predictionLiveReading(liveUsageEntryByAccount.get(a.id)),
+					] as const,
+			),
 		);
 
 		// Earned Codex resets come from a separate read-only account endpoint, not
@@ -812,8 +877,7 @@ export async function listAccountResponses(
 		// `prediction: null`.
 		//
 		// Sourced from `routingFreshUsageByAccount`, NOT the display view: the
-		// service appends this reading with `t: now`, so a reading that is minutes
-		// old would enter the regression claiming to be current.
+		// service appends this poll reading at its own observation time.
 		const predictionByAccount = await buildPredictionsForAccounts(
 			dbOps,
 			accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),
@@ -905,14 +969,14 @@ export async function listAccountResponses(
 				// reports the CAUSE rather than the cooldown MECHANISM.
 				// Family-scoped windows are per-model and NOT reflected here.
 				//
-				// TWO VIEWS (see the note above `liveUsageByAccount`): the weekly class
-				// is read from the 30-minute display horizon, the fast-moving session
-				// class from the 10-minute routing-fresh view.
+				// See the note above `liveUsageByAccount`: the weekly class is read
+				// from the 30-minute display horizon, the fast-moving session class
+				// from the 10-minute routing view.
 				const exhaustion = accountWideExhaustionFor(
 					account.provider ?? "anthropic",
 					usageData as FullUsageData | null,
 					now,
-					(routingFreshUsageByAccount.get(account.id) ??
+					(routingViewUsageByAccount.get(account.id) ??
 						null) as FullUsageData | null,
 				);
 				const accountWideExhausted: {
@@ -1162,15 +1226,20 @@ export async function listAccountResponses(
 					weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
 				};
 				// Unlike the bars, "requests are being delayed" is a claim about what
-				// the PROXY is doing right now, and the proxy gates throttling on a
-				// routing-fresh reading (`usageCache.peek()`, TTL-gated). Mirror that
-				// gate so an aged display reading can't announce a delay that isn't
-				// happening. Age of the reading behind `fullUsageData`: the live cache
-				// entry's, or 0 for a Codex payload just re-derived from stored headers
-				// (that path re-warms the cache, so the proxy sees it as fresh too).
+				// the PROXY is doing right now, and the proxy throttles on the routing
+				// view. For Anthropic that view is read here directly. Otherwise the
+				// display reading stands in for it under the same TTL gate, so an aged
+				// display reading can't announce a delay that isn't happening. Age of
+				// the reading behind `fullUsageData`: the live cache entry's, or 0 for a
+				// Codex payload just re-derived from stored headers (that path re-warms
+				// the cache, so the proxy sees it as fresh too).
 				const usageDataAgeMs = usageIsLiveCacheEntry
 					? (liveUsageEntry?.ageMs ?? 0)
 					: 0;
+				const throttleUsageData =
+					provider === "anthropic"
+						? (routingViewUsageByAccount.get(account.id) ?? null)
+						: fullUsageData;
 				// The one reading with no cache counterpart at all: a Codex snapshot
 				// restored from `accounts.codex_usage_json`, which is deliberately NOT
 				// written back into the usage cache. Its age is unknown to the age
@@ -1179,12 +1248,12 @@ export async function listAccountResponses(
 				if (
 					(usageThrottleSettings.fiveHourEnabled ||
 						usageThrottleSettings.weeklyEnabled) &&
-					fullUsageData &&
+					throttleUsageData &&
 					!usageServedFromCodexColumn &&
 					usageDataAgeMs <= USAGE_CACHE_TTL_MS
 				) {
 					const usageThrottleStatus = getUsageThrottleStatus(
-						fullUsageData as AnyUsageData,
+						throttleUsageData as AnyUsageData,
 						usageThrottleSettings,
 						now,
 						// The account row projection types provider as nullable; an
@@ -1321,6 +1390,11 @@ export async function listAccountResponses(
 							: usageObservedAtMs != null
 								? new Date(usageObservedAtMs).toISOString()
 								: null,
+					usageWindowAsOfIso: usageIsLiveCacheEntry
+						? headerFedWindowAsOf(
+								liveUsageViewByAccount.get(account.id) ?? null,
+							)
+						: null,
 					prediction: predictionByAccount.get(account.id) ?? null,
 					burnAnchors,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),

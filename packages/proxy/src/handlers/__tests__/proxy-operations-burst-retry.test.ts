@@ -245,7 +245,7 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 	});
 
 	it("Finding 6: stale/absent usage triggers ONE refreshNow, then classifies on the refreshed capacity (fresh_headroom)", async () => {
-		// No usage cached for acc-oauth (deleted in beforeEach) ⇒ getFreshCapacity
+		// No usage cached for acc-oauth (deleted in beforeEach) ⇒ getFreshRoutingCapacity
 		// returns null. The intercept must call refreshNow ONCE; we stub it to
 		// "succeed" by seeding fresh, positive 5h headroom into the cache (as a real
 		// successful fetch would) and returning true. Classification then runs on

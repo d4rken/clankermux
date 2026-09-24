@@ -17,6 +17,7 @@ import {
 	withSanitizedProxyHeaders,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
+import { usageCache } from "@clankermux/providers";
 import {
 	type Account,
 	type CachePrefixCapture,
@@ -447,6 +448,10 @@ function createProbeSpendSink(
  * list would drop exactly the shapes that are otherwise unrecorded. Both sides
  * share ONE `observedAt` and one source, and go out as ONE writer job — two jobs
  * could be split by a queue rejection into a half-recorded response.
+ *
+ * The same claim readings, at the same `observedAt`, also go to
+ * `usageCache.recordUsageHeaders` under the epoch the attempt captured before
+ * sending.
  */
 function captureUnifiedClaimObservations(
 	args: {
@@ -457,6 +462,7 @@ function captureUnifiedClaimObservations(
 		response: Response;
 		/** Request start (the handler's `timestamp` input), epoch ms. */
 		timestamp: number;
+		usageHeaderEpoch: number | null;
 	},
 	ctx: ProxyContext,
 ): void {
@@ -471,6 +477,14 @@ function captureUnifiedClaimObservations(
 	// true, not when the queued write happened to run. Shared by both sides so a
 	// joined read never has to reconcile two clocks for one response.
 	const observedAt = Date.now();
+	if (readings.length > 0) {
+		usageCache.recordUsageHeaders(
+			account.id,
+			args.usageHeaderEpoch,
+			readings,
+			observedAt,
+		);
+	}
 	const source = claimObservationSource(args.requestHeaders, args.internal);
 	const rows: UnifiedClaimObservationRow[] = readings.map((reading) => ({
 		requestId: args.requestId,
@@ -548,6 +562,12 @@ export interface ResponseHandlerOptions {
 	 * omitted value is the safe (untrusted) one.
 	 */
 	internal?: boolean;
+	/**
+	 * `usageCache.usageHeaderEpoch` for the account, captured before the upstream
+	 * request was sent. Null or absent: the response's usage headers are not
+	 * recorded for routing.
+	 */
+	usageHeaderEpoch?: number | null;
 	/** Ingress model, supplied by the already-parsed request path when available. */
 	requestedModel?: string | null;
 	/** True when the request carried a fallback credit token (see RequestMeta). */
@@ -794,6 +814,7 @@ async function forwardToClientInner(
 		routing,
 		disableCooldown,
 		overloadProbeToken,
+		usageHeaderEpoch = null,
 	} = options;
 
 	// Always strip compression headers *before* we do anything else
@@ -810,6 +831,7 @@ async function forwardToClientInner(
 			internal: internalDispatch,
 			response,
 			timestamp,
+			usageHeaderEpoch,
 		},
 		ctx,
 	);

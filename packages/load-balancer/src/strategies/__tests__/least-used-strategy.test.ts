@@ -25,7 +25,11 @@ class MockStore implements StrategyStore {
 	resumeAccount(accountId: string): void {
 		this.resumeCalls.push(accountId);
 	}
-	getAccountUtilization(accountId: string): number | null {
+	getAccountUtilization(
+		accountId: string,
+		_provider: string,
+		_now: number,
+	): number | null {
 		return this.utilization.has(accountId)
 			? (this.utilization.get(accountId) ?? null)
 			: null;

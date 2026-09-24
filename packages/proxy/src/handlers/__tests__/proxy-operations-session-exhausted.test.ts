@@ -6,7 +6,9 @@ import {
 	it,
 	mock,
 	setSystemTime,
+	spyOn,
 } from "bun:test";
+import { extractUnifiedClaimReadings } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
@@ -343,7 +345,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
 		globalThis.fetch = mockFetch(mock(async () => rejected429()));
-		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
+		// No usage cache entry ⇒ getFreshRoutingCapacity returns null ⇒ no evidence.
 
 		const { ctx, attemptCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
@@ -708,5 +710,224 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", Date.now())).toBe(
 			WEEKLY_RESET,
 		);
+	});
+});
+
+describe("proxyWithAccount — header-fed usage on the 429 ladder", () => {
+	const HOUR = 3_600_000;
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		usageCache.delete(ACCOUNT_ID);
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		usageCache.stopPolling(ACCOUNT_ID);
+		usageCache.delete(ACCOUNT_ID);
+	});
+
+	const fiveResetS = Math.floor((Date.now() + 2 * HOUR) / 1000);
+	const weekResetS = Math.floor((Date.now() + 23 * HOUR) / 1000);
+
+	/** A 429 whose own 5h claim reads the window full without rejecting it. */
+	function saturated429() {
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: { type: "rate_limit_error", message: "rate limited" },
+			}),
+			{
+				status: 429,
+				headers: {
+					"content-type": "application/json",
+					"x-should-retry": "true",
+					"retry-after": String(RETRY_AFTER_S),
+					"anthropic-ratelimit-unified-5h-status": "allowed_warning",
+					"anthropic-ratelimit-unified-5h-utilization": "1",
+					"anthropic-ratelimit-unified-5h-reset": String(fiveResetS),
+					"anthropic-ratelimit-unified-7d-status": "allowed",
+					"anthropic-ratelimit-unified-7d-utilization": "0.3",
+					"anthropic-ratelimit-unified-7d-reset": String(weekResetS),
+				},
+			},
+		);
+	}
+
+	it("classifies a 429 without its own headers; they count from the next request", async () => {
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
+		);
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: {
+				utilization: 50,
+				resets_at: new Date(fiveResetS * 1000 + 219).toISOString(),
+			},
+			seven_day: {
+				utilization: 30,
+				resets_at: new Date(weekResetS * 1000 + 431).toISOString(),
+			},
+		} as never);
+
+		globalThis.fetch = mockFetch(mock(async () => saturated429()));
+		const first = makeProxyContext();
+		await run(first.ctx, makeOAuthAnthropicAccount());
+		expect(reasonsFrom(first.attemptCalls)).not.toContain(
+			"session_exhausted_429",
+		);
+
+		// What forwarding a response carrying these claims records.
+		usageCache.recordUsageHeaders(
+			ACCOUNT_ID,
+			usageCache.usageHeaderEpoch(ACCOUNT_ID),
+			extractUnifiedClaimReadings(saturated429().headers),
+			Date.now(),
+		);
+
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
+		const second = makeProxyContext();
+		await run(second.ctx, makeOAuthAnthropicAccount());
+		expect(reasonsFrom(second.attemptCalls)).toContain("session_exhausted_429");
+		// The account-wide cooldown dropped the header readings with it.
+		expect(fiveHourSource()).toBe("poll");
+	});
+
+	function register() {
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
+		);
+	}
+
+	function seedPoll(ageMs: number, opusWeeklyPct: number | null) {
+		usageCache.setWithAgeForTests(
+			ACCOUNT_ID,
+			{
+				five_hour: {
+					utilization: 20,
+					resets_at: new Date(fiveResetS * 1000 + 219).toISOString(),
+				},
+				seven_day: {
+					utilization: 30,
+					resets_at: new Date(weekResetS * 1000 + 431).toISOString(),
+				},
+				...(opusWeeklyPct === null
+					? {}
+					: {
+							limits: [
+								{
+									kind: "weekly_scoped",
+									percent: opusWeeklyPct,
+									resets_at: new Date(Date.now() + 20 * HOUR).toISOString(),
+									scope: { model: { display_name: "Claude Opus 4.8" } },
+								},
+							],
+						}),
+			} as never,
+			ageMs,
+		);
+	}
+
+	function feedHeaders() {
+		usageCache.recordUsageHeaders(
+			ACCOUNT_ID,
+			usageCache.usageHeaderEpoch(ACCOUNT_ID),
+			extractUnifiedClaimReadings(
+				new Headers({
+					"anthropic-ratelimit-unified-5h-status": "allowed",
+					"anthropic-ratelimit-unified-5h-utilization": "0.2",
+					"anthropic-ratelimit-unified-5h-reset": String(fiveResetS),
+					"anthropic-ratelimit-unified-7d-status": "allowed",
+					"anthropic-ratelimit-unified-7d-utilization": "0.3",
+					"anthropic-ratelimit-unified-7d-reset": String(weekResetS),
+				}),
+			),
+			Date.now(),
+		);
+	}
+
+	const fiveHourSource = () =>
+		usageCache.peekUsageView(ACCOUNT_ID, "anthropic")?.fiveHour.source;
+
+	it("a family-scoped 429 leaves the header readings standing", async () => {
+		register();
+		seedPoll(60_000, 100);
+		feedHeaders();
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+		const { ctx, attemptCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+
+		expect(reasonsFrom(attemptCalls)).toContain("family_weekly_exhausted_429");
+		expect(fiveHourSource()).toBe("merged");
+	});
+
+	it("a burst 429 leaves the header readings standing", async () => {
+		register();
+		seedPoll(60_000, null);
+		feedHeaders();
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+		const { ctx, attemptCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+
+		expect(reasonsFrom(attemptCalls)).toContain("retryable_429");
+		expect(fiveHourSource()).toBe("merged");
+	});
+
+	describe("the shared refresh with a fresh routing view and a stale poll", () => {
+		let refresh: ReturnType<typeof spyOn>;
+		beforeEach(() => {
+			refresh = spyOn(usageCache, "refreshNow").mockResolvedValue(false);
+		});
+		afterEach(() => refresh.mockRestore());
+
+		it("refreshes when the poll names a weekly limit for the requested family", async () => {
+			register();
+			seedPoll(400_000, 40);
+			feedHeaders();
+			globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+			const { ctx } = makeProxyContext();
+			await run(ctx, makeOAuthAnthropicAccount(), "claude-opus-4-8");
+
+			expect(refresh).toHaveBeenCalledWith(ACCOUNT_ID);
+		});
+
+		it("does not refresh when the poll names no limit for that family", async () => {
+			register();
+			seedPoll(400_000, null);
+			feedHeaders();
+			globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+			const { ctx } = makeProxyContext();
+			await run(ctx, makeOAuthAnthropicAccount(), "claude-opus-4-8");
+
+			expect(refresh).not.toHaveBeenCalled();
+		});
 	});
 });

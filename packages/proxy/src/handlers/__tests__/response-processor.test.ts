@@ -805,7 +805,7 @@ describe("processProxyResponse — reliable burst marker (Part 1)", () => {
 	});
 
 	it("does NOT set the marker on a 429 with no headroom and no x-should-retry hint (Finding 5)", async () => {
-		// Usage stale/absent (no cache entry → getFreshCapacity null) AND no
+		// Usage stale/absent (no cache entry → getFreshRoutingCapacity null) AND no
 		// `x-should-retry` header → classify429Transient: no_headroom_no_retry_hint.
 		// Before Finding 5 the broad predicate WOULD have set the marker here; now it
 		// must not, so a genuine per-account wall doesn't pin siblings.

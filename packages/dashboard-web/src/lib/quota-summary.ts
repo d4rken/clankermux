@@ -11,7 +11,7 @@ import {
 	type PoolWindow,
 	providerDisplayName,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
-	usageObservedAtMs,
+	usageWindowObservedAtMs,
 } from "@clankermux/core";
 import {
 	type AccountResponse,
@@ -238,7 +238,7 @@ export function buildQuotaSummary(
 						isUnstartedWindow({
 							utilizationPct: value.pct ?? Number.NaN,
 							windowStartMs: computeWindowStartMs(value.resetMs, window),
-							observedAtMs: usageObservedAtMs(a.usageAsOfIso),
+							observedAtMs: usageWindowObservedAtMs(a, window),
 							windowKind: window,
 						})
 					)

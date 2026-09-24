@@ -46,6 +46,10 @@ interface RateLimitProgressProps {
 	usageData?: FullUsageData | null; // Full usage data from API
 	staleUsage?: StaleUsageInfo | null; // Last-known weekly usage when live data is unavailable
 	usageAsOfIso?: string | null; // When the live reading in usageData was sampled
+	// When each header-fed window in usageData was observed; the rest are as of usageAsOfIso
+	usageWindowAsOfIso?: Partial<
+		Record<"five_hour" | "seven_day", string>
+	> | null;
 	usageRateLimitedUntil?: number | null; // Timestamp (ms) until usage API 429 clears
 	usageThrottledUntil?: number | null; // Timestamp (ms) until proactive usage throttling clears
 	usageThrottledWindows?: string[]; // Exact usage windows currently being throttled
@@ -460,6 +464,7 @@ export function RateLimitProgress({
 	usageData,
 	staleUsage,
 	usageAsOfIso,
+	usageWindowAsOfIso,
 	usageRateLimitedUntil,
 	usageThrottledUntil,
 	usageThrottledWindows = [],
@@ -501,9 +506,12 @@ export function RateLimitProgress({
 	// them can be aged.
 	const agedAsOfText = agedLiveUsageAsOf(usageAsOfIso, now);
 
-	// The instant the rendered reading was sampled. Independent of `now`, which
-	// is what lets the weekly projection hold still between the card's ticks.
-	const observedAtMs = usageObservedAtMs(usageAsOfIso);
+	// A window response headers fed carries its own as-of; every other window
+	// is as of the reading.
+	const windowAsOfIso = (window: string | null | undefined) =>
+		(window === "five_hour" || window === "seven_day"
+			? usageWindowAsOfIso?.[window]
+			: undefined) ?? usageAsOfIso;
 
 	// Which of the five card shapes this account gets. The branch conditions live
 	// in `classifyUsageCard` alone so the cross-account "resets next" comparison
@@ -626,6 +634,20 @@ export function RateLimitProgress({
 
 	const usages = card.usages;
 
+	// The aged-reading caption. One line under the grid while every window
+	// shares an as-of (always, without header-fed windows); once they differ,
+	// each aged window states its own inside its card instead.
+	const agedByWindow = usages.map((usage) =>
+		usage.state === "unopened"
+			? null
+			: agedLiveUsageAsOf(windowAsOfIso(usage.window), now),
+	);
+	const shownAged = agedByWindow.filter(
+		(_, i) => usages[i].state !== "unopened",
+	);
+	const sharedAsOf = shownAged.every((text) => text === shownAged[0]);
+	const gridAgedAsOfText = sharedAsOf ? (shownAged[0] ?? null) : null;
+
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	const cardClass = compact ? COMPACT_WINDOW_CARD_CLASS : WINDOW_CARD_CLASS;
@@ -641,9 +663,14 @@ export function RateLimitProgress({
 		: "grid grid-cols-1 gap-row sm:grid-cols-2";
 
 	const windowGrid = (
-		<div className={cn(gridClass, !agedAsOfText && className)}>
-			{usages.map((usage, _index) => {
+		<div className={cn(gridClass, !gridAgedAsOfText && className)}>
+			{usages.map((usage, index) => {
 				const percentage = usage.utilization;
+				// The instant this window's reading was sampled. Independent of
+				// `now`, which is what lets the weekly projection hold still between
+				// the card's ticks.
+				const observedAtMs = usageObservedAtMs(windowAsOfIso(usage.window));
+				const cardAgedAsOfText = sharedAsOf ? null : agedByWindow[index];
 				const isAvailable = percentage !== null;
 				// The window is real and its reset is a deadline, but the provider
 				// reported no percentage for it. The bar is suppressed rather than
@@ -1035,19 +1062,24 @@ export function RateLimitProgress({
 								</span>
 							</div>
 						)}
+						{cardAgedAsOfText && (
+							<p className="text-xs text-muted-foreground">
+								Live usage as of {cardAgedAsOfText}
+							</p>
+						)}
 					</div>
 				);
 			})}
 		</div>
 	);
 
-	if (!agedAsOfText) return windowGrid;
+	if (!gridAgedAsOfText) return windowGrid;
 
 	return (
 		<div className={cn("space-y-item", className)}>
 			{windowGrid}
 			<p className="text-xs text-muted-foreground">
-				Live usage as of {agedAsOfText}
+				Live usage as of {gridAgedAsOfText}
 			</p>
 		</div>
 	);

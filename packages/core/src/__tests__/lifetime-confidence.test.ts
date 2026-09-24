@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	canonicalWindowKind,
 	usageObservedAtMs,
+	usageWindowObservedAtMs,
 	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,
 	weeklyRedEligible,
@@ -60,6 +61,38 @@ describe("usageObservedAtMs", () => {
 });
 
 const HOUR_MS = 60 * 60_000;
+
+describe("usageWindowObservedAtMs", () => {
+	const account = {
+		usageAsOfIso: "2026-09-24T10:00:00.000Z",
+		usageWindowAsOfIso: { five_hour: "2026-09-24T10:08:00.000Z" },
+	};
+
+	it("takes a header-fed window's own stamp", () => {
+		expect(usageWindowObservedAtMs(account, "five_hour")).toBe(
+			Date.parse("2026-09-24T10:08:00.000Z"),
+		);
+	});
+
+	it("falls back to the reading's stamp for every other window", () => {
+		const polled = Date.parse("2026-09-24T10:00:00.000Z");
+		expect(usageWindowObservedAtMs(account, "seven_day")).toBe(polled);
+		expect(usageWindowObservedAtMs(account, "seven_day_oauth_apps")).toBe(
+			polled,
+		);
+		expect(usageWindowObservedAtMs(account, null)).toBe(polled);
+		expect(
+			usageWindowObservedAtMs(
+				{ usageAsOfIso: account.usageAsOfIso },
+				"five_hour",
+			),
+		).toBe(polled);
+	});
+
+	it("is null when neither stamp exists", () => {
+		expect(usageWindowObservedAtMs({}, "five_hour")).toBeNull();
+	});
+});
 
 describe("canonicalWindowKind", () => {
 	it("maps Zai's render-loop names onto the account-wide window kinds", () => {

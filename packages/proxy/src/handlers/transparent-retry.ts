@@ -141,7 +141,7 @@ export type Burst429Classification =
  * Production wires this to:
  *
  *   (accountId) =>
- *     getFreshCapacity(
+ *     getFreshRoutingCapacity(
  *       usageCache,
  *       accountId,
  *       account.provider,
@@ -149,7 +149,7 @@ export type Burst429Classification =
  *       BURST_RETRY_MAX_USAGE_AGE_MS,
  *     )
  *
- * `getFreshCapacity` already returns `null` for age-stale or content-stale
+ * `getFreshRoutingCapacity` already returns `null` for age-stale or content-stale
  * usage, so the caller need not re-check freshness.
  */
 export type FreshCapacityLookup = (

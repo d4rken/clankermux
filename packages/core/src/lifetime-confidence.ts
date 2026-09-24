@@ -75,6 +75,23 @@ export function usageObservedAtMs(
 }
 
 /**
+ * {@link usageObservedAtMs} for one window: its own stamp from
+ * `AccountResponse.usageWindowAsOfIso` when response headers fed it, else the
+ * reading's `usageAsOfIso`.
+ */
+export function usageWindowObservedAtMs(
+	account: {
+		usageAsOfIso?: string | null;
+		usageWindowAsOfIso?: Partial<Record<string, string>> | null;
+	},
+	windowKind: string | null,
+): number | null {
+	const own =
+		windowKind === null ? undefined : account.usageWindowAsOfIso?.[windowKind];
+	return usageObservedAtMs(own ?? account.usageAsOfIso);
+}
+
+/**
  * The third leg of the projection input set, beside
  * {@link weeklyLifetimeConfidence} and {@link usageObservedAtMs}: the burn
  * anchor the server detected for one account-wide window, out of

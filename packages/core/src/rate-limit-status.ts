@@ -82,6 +82,16 @@ export const SOFT_WARNING_STATUSES: ReadonlySet<string> = new Set([
 	"queueing_soft",
 ]);
 
+/**
+ * Per-claim statuses whose `-utilization` line is taken as a usage reading for
+ * routing. `rejected` and anything unrecognized are left to the 429 path, which
+ * classifies the response that carried them.
+ */
+export const USAGE_READING_CLAIM_STATUSES: ReadonlySet<string> = new Set([
+	"allowed",
+	"allowed_warning",
+]);
+
 /** Every provider status the vocabulary recognizes (soft, hard and `rejected`). */
 const PROVIDER_STATUS_CAUSES: ReadonlyMap<string, RateLimitCause> = new Map<
 	string,

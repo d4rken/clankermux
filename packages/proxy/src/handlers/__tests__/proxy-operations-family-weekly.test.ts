@@ -410,7 +410,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		// family rung sees exactly what the burst rung would have seen.
 		//
 		// Absent cache (deleted in beforeEach) is the same "stale" input as an
-		// over-age one: getFreshCapacity returns null for both.
+		// over-age one: getFreshPollCapacity returns null for both.
 		let refreshCalls = 0;
 		const refreshSpy = mock(async (accountId: string) => {
 			refreshCalls += 1;

@@ -32,7 +32,11 @@ import {
 	NETWORK,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { getFreshCapacity, usageCache } from "@clankermux/providers";
+import {
+	getFreshPollCapacity,
+	getFreshRoutingCapacity,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type {
 	AdmissionGates,
@@ -362,7 +366,7 @@ export async function resolveZeroAccountsOutcome(
 			isOAuthAnthropicAccount(heldAccount) &&
 			isAnthropicBurstThrottleActive()
 		) {
-			const heldCapacity = getFreshCapacity(
+			const heldCapacity = getFreshRoutingCapacity(
 				usageCache,
 				heldAccount.id,
 				heldAccount.provider,
@@ -379,8 +383,14 @@ export async function resolveZeroAccountsOutcome(
 					// The family this account would SERVE, which a literal routing rule
 					// makes different from the family the client asked for.
 					resolvedModelFor(heldAccount),
-					usageCache.get(heldAccount.id),
-					heldCapacity,
+					usageCache.peek(heldAccount.id),
+					getFreshPollCapacity(
+						usageCache,
+						heldAccount.id,
+						heldAccount.provider,
+						Date.now(),
+						BURST_RETRY_MAX_USAGE_AGE_MS,
+					),
 					Date.now(),
 				) !== null
 			) {
@@ -640,7 +650,7 @@ export async function resolveZeroAccountsOutcome(
 						resolveTransientlyCooledFamilySibling(
 							a,
 							family,
-							usageCache.get(a.id),
+							usageCache.peek(a.id),
 							a.rate_limited_until,
 							getProviderOverloadUntil(
 								a.provider,

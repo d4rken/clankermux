@@ -5,7 +5,7 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
-	getFreshCapacity,
+	getFreshRoutingCapacity,
 	type Provider,
 	type RateLimitInfo,
 	usageCache,
@@ -379,7 +379,7 @@ export async function processProxyResponse(
 					account,
 					now,
 					getCapacity: (accountId) =>
-						getFreshCapacity(
+						getFreshRoutingCapacity(
 							usageCache,
 							accountId,
 							account.provider,

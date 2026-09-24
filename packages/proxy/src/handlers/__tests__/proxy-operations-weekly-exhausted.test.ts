@@ -302,7 +302,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
 		globalThis.fetch = mockFetch(mock(async () => rejected429()));
-		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
+		// No usage cache entry ⇒ getFreshRoutingCapacity returns null ⇒ no evidence.
 
 		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();

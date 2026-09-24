@@ -69,7 +69,8 @@ export class LeastUsedStrategy implements LoadBalancingStrategy {
 		const available = accounts.filter((a) => isPeekAvailable(a, now));
 
 		const scored = available.map((a) => {
-			const util = this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
+			const util =
+				this.store?.getAccountUtilization?.(a.id, a.provider, now) ?? 0;
 			const lastPick = this.lastPickedAt.get(a.id) ?? 0;
 			const recencyPenalty =
 				now - lastPick < RECENT_PICK_WINDOW_MS ? RECENT_PICK_PENALTY : 0;
@@ -107,7 +108,8 @@ export class LeastUsedStrategy implements LoadBalancingStrategy {
 		// Treat null utilization as 0 so newly-added accounts (no usage data
 		// yet) are preferred over fully-utilized ones.
 		const scored = available.map((a) => {
-			const util = this.store?.getAccountUtilization?.(a.id, a.provider) ?? 0;
+			const util =
+				this.store?.getAccountUtilization?.(a.id, a.provider, now) ?? 0;
 			const lastPick = this.lastPickedAt.get(a.id) ?? 0;
 			const recencyPenalty =
 				now - lastPick < RECENT_PICK_WINDOW_MS ? RECENT_PICK_PENALTY : 0;

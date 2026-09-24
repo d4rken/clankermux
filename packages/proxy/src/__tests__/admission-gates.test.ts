@@ -583,6 +583,159 @@ describe("createAdmissionGates", () => {
 		});
 	});
 
+	describe("header-fed usage", () => {
+		const polled: string[] = [];
+		afterEach(() => {
+			for (const id of polled.splice(0)) usageCache.stopPolling(id);
+		});
+		const fiveReset = () => Math.floor((Date.now() + 4 * HOUR) / 1000) * 1000;
+		const weekReset = () => Math.floor((Date.now() + 5 * DAY) / 1000) * 1000;
+
+		/** A poll reading written `ageMs` ago, with an optional Fable limit. */
+		function seedPoll(
+			id: string,
+			ageMs: number,
+			fivePct: number,
+			weekPct: number,
+			fablePct: number | null = null,
+		) {
+			usageCache.setWithAgeForTests(
+				id,
+				{
+					five_hour: {
+						utilization: fivePct,
+						resets_at: new Date(fiveReset()).toISOString(),
+					},
+					seven_day: {
+						utilization: weekPct,
+						resets_at: new Date(weekReset()).toISOString(),
+					},
+					...(fablePct === null
+						? {}
+						: {
+								limits: [
+									{
+										kind: "weekly_scoped",
+										group: "weekly",
+										percent: fablePct,
+										resets_at: new Date(weekReset()).toISOString(),
+										scope: { model: { id: "fable", display_name: "Fable" } },
+										is_active: true,
+									},
+								],
+							}),
+				} as never,
+				ageMs,
+			);
+		}
+
+		/** Headers of a response that arrived just now, under a live poller. */
+		function feedHeaders(id: string, fivePct: number, weekPct: number) {
+			if (usageCache.usageHeaderEpoch(id) === null) {
+				polled.push(id);
+				usageCache.startPolling(
+					id,
+					async () => "token",
+					"anthropic",
+					90_000,
+					null,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					{ initialDelayMs: 10 * HOUR },
+				);
+			}
+			usageCache.recordUsageHeaders(
+				id,
+				usageCache.usageHeaderEpoch(id),
+				[
+					{
+						claim: "5h",
+						status: "allowed",
+						utilization: fivePct / 100,
+						resetMs: fiveReset(),
+						surpassedThreshold: null,
+					},
+					{
+						claim: "7d",
+						status: "allowed",
+						utilization: weekPct / 100,
+						resetMs: weekReset(),
+						surpassedThreshold: null,
+					},
+				],
+				Date.now(),
+			);
+		}
+
+		it("the family gate and soft demotions leave a stale poll entry in place", () => {
+			const a = makeAccount({ id: "acc-a", name: "a" });
+			const b = makeAccount({ id: "acc-b", name: "b" });
+			seedPoll("acc-a", 11 * 60_000, 10, 10, 100);
+			seedUsage("acc-b", 20, 20);
+			const gates = makeGates({ requestModel: "claude-fable-5" });
+
+			gates.applyFamilyWeeklyGate([a, b]);
+			gates.applySoftDemotionReorder([a, b]);
+
+			expect(usageCache.peekAge("acc-a")).not.toBeNull();
+		});
+
+		it("header readings never make a stale poll count for the family gate", () => {
+			const account = makeAccount({ id: "acc-a" });
+			feedHeaders("acc-a", 10, 10);
+			seedPoll("acc-a", 200_000, 10, 10, 100);
+			const gates = makeGates({ requestModel: "claude-fable-5" });
+
+			// Past the 180s bound the poll-only gate fails open, however fresh the
+			// headers are.
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([account]);
+			expect(gates.familyWeeklyExcludedAccounts).toEqual([]);
+		});
+
+		it("header readings never change a family exclusion on a fresh poll", () => {
+			const account = makeAccount({ id: "acc-a" });
+			// A spent account-wide pair would void the "headroom present" half of the
+			// exclusion if the gate read it.
+			feedHeaders("acc-a", 100, 100);
+			seedPoll("acc-a", 60_000, 10, 10, 100);
+			const gates = makeGates({ requestModel: "claude-fable-5" });
+
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([]);
+			expect(gates.familyWeeklyExcludedAccounts).toHaveLength(1);
+		});
+
+		it("the liveness reserve reads a fresh header weekly over a stale poll", () => {
+			const a = makeAccount({ id: "acc-a", name: "a" });
+			const b = makeAccount({ id: "acc-b", name: "b" });
+			feedHeaders("acc-a", 0, 95);
+			seedPoll("acc-a", 400_000, 0, 20);
+			seedUsage("acc-b", 20, 20);
+			const gates = makeGates();
+
+			expect(gates.applySoftDemotionReorder([a, b]).map((x) => x.id)).toEqual([
+				"acc-b",
+				"acc-a",
+			]);
+			expect(gates.softDemotionReasons.get("acc-a")).toBe("pool liveness");
+		});
+
+		it("usage throttling reads a fresh header 5h over an older poll", () => {
+			const account = makeAccount({ id: "acc-a" });
+			feedHeaders("acc-a", 99, 10);
+			seedPoll("acc-a", 300_000, 20, 10);
+			const gates = makeGates({
+				config: makeConfig({ fiveHour: true, weekly: false }),
+			});
+
+			expect(gates.applyUsageThrottling([account]).throttled).toEqual([
+				account,
+			]);
+		});
+	});
+
 	describe("transient Codex failure demotion", () => {
 		it("partitions both failure reasons together and preserves an entirely demoted pool", () => {
 			const codex = makeAccount({ id: "codex-1", provider: "codex" });

@@ -2,13 +2,24 @@ import { describe, expect, it } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { AnyUsageData } from "@clankermux/providers";
 import type { UsageSnapshotSample } from "@clankermux/types";
-import { buildPredictionsForAccounts } from "./build-account-predictions-for";
+import {
+	buildPredictionsForAccounts,
+	type PredictionLiveReading,
+} from "./build-account-predictions-for";
 
 const HOUR_MS = 60 * 60 * 1000;
 const NOW = 1_700_000_000_000;
 
-function usage(fivePct: number, resetMs: number): AnyUsageData {
-	return {
+/** A poll reading observed at `observedAtMs`. */
+function live(
+	data: AnyUsageData,
+	observedAtMs: number | null = NOW,
+): PredictionLiveReading {
+	return { data, observedAtMs };
+}
+
+function usage(fivePct: number, resetMs: number): PredictionLiveReading {
+	return live({
 		five_hour: {
 			utilization: fivePct,
 			resets_at: new Date(resetMs).toISOString(),
@@ -17,12 +28,12 @@ function usage(fivePct: number, resetMs: number): AnyUsageData {
 			utilization: 20,
 			resets_at: new Date(resetMs).toISOString(),
 		},
-	} as unknown as AnyUsageData;
+	} as unknown as AnyUsageData);
 }
 
 /** A Z.AI reading: the 5-hour window is `tokens_limit`, the weekly one is separate. */
-function zaiUsage(fivePct: number, resetMs: number): AnyUsageData {
-	return {
+function zaiUsage(fivePct: number, resetMs: number): PredictionLiveReading {
+	return live({
 		time_limit: null,
 		tokens_limit: {
 			used: 0,
@@ -32,7 +43,7 @@ function zaiUsage(fivePct: number, resetMs: number): AnyUsageData {
 			type: "TOKENS_LIMIT",
 		},
 		tokens_limit_weekly: null,
-	} as unknown as AnyUsageData;
+	} as unknown as AnyUsageData);
 }
 
 /** Rising 5h history: 10/20/30 over the last three hours. */
@@ -109,12 +120,12 @@ describe("buildPredictionsForAccounts", () => {
 			new Map([
 				[
 					"acc-1",
-					{
+					live({
 						seven_day: {
 							utilization: 20,
 							resets_at: new Date(reset).toISOString(),
 						},
-					} as unknown as AnyUsageData,
+					} as unknown as AnyUsageData),
 				],
 			]),
 			NOW,
@@ -202,7 +213,7 @@ describe("buildPredictionsForAccounts", () => {
 			],
 			new Map([
 				["acc-1", usage(60, NOW + 3 * HOUR_MS)],
-				["acc-2", { credits: { balance: 5 } } as unknown as AnyUsageData],
+				["acc-2", live({ credits: { balance: 5 } } as unknown as AnyUsageData)],
 			]),
 			NOW,
 		);
@@ -250,9 +261,9 @@ describe("buildPredictionsForAccounts", () => {
 			new Map([
 				[
 					"acc-1",
-					{
+					live({
 						five_hour: { utilization: 60, resets_at: "not-a-date" },
-					} as unknown as AnyUsageData,
+					} as unknown as AnyUsageData),
 				],
 			]),
 			NOW,
@@ -287,11 +298,11 @@ describe("buildPredictionsForAccounts", () => {
 			new Map([
 				[
 					"zai-1",
-					{
+					live({
 						time_limit: null,
 						tokens_limit: null,
 						tokens_limit_weekly: null,
-					} as unknown as AnyUsageData,
+					} as unknown as AnyUsageData),
 				],
 			]),
 			NOW,

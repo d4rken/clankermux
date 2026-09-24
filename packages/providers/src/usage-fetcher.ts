@@ -1,6 +1,7 @@
 import {
 	claudeUsageReadHeaders,
 	collectObservedWindows,
+	type ExtractedClaimReading,
 	normalizeAnthropicUsage,
 	type ObservedWindow,
 } from "@clankermux/core";
@@ -40,6 +41,16 @@ import {
 	DevinSessionAuthenticationError,
 	devinClient,
 } from "./providers/devin/client";
+import {
+	buildUsageView,
+	type HeaderWindowReading,
+	type HeaderWindows,
+	headerWindowsFromClaims,
+	isUsageViewFresh,
+	mergeHeaderWindows,
+	reportsPollOnlyAxis,
+	type UsageView,
+} from "./usage-header-view";
 import {
 	ANTHROPIC_USAGE_READ_MIN_GAP_MS,
 	UsageReadBudget,
@@ -151,6 +162,11 @@ export const UI_STALE_HORIZON_MS = 30 * 60_000;
  * ACTIVITY_RECENCY_MS: how recently an account must have served a request to be
  * treated as "active" (poll at the configured active cadence). 15 minutes.
  *
+ * HEADER-FED: an active account whose routing view is being kept fresh by its
+ * own responses' 5h/7d headers polls at the idle cadence anyway (see
+ * `UsageCache.isHeaderFed`); the poll then only has to keep the view's base and
+ * the windows headers do not carry within the cache TTL.
+ *
  * MAX_BACKOFF_MS: ceiling for the exponential failure backoff (unchanged).
  */
 const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
@@ -226,6 +242,9 @@ export interface PollingPolicy {
  * {@link computePollDelay} clamps the final DELAY of both branches to the same
  * ceiling. At that ceiling idle simply equals active, so the "idle is never
  * faster than active" rule still holds while the schedule stays inside the TTL.
+ *
+ * `headerFresh` selects the idle cadence whatever the activity, marked
+ * `headerFed` so the schedule can tell it from a cold account.
  */
 export function computeDemandAwareInterval(
 	opts: Pick<
@@ -235,7 +254,8 @@ export function computeDemandAwareInterval(
 	lastActivityMs: number | null,
 	activeIntervalMs: number,
 	now: number,
-): { intervalMs: number; isIdle: boolean } {
+	headerFresh = false,
+): { intervalMs: number; isIdle: boolean; headerFed?: true } {
 	if (!opts.demandAware) return { intervalMs: activeIntervalMs, isIdle: false };
 	const idleIntervalMs = Math.max(
 		activeIntervalMs,
@@ -244,6 +264,8 @@ export function computeDemandAwareInterval(
 			USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
 		),
 	);
+	if (headerFresh)
+		return { intervalMs: idleIntervalMs, isIdle: true, headerFed: true };
 	const recencyMs = opts.activityRecencyMs ?? ACTIVITY_RECENCY_MS;
 	if (lastActivityMs != null && now - lastActivityMs < recencyMs) {
 		return { intervalMs: activeIntervalMs, isIdle: false };
@@ -285,11 +307,13 @@ export function computePollDelay(params: {
 	activityRecencyMs?: number;
 	activeIntervalMs: number;
 	lastActivityMs: number | null;
+	/** The account's routing view is being kept fresh by response headers. */
+	headerFresh?: boolean;
 	failures: number;
 	retryAfterMs: number | null;
 	now: number;
 	jitterFraction: number;
-}): { delayMs: number; isIdle: boolean } {
+}): { delayMs: number; isIdle: boolean; headerFed?: true } {
 	if (params.retryAfterMs != null)
 		return { delayMs: params.retryAfterMs, isIdle: false };
 	if (params.failures > 0) {
@@ -301,11 +325,12 @@ export function computePollDelay(params: {
 			isIdle: false,
 		};
 	}
-	const { intervalMs, isIdle } = computeDemandAwareInterval(
+	const { intervalMs, isIdle, headerFed } = computeDemandAwareInterval(
 		params,
 		params.lastActivityMs,
 		params.activeIntervalMs,
 		params.now,
+		params.headerFresh,
 	);
 	const fraction = isIdle
 		? idleJitterFraction(params.jitterFraction)
@@ -316,7 +341,7 @@ export function computePollDelay(params: {
 	const delayMs = params.demandAware
 		? Math.min(jittered, USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS)
 		: jittered;
-	return { delayMs, isIdle };
+	return headerFed ? { delayMs, isIdle, headerFed } : { delayMs, isIdle };
 }
 
 export interface UsageWindow {
@@ -1196,16 +1221,70 @@ export function getAccountCapacitySignal(
 	};
 }
 
-export function getFreshCapacity(
-	cache: Pick<UsageCache, "get" | "getAge">,
+/**
+ * The shortest freshness bound routing applies to the usage view, and the cap
+ * on how long header readings let a busy account skip active polling.
+ */
+export const ROUTING_USAGE_MAX_AGE_MS = 180_000;
+
+/**
+ * Capacity from the polled reading alone, or null when it is older than
+ * `maxAgeMs`. For decisions that read the poll's `limits[]` beside its
+ * account-wide windows (the family-weekly gate), which must not see one
+ * source's windows next to the other's scoped limits. Non-evicting: a stale
+ * entry stays as the next poll's window-roll and limit-reached baseline.
+ */
+export function getFreshPollCapacity(
+	cache: Pick<UsageCache, "peek" | "peekAge">,
 	accountId: string,
 	provider: string,
 	now: number,
 	maxAgeMs: number,
 ): CapacitySignal | null {
-	const age = cache.getAge(accountId);
+	const age = cache.peekAge(accountId);
 	if (age === null || age > maxAgeMs) return null; // age-stale → unknown
-	return getAccountCapacitySignal(cache.get(accountId), provider, now);
+	return getAccountCapacitySignal(cache.peek(accountId), provider, now);
+}
+
+/**
+ * The reading routing acts on: the poll with its 5h/7d windows updated from
+ * later responses' headers (see {@link UsageCache.peekUsageView}), or null when
+ * that view is not fresh within `maxAgeMs` (see `isUsageViewFresh`). With no
+ * header readings, or for any provider but Anthropic, this is the poll reading
+ * under the poll's own age, as {@link getFreshPollCapacity} reads it.
+ */
+export function getFreshRoutingUsage(
+	cache: Pick<UsageCache, "peekUsageView">,
+	accountId: string,
+	provider: string,
+	now: number,
+	maxAgeMs: number,
+): AnyUsageData | null {
+	// The base may be as old as the UI horizon: poll-sourced axes still carry
+	// the poll's write time and fail `maxAgeMs` on their own.
+	const view = cache.peekUsageView(
+		accountId,
+		provider,
+		now,
+		UI_STALE_HORIZON_MS,
+	);
+	if (view === null || !isUsageViewFresh(view, now, maxAgeMs)) return null;
+	return view.data;
+}
+
+/** {@link getAccountCapacitySignal} over {@link getFreshRoutingUsage}. */
+export function getFreshRoutingCapacity(
+	cache: Pick<UsageCache, "peekUsageView">,
+	accountId: string,
+	provider: string,
+	now: number,
+	maxAgeMs: number,
+): CapacitySignal | null {
+	return getAccountCapacitySignal(
+		getFreshRoutingUsage(cache, accountId, provider, now, maxAgeMs),
+		provider,
+		now,
+	);
 }
 
 /**
@@ -1339,6 +1418,14 @@ class UsageCache {
 	// value current when it starts and is superseded once the counter moves past
 	// it: its reading predates whatever made the fence necessary.
 	private fences = new Map<string, number>();
+	// Latest 5h/7d readings taken from proxied Anthropic responses' headers, and
+	// the epoch a response must have been sent under to be recorded. startPolling
+	// issues an epoch, delete() and fenceAndRefetch reissue it, stopPolling
+	// withdraws it. The counter is shared by every account, so an id deleted and
+	// reused can never match an epoch from before.
+	private headerWindows = new Map<string, HeaderWindows>();
+	private headerEpochs = new Map<string, number>();
+	private nextHeaderEpoch = 0;
 	// Demand-aware polling state (Anthropic only — set when startPolling receives
 	// a PollingPolicy with demandAware:true). See PollingPolicy / noteActivity.
 	private pollingPolicies = new Map<string, PollingPolicy>();
@@ -1350,7 +1437,12 @@ class UsageCache {
 	// whether an idle-sleeping account should be re-armed to the active cadence.
 	private pollSchedule = new Map<
 		string,
-		{ wakeAt: number; isIdle: boolean; activeBaseMs: number }
+		{
+			wakeAt: number;
+			isIdle: boolean;
+			activeBaseMs: number;
+			headerFed?: true;
+		}
 	>();
 	private anthropicReadStore: AnthropicUsageReadStore | null = null;
 	// Kept across stopPolling: restarting an account's poller must not reopen
@@ -1518,15 +1610,18 @@ class UsageCache {
 		// it to negative-only for the IDLE cadence (which must never overshoot its
 		// refresh-before-expiry cap).
 		const jitterFraction = (Math.random() - 0.5) * 0.4;
-		const { delayMs, isIdle } = computePollDelay({
+		const now = Date.now();
+		const { delayMs, isIdle, headerFed } = computePollDelay({
 			demandAware: policy?.demandAware,
 			idleIntervalMs: policy?.idleIntervalMs,
 			activityRecencyMs: policy?.activityRecencyMs,
 			activeIntervalMs: activeBaseMs,
 			lastActivityMs,
+			headerFresh:
+				!!policy?.demandAware && this.isHeaderFed(accountId, activeBaseMs, now),
 			failures,
 			retryAfterMs,
-			now: Date.now(),
+			now,
 			jitterFraction,
 		});
 
@@ -1620,7 +1715,44 @@ class UsageCache {
 			wakeAt: Date.now() + delayMs,
 			isIdle,
 			activeBaseMs,
+			...(headerFed ? { headerFed } : {}),
 		});
+	}
+
+	/**
+	 * Whether the account's routing view stays fresh from its own responses'
+	 * headers without this poll: 5h and 7d both taken from a header reading
+	 * observed within the routing bound (twice the active cadence, as for
+	 * `usage_poll_interval_ms`, capped at {@link ROUTING_USAGE_MAX_AGE_MS}), and
+	 * no poll-only axis reported that would still need the poll inside that
+	 * bound. The view's base is read as routing reads it.
+	 */
+	private isHeaderFed(
+		accountId: string,
+		activeBaseMs: number,
+		now: number,
+	): boolean {
+		const stored = this.headerWindows.get(accountId);
+		if (!stored?.fiveHour || !stored.sevenDay) return false;
+		const boundMs = Math.min(2 * activeBaseMs, ROUTING_USAGE_MAX_AGE_MS);
+		if (
+			now - stored.fiveHour.observedAtMs > boundMs ||
+			now - stored.sevenDay.observedAtMs > boundMs
+		) {
+			return false;
+		}
+		const view = this.peekUsageView(
+			accountId,
+			"anthropic",
+			now,
+			UI_STALE_HORIZON_MS,
+		);
+		return (
+			view !== null &&
+			view.fiveHour.source !== "poll" &&
+			view.sevenDay.source !== "poll" &&
+			!reportsPollOnlyAxis(view.data)
+		);
 	}
 
 	/**
@@ -1651,6 +1783,9 @@ class UsageCache {
 		// Only re-arm when currently sleeping on an IDLE timer. An active or
 		// backoff timer is left untouched (backoff must keep winning).
 		if (!sched?.isIdle) return;
+		// Fresh response headers already keep routing current: stay on the idle
+		// timer. Once they lapse, activity re-arms as for any idle account.
+		if (this.isHeaderFed(accountId, sched.activeBaseMs, now)) return;
 		// Skip if the pending idle wake is already within ~one active interval
 		// (incl. max +20% jitter) — re-arming could only push it further out.
 		if (sched.wakeAt - now <= sched.activeBaseMs * 1.2) return;
@@ -1670,6 +1805,40 @@ class UsageCache {
 			this.providerTypes.get(accountId),
 			this.customEndpoints.get(accountId),
 			null,
+		);
+	}
+
+	/**
+	 * An account-wide quota cooldown was just applied. Its header readings stop
+	 * counting: they are cleared and the epoch is reissued, so the headers of the
+	 * 429 that caused the cooldown (recorded when it is forwarded, under the
+	 * epoch captured before sending) are refused. An account sleeping on an idle
+	 * timer is re-armed straight onto the active cadence, since polling is the
+	 * only channel that observes the account recover; a pending wake sooner than
+	 * the shortest active delay is kept. A no-op without a live poller.
+	 */
+	noteAccountWideCooldown(accountId: string, now: number = Date.now()): void {
+		if (!this.headerEpochs.has(accountId)) return;
+		this.reissueHeaderEpoch(accountId);
+		const sched = this.pollSchedule.get(accountId);
+		if (!sched?.isIdle) return;
+		if (sched.wakeAt - now <= sched.activeBaseMs * 0.8) return;
+		const tokenProvider = this.tokenProviders.get(accountId);
+		const generation = this.pollGenerations.get(accountId);
+		if (!tokenProvider || generation === undefined) return;
+		const existing = this.pollTimeouts.get(accountId);
+		if (existing) clearTimeout(existing);
+		this.pollTimeouts.delete(accountId);
+		this.pollSchedule.delete(accountId);
+		this.armNextPoll(
+			accountId,
+			tokenProvider,
+			generation,
+			sched.activeBaseMs,
+			this.providerTypes.get(accountId),
+			this.customEndpoints.get(accountId),
+			null,
+			now,
 		);
 	}
 
@@ -1740,6 +1909,8 @@ class UsageCache {
 		else this.anthropicLimitReachedCallbacks.delete(accountId);
 		this.anthropicObservationVersions.set(accountId, 0);
 		this.anthropicObservationTasks.delete(accountId);
+		this.headerWindows.delete(accountId);
+		this.headerEpochs.set(accountId, ++this.nextHeaderEpoch);
 
 		// Store the token provider (either a static token or a function)
 		const tokenProvider: AccessTokenProvider =
@@ -1929,6 +2100,7 @@ class UsageCache {
 	async fenceAndRefetch(accountId: string): Promise<boolean> {
 		if (!this.tokenProviders.has(accountId)) return false;
 		this.fences.set(accountId, (this.fences.get(accountId) ?? 0) + 1);
+		this.reissueHeaderEpoch(accountId);
 		return this.refreshNow(accountId);
 	}
 
@@ -2082,6 +2254,8 @@ class UsageCache {
 			clearTimeout(timeout);
 			this.pollTimeouts.delete(accountId);
 		}
+		this.headerWindows.delete(accountId);
+		this.headerEpochs.delete(accountId);
 		if (this.tokenProviders.has(accountId)) {
 			this.tokenProviders.delete(accountId);
 			this.failureCounts.delete(accountId);
@@ -2778,8 +2952,8 @@ class UsageCache {
 	 *
 	 * NEVER evicts — like peek()/peekAge(), a stale entry is left in the map so
 	 * eviction and window-reset comparisons behave as if no read happened. Do NOT
-	 * use for routing/throttling/capacity decisions; those must keep using
-	 * get()/getAge()/getFreshCapacity, which enforce the routing TTL.
+	 * use for routing/throttling/capacity decisions; those go through
+	 * getFreshPollCapacity/getFreshRoutingUsage, which enforce freshness bounds.
 	 *
 	 * Returns THREE fields on purpose, and the first two are NOT interchangeable:
 	 *  - `sampledAtMs` is the entry's ABSOLUTE WRITE time, i.e. the anchor of the
@@ -2864,7 +3038,8 @@ class UsageCache {
 
 	/**
 	 * Test-only: seed the cache with an explicit age so freshness-bounded readers
-	 * (`getFreshCapacity`) can be exercised at a chosen point.
+	 * (`getFreshPollCapacity`, `getFreshRoutingUsage`) can be exercised at a
+	 * chosen point.
 	 *
 	 * The 429 ladder in proxy-operations reads the same cache through two
 	 * DIFFERENT bounds — 180s for the account-wide/family rungs, 120s for the
@@ -3024,7 +3199,79 @@ class UsageCache {
 	 */
 	delete(accountId: string): void {
 		this.cache.delete(accountId);
+		this.reissueHeaderEpoch(accountId);
 		log.debug(`Cleared usage cache for account ${accountId}`);
+	}
+
+	/**
+	 * The epoch this account's response headers are recorded under. Capture it
+	 * before the request is sent and hand it to {@link recordUsageHeaders} with
+	 * the response. Null without a live poller: poll writes are bound to one, and
+	 * header readings follow the same lifecycle.
+	 */
+	usageHeaderEpoch(accountId: string): number | null {
+		return this.headerEpochs.get(accountId) ?? null;
+	}
+
+	/**
+	 * Take the account-wide 5h/7d readings of one Anthropic response. Dropped
+	 * unless `epoch` is still the account's, so a response sent before the poller
+	 * stopped, restarted or was fenced cannot repopulate the store afterwards. Per
+	 * axis the later-observed reading wins. Writes nothing to the database.
+	 */
+	recordUsageHeaders(
+		accountId: string,
+		epoch: number | null,
+		claims: readonly ExtractedClaimReading[],
+		observedAtMs: number,
+	): void {
+		if (epoch === null || this.headerEpochs.get(accountId) !== epoch) return;
+		const incoming = headerWindowsFromClaims(claims, observedAtMs);
+		if (incoming.fiveHour === null && incoming.sevenDay === null) return;
+		this.headerWindows.set(
+			accountId,
+			mergeHeaderWindows(this.headerWindows.get(accountId), incoming),
+		);
+	}
+
+	private reissueHeaderEpoch(accountId: string): void {
+		this.headerWindows.delete(accountId);
+		if (this.headerEpochs.has(accountId))
+			this.headerEpochs.set(accountId, ++this.nextHeaderEpoch);
+	}
+
+	/**
+	 * Non-evicting read of the poll reading with its 5h/7d windows brought up to
+	 * date from recorded headers (Anthropic only; see `buildUsageView`), or null
+	 * without a poll reading written within `horizonMs`. Header readings observed
+	 * longer ago than `horizonMs` are left out. Freshness is the caller's to
+	 * judge, per axis; {@link getFreshRoutingUsage} is the routing gate.
+	 */
+	peekUsageView(
+		accountId: string,
+		provider: string,
+		now: number = Date.now(),
+		horizonMs: number = USAGE_CACHE_TTL_MS,
+	): UsageView | null {
+		const cached = this.cache.get(accountId);
+		if (!cached || now - cached.timestamp > horizonMs) return null;
+		const stored =
+			provider === "anthropic" ? this.headerWindows.get(accountId) : undefined;
+		const within = (reading: HeaderWindowReading | null) =>
+			reading !== null && now - reading.observedAtMs <= horizonMs
+				? reading
+				: null;
+		const fiveHour = within(stored?.fiveHour ?? null);
+		const sevenDay = within(stored?.sevenDay ?? null);
+		return buildUsageView(
+			{
+				data: cached.data,
+				writtenAtMs: cached.timestamp,
+				observedAtMs: cached.observedAtMs,
+			},
+			fiveHour || sevenDay ? { fiveHour, sevenDay } : null,
+			now,
+		);
 	}
 
 	/**
@@ -3037,6 +3284,8 @@ class UsageCache {
 		this.cache.clear();
 		this.usageRateLimitedUntil.clear();
 		this.fences.clear();
+		this.headerWindows.clear();
+		this.headerEpochs.clear();
 		this.anthropicReadBudget.clear();
 		log.info("Cleared all usage cache and stopped polling");
 	}

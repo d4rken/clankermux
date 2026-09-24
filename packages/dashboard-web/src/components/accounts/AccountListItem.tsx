@@ -764,6 +764,7 @@ export function AccountListItem({
 							usageData={account.usageData}
 							staleUsage={account.staleUsage}
 							usageAsOfIso={account.usageAsOfIso}
+							usageWindowAsOfIso={account.usageWindowAsOfIso}
 							usageRateLimitedUntil={account.usageRateLimitedUntil}
 							usageThrottledUntil={account.usageThrottledUntil}
 							usageThrottledWindows={account.usageThrottledWindows}

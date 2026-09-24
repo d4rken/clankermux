@@ -5,7 +5,13 @@ import {
 	RateLimitError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
+import { usageCache } from "@clankermux/providers";
+import {
+	type Account,
+	isQuotaDerivedRateLimitReason,
+	type RateLimitReason,
+	type RequestMeta,
+} from "@clankermux/types";
 import type { ProxyContext } from "./proxy-types";
 import { isOAuthAnthropicAccount } from "./transparent-retry";
 
@@ -691,6 +697,18 @@ export function applyRateLimitCooldown(
 		);
 		logError(rateLimitError, log);
 		return;
+	}
+
+	// A spent 5h or weekly window: the header readings describe the window that
+	// just ran out, and polling is what observes it coming back. Only the
+	// quota-derived account-wide reasons qualify; any other cooldown leaves the
+	// headers and the poll schedule alone.
+	if (
+		account.provider === "anthropic" &&
+		!account.custom_endpoint &&
+		isQuotaDerivedRateLimitReason(rateLimitInfo.reason)
+	) {
+		usageCache.noteAccountWideCooldown(account.id, now);
 	}
 
 	// Single-flight recovery probe: reaching here means a REAL fresh cooldown is

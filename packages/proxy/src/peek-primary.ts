@@ -1,6 +1,11 @@
 import type { Config } from "@clankermux/config";
 import { Logger } from "@clankermux/logger";
-import { getAccountCapacitySignal, usageCache } from "@clankermux/providers";
+import {
+	getFreshRoutingCapacity,
+	getFreshRoutingUsage,
+	USAGE_CACHE_TTL_MS,
+	usageCache,
+} from "@clankermux/providers";
 import type {
 	Account,
 	CapacitySignal,
@@ -103,7 +108,7 @@ interface ThrottleSettings {
  * would leave the second deadline undiscovered, and a caller taking the
  * earliest recovery across the pool would then publish T1 — a moment at which
  * nothing is actually routable. Both reads are pure (a non-evicting
- * `usageCache.peek` and a breaker inspection), so evaluating the second gate
+ * `getFreshRoutingUsage` and a breaker inspection), so evaluating the second gate
  * for an already-gated account costs nothing and mutates nothing.
  */
 function activeGateExclusions(
@@ -125,7 +130,13 @@ function activeGateExclusions(
 
 	if (throttlingActive) {
 		const tu = getUsageThrottleUntil(
-			usageCache.peek(account.id),
+			getFreshRoutingUsage(
+				usageCache,
+				account.id,
+				account.provider,
+				now,
+				USAGE_CACHE_TTL_MS,
+			),
 			settings,
 			now,
 			account.provider,
@@ -157,8 +168,8 @@ function activeGateExclusions(
  * account cannot make. Asking THIS question for every account is what completes
  * that picture.
  *
- * Pure and non-evicting, exactly like the evaluation: a `usageCache.peek` and a
- * breaker inspection, nothing written.
+ * Pure and non-evicting, exactly like the evaluation: a `getFreshRoutingUsage`
+ * and a breaker inspection, nothing written.
  */
 export function gateHoldsForAccounts(
 	accounts: readonly Account[],
@@ -217,9 +228,10 @@ export function gateHoldsForAccounts(
  *    `getProviderWideOverloadUntil`); a Haiku-only incident must not move the
  *    prediction while Sonnet/Opus traffic still routes to the account.
  *
- * Purity note: this reads usage via `usageCache.peek`, which is fully read-only —
- * it returns null for a stale entry but never evicts it. (The inspection must
- * not mutate cache state that routing / window-reset comparisons depend on.)
+ * Purity note: this reads usage via `getFreshRoutingUsage` and
+ * `getFreshRoutingCapacity`, which are fully read-only — they return null for a
+ * stale entry but never evict it. (The inspection must not mutate cache state
+ * that routing / window-reset comparisons depend on.)
  *
  * Silent, unlike {@link peekPrimaryAccountId}: the change-only diagnostic there
  * describes the DASHBOARD's badge moving, and an unauthenticated widget polling
@@ -271,25 +283,21 @@ export function evaluateDefaultCandidates(
 		survivors.push(account);
 	}
 
-	// PASS 2 — capacity snapshot for the surviving pool, bounded by the SAME
-	// freshness window routing uses. `usageCache.peek()` accepts data up to 10
-	// minutes old, but routing's liveness path reads through getFreshCapacity's
-	// 180s FAMILY_WEEKLY_MAX_USAGE_AGE_MS bound. Without this gate, between 3 and
-	// 10 minutes routing would fail open while the badge demoted on stale
-	// evidence. peekAge()/peek() are both non-evicting: the badge never mutates
-	// cache state that routing depends on.
+	// PASS 2 — capacity snapshot for the surviving pool, through the same lookup
+	// and 180s FAMILY_WEEKLY_MAX_USAGE_AGE_MS bound routing's liveness path uses.
+	// A looser bound would let the badge demote on evidence routing has already
+	// stopped acting on.
 	const capacityById = new Map<string, CapacitySignal | null>();
 	for (const account of survivors) {
-		const age = usageCache.peekAge(account.id);
 		capacityById.set(
 			account.id,
-			age !== null && age <= FAMILY_WEEKLY_MAX_USAGE_AGE_MS
-				? getAccountCapacitySignal(
-						usageCache.peek(account.id),
-						account.provider,
-						now,
-					)
-				: null,
+			getFreshRoutingCapacity(
+				usageCache,
+				account.id,
+				account.provider,
+				now,
+				FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+			),
 		);
 	}
 

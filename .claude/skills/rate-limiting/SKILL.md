@@ -62,6 +62,32 @@ legacy account-level model lists. Concrete model IDs retain strict selection.
 4. stale/absent/zero headroom: a REJECTING status → not retryable; else
    `x-should-retry: true` → retryable
 
+## Two views of the usage cache
+
+Routing reads the poll reading with its 5h/7d windows updated from later
+responses' `anthropic-ratelimit-unified-{5h,7d}-*` headers
+(`getFreshRoutingUsage`/`getFreshRoutingCapacity`, `usage-header-view.ts`).
+The family-weekly gate, the reactive family rung, predictions and every poll
+side effect read the poll alone (`getFreshPollCapacity`), because they read the
+poll's `limits[]` beside its account-wide windows and the two must come from
+one reading. A new consumer picks one of the two on purpose.
+
+- A header reading counts only with status `allowed`/`allowed_warning`,
+  utilization in 0..1 and a reset after the response arrived; right after a 5h
+  roll responses still report the OLD window, reset already passed.
+- Same window (resets within 2 s): the HIGHER utilization wins. Headers
+  saturate at 0.99 while the poll reads 100; taking the header would
+  un-exhaust a spent window.
+- Header readings are bound to the poller: the attempt captures
+  `usageHeaderEpoch` before sending, and stop/restart/`delete`/
+  `fenceAndRefetch` reissue it, so a response sent under old credentials never
+  lands. An account-wide quota cooldown (`weekly_exhausted_429`,
+  `session_exhausted_429`) reissues it too and re-arms the active poll, so the
+  cooled 429's own headers never re-feed the view.
+- The routing view is fresh only while `seven_day_oauth_apps` (finite) and
+  enabled `extra_usage` (finite) are within the bound too; headers never carry
+  them.
+
 ## What actually blocks routing
 
 ```ts
@@ -76,7 +102,7 @@ breaker, context-window fit, and API-key account/class pinning.
 
 | Loop | Cadence | Behaviour with a LOCKED account |
 |---|---|---|
-| Usage poller | 90s active / ~10min idle (demand-aware), held to the account's 150s read gap | **keeps polling** — the only observation channel |
+| Usage poller | 90s active / ~10min idle (demand-aware; an account whose own responses keep its header 5h/7d fresh polls at the idle cadence even when busy), held to the account's 150s read gap | **keeps polling** — the only observation channel |
 | Auto-refresh scheduler | scheduled | **skips locked accounts** by SQL |
 | Usage snapshots | 2 min | Limits-tab history |
 | Integrity | quick 6h / full 24h | — |
