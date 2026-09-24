@@ -122,6 +122,7 @@ mock.module("node:fs", () => ({ ...nodeFs, statSync: mockStatSync }));
 
 import {
 	fullCheckInitialDelayMs,
+	fullCheckRemainingMs,
 	runIntegrityCheckOnDemand,
 	runScheduledIntegrityCheck,
 	startFullIntegrityCheckBackground,
@@ -376,6 +377,28 @@ describe("fullCheckInitialDelayMs", () => {
 
 	it("never runs sooner than the startup delay, even when overdue", () => {
 		expect(fullCheckInitialDelayMs(now - 3 * DAY, now, DAY)).toBe(30 * 60_000);
+	});
+});
+
+describe("fullCheckRemainingMs", () => {
+	const HOUR = 3_600_000;
+	const DAY = 24 * HOUR;
+	const now = 1_790_000_000_000;
+
+	it("is due at once when no full check was ever attempted", () => {
+		expect(fullCheckRemainingMs(null, now, DAY)).toBe(0);
+	});
+
+	// A full check that ran after the timer was armed (an on-demand one, say)
+	// pushes the next scheduled one a whole interval past it.
+	it("waits a full interval after a check that ran since the timer was armed", () => {
+		expect(fullCheckRemainingMs(now - 5 * 60_000, now, DAY)).toBe(
+			DAY - 5 * 60_000,
+		);
+	});
+
+	it("is due at once when the interval has passed", () => {
+		expect(fullCheckRemainingMs(now - DAY - 1, now, DAY)).toBe(0);
 	});
 });
 

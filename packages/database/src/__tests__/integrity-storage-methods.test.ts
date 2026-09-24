@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 
 // ---------------------------------------------------------------------------
 // Minimal DatabaseOperations stand-in exposing only the methods under test.
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { tempDbTracker } from "@clankermux/test-support";
 import { DatabaseOperations } from "../database-operations";
+import { StrategyRepository } from "../repositories/strategy.repository";
 
 const tmpDb = tempDbTracker("test-integrity");
 
@@ -349,6 +350,32 @@ describe("DatabaseOperations full integrity outcome across restarts", () => {
 		expect(s.lastFullSkipReason).toBe("worker timed out");
 		expect(s.lastFullAttemptAt).toBeGreaterThanOrEqual(verified ?? 0);
 		expect(s.status).toBe("skipped");
+	});
+
+	it("keeps the newest full outcome when an earlier write is still pending", async () => {
+		const realSet = StrategyRepository.prototype.set;
+		let calls = 0;
+		const set = spyOn(StrategyRepository.prototype, "set").mockImplementation(
+			async function (
+				this: StrategyRepository,
+				...args: Parameters<StrategyRepository["set"]>
+			) {
+				// The first write stalls, as behind a busy writer, until the
+				// second record has been made.
+				if (++calls === 1) await Bun.sleep(30);
+				return realSet.apply(this, args);
+			},
+		);
+
+		const older = first.recordIntegrityResult("full", "corrupt", "stale");
+		const newer = first.recordIntegrityResult("full", "ok");
+		await Promise.all([older, newer]);
+		set.mockRestore();
+		expect(calls).toBeGreaterThanOrEqual(2);
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.status).toBe("ok");
 	});
 
 	it("does not persist quick results", async () => {

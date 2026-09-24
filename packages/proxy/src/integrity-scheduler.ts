@@ -54,11 +54,20 @@ export function fullCheckInitialDelayMs(
 	now: number,
 	fullIntervalMs: number,
 ): number {
-	if (lastFullAttemptAt === null) return FULL_INITIAL_DELAY_MS;
 	return Math.max(
 		FULL_INITIAL_DELAY_MS,
-		lastFullAttemptAt + fullIntervalMs - now,
+		fullCheckRemainingMs(lastFullAttemptAt, now, fullIntervalMs),
 	);
+}
+
+/** Time until a full check is due: a full interval after the last attempt. */
+export function fullCheckRemainingMs(
+	lastFullAttemptAt: number | null,
+	now: number,
+	fullIntervalMs: number,
+): number {
+	if (lastFullAttemptAt === null) return 0;
+	return Math.max(0, lastFullAttemptAt + fullIntervalMs - now);
 }
 
 export function startIntegrityScheduler(
@@ -120,32 +129,45 @@ export function startIntegrityScheduler(
 	}
 
 	let stopped = false;
+	let fullTimer: ReturnType<typeof setTimeout> | undefined;
 	if (fullInterval !== null) {
+		// Each timer re-reads when the last full check ran: one that ran since
+		// the timer was armed (an on-demand check) moves the next one out
+		// instead of being repeated.
+		const armFull = (delay: number) => {
+			if (stopped) return;
+			fullTimer = setTimeout(() => {
+				const remaining = fullCheckRemainingMs(
+					dbOps.getIntegrityStatus().lastFullAttemptAt,
+					Date.now(),
+					fullInterval,
+				);
+				if (remaining > 0) return armFull(remaining);
+				tickFull();
+				armFull(fullInterval);
+			}, delay);
+		};
 		// The daily cadence spans restarts: first learn when the last full check
 		// ran, so a restart doesn't rescan the whole file every time.
 		void dbOps
 			.restoreFullIntegrityStatus()
 			.catch(() => {})
-			.then(() => {
-				if (stopped) return;
-				const delay = fullCheckInitialDelayMs(
-					dbOps.getIntegrityStatus().lastFullAttemptAt,
-					Date.now(),
-					fullInterval,
-				);
-				handles.push(
-					setTimeout(() => {
-						tickFull();
-						if (!stopped) intervals.push(setInterval(tickFull, fullInterval));
-					}, delay),
-				);
-			});
+			.then(() =>
+				armFull(
+					fullCheckInitialDelayMs(
+						dbOps.getIntegrityStatus().lastFullAttemptAt,
+						Date.now(),
+						fullInterval,
+					),
+				),
+			);
 	} else {
 		logger.info("Full integrity check disabled (interval override = 0)");
 	}
 
 	return () => {
 		stopped = true;
+		clearTimeout(fullTimer);
 		for (const h of handles) clearTimeout(h);
 		for (const i of intervals) clearInterval(i);
 		logger.info("Integrity scheduler stopped");

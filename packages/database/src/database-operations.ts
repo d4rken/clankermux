@@ -573,6 +573,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		lastFullAttemptAt: null,
 		lastFullSkipReason: null,
 	};
+	/** Tail of the queued full-integrity writes; see persistFullIntegrity(). */
+	private fullIntegrityWrites: Promise<void> = Promise.resolve();
 	/**
 	 * Cached per-data-type storage-usage measurement, with the epoch ms it was
 	 * computed. Reused for {@link RETENTION_STORAGE_USAGE_TTL_MS}; invalidated by
@@ -1004,21 +1006,29 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	/**
 	 * Store the full check's outcome so a restart knows when it last ran and
 	 * what it found. Never rejects: a lost write only costs an early recheck.
+	 * Writes run one after another, each taking its snapshot when it starts, so
+	 * a write held up behind a busy writer can't land an older outcome last.
 	 */
-	private async persistFullIntegrity(): Promise<void> {
-		const s = this.integrityStatus;
-		const stored: StoredFullIntegrity = {
-			checkAt: s.lastFullCheckAt,
-			result: s.lastFullResult,
-			error: s.lastFullError,
-			attemptAt: s.lastFullAttemptAt,
-			skipReason: s.lastFullSkipReason,
-		};
-		try {
-			await this.strategy.set(FULL_INTEGRITY_STRATEGY, { ...stored });
-		} catch (error) {
-			console.warn("Could not store the full integrity check outcome:", error);
-		}
+	private persistFullIntegrity(): Promise<void> {
+		this.fullIntegrityWrites = this.fullIntegrityWrites.then(async () => {
+			const s = this.integrityStatus;
+			const stored: StoredFullIntegrity = {
+				checkAt: s.lastFullCheckAt,
+				result: s.lastFullResult,
+				error: s.lastFullError,
+				attemptAt: s.lastFullAttemptAt,
+				skipReason: s.lastFullSkipReason,
+			};
+			try {
+				await this.strategy.set(FULL_INTEGRITY_STRATEGY, { ...stored });
+			} catch (error) {
+				console.warn(
+					"Could not store the full integrity check outcome:",
+					error,
+				);
+			}
+		});
+		return this.fullIntegrityWrites;
 	}
 
 	/**
