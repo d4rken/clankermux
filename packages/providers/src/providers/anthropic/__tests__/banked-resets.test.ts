@@ -633,6 +633,37 @@ describe("anthropicBankedResetCache", () => {
 		).toBe(2 * HOUR);
 	});
 
+	it("counts the weekly reset as a deadline", () => {
+		expect(
+			readDueAfter(
+				status({
+					grants: [parsedGrant({ endsAt: NOW + 29 * DAY })],
+					nextGrantId: "g1",
+					weeklyResetsAt: NOW + 3 * HOUR,
+				}),
+			),
+		).toBe(90 * MINUTE);
+	});
+
+	it("re-reads once weekly_resets_at passes", () => {
+		const weeklyResetsAt = NOW + 20 * MINUTE;
+		anthropicBankedResetCache.set(ID, status({ weeklyResetsAt }), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 15 * MINUTE)).toBe(
+			true,
+		);
+		anthropicBankedResetCache.set(
+			ID,
+			status({ weeklyResetsAt }),
+			NOW + 15 * MINUTE,
+		);
+		expect(anthropicBankedResetCache.needsRefresh(ID, weeklyResetsAt - 1)).toBe(
+			false,
+		);
+		expect(anthropicBankedResetCache.needsRefresh(ID, weeklyResetsAt)).toBe(
+			true,
+		);
+	});
+
 	it("does not count instants already past at read time as deadlines", () => {
 		expect(
 			readDueAfter(
@@ -642,6 +673,7 @@ describe("anthropicBankedResetCache", () => {
 					],
 					nextGrantId: "g1",
 					cooldownUntil: NOW - MINUTE,
+					weeklyResetsAt: NOW - MINUTE,
 				}),
 			),
 		).toBe(6 * HOUR);

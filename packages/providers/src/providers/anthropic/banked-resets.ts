@@ -381,7 +381,8 @@ export async function claimAnthropicBankedReset(
 
 /**
  * The TTL of a status read at `fetchedAt`, from the nearest instant still
- * ahead then: a grant starting or ending, or the claim cooldown lifting.
+ * ahead then: a grant starting or ending, the claim cooldown lifting, or the
+ * weekly window resetting.
  */
 function deadlineRefreshMs(
 	status: AnthropicBankedResetStatus,
@@ -394,6 +395,7 @@ function deadlineRefreshMs(
 		}
 	};
 	consider(status.cooldownUntil);
+	consider(status.weeklyResetsAt);
 	for (const grant of status.grants) {
 		consider(grant.startsAt);
 		consider(grant.endsAt);
@@ -465,6 +467,7 @@ class AnthropicBankedResetCache {
 			instant !== null && instant > fetchedAt && instant <= now;
 		return (
 			passedSinceRead(status.cooldownUntil) ||
+			passedSinceRead(status.weeklyResetsAt) ||
 			status.grants.some((grant) => passedSinceRead(grant.endsAt))
 		);
 	}
