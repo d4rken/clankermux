@@ -87,6 +87,7 @@ const usage = {
 	get: mock((_id: string) => usageReading as never),
 	noteRateLimited: mock((_id: string, _until: number) => {}),
 	getRateLimitedUntil: mock((_id: string) => rateLimitedUntil),
+	noteAnthropicUsageRead: mock((_id: string) => {}),
 };
 
 function status(
@@ -232,6 +233,7 @@ beforeEach(() => {
 		usage.get,
 		usage.noteRateLimited,
 		usage.getRateLimitedUntil,
+		usage.noteAnthropicUsageRead,
 	]) {
 		fn.mockClear();
 	}
@@ -342,11 +344,17 @@ describe("refreshStatus", () => {
 		expect(usage.noteRateLimited).not.toHaveBeenCalled();
 	});
 
+	it("counts every sent read against the account's usage read gap", async () => {
+		await coordinator().refreshStatus(ACCOUNT_ID, true);
+		expect(usage.noteAnthropicUsageRead.mock.calls).toEqual([[ACCOUNT_ID]]);
+	});
+
 	it("skips the read while the shared usage bucket is rate-limited", async () => {
 		rateLimitedUntil = NOW + 60_000;
 		const outcome = await coordinator().refreshStatus(ACCOUNT_ID, true);
 		expect(outcome.success).toBe(false);
 		expect(fetchStatus).not.toHaveBeenCalled();
+		expect(usage.noteAnthropicUsageRead).not.toHaveBeenCalled();
 	});
 
 	it("a 429 with Retry-After sets the shared backoff to that deadline", async () => {
@@ -387,6 +395,10 @@ describe("refreshStatus", () => {
 			const outcome = await coordinator().refreshStatus(ACCOUNT_ID, true);
 			expect(outcome.success).toBe(true);
 			expect(tokens).toEqual(["token", "fresh-token"]);
+			expect(usage.noteAnthropicUsageRead.mock.calls).toEqual([
+				[ACCOUNT_ID],
+				[ACCOUNT_ID],
+			]);
 		} finally {
 			fetchStatus.mockImplementation(() => statusImpl());
 		}

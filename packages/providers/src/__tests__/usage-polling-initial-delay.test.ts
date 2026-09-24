@@ -21,6 +21,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // One hour: the armed poll loop must never actually tick inside a test.

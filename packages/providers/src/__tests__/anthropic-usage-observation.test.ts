@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { type AnthropicUsageObservation, usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const ACCOUNT = "anthropic-usage-observation";
 let fetchSpy: ReturnType<typeof spyOn> | undefined;

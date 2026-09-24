@@ -581,6 +581,12 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	anthropic_usage_reads: {
+		shipped: "2026-09-24",
+		commit: "unreleased",
+		columns: ["account_id", "last_read_at", "reading", "reading_observed_at"],
+		source: "create-table-at-intro",
+	},
 };
 
 /**

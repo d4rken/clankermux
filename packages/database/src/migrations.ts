@@ -1081,6 +1081,19 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
+	// Each Anthropic account's last /api/oauth/usage request and last usage
+	// reading, so a restart neither re-reads an account inside its per-account
+	// gap nor starts routing with no reading at all. `reading` is the response
+	// body as JSON.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS anthropic_usage_reads (
+			account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+			last_read_at INTEGER,
+			reading TEXT,
+			reading_observed_at INTEGER
+		)
+	`);
+
 	// Claude Agent SDK bridge: one row per logical turn (one Claude Code query).
 	// Token and cost truth is NOT stored here; it is summed at read time from
 	// the inner `requests` rows carrying sdk_bridge_turn_id. The sdk_* columns

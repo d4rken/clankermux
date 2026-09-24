@@ -47,6 +47,7 @@ export {
 	type AnthropicBankedResetManualBegin,
 	type AnthropicBankedResetResolution,
 } from "./repositories/anthropic-banked-reset-event.repository";
+export type { AnthropicUsageReadRow } from "./repositories/anthropic-usage-read.repository";
 export { ApiKeyRepository } from "./repositories/api-key.repository";
 export {
 	AuthRepository,

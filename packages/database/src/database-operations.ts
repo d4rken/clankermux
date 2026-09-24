@@ -65,6 +65,10 @@ import {
 	type AnthropicBankedResetManualBegin,
 	type AnthropicBankedResetResolution,
 } from "./repositories/anthropic-banked-reset-event.repository";
+import {
+	AnthropicUsageReadRepository,
+	type AnthropicUsageReadRow,
+} from "./repositories/anthropic-usage-read.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
 	AuthRepository,
@@ -557,6 +561,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private quotaDriftResults: QuotaDriftResultRepository;
 	private modelOverrides: ModelOverrideRepository;
 	private sessionAffinityPins: SessionAffinityPinRepository;
+	private anthropicUsageReads: AnthropicUsageReadRepository;
 
 	constructor(
 		dbPath?: string,
@@ -718,6 +723,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.sessionAffinityPins = retrying(
 			new SessionAffinityPinRepository(this.adapter),
 			"sessionAffinityPins",
+		);
+		this.anthropicUsageReads = retrying(
+			new AnthropicUsageReadRepository(this.adapter),
+			"anthropicUsageReads",
 		);
 	}
 
@@ -3006,6 +3015,31 @@ OAuth tokens will need to be re-authenticated.
 
 	async getSessionAffinityPins(sinceMs: number): Promise<AffinityPin[]> {
 		return this.sessionAffinityPins.getSince(sinceMs);
+	}
+
+	// ── Anthropic usage-read operations delegated to repository ───────────────
+
+	async recordAnthropicUsageReadAt(
+		accountId: string,
+		at: number,
+	): Promise<void> {
+		await this.anthropicUsageReads.recordReadAt(accountId, at);
+	}
+
+	async recordAnthropicUsageReading(
+		accountId: string,
+		reading: string,
+		observedAt: number,
+	): Promise<void> {
+		await this.anthropicUsageReads.recordReading(
+			accountId,
+			reading,
+			observedAt,
+		);
+	}
+
+	async getAnthropicUsageReads(): Promise<AnthropicUsageReadRow[]> {
+		return this.anthropicUsageReads.getAll();
 	}
 
 	// ── Account payment (ledger) operations delegated to repository ───────────

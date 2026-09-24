@@ -2,6 +2,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const ACCOUNT = "anthropic-limit-reached";
 let fetchSpy: ReturnType<typeof spyOn> | undefined;

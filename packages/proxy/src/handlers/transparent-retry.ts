@@ -4,7 +4,10 @@ import {
 	REJECTING_STATUSES,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { isAnthropicHardLimitStatus } from "@clankermux/providers";
+import {
+	ANTHROPIC_USAGE_READ_MIN_GAP_MS,
+	isAnthropicHardLimitStatus,
+} from "@clankermux/providers";
 import {
 	type Account,
 	PROVIDER_NAMES,
@@ -55,9 +58,12 @@ const BURST_RETRY_SUPPRESSED_POLL_MS = 1_000;
  * transient-429 classification. Exported and consumed by the early-intercept
  * (proxy-operations.ts) and the marker-active revalidation (proxy.ts) — it's
  * classification-related, so it lives with the classifier rather than the hold
- * orchestrator. Defined once here to avoid duplicating the literal.
+ * orchestrator. Defined once here to avoid duplicating the literal. It must
+ * outlast the per-account read gap, or a reading goes stale before the next
+ * one is allowed.
  */
-export const BURST_RETRY_MAX_USAGE_AGE_MS = 120_000;
+export const BURST_RETRY_MAX_USAGE_AGE_MS =
+	ANTHROPIC_USAGE_READ_MIN_GAP_MS + 30_000;
 
 /**
  * Time (ms) reserved for the re-probe request itself when capping a

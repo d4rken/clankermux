@@ -19,6 +19,9 @@ import {
 	USAGE_RATE_LIMITED_DEFAULT_MS,
 	usageCache,
 } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const HOUR = 60 * 60 * 1000;
 

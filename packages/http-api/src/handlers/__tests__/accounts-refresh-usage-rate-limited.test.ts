@@ -69,11 +69,52 @@ it("defers the recheck while the usage endpoint's own retry-after is still runni
 	}
 });
 
+it("keeps the cached reading and names the next read while the account is inside its read gap", async () => {
+	const rateLimitedUntil = spyOn(
+		usageCache,
+		"getRateLimitedUntil",
+	).mockReturnValue(null);
+	const waitMs = spyOn(usageCache, "anthropicUsageReadWaitMs").mockReturnValue(
+		90_000,
+	);
+	const stopPolling = spyOn(usageCache, "stopPolling");
+	const refreshNow = spyOn(usageCache, "refreshNow").mockResolvedValue(false);
+	try {
+		const before = Date.now();
+		const response = await createAccountRefreshUsageHandler(dbOps)(
+			req(),
+			"acct",
+		);
+		const body = (await response.json()) as {
+			success: boolean;
+			message: string;
+			pollingRestarted: boolean;
+			cacheRefreshed: boolean;
+			nextUsageReadAt: number;
+		};
+		expect(body.success).toBe(false);
+		expect(body.pollingRestarted).toBe(false);
+		expect(body.cacheRefreshed).toBe(false);
+		expect(body.message).toContain("90s");
+		expect(body.nextUsageReadAt).toBeGreaterThanOrEqual(before + 90_000);
+		expect(stopPolling).not.toHaveBeenCalled();
+		expect(refreshNow).not.toHaveBeenCalled();
+	} finally {
+		rateLimitedUntil.mockRestore();
+		waitMs.mockRestore();
+		stopPolling.mockRestore();
+		refreshNow.mockRestore();
+	}
+});
+
 it("refreshes as usual when no retry-after is outstanding", async () => {
 	const rateLimitedUntil = spyOn(
 		usageCache,
 		"getRateLimitedUntil",
 	).mockReturnValue(null);
+	const waitMs = spyOn(usageCache, "anthropicUsageReadWaitMs").mockReturnValue(
+		0,
+	);
 	const refreshNow = spyOn(usageCache, "refreshNow").mockResolvedValue(true);
 	try {
 		const response = await createAccountRefreshUsageHandler(dbOps)(
@@ -89,6 +130,7 @@ it("refreshes as usual when no retry-after is outstanding", async () => {
 		expect(refreshNow).toHaveBeenCalled();
 	} finally {
 		rateLimitedUntil.mockRestore();
+		waitMs.mockRestore();
 		refreshNow.mockRestore();
 	}
 });

@@ -5,6 +5,9 @@ import {
 	shouldReportCapacityRestored,
 	usageCache,
 } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 /**
  * The poller REPORTS capacity evidence; it no longer decides whether a cooldown

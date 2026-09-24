@@ -167,7 +167,11 @@ export interface AnthropicBankedResetCoordinatorDeps {
 	canFetchProfile?: typeof canFetchAnthropicProfile;
 	usage?: Pick<
 		typeof usageCache,
-		"fenceAndRefetch" | "get" | "noteRateLimited" | "getRateLimitedUntil"
+		| "fenceAndRefetch"
+		| "get"
+		| "noteRateLimited"
+		| "getRateLimitedUntil"
+		| "noteAnthropicUsageRead"
 	>;
 	now?: () => number;
 	/** Spaces status reads of different accounts; one per coordinator. */
@@ -394,13 +398,17 @@ export class AnthropicBankedResetCoordinator {
 		turn: ReadTurn,
 	): Promise<AnthropicBankedResetRefreshOutcome> {
 		const accountId = account.id;
-		turn.sent();
+		const sent = () => {
+			turn.sent();
+			this.usage.noteAnthropicUsageRead(accountId);
+		};
+		sent();
 		let markAtReadStart = anthropicBankedResetCache.dueMark(accountId);
 		let read = await this.fetchStatus(accessToken);
 		if (read.httpStatus === 401) {
 			const refreshed = await this.forceTokenRefresh(account, accessToken);
 			if (refreshed) {
-				turn.sent();
+				sent();
 				markAtReadStart = anthropicBankedResetCache.dueMark(accountId);
 				read = await this.fetchStatus(refreshed);
 			}

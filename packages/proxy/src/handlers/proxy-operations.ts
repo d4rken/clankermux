@@ -2361,13 +2361,13 @@ export async function proxyWithAccount(
 				// (getFreshCapacity → null), ONE best-effort refresh runs before
 				// falling back to the `x-should-retry` hint — so a real burst 429
 				// doesn't fall through to sibling failover just because the usage
-				// cache happened to be cold. This rung's bound (120s) is TIGHTER
-				// than the shared refresh's trigger (180s), so it still owns the
-				// 120-180s band: there the rungs above are satisfied and no shared
-				// refresh ran, but this rung wants tighter evidence before spending
-				// the full hold budget. `usageRefreshAttempted` keeps the total at
-				// ONE fetch per 429 — above 180s the shared block already tried, and
-				// re-trying here would only re-pay a failed endpoint's timeout. The
+				// cache happened to be cold. This rung's bound
+				// (BURST_RETRY_MAX_USAGE_AGE_MS) is no looser than the shared
+				// refresh's trigger (FAMILY_WEEKLY_MAX_USAGE_AGE_MS), so a reading it
+				// rejects either predates a shared refresh that already ran or is
+				// cold for this rung alone. `usageRefreshAttempted` keeps the total at
+				// ONE fetch per 429: re-trying after the shared block would only
+				// re-pay a failed endpoint's timeout. The
 				// refresh is a single, self-bounded fetch (usageCache.refreshNow
 				// handles its own 5s timeout + failure → false); we re-read capacity
 				// afterward. The predicate itself stays pure/synchronous: it
