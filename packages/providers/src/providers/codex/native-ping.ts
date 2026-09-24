@@ -137,7 +137,7 @@ export async function sendCodexNativePing(
 		// breaking usage sampling + scheduled priming. `effort: "none"` is the
 		// cheapest accepted value; the abort-after-headers body cancel below is what
 		// actually bounds token generation. Verified live: 200 + x-codex-* headers
-		// on gpt-5.4-mini and gpt-5.6-sol.
+		// on gpt-5.6-sol.
 		reasoning: { effort: "none" },
 		instructions: "ping",
 	});
