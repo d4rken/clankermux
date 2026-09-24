@@ -52,6 +52,9 @@ class MockStrategyStore implements StrategyStore {
 	resumeCalls: string[] = [];
 	utilizationMap: Map<string, number | null> = new Map();
 	capacityMap: Map<string, CapacitySignal | null> = new Map();
+	/** The `now` each read was asked for, in call order. */
+	utilizationNows: number[] = [];
+	capacityNows: number[] = [];
 
 	resetAccountSession(accountId: string, timestamp: number): void {
 		this.resetCalls.push({ accountId, timestamp });
@@ -61,7 +64,12 @@ class MockStrategyStore implements StrategyStore {
 		this.resumeCalls.push(accountId);
 	}
 
-	getAccountUtilization(accountId: string, _provider: string): number | null {
+	getAccountUtilization(
+		accountId: string,
+		_provider: string,
+		now: number,
+	): number | null {
+		this.utilizationNows.push(now);
 		if (!this.utilizationMap.has(accountId)) return null;
 		return this.utilizationMap.get(accountId) ?? null;
 	}
@@ -73,8 +81,9 @@ class MockStrategyStore implements StrategyStore {
 	getAccountCapacity(
 		accountId: string,
 		_provider: string,
-		_now: number,
+		now: number,
 	): CapacitySignal | null {
+		this.capacityNows.push(now);
 		return this.capacityMap.get(accountId) ?? null;
 	}
 
@@ -88,6 +97,8 @@ class MockStrategyStore implements StrategyStore {
 		this.resumeCalls = [];
 		this.utilizationMap.clear();
 		this.capacityMap.clear();
+		this.utilizationNows = [];
+		this.capacityNows = [];
 	}
 
 	getResetCall(
@@ -2402,6 +2413,24 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 			noDeadline.id,
 			nearLimit.id,
 		]);
+	});
+
+	it("one ranking pass reads utilization and capacity at one instant", () => {
+		const a = makeCapAccount("instant-a");
+		const b = makeCapAccount("instant-b");
+		mockStore.setCapacity(a.id, harvest(40, 60 * 60_000));
+		mockStore.setUtilization(b.id, 30);
+		mockStore.utilizationNows = [];
+		mockStore.capacityNows = [];
+
+		strategy.select([a, b], makeMeta());
+
+		const instants = new Set([
+			...mockStore.utilizationNows,
+			...mockStore.capacityNows,
+		]);
+		expect(mockStore.utilizationNows.length).toBeGreaterThan(0);
+		expect(instants.size).toBe(1);
 	});
 
 	it("bucket order overall: HARVEST > UNKNOWN > NEAR_LIMIT", () => {

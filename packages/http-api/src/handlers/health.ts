@@ -6,7 +6,11 @@ import {
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
-import { usageCache } from "@clankermux/providers";
+import {
+	getFreshRoutingUsage,
+	USAGE_CACHE_TTL_MS,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account, FullUsageData } from "@clankermux/types";
 import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
 
@@ -37,15 +41,21 @@ export type AccountUsageResolver = (
  * for anything it cannot judge, so a second list here would be a copy of that
  * one that nothing keeps in step.
  *
- * FRESHNESS: `usageCache.peek()` is already TTL-gated at `USAGE_CACHE_TTL_MS`
- * (10 min), so everything reached from here is on the ROUTING-fresh view. That
- * is why `/health` asks for the verdict without a narrower session view while
+ * FRESHNESS: this is the routing view (the poll with header-fed 5h/7d windows)
+ * gated at `USAGE_CACHE_TTL_MS` (10 min), non-evicting. That is why `/health`
+ * asks for the verdict without a narrower session view while
  * `/api/accounts` passes one: the accounts endpoint renders from a 30-minute
  * display horizon that is too generous to assert the fast-moving 5h session
  * window, and has to narrow it explicitly. Here there is nothing to narrow.
  */
 export const usageCacheResolver: AccountUsageResolver = (account) =>
-	usageCache.peek(account.id) as FullUsageData | null;
+	getFreshRoutingUsage(
+		usageCache,
+		account.id,
+		account.provider ?? "anthropic",
+		Date.now(),
+		USAGE_CACHE_TTL_MS,
+	) as FullUsageData | null;
 
 export function computePoolStatus(
 	accounts: Account[],

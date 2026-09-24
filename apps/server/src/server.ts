@@ -59,9 +59,11 @@ import {
 	extractCodexIdentity,
 	fetchAnthropicProfile,
 	fetchCodexModelCatalog,
-	getFreshCapacity,
+	getFreshRoutingCapacity,
+	getFreshRoutingUsage,
 	getProvider,
 	getRepresentativeUtilizationForProvider,
+	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "@clankermux/providers";
 import {
@@ -1256,8 +1258,18 @@ export default async function startServer(options?: {
 	log.info(`Load-balancing strategy: ${config.getStrategy()}`);
 
 	const strategyStore: StrategyStore = Object.assign(dbOps, {
-		getAccountUtilization(accountId: string, provider: string): number | null {
-			const data = usageCache.get(accountId);
+		getAccountUtilization(
+			accountId: string,
+			provider: string,
+			now: number,
+		): number | null {
+			const data = getFreshRoutingUsage(
+				usageCache,
+				accountId,
+				provider,
+				now,
+				USAGE_CACHE_TTL_MS,
+			);
 			if (!data) return null;
 			return getRepresentativeUtilizationForProvider(data, provider);
 		},
@@ -1266,7 +1278,7 @@ export default async function startServer(options?: {
 			provider: string,
 			now: number,
 		): CapacitySignal | null {
-			return getFreshCapacity(
+			return getFreshRoutingCapacity(
 				usageCache,
 				accountId,
 				provider,

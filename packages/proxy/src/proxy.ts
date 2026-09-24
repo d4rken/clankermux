@@ -11,7 +11,8 @@ import {
 } from "@clankermux/core";
 import { Logger, LogLevel } from "@clankermux/logger";
 import {
-	getFreshCapacity,
+	getFreshPollCapacity,
+	getFreshRoutingCapacity,
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
@@ -939,7 +940,7 @@ async function handleIngestedProxy(
 				// prior fresh/stale burst classification, so an ambiguous account is
 				// treated as plausibly transient (consistent with classify429Transient,
 				// which holds on fresh minHeadroom>0 and on stale + retry hint).
-				const heldCapacity = getFreshCapacity(
+				const heldCapacity = getFreshRoutingCapacity(
 					usageCache,
 					heldAccount.id,
 					heldAccount.provider,
@@ -974,7 +975,13 @@ async function handleIngestedProxy(
 						heldAccount,
 						heldTargetModel,
 						usageCache.get(heldAccount.id),
-						heldCapacity,
+						getFreshPollCapacity(
+							usageCache,
+							heldAccount.id,
+							heldAccount.provider,
+							Date.now(),
+							BURST_RETRY_MAX_USAGE_AGE_MS,
+						),
 						Date.now(),
 					) !== null ||
 					isFamilyWeeklyMemoExhausted(heldAccount, heldTargetModel, Date.now())

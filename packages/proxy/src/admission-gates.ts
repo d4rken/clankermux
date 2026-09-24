@@ -7,7 +7,13 @@ import {
 	SAFETY_MARGIN,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { getFreshCapacity, usageCache } from "@clankermux/providers";
+import {
+	getFreshPollCapacity,
+	getFreshRoutingCapacity,
+	getFreshRoutingUsage,
+	USAGE_CACHE_TTL_MS,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { getCodexTransientFailureUntil } from "./codex-transient-health";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
@@ -306,7 +312,13 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 
 		for (const account of accounts) {
 			const throttleUntil = getUsageThrottleUntil(
-				usageCache.get(account.id),
+				getFreshRoutingUsage(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					USAGE_CACHE_TTL_MS,
+				),
 				settings,
 				now,
 				account.provider,
@@ -414,7 +426,9 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				continue;
 			}
 			const modelForGate = modelForAccount(account);
-			const capacity = getFreshCapacity(
+			// Poll-only: the exclusion reads the poll's limits[] beside these
+			// account-wide windows, and the two must come from one reading.
+			const capacity = getFreshPollCapacity(
 				usageCache,
 				account.id,
 				account.provider,
@@ -571,7 +585,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		const capacityById = new Map(
 			candidates.map((account) => [
 				account.id,
-				getFreshCapacity(
+				getFreshRoutingCapacity(
 					usageCache,
 					account.id,
 					account.provider,

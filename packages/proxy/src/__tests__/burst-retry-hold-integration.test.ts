@@ -1037,7 +1037,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 	it("marker active + held account capacity STALE/absent ⇒ single re-probe only (stale_should_retry), not the full 3-attempt budget", async () => {
 		// A concurrent request tripped the global per-IP marker, and THIS held
-		// account's usage is stale/absent (no seed ⇒ getFreshCapacity → null) — the
+		// account's usage is stale/absent (no seed ⇒ getFreshRoutingCapacity → null) — the
 		// SAME condition under which classify429Transient would only grant
 		// `stale_should_retry`. The marker-active branch must therefore enter the
 		// hold at `stale_should_retry` confidence, capping it at ONE re-probe rather
@@ -1058,7 +1058,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			name: "Sibling",
 			access_token: "at-sibling",
 		});
-		// Deliberately NO usageCache seed for "held" ⇒ getFreshCapacity returns null.
+		// Deliberately NO usageCache seed for "held" ⇒ getFreshRoutingCapacity returns null.
 		usageCache.delete("held");
 		markAnthropicBurstThrottle();
 

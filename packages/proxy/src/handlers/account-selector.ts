@@ -1,6 +1,6 @@
 import { isAccountAvailable, isPinActive } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { getFreshCapacity, usageCache } from "@clankermux/providers";
+import { getFreshRoutingCapacity, usageCache } from "@clankermux/providers";
 import {
 	type Account,
 	getSdkBridgeInnerMetaContext,
@@ -54,7 +54,8 @@ export async function ensureUsageFreshForSelection(
 		if (anthropic.length === 0) return;
 		const stale = anthropic.filter(
 			(a) =>
-				getFreshCapacity(usageCache, a.id, a.provider, now, maxAge) === null &&
+				getFreshRoutingCapacity(usageCache, a.id, a.provider, now, maxAge) ===
+					null &&
 				(usageCache.getRateLimitedUntil(a.id) ?? 0) <= now &&
 				now - (lastColdRefreshAttempt.get(a.id) ?? 0) >
 					COLD_REFRESH_COOLDOWN_MS,

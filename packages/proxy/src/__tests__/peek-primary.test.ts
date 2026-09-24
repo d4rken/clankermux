@@ -327,17 +327,68 @@ describe("peekPrimaryAccountId", () => {
 		const peer = makeAccount({ id: "codex", provider: "codex" });
 		const strategy = makeStrategy([reserved, peer]);
 
-		usageCache.set("anthropicA", usage(now, 0, 95));
-		usageCache.set("codex", usage(now, 20, 20));
-
-		// The reserved account's datum is 4 minutes old: still inside peek()'s
+		// The reserved account's datum is 4 minutes old: still inside the cache's
 		// 10-minute TTL, but OUTSIDE the 180s bound routing's liveness path uses.
 		// Routing fails open there, so the badge must too. The peer stays fresh, so
 		// this is not merely "everything is stale".
-		const ages = spyOn(usageCache, "peekAge").mockImplementation(
-			(id: string) => (id === "anthropicA" ? 240_000 : 1_000),
+		usageCache.setWithAgeForTests("anthropicA", usage(now, 0, 95), 240_000);
+		usageCache.set("codex", usage(now, 20, 20));
+
+		expect(
+			peekPrimaryAccountId(
+				[reserved, peer],
+				strategy,
+				throttleDisabledConfig,
+				now,
+			),
+		).toBe("anthropicA");
+	});
+
+	it("(l2) reads a fresh header weekly over a poll past the bound, as routing does", () => {
+		const now = Date.now();
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "anthropicB", provider: "anthropic" });
+		const strategy = makeStrategy([reserved, peer]);
+
+		const reading = usage(now, 0, 20);
+		usageCache.startPolling(
+			"anthropicA",
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
 		);
 		try {
+			usageCache.setWithAgeForTests("anthropicA", reading, 240_000);
+			usageCache.set("anthropicB", usage(now, 20, 20));
+			usageCache.recordUsageHeaders(
+				"anthropicA",
+				usageCache.usageHeaderEpoch("anthropicA"),
+				[
+					{
+						claim: "5h",
+						status: "allowed",
+						utilization: 0,
+						resetMs: Date.parse(reading.five_hour?.resets_at ?? ""),
+						surpassedThreshold: null,
+					},
+					{
+						claim: "7d",
+						status: "allowed",
+						utilization: 0.95,
+						resetMs: Date.parse(reading.seven_day?.resets_at ?? ""),
+						surpassedThreshold: null,
+					},
+				],
+				now,
+			);
+
 			expect(
 				peekPrimaryAccountId(
 					[reserved, peer],
@@ -345,9 +396,9 @@ describe("peekPrimaryAccountId", () => {
 					throttleDisabledConfig,
 					now,
 				),
-			).toBe("anthropicA");
+			).toBe("anthropicB");
 		} finally {
-			ages.mockRestore();
+			usageCache.stopPolling("anthropicA");
 		}
 	});
 

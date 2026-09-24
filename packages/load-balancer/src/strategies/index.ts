@@ -646,7 +646,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// Legacy representative utilization — kept so providers without a capacity
 		// model (Zai/Kilo/Alibaba) still balance least-used within the UNKNOWN bucket.
 		const util =
-			this.store?.getAccountUtilization?.(account.id, account.provider) ?? 0;
+			this.store?.getAccountUtilization?.(account.id, account.provider, now) ??
+			0;
 		let bucket: number = CAPACITY_BUCKET.UNKNOWN;
 		let harvestDeadline = Number.POSITIVE_INFINITY;
 		let weeklyHeadroom = 100;

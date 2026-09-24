@@ -82,8 +82,13 @@ export interface StrategyStore {
 	/**
 	 * Get the representative utilization (0–100) for an account based on its
 	 * most-constrained usage window. Returns null when no usage data is available.
+	 * `now` is the ranking pass's instant, shared with getAccountCapacity.
 	 */
-	getAccountUtilization?(accountId: string, provider: string): number | null;
+	getAccountUtilization?(
+		accountId: string,
+		provider: string,
+		now: number,
+	): number | null;
 
 	/**
 	 * Get a fresh capacity signal for an account, or null when no fresh usage

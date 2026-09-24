@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { AnthropicUsageData } from "@clankermux/types";
 import type { AnyUsageData, UsageData } from "../usage-fetcher";
-import { getAccountCapacitySignal, getFreshCapacity } from "../usage-fetcher";
+import {
+	getAccountCapacitySignal,
+	getFreshPollCapacity,
+} from "../usage-fetcher";
 
 // Fixed reference time so assertions don't depend on wall-clock time.
 const NOW = 1_700_000_000_000;
@@ -548,7 +551,7 @@ describe("getAccountCapacitySignal for zai", () => {
 	});
 });
 
-describe("getFreshCapacity", () => {
+describe("getFreshPollCapacity", () => {
 	const makeCache = (
 		age: number | null,
 		data: AnyUsageData | null,
@@ -568,20 +571,26 @@ describe("getFreshCapacity", () => {
 	it("returns null when getAge is null (no cached datum)", () => {
 		const cache = makeCache(null, freshData);
 		expect(
-			getFreshCapacity(cache, "acct", "anthropic", NOW, 60_000),
+			getFreshPollCapacity(cache, "acct", "anthropic", NOW, 60_000),
 		).toBeNull();
 	});
 
 	it("returns null when the cached datum is older than maxAgeMs", () => {
 		const cache = makeCache(120_000, freshData); // 120s old
 		expect(
-			getFreshCapacity(cache, "acct", "anthropic", NOW, 60_000),
+			getFreshPollCapacity(cache, "acct", "anthropic", NOW, 60_000),
 		).toBeNull();
 	});
 
 	it("returns the capacity signal when the cached datum is fresh", () => {
 		const cache = makeCache(30_000, freshData); // 30s old, within 60s budget
-		const signal = getFreshCapacity(cache, "acct", "anthropic", NOW, 60_000);
+		const signal = getFreshPollCapacity(
+			cache,
+			"acct",
+			"anthropic",
+			NOW,
+			60_000,
+		);
 		expect(signal).not.toBeNull();
 		expect(signal?.minHeadroom).toBe(60);
 		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);

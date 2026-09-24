@@ -25,7 +25,7 @@ import {
 /**
  * Max age of cached usage data the family-weekly gate will trust (2× the 90s
  * default usage poll interval, matching `ensureUsageFreshForSelection`). Older
- * than this, `getFreshCapacity` returns null and the gate fails open. A plain
+ * than this, `getFreshPollCapacity` returns null and the gate fails open. A plain
  * constant (not a config knob) keeps this off the request hot path and out of
  * every proxy test's ctx.config mock.
  */

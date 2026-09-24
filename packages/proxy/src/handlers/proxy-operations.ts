@@ -29,8 +29,11 @@ import {
 	anthropicBankedResetCache,
 	DevinSessionAuthenticationError,
 	devinClient,
+	getAccountCapacitySignal,
 	getDevinRequestProvenance,
-	getFreshCapacity,
+	getFreshPollCapacity,
+	getFreshRoutingCapacity,
+	getFreshRoutingUsage,
 	getProvider,
 	isAnthropicHardLimitStatus,
 	isAnthropicOrgPermissionDenied,
@@ -1190,6 +1193,9 @@ export async function proxyWithAccount(
 	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
 	noteAttemptStarted(requestMeta);
+	// Before anything is sent, so a response that outlives a poller restart
+	// cannot feed the restarted poller's header store.
+	const usageHeaderEpoch = usageCache.usageHeaderEpoch(account.id);
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
 	// never disagree about whether this attempt is terminal.
@@ -1770,6 +1776,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						usageHeaderEpoch,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -1997,7 +2004,7 @@ export async function proxyWithAccount(
 					account,
 					now,
 					getCapacity: () =>
-						getFreshCapacity(
+						getFreshRoutingCapacity(
 							usageCache,
 							account.id,
 							account.provider,
@@ -2145,18 +2152,30 @@ export async function proxyWithAccount(
 			// null, and single-flight does not dedupe a second SEQUENTIAL call — so
 			// without the flag the burst rung would fetch again and a dead endpoint
 			// would cost two bounded waits (~10s) on one request.
+			//
+			// The rungs read two views of the cache: the family rung the poll alone,
+			// the others the poll with header-fed 5h/7d windows. Either one missing
+			// triggers the refresh.
 			let usageRefreshAttempted = false;
+			const refreshCheckAt = Date.now();
 			if (
 				rawResponse.status === 429 &&
 				!options?.reprobe &&
 				!isTrustedProbe("any") &&
-				getFreshCapacity(
+				(getFreshPollCapacity(
 					usageCache,
 					account.id,
 					account.provider,
-					Date.now(),
+					refreshCheckAt,
 					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-				) === null
+				) === null ||
+					getFreshRoutingCapacity(
+						usageCache,
+						account.id,
+						account.provider,
+						refreshCheckAt,
+						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+					) === null)
 			) {
 				usageRefreshAttempted = true;
 				await usageCache.refreshNow(account.id);
@@ -2202,23 +2221,26 @@ export async function proxyWithAccount(
 				!isTrustedProbe("any")
 			) {
 				const now = Date.now();
-				// getFreshCapacity is only the 180s FRESHNESS gate here; the
-				// exhaustion verdict itself comes from accountWideExhaustionFor.
-				const usageIsFresh =
-					getFreshCapacity(
-						usageCache,
-						account.id,
-						account.provider,
-						now,
-						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-					) !== null;
-				const exhaustion = usageIsFresh
-					? accountWideExhaustionFor(
-							account.provider,
-							usageCache.get(account.id) as FullUsageData | null,
-							now,
-						)
-					: { exhausted: false, binding: null, resetMs: null };
+				// Null past the 180s freshness bound; the exhaustion verdict itself
+				// comes from accountWideExhaustionFor. Header readings in the view
+				// come from earlier responses, never this 429's own (pinned in
+				// proxy-operations-session-exhausted.test.ts).
+				const freshUsage = getFreshRoutingUsage(
+					usageCache,
+					account.id,
+					account.provider,
+					now,
+					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+				);
+				const exhaustion =
+					freshUsage !== null &&
+					getAccountCapacitySignal(freshUsage, account.provider, now) !== null
+						? accountWideExhaustionFor(
+								account.provider,
+								freshUsage as FullUsageData,
+								now,
+							)
+						: { exhausted: false, binding: null, resetMs: null };
 				if (
 					exhaustion.exhausted &&
 					exhaustion.resetMs !== null &&
@@ -2280,7 +2302,7 @@ export async function proxyWithAccount(
 				!hasAccountWideUnifiedRejection(rawResponse)
 			) {
 				const now = Date.now();
-				const familyFreshCapacity = getFreshCapacity(
+				const familyFreshCapacity = getFreshPollCapacity(
 					usageCache,
 					account.id,
 					account.provider,
@@ -2358,7 +2380,7 @@ export async function proxyWithAccount(
 			) {
 				const now = Date.now();
 				// Read fresh capacity once. When usage is stale/absent
-				// (getFreshCapacity → null), ONE best-effort refresh runs before
+				// (getFreshRoutingCapacity → null), ONE best-effort refresh runs before
 				// falling back to the `x-should-retry` hint — so a real burst 429
 				// doesn't fall through to sibling failover just because the usage
 				// cache happened to be cold. This rung's bound
@@ -2373,7 +2395,7 @@ export async function proxyWithAccount(
 				// afterward. The predicate itself stays pure/synchronous: it
 				// classifies on the pre-resolved capacity value via the closure
 				// below.
-				let capacity = getFreshCapacity(
+				let capacity = getFreshRoutingCapacity(
 					usageCache,
 					account.id,
 					account.provider,
@@ -2385,7 +2407,7 @@ export async function proxyWithAccount(
 					if (refreshed) {
 						// Re-read against the same `now` budget; refreshNow updated the
 						// cache timestamp so a successful fetch is fresh by definition.
-						capacity = getFreshCapacity(
+						capacity = getFreshRoutingCapacity(
 							usageCache,
 							account.id,
 							account.provider,
@@ -2995,6 +3017,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						usageHeaderEpoch,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -3183,6 +3206,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						usageHeaderEpoch,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -3292,6 +3316,7 @@ export async function proxyWithAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				usageHeaderEpoch,
 				poolCandidates: getPoolHeadroomCandidates(requestMeta),
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
@@ -3441,6 +3466,8 @@ export async function proxyForcedAccount(
 ): Promise<Response> {
 	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
+	// Before anything is sent; see proxyWithAccount.
+	const usageHeaderEpoch = usageCache.usageHeaderEpoch(account.id);
 	// Hoisted to function scope so the outer catch (which may fire before
 	// `provider` is assigned, e.g. a validateProviderPath throw) and the
 	// local-error recorder can reference them. effectiveBodyBuffer feeds the
@@ -3484,6 +3511,7 @@ export async function proxyForcedAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				usageHeaderEpoch,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				response: errorResponse,
@@ -3756,6 +3784,7 @@ export async function proxyForcedAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				usageHeaderEpoch,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				response,

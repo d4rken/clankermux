@@ -6,8 +6,9 @@
  * headers, so their readings belong in the series even though their rows are
  * deliberately kept out of Request History.
  */
-import { describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
+import { usageCache } from "@clankermux/providers";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type {
 	Account,
@@ -335,4 +336,163 @@ describe("response-handler — unified summary capture", () => {
 		expect(h.savedSummaries).toHaveLength(1);
 		expect(h.savedSummaries[0].source).toBe("keepalive");
 	});
+});
+
+describe("response-handler — usage header store", () => {
+	const HOUR = 3_600_000;
+	let counter = 0;
+	const registered: string[] = [];
+	afterEach(() => {
+		for (const id of registered.splice(0)) {
+			usageCache.stopPolling(id);
+			usageCache.delete(id);
+		}
+	});
+
+	/** An Anthropic account with a registered poller that never fetches. */
+	function polledAccount(overrides: Partial<Account> = {}): Account {
+		const id = `hdr-capture-${Date.now()}-${counter++}`;
+		registered.push(id);
+		usageCache.startPolling(
+			id,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
+		);
+		usageCache.set(id, {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(fiveResetS * 1000).toISOString(),
+			},
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(weekResetS * 1000).toISOString(),
+			},
+		});
+		return makeAccount({ id, provider: "anthropic", ...overrides });
+	}
+
+	const fiveResetS = Math.floor((Date.now() + 2 * HOUR) / 1000);
+	const weekResetS = Math.floor((Date.now() + 90 * HOUR) / 1000);
+
+	function liveClaims(fiveStatus = "allowed", status = 200): Response {
+		return new Response(JSON.stringify({ type: "message" }), {
+			status,
+			headers: {
+				"Content-Type": "application/json",
+				"anthropic-ratelimit-unified-5h-status": fiveStatus,
+				"anthropic-ratelimit-unified-5h-utilization": "0.45",
+				"anthropic-ratelimit-unified-5h-reset": String(fiveResetS),
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-utilization": "0.35",
+				"anthropic-ratelimit-unified-7d-reset": String(weekResetS),
+			},
+		});
+	}
+
+	async function forwardWithEpoch(
+		account: Account,
+		epoch: number | null,
+		response: Response,
+	): Promise<void> {
+		await forwardToClient(
+			{
+				requestId: "req-hdr",
+				method: "POST",
+				path: "/v1/messages",
+				account,
+				requestHeaders: new Headers(),
+				requestBody: null,
+				response,
+				timestamp: Date.now(),
+				retryAttempt: 0,
+				failoverAttempts: 0,
+				usageHeaderEpoch: epoch,
+			},
+			makeHarness().ctx,
+		);
+	}
+
+	function windowsOf(id: string) {
+		const data = usageCache.peekUsageView(id, "anthropic")?.data as {
+			five_hour?: { utilization: number };
+			seven_day?: { utilization: number };
+		};
+		return {
+			fiveHour: data?.five_hour?.utilization,
+			sevenDay: data?.seven_day?.utilization,
+		};
+	}
+
+	it("feeds the 5h/7d readings of a response sent under the live epoch", async () => {
+		const account = polledAccount();
+		await forwardWithEpoch(
+			account,
+			usageCache.usageHeaderEpoch(account.id),
+			liveClaims(),
+		);
+		expect(windowsOf(account.id)).toEqual({ fiveHour: 45, sevenDay: 35 });
+	});
+
+	it("drops a response sent before the poller restarted", async () => {
+		const account = polledAccount();
+		const epoch = usageCache.usageHeaderEpoch(account.id);
+		usageCache.stopPolling(account.id);
+		polledAccountRestart(account.id);
+		await forwardWithEpoch(account, epoch, liveClaims());
+		expect(windowsOf(account.id)).toEqual({ fiveHour: 10, sevenDay: 20 });
+	});
+
+	it("never feeds a custom-endpoint account", async () => {
+		const account = polledAccount({ custom_endpoint: "https://example.test" });
+		await forwardWithEpoch(
+			account,
+			usageCache.usageHeaderEpoch(account.id),
+			liveClaims(),
+		);
+		expect(windowsOf(account.id)).toEqual({ fiveHour: 10, sevenDay: 20 });
+	});
+
+	it("feeds a delivered 429's allowed claims but not its rejected one", async () => {
+		const account = polledAccount();
+		await forwardWithEpoch(
+			account,
+			usageCache.usageHeaderEpoch(account.id),
+			liveClaims("rejected", 429),
+		);
+		expect(windowsOf(account.id)).toEqual({ fiveHour: 10, sevenDay: 35 });
+	});
+
+	function polledAccountRestart(id: string): void {
+		usageCache.startPolling(
+			id,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
+		);
+		usageCache.set(id, {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(fiveResetS * 1000).toISOString(),
+			},
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(weekResetS * 1000).toISOString(),
+			},
+		});
+	}
 });

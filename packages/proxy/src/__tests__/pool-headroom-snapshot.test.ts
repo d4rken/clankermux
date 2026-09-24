@@ -4,7 +4,7 @@
  *
  * Each of those has a specific failure it pins. Reporting the worst member (or a
  * mean) would raise an alarm for a spent account the router is already routing
- * around. Reading through `getFreshCapacity` would evict entries out from under
+ * around. Reading through `getFreshPollCapacity` would evict entries out from under
  * selection, because that helper uses the evicting accessors. And folding an
  * unreadable account in as if it were exhausted would put a 100% meter on screen
  * while the pool was still serving.
@@ -201,9 +201,9 @@ describe("computePoolHeadroom", () => {
 		//
 		// The entry is aged past the cache's own 10-minute TTL on purpose. On a
 		// FRESH entry the evicting and non-evicting accessors behave identically,
-		// so this assertion would pass against a `getFreshCapacity` implementation
+		// so this assertion would pass against a `getFreshPollCapacity` implementation
 		// and prove nothing. Past the TTL they diverge: `get()` drops the entry as
-		// a side effect of reading it, `peekWithAge()` leaves it in place.
+		// a side effect of reading it, `peekUsageView()` leaves it in place.
 		const aged = 15 * 60_000;
 		const clock = spyOn(Date, "now").mockReturnValue(NOW - aged);
 		seed("keep-me", { weeklyPct: 40, weeklyResetMs: NOW + 48 * HOUR_MS });
@@ -432,5 +432,63 @@ describe("computePoolHeadroom", () => {
 
 		expect(figures.weekly?.headroomPct).toBe(60);
 		expect(figures.weekly?.resetMs).toBeNull();
+	});
+
+	it("counts a member whose weekly comes fresh from response headers", () => {
+		const id = key("hdr-fed");
+		seeded.push(id);
+		usageCache.startPolling(
+			id,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR_MS },
+		);
+		try {
+			const weeklyResetMs = Math.floor((NOW + 48 * HOUR_MS) / 1000) * 1000;
+			// Five minutes old: past this module's bound on its own.
+			usageCache.setWithAgeForTests(
+				id,
+				{
+					five_hour: null,
+					seven_day: {
+						utilization: 90,
+						resets_at: new Date(weeklyResetMs).toISOString(),
+					},
+				} as never,
+				300_000,
+			);
+			usageCache.recordUsageHeaders(
+				id,
+				usageCache.usageHeaderEpoch(id),
+				[
+					{
+						claim: "7d",
+						status: "allowed",
+						utilization: 0.92,
+						resetMs: weeklyResetMs,
+						surpassedThreshold: null,
+					},
+				],
+				Date.now(),
+			);
+
+			const figures = computePoolHeadroom(
+				account("hdr-fed"),
+				[account("hdr-fed")],
+				noHeaders,
+				Date.now(),
+			);
+
+			expect(figures.weekly?.headroomPct).toBe(8);
+		} finally {
+			usageCache.stopPolling(id);
+		}
 	});
 });

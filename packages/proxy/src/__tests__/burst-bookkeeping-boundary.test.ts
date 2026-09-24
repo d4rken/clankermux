@@ -330,7 +330,7 @@ describe("handleProxy burst-hold bookkeeping", () => {
 			name: "Sibling",
 			access_token: "at-sibling",
 		});
-		// No usage seeded ⇒ getFreshCapacity returns null ⇒ the marker-active branch
+		// No usage seeded ⇒ getFreshRoutingCapacity returns null ⇒ the marker-active branch
 		// enters the hold at `stale_should_retry`, which caps it at exactly ONE
 		// re-probe before giving up.
 		usageCache.delete(heldId);
