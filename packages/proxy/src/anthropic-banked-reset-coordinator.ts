@@ -179,6 +179,15 @@ export interface AnthropicBankedResetCoordinatorDeps {
 	now?: () => number;
 	/** Spaces status reads of different accounts; one per coordinator. */
 	readGate?: ReadGate;
+	/**
+	 * Lifts the account's cooldown for the windows a claim reports cleared.
+	 * `claimStartedAt` is when the claim was sent.
+	 */
+	onWindowsRestored?: (
+		accountId: string,
+		cleared: AnthropicBankedResetWindow[],
+		claimStartedAt: number,
+	) => Promise<void>;
 }
 
 /** Gap between status reads of different accounts, jittered up to 1.5×. */
@@ -210,12 +219,12 @@ type LedgerTarget =
  *
  * Every claim has a ledger row written `pending` before its POST, and replays
  * reuse the row's request id, which the server deduplicates on, but only
- * within ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS of the row opening. A reset
- * changes the account's usage upstream, so a restoring claim fences the usage
- * cache and refetches instead of clearing any rate-limit state itself: the
- * refetch reaches the capacity-restored path, and `rate_limit_reset` must
- * never be nulled for an Anthropic account (a paused one could not auto-unpause
- * again).
+ * within ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS of the row opening. A
+ * restoring claim lifts the quota cooldown of the windows it cleared through
+ * `onWindowsRestored`, and fences the usage cache and refetches: an overage
+ * pause and the weekly usage throttle wait for that post-claim reading.
+ * `rate_limit_reset` is never nulled for an Anthropic account (a paused one
+ * could not auto-unpause again).
  */
 export class AnthropicBankedResetCoordinator {
 	private readonly ctx: ProxyContext;
@@ -230,6 +239,7 @@ export class AnthropicBankedResetCoordinator {
 	>;
 	private readonly now: () => number;
 	private readonly readGate: ReadGate;
+	private readonly onWindowsRestored: AnthropicBankedResetCoordinatorDeps["onWindowsRestored"];
 	private readonly statusInflight = new Map<
 		string,
 		Promise<AnthropicBankedResetRefreshOutcome>
@@ -262,6 +272,7 @@ export class AnthropicBankedResetCoordinator {
 				spacingMs: ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
 				now: this.now,
 			});
+		this.onWindowsRestored = deps.onWindowsRestored;
 	}
 
 	/** Refuses every status read still waiting for its turn, and any later one. */
@@ -644,6 +655,16 @@ export class AnthropicBankedResetCoordinator {
 		log.info(
 			`banked_reset_claim account=${account.name} grant=${request.grantId} trigger=${request.autoApply ? `auto:${request.autoApply.cause}` : "manual"} replay=${target.replay} result=${result.result} reason=${result.reason ?? "none"} ledger=${ledgerStatus}`,
 		);
+
+		if (windowsRestored && this.onWindowsRestored) {
+			try {
+				await this.onWindowsRestored(accountId, result.cleared, claimStartedAt);
+			} catch (error) {
+				log.warn(
+					`Could not lift the cooldown of '${account.name}' after a banked reset; the post-claim usage reading still can: ${errorMessage(error)}`,
+				);
+			}
+		}
 
 		if (owedPause && refetch) {
 			await this.settleOwedPause(

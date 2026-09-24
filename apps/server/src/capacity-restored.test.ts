@@ -8,7 +8,7 @@ import {
 	markCapacityRestoredProbePending,
 	rollbackCapacityRestoredProbePending,
 } from "@clankermux/proxy";
-import type { Account } from "@clankermux/types";
+import type { Account, AnthropicBankedResetWindow } from "@clankermux/types";
 import { RATE_LIMIT_REASONS } from "@clankermux/types";
 import { resolveLiveAccountQuota429 } from "../../../packages/proxy/src/handlers/anthropic-account-quota";
 import {
@@ -18,6 +18,7 @@ import {
 import {
 	type CapacityRestoredLogger,
 	type CapacityRestoredProbeMarker,
+	clearRateLimitOnBankedReset,
 	clearRateLimitOnCapacityRestored,
 	isStaleRecordedReset,
 	RESET_MATCH_TOLERANCE_MS,
@@ -1169,6 +1170,215 @@ describe("clearRateLimitOnCapacityRestored — stranded paused account", () => {
 		);
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.stampCalls).toEqual([]);
+	});
+});
+
+describe("clearRateLimitOnBankedReset", () => {
+	/** The claim was sent 1s ago, after the cooldown (written 5s ago). */
+	const CLAIM_STARTED_AT = NOW - 1_000;
+	const bankedSkipToken = (msgs: string[]) =>
+		msgs.map((m) => m.split("banked_reset_skip ")[1]?.split(" ")[0]);
+
+	async function run(
+		h: Harness,
+		cleared: AnthropicBankedResetWindow[],
+		claimStartedAt = CLAIM_STARTED_AT,
+	) {
+		await clearRateLimitOnBankedReset(
+			h.dbOps,
+			h.logger,
+			{ accountId: "acc-1", cleared, claimStartedAt },
+			h.marker,
+			NOW,
+		);
+	}
+
+	it("lifts a weekly lock when the claim cleared seven_day, pinning the observed lock", async () => {
+		const h = makeHarness(makeAccount({}));
+		await run(h, ["five_hour", "seven_day", "seven_day_overage_included"]);
+		expect(h.clearCalls).toEqual([
+			{
+				accountId: "acc-1",
+				expectedUntil: FUTURE,
+				expectedAt: AT,
+				expectedReason: "weekly_exhausted_429",
+				fetchStartedAt: CLAIM_STARTED_AT,
+			},
+		]);
+		expect(h.infoMsgs).toHaveLength(1);
+		expect(h.infoMsgs[0]).toContain("banked_reset_clear");
+		expect(h.infoMsgs[0]).toContain("reason=weekly_exhausted_429");
+		expect(h.infoMsgs[0]).toContain(
+			"cleared=five_hour,seven_day,seven_day_overage_included",
+		);
+		expect(h.infoMsgs[0]).toContain("cooldown_remaining=60m");
+		expect(h.infoMsgs[0]).toContain(
+			`claim_started_at=${new Date(CLAIM_STARTED_AT).toISOString()}`,
+		);
+		expect(h.markerCalls).toEqual(["mark:1"]);
+		expect([...h.pending]).toEqual([1]);
+	});
+
+	it("lifts a weekly lock when the claim cleared only seven_day_overage_included", async () => {
+		const h = makeHarness(makeAccount({}));
+		await run(h, ["seven_day_overage_included"]);
+		expect(h.clearCalls).toHaveLength(1);
+		expect(h.infoMsgs[0]).toContain("banked_reset_clear");
+	});
+
+	it("keeps a weekly lock when the claim cleared only the five-hour window", async () => {
+		const h = makeHarness(makeAccount({}));
+		await run(h, ["five_hour"]);
+		expect(h.clearCalls).toEqual([]);
+		expect(h.markerCalls).toEqual([]);
+		expect(h.infoMsgs).toEqual([]);
+	});
+
+	it("lifts a session lock when the claim cleared five_hour", async () => {
+		const h = makeHarness(
+			makeAccount({ rate_limited_reason: "session_exhausted_429" }),
+		);
+		await run(h, ["five_hour"]);
+		expect(h.clearCalls).toHaveLength(1);
+		expect(h.clearCalls[0].expectedReason).toBe("session_exhausted_429");
+		expect(h.infoMsgs[0]).toContain("reason=session_exhausted_429");
+	});
+
+	it("keeps a session lock when the claim cleared only the weekly windows", async () => {
+		const h = makeHarness(
+			makeAccount({ rate_limited_reason: "session_exhausted_429" }),
+		);
+		await run(h, ["seven_day", "seven_day_overage_included"]);
+		expect(h.clearCalls).toEqual([]);
+		expect(h.markerCalls).toEqual([]);
+	});
+
+	it("never lifts a lock that is not quota-derived", async () => {
+		for (const reason of [
+			"out_of_credits",
+			"org_permission_denied",
+			"upstream_429_with_reset",
+			"model_fallback_429",
+			null,
+		]) {
+			const h = makeHarness(
+				makeAccount({ rate_limited_reason: reason as never }),
+			);
+			await run(h, ["five_hour", "seven_day", "seven_day_overage_included"]);
+			expect(h.clearCalls).toEqual([]);
+			expect(h.markerCalls).toEqual([]);
+			expect(h.infoMsgs).toEqual([]);
+			expect(h.warnMsgs).toEqual([]);
+		}
+	});
+
+	it("does nothing when there is no active lock or no account", async () => {
+		for (const until of [null, NOW - 1000, NOW]) {
+			const h = makeHarness(
+				makeAccount({ rate_limited_until: until as never }),
+			);
+			await run(h, ["seven_day"]);
+			expect(h.clearCalls).toEqual([]);
+			expect(h.markerCalls).toEqual([]);
+			expect(h.infoMsgs).toEqual([]);
+		}
+		const missing = makeHarness(null);
+		await run(missing, ["seven_day"]);
+		expect(missing.clearCalls).toEqual([]);
+	});
+
+	it("fails closed when rate_limited_at is missing", async () => {
+		for (const at of [null, undefined]) {
+			const h = makeHarness(makeAccount({ rate_limited_at: at as never }));
+			await run(h, ["seven_day"]);
+			expect(h.clearCalls).toEqual([]);
+			expect(h.markerCalls).toEqual([]);
+			expect(bankedSkipToken(h.debugMsgs)).toEqual(["missing_rate_limited_at"]);
+		}
+	});
+
+	it("keeps a cooldown written at or after the claim was sent", async () => {
+		for (const at of [CLAIM_STARTED_AT, CLAIM_STARTED_AT + 1]) {
+			const h = makeHarness(makeAccount({ rate_limited_at: at }));
+			await run(h, ["seven_day"]);
+			expect(h.clearCalls).toEqual([]);
+			expect(h.markerCalls).toEqual([]);
+			expect(bankedSkipToken(h.debugMsgs)).toEqual([
+				"cooldown_newer_than_evidence",
+			]);
+		}
+	});
+
+	it("preserves a lock rewritten between the read and the clear, and rolls the marker back", async () => {
+		const rewrites: Array<Partial<Account>> = [
+			{ rate_limited_until: FUTURE + 60_000 },
+			{ rate_limited_at: NOW - 2_000 },
+			{ rate_limited_reason: "out_of_credits" },
+		];
+		for (const rewrite of rewrites) {
+			const row = makeAccount({});
+			const h = makeHarness(
+				() => ({ ...row }),
+				() => {
+					// The concurrent writer lands first; the compare-and-clear
+					// then matches the row against the lock it observed.
+					Object.assign(row, rewrite);
+					const call = h.clearCalls[h.clearCalls.length - 1];
+					return (
+						row.rate_limited_until === call.expectedUntil &&
+						row.rate_limited_at === call.expectedAt &&
+						row.rate_limited_reason === call.expectedReason
+					);
+				},
+			);
+			await run(h, ["seven_day"]);
+			expect(h.clearCalls).toHaveLength(1);
+			expect(row).toMatchObject(rewrite);
+			expect(h.infoMsgs).toEqual([]);
+			expect(bankedSkipToken(h.debugMsgs)).toEqual(["cas_mismatch"]);
+			expect(h.markerCalls).toEqual(["mark:1", "rollback:1"]);
+			expect([...h.pending]).toEqual([]);
+		}
+	});
+
+	it("rolls the marker back and rethrows when the clear throws", async () => {
+		const h = makeHarness(makeAccount({}), () => {
+			throw new Error("database is locked");
+		});
+		await expect(run(h, ["seven_day"])).rejects.toThrow("database is locked");
+		expect(h.markerCalls).toEqual(["mark:1", "rollback:1"]);
+		expect([...h.pending]).toEqual([]);
+	});
+
+	it("clears nothing for an empty cleared list", async () => {
+		for (const reason of ["weekly_exhausted_429", "session_exhausted_429"]) {
+			const h = makeHarness(
+				makeAccount({ rate_limited_reason: reason as never }),
+			);
+			await run(h, []);
+			expect(h.clearCalls).toEqual([]);
+			expect(h.markerCalls).toEqual([]);
+		}
+	});
+
+	it("leaves rate_limit_reset and an overage pause alone", async () => {
+		const account = makeAccount({
+			paused: true,
+			pause_reason: "overage",
+			auto_fallback_enabled: true,
+			auto_pause_on_overage_enabled: true,
+			provider: "anthropic",
+			rate_limit_reset: FUTURE,
+		} as Partial<Account>);
+		const before = { ...account };
+		const h = makeHarness(account);
+		await run(h, ["five_hour", "seven_day", "seven_day_overage_included"]);
+		expect(h.clearCalls).toHaveLength(1);
+		expect(h.stampCalls).toEqual([]);
+		expect(account).toEqual(before);
+		expect(h.infoMsgs.map((m) => m.match(/banked_reset_\w+/)?.[0])).toEqual([
+			"banked_reset_clear",
+		]);
 	});
 });
 

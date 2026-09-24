@@ -8,6 +8,7 @@ import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import type { CapacityProbeReservation } from "@clankermux/proxy";
 import {
 	type Account,
+	type AnthropicBankedResetWindow,
 	isQuotaDerivedRateLimitReason,
 	type QuotaDerivedRateLimitReason,
 } from "@clankermux/types";
@@ -267,6 +268,72 @@ async function releaseQuotaLockPredating(
 		);
 	}
 	return cleared;
+}
+
+/**
+ * The windows a banked-reset claim must report cleared before it may lift a
+ * cooldown of each quota-derived reason.
+ */
+const BANKED_RESET_WINDOWS_BY_REASON: Record<
+	QuotaDerivedRateLimitReason,
+	readonly AnthropicBankedResetWindow[]
+> = {
+	weekly_exhausted_429: ["seven_day", "seven_day_overage_included"],
+	session_exhausted_429: ["five_hour"],
+};
+
+/**
+ * Lift the quota cooldown a banked-reset claim just cleared upstream, instead
+ * of waiting for the next usage reading. Only a quota-derived lock whose
+ * window is in `cleared` and that was written before the claim was sent is
+ * released, through the same compare-and-clear as the poller path. Pause
+ * state and `rate_limit_reset` are left to that post-claim reading.
+ */
+export async function clearRateLimitOnBankedReset(
+	dbOps: Pick<
+		DatabaseOperations,
+		"getAccount" | "clearRateLimitOnCapacityRestore"
+	>,
+	logger: CapacityRestoredLogger,
+	claim: {
+		accountId: string;
+		cleared: readonly AnthropicBankedResetWindow[];
+		claimStartedAt: number;
+	},
+	marker: CapacityRestoredProbeMarker,
+	now: number = Date.now(),
+): Promise<void> {
+	const acc = await dbOps.getAccount(claim.accountId);
+	if (!acc?.rate_limited_until || Number(acc.rate_limited_until) <= now) return;
+	const reason = acc.rate_limited_reason;
+	const clearedList = claim.cleared.join(",") || "none";
+	if (
+		!isQuotaDerivedRateLimitReason(reason) ||
+		!BANKED_RESET_WINDOWS_BY_REASON[reason].some((w) =>
+			claim.cleared.includes(w),
+		)
+	) {
+		logger.debug(
+			`[clankermux] account=${acc.name} banked_reset_skip window_not_cleared reason=${reason ?? "null"} cleared=${clearedList}`,
+		);
+		return;
+	}
+	const released = await releaseQuotaLockPredating(
+		dbOps,
+		logger,
+		marker,
+		acc,
+		{ reason, until: acc.rate_limited_until },
+		{ at: claim.claimStartedAt, label: "claim_started_at" },
+		"banked_reset_skip",
+	);
+	if (released) {
+		logger.info(
+			`[clankermux] account=${acc.name} banked_reset_clear reason=${reason} cleared=${clearedList} cooldown_remaining=${Math.round(
+				(Number(acc.rate_limited_until) - now) / 60_000,
+			)}m claim_started_at=${new Date(claim.claimStartedAt).toISOString()}`,
+		);
+	}
 }
 
 /**
