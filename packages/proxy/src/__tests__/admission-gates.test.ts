@@ -670,6 +670,19 @@ describe("createAdmissionGates", () => {
 			);
 		}
 
+		it("the family gate and soft demotions leave a stale poll entry in place", () => {
+			const a = makeAccount({ id: "acc-a", name: "a" });
+			const b = makeAccount({ id: "acc-b", name: "b" });
+			seedPoll("acc-a", 11 * 60_000, 10, 10, 100);
+			seedUsage("acc-b", 20, 20);
+			const gates = makeGates({ requestModel: "claude-fable-5" });
+
+			gates.applyFamilyWeeklyGate([a, b]);
+			gates.applySoftDemotionReorder([a, b]);
+
+			expect(usageCache.peekAge("acc-a")).not.toBeNull();
+		});
+
 		it("header readings never make a stale poll count for the family gate", () => {
 			const account = makeAccount({ id: "acc-a" });
 			feedHeaders("acc-a", 10, 10);

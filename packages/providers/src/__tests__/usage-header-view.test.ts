@@ -97,6 +97,7 @@ describe("headerWindowFromClaim", () => {
 		["reset at the observation", { resetMs: NOW }],
 		["reset before the observation", { resetMs: NOW - 1 }],
 		["infinite reset", { resetMs: Number.POSITIVE_INFINITY }],
+		["reset past the Date range", { resetMs: 8.64e15 + 1_000 }],
 	] as const)("ignores a claim with %s", (_label, overrides) => {
 		expect(
 			headerWindowFromClaim(

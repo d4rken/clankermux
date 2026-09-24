@@ -820,14 +820,14 @@ describe("demand-aware cadence — header-fed accounts", () => {
 				}
 			).pollSchedule.get(id);
 
-		function start(label: string): string {
+		function start(label: string, activeMs = ACTIVE_MS): string {
 			const id = `hdr-cadence-${label}-${Date.now()}`;
 			ids.push(id);
 			usageCache.startPolling(
 				id,
 				async () => "fake-token",
 				"anthropic",
-				ACTIVE_MS,
+				activeMs,
 				null,
 				undefined,
 				undefined,
@@ -839,10 +839,14 @@ describe("demand-aware cadence — header-fed accounts", () => {
 			return id;
 		}
 
-		function feed(id: string): void {
+		function feed(
+			id: string,
+			observedAt = Date.now(),
+			epoch = usageCache.usageHeaderEpoch(id),
+		): void {
 			usageCache.recordUsageHeaders(
 				id,
-				usageCache.usageHeaderEpoch(id),
+				epoch,
 				[
 					{
 						claim: "5h",
@@ -859,7 +863,7 @@ describe("demand-aware cadence — header-fed accounts", () => {
 						surpassedThreshold: null,
 					},
 				],
-				Date.now(),
+				observedAt,
 			);
 		}
 
@@ -889,6 +893,41 @@ describe("demand-aware cadence — header-fed accounts", () => {
 			await wait(700);
 			expect(fetchCalls).toBe(1);
 			usageCache.noteActivity(id);
+			await wait(500);
+			expect(fetchCalls).toBeGreaterThan(1);
+		});
+
+		it("caps the header freshness bound at 180 s for a slower active cadence", async () => {
+			// Twice a 150 s cadence would be 300 s; a 200 s-old header is past the
+			// 180 s cap and a 100 s-old one is inside it.
+			const stale = start("slow-stale", 150_000);
+			feed(stale, Date.now() - 200_000);
+			const fresh = start("slow-fresh", 150_000);
+			feed(fresh, Date.now() - 100_000);
+			await wait(40);
+
+			expect(schedule(stale)?.headerFed).toBeUndefined();
+			expect(schedule(fresh)).toMatchObject({ isIdle: true, headerFed: true });
+		});
+
+		it("an account-wide cooldown drops the headers and re-arms the active cadence", async () => {
+			const id = start("cooldown");
+			feed(id);
+			await wait(40);
+			expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+			const sentBefore = usageCache.usageHeaderEpoch(id);
+
+			usageCache.noteAccountWideCooldown(id);
+
+			expect(schedule(id)?.isIdle).toBe(false);
+			const fiveHourSource = () =>
+				usageCache.peekUsageView(id, "anthropic", Date.now())?.fiveHour.source;
+			expect(fiveHourSource()).toBe("poll");
+			// The cooled 429's own headers, recorded later under the epoch its
+			// attempt captured, are refused.
+			feed(id, Date.now(), sentBefore);
+			expect(fiveHourSource()).toBe("poll");
+
 			await wait(500);
 			expect(fetchCalls).toBeGreaterThan(1);
 		});

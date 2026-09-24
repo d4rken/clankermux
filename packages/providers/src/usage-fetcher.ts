@@ -1222,21 +1222,28 @@ export function getAccountCapacitySignal(
 }
 
 /**
+ * The shortest freshness bound routing applies to the usage view, and the cap
+ * on how long header readings let a busy account skip active polling.
+ */
+export const ROUTING_USAGE_MAX_AGE_MS = 180_000;
+
+/**
  * Capacity from the polled reading alone, or null when it is older than
  * `maxAgeMs`. For decisions that read the poll's `limits[]` beside its
  * account-wide windows (the family-weekly gate), which must not see one
- * source's windows next to the other's scoped limits.
+ * source's windows next to the other's scoped limits. Non-evicting: a stale
+ * entry stays as the next poll's window-roll and limit-reached baseline.
  */
 export function getFreshPollCapacity(
-	cache: Pick<UsageCache, "get" | "getAge">,
+	cache: Pick<UsageCache, "peek" | "peekAge">,
 	accountId: string,
 	provider: string,
 	now: number,
 	maxAgeMs: number,
 ): CapacitySignal | null {
-	const age = cache.getAge(accountId);
+	const age = cache.peekAge(accountId);
 	if (age === null || age > maxAgeMs) return null; // age-stale → unknown
-	return getAccountCapacitySignal(cache.get(accountId), provider, now);
+	return getAccountCapacitySignal(cache.peek(accountId), provider, now);
 }
 
 /**
@@ -1253,7 +1260,14 @@ export function getFreshRoutingUsage(
 	now: number,
 	maxAgeMs: number,
 ): AnyUsageData | null {
-	const view = cache.peekUsageView(accountId, provider, now);
+	// The base may be as old as the UI horizon: poll-sourced axes still carry
+	// the poll's write time and fail `maxAgeMs` on their own.
+	const view = cache.peekUsageView(
+		accountId,
+		provider,
+		now,
+		UI_STALE_HORIZON_MS,
+	);
 	if (view === null || !isUsageViewFresh(view, now, maxAgeMs)) return null;
 	return view.data;
 }
@@ -1709,9 +1723,9 @@ class UsageCache {
 	 * Whether the account's routing view stays fresh from its own responses'
 	 * headers without this poll: 5h and 7d both taken from a header reading
 	 * observed within the routing bound (twice the active cadence, as for
-	 * `usage_poll_interval_ms`), and no poll-only axis reported that would still
-	 * need the poll inside that bound. A view with no poll base in the cache TTL
-	 * does not count, so a failing poll keeps its own cadence.
+	 * `usage_poll_interval_ms`, capped at {@link ROUTING_USAGE_MAX_AGE_MS}), and
+	 * no poll-only axis reported that would still need the poll inside that
+	 * bound. The view's base is read as routing reads it.
 	 */
 	private isHeaderFed(
 		accountId: string,
@@ -1720,14 +1734,19 @@ class UsageCache {
 	): boolean {
 		const stored = this.headerWindows.get(accountId);
 		if (!stored?.fiveHour || !stored.sevenDay) return false;
-		const boundMs = 2 * activeBaseMs;
+		const boundMs = Math.min(2 * activeBaseMs, ROUTING_USAGE_MAX_AGE_MS);
 		if (
 			now - stored.fiveHour.observedAtMs > boundMs ||
 			now - stored.sevenDay.observedAtMs > boundMs
 		) {
 			return false;
 		}
-		const view = this.peekUsageView(accountId, "anthropic", now);
+		const view = this.peekUsageView(
+			accountId,
+			"anthropic",
+			now,
+			UI_STALE_HORIZON_MS,
+		);
 		return (
 			view !== null &&
 			view.fiveHour.source !== "poll" &&
@@ -1786,6 +1805,40 @@ class UsageCache {
 			this.providerTypes.get(accountId),
 			this.customEndpoints.get(accountId),
 			null,
+		);
+	}
+
+	/**
+	 * An account-wide quota cooldown was just applied. Its header readings stop
+	 * counting: they are cleared and the epoch is reissued, so the headers of the
+	 * 429 that caused the cooldown (recorded when it is forwarded, under the
+	 * epoch captured before sending) are refused. An account sleeping on an idle
+	 * timer is re-armed straight onto the active cadence, since polling is the
+	 * only channel that observes the account recover; a pending wake sooner than
+	 * the shortest active delay is kept. A no-op without a live poller.
+	 */
+	noteAccountWideCooldown(accountId: string, now: number = Date.now()): void {
+		if (!this.headerEpochs.has(accountId)) return;
+		this.reissueHeaderEpoch(accountId);
+		const sched = this.pollSchedule.get(accountId);
+		if (!sched?.isIdle) return;
+		if (sched.wakeAt - now <= sched.activeBaseMs * 0.8) return;
+		const tokenProvider = this.tokenProviders.get(accountId);
+		const generation = this.pollGenerations.get(accountId);
+		if (!tokenProvider || generation === undefined) return;
+		const existing = this.pollTimeouts.get(accountId);
+		if (existing) clearTimeout(existing);
+		this.pollTimeouts.delete(accountId);
+		this.pollSchedule.delete(accountId);
+		this.armNextPoll(
+			accountId,
+			tokenProvider,
+			generation,
+			sched.activeBaseMs,
+			this.providerTypes.get(accountId),
+			this.customEndpoints.get(accountId),
+			null,
+			now,
 		);
 	}
 

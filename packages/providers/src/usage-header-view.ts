@@ -64,6 +64,9 @@ export interface PollReading {
 	observedAtMs: number | null;
 }
 
+/** The latest instant a `Date` can hold; a later reset cannot be formatted. */
+const MAX_DATE_MS = 8.64e15;
+
 /** Percent with the binary-fraction noise of `0.29 * 100` rounded away. */
 function toPercent(fraction: number): number {
 	return Math.round(fraction * 100 * 1e6) / 1e6;
@@ -72,9 +75,9 @@ function toPercent(fraction: number): number {
 /**
  * A claim as a reading, or null when it cannot be one: a status outside
  * {@link USAGE_READING_CLAIM_STATUSES}, a utilization that is missing or
- * outside 0..1, or a reset that is missing or not after the observation.
- * The last one is what a response right after a window roll carries: the old
- * window, reset already behind it.
+ * outside 0..1, or a reset that is missing, beyond what a `Date` can
+ * represent, or not after the observation. That last one is what a response
+ * right after a window roll carries: the old window, reset already behind it.
  */
 export function headerWindowFromClaim(
 	claim: ExtractedClaimReading,
@@ -90,8 +93,14 @@ export function headerWindowFromClaim(
 	) {
 		return null;
 	}
-	if (resetMs === null || !Number.isFinite(resetMs) || resetMs <= observedAtMs)
+	if (
+		resetMs === null ||
+		!Number.isFinite(resetMs) ||
+		resetMs <= observedAtMs ||
+		resetMs > MAX_DATE_MS
+	) {
 		return null;
+	}
 	return {
 		utilization: toPercent(utilization),
 		resetMs,

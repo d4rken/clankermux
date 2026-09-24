@@ -12,6 +12,7 @@ import {
 	isScopedOnlyUnifiedRejection,
 	MODEL_SUBSTITUTION_SUPPRESSION_REASON,
 	NETWORK,
+	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
 	PAUSE_REASON_SUBSCRIPTION_EXPIRED,
 	resolveModelMaxContextWindow,
@@ -46,6 +47,7 @@ import {
 import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import {
 	type Account,
+	type AnthropicUsageData,
 	type FullUsageData,
 	getChatContext,
 	getNativeResponsesMetaContext,
@@ -1166,6 +1168,26 @@ function applyConversationId(
  *   in hand, and memoized for the rest of that attempt.
  * @returns Promise resolving to response or null if failed
  */
+/**
+ * Whether the account's last poll reading, however old (up to the UI horizon,
+ * never evicted), names a `weekly_scoped` limit for the family `model` belongs
+ * to: without one, the family rung has nothing a refreshed poll could confirm.
+ */
+function pollNamesFamilyLimit(
+	accountId: string,
+	model: string | null,
+	now: number,
+): boolean {
+	const family = model ? getModelFamily(model) : null;
+	if (family === null) return false;
+	const data = usageCache.peekWithAge(accountId)?.data;
+	if (!data) return false;
+	return normalizeAnthropicUsage(
+		data as AnthropicUsageData,
+		now,
+	).weeklyScopedPresent.includes(family);
+}
+
 export async function proxyWithAccount(
 	req: Request,
 	url: URL,
@@ -2133,16 +2155,20 @@ export async function proxyWithAccount(
 			// evidence-starved relative to the later ones.
 			//
 			// The trigger is the LOOSEST bound in the ladder
-			// (FAMILY_WEEKLY_MAX_USAGE_AGE_MS, 180s) — deliberately not the burst
-			// rung's tighter 120s — so this never buys a fetch the old code wouldn't
-			// have made. Null at 180s means the two rungs above are about to fail
-			// open on missing evidence and hand the 429 to the burst rung, which
-			// would then have refreshed anyway: same one fetch, just early enough to
-			// be useful. Triggering at 120s instead would fire in the 120-180s band,
-			// where the rungs above are still satisfied and may return before the
-			// burst rung ever runs — costing a fetch AND up to 5s of latency that
-			// the old code did not spend. The burst rung keeps its own lazy refresh
-			// for exactly that band, gated on `usageRefreshAttempted` below.
+			// (FAMILY_WEEKLY_MAX_USAGE_AGE_MS, 180s), deliberately not the burst
+			// rung's. Null at 180s means the rungs below are about to fail open on
+			// missing evidence and hand the 429 to the burst rung, which would then
+			// refresh anyway: same one fetch, just early enough to be useful. A
+			// tighter trigger would fire where the rungs below are still satisfied
+			// and may return before the burst rung ever runs, costing a fetch and up
+			// to 5s of latency for nothing. The burst rung keeps its own lazy refresh
+			// for that band, gated on `usageRefreshAttempted` below.
+			//
+			// The family rung reads the poll alone, and a busy account's poll ages
+			// while headers keep its routing view fresh. A stale poll therefore
+			// buys a fetch the other rungs would not need, but only when the poll
+			// names a weekly limit for the requested model's family, i.e. when the
+			// family rung could act on the refreshed reading.
 			//
 			// refreshNow single-flights and bounds itself (5s timeout, failure →
 			// false), so a dead usage endpoint costs one bounded wait and every rung
@@ -2152,30 +2178,27 @@ export async function proxyWithAccount(
 			// null, and single-flight does not dedupe a second SEQUENTIAL call — so
 			// without the flag the burst rung would fetch again and a dead endpoint
 			// would cost two bounded waits (~10s) on one request.
-			//
-			// The rungs read two views of the cache: the family rung the poll alone,
-			// the others the poll with header-fed 5h/7d windows. Either one missing
-			// triggers the refresh.
 			let usageRefreshAttempted = false;
 			const refreshCheckAt = Date.now();
 			if (
 				rawResponse.status === 429 &&
 				!options?.reprobe &&
 				!isTrustedProbe("any") &&
-				(getFreshPollCapacity(
+				(getFreshRoutingCapacity(
 					usageCache,
 					account.id,
 					account.provider,
 					refreshCheckAt,
 					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 				) === null ||
-					getFreshRoutingCapacity(
+					(getFreshPollCapacity(
 						usageCache,
 						account.id,
 						account.provider,
 						refreshCheckAt,
 						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-					) === null)
+					) === null &&
+						pollNamesFamilyLimit(account.id, requestedModel, refreshCheckAt)))
 			) {
 				usageRefreshAttempted = true;
 				await usageCache.refreshNow(account.id);

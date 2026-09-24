@@ -6,6 +6,7 @@ import {
 	it,
 	mock,
 	setSystemTime,
+	spyOn,
 } from "bun:test";
 import { extractUnifiedClaimReadings } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
@@ -802,5 +803,131 @@ describe("proxyWithAccount — header-fed usage on the 429 ladder", () => {
 		const second = makeProxyContext();
 		await run(second.ctx, makeOAuthAnthropicAccount());
 		expect(reasonsFrom(second.attemptCalls)).toContain("session_exhausted_429");
+		// The account-wide cooldown dropped the header readings with it.
+		expect(fiveHourSource()).toBe("poll");
+	});
+
+	function register() {
+		usageCache.startPolling(
+			ACCOUNT_ID,
+			async () => "token",
+			"anthropic",
+			90_000,
+			null,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ initialDelayMs: 10 * HOUR },
+		);
+	}
+
+	function seedPoll(ageMs: number, opusWeeklyPct: number | null) {
+		usageCache.setWithAgeForTests(
+			ACCOUNT_ID,
+			{
+				five_hour: {
+					utilization: 20,
+					resets_at: new Date(fiveResetS * 1000 + 219).toISOString(),
+				},
+				seven_day: {
+					utilization: 30,
+					resets_at: new Date(weekResetS * 1000 + 431).toISOString(),
+				},
+				...(opusWeeklyPct === null
+					? {}
+					: {
+							limits: [
+								{
+									kind: "weekly_scoped",
+									percent: opusWeeklyPct,
+									resets_at: new Date(Date.now() + 20 * HOUR).toISOString(),
+									scope: { model: { display_name: "Claude Opus 4.8" } },
+								},
+							],
+						}),
+			} as never,
+			ageMs,
+		);
+	}
+
+	function feedHeaders() {
+		usageCache.recordUsageHeaders(
+			ACCOUNT_ID,
+			usageCache.usageHeaderEpoch(ACCOUNT_ID),
+			extractUnifiedClaimReadings(
+				new Headers({
+					"anthropic-ratelimit-unified-5h-status": "allowed",
+					"anthropic-ratelimit-unified-5h-utilization": "0.2",
+					"anthropic-ratelimit-unified-5h-reset": String(fiveResetS),
+					"anthropic-ratelimit-unified-7d-status": "allowed",
+					"anthropic-ratelimit-unified-7d-utilization": "0.3",
+					"anthropic-ratelimit-unified-7d-reset": String(weekResetS),
+				}),
+			),
+			Date.now(),
+		);
+	}
+
+	const fiveHourSource = () =>
+		usageCache.peekUsageView(ACCOUNT_ID, "anthropic")?.fiveHour.source;
+
+	it("a family-scoped 429 leaves the header readings standing", async () => {
+		register();
+		seedPoll(60_000, 100);
+		feedHeaders();
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+		const { ctx, attemptCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+
+		expect(reasonsFrom(attemptCalls)).toContain("family_weekly_exhausted_429");
+		expect(fiveHourSource()).toBe("merged");
+	});
+
+	it("a burst 429 leaves the header readings standing", async () => {
+		register();
+		seedPoll(60_000, null);
+		feedHeaders();
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+		const { ctx, attemptCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+
+		expect(reasonsFrom(attemptCalls)).toContain("retryable_429");
+		expect(fiveHourSource()).toBe("merged");
+	});
+
+	describe("the shared refresh with a fresh routing view and a stale poll", () => {
+		let refresh: ReturnType<typeof spyOn>;
+		beforeEach(() => {
+			refresh = spyOn(usageCache, "refreshNow").mockResolvedValue(false);
+		});
+		afterEach(() => refresh.mockRestore());
+
+		it("refreshes when the poll names a weekly limit for the requested family", async () => {
+			register();
+			seedPoll(400_000, 40);
+			feedHeaders();
+			globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+			const { ctx } = makeProxyContext();
+			await run(ctx, makeOAuthAnthropicAccount(), "claude-opus-4-8");
+
+			expect(refresh).toHaveBeenCalledWith(ACCOUNT_ID);
+		});
+
+		it("does not refresh when the poll names no limit for that family", async () => {
+			register();
+			seedPoll(400_000, null);
+			feedHeaders();
+			globalThis.fetch = mockFetch(mock(async () => rejected429()));
+
+			const { ctx } = makeProxyContext();
+			await run(ctx, makeOAuthAnthropicAccount(), "claude-opus-4-8");
+
+			expect(refresh).not.toHaveBeenCalled();
+		});
 	});
 });

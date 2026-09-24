@@ -247,23 +247,70 @@ describe("UsageCache header store — lookups", () => {
 		).toBe(50);
 	});
 
-	it("routing needs a poll reading within the cache TTL as its base", () => {
+	it("an 11-minute-old poll base still carries 60 s-old headers", () => {
 		const id = freshId("base");
 		register(id);
-		usageCache.setWithAgeForTests(
-			id,
-			pollReading(40, 30),
-			USAGE_CACHE_TTL_MS + 1_000,
-		);
+		const elevenMinutes = USAGE_CACHE_TTL_MS + 60_000;
+		usageCache.setWithAgeForTests(id, pollReading(40, 30), elevenMinutes);
 		usageCache.recordUsageHeaders(
 			id,
 			usageCache.usageHeaderEpoch(id),
 			claims(0.5),
-			Date.now(),
+			Date.now() - 60_000,
+		);
+		const now = Date.now();
+		expect(
+			(
+				getFreshRoutingUsage(
+					usageCache,
+					id,
+					"anthropic",
+					now,
+					180_000,
+				) as UsageData | null
+			)?.five_hour?.utilization,
+		).toBe(50);
+
+		// A reported poll-only axis still needs the poll inside the bound.
+		usageCache.setWithAgeForTests(
+			id,
+			{
+				...pollReading(40, 30),
+				seven_day_oauth_apps: { utilization: 10, resets_at: null },
+			},
+			elevenMinutes,
 		);
 		expect(
-			getFreshRoutingUsage(usageCache, id, "anthropic", Date.now(), 180_000),
+			getFreshRoutingUsage(usageCache, id, "anthropic", now, 180_000),
 		).toBeNull();
+	});
+
+	it("neither lookup evicts a stale poll entry, so the next poll keeps its baseline", () => {
+		const id = freshId("no-evict");
+		register(id);
+		const oldReset = Date.now() - 1_000;
+		usageCache.setWithAgeForTests(
+			id,
+			{
+				five_hour: {
+					utilization: 90,
+					resets_at: new Date(oldReset).toISOString(),
+				},
+				seven_day: pollReading(40, 30).seven_day,
+			},
+			USAGE_CACHE_TTL_MS + 60_000,
+		);
+		const now = Date.now();
+		getFreshPollCapacity(usageCache, id, "anthropic", now, 180_000);
+		getFreshRoutingCapacity(usageCache, id, "anthropic", now, 180_000);
+		expect(usageCache.peekAge(id)).not.toBeNull();
+
+		// The window-roll comparison a poll makes before writing still sees it.
+		let rolled = 0;
+		usageCache.notifyWindowReset(id, pollReading(5, 30), "anthropic", () => {
+			rolled++;
+		});
+		expect(rolled).toBe(1);
 	});
 
 	it("a non-Anthropic provider reads the poll alone", () => {

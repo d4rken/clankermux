@@ -1,4 +1,5 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
+import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../proxy-types";
 import { applyRateLimitCooldown } from "../rate-limit-cooldown";
@@ -203,5 +204,59 @@ describe("applyRateLimitCooldown — Lever B (server-directed reset, no escalati
 		expect(account.consecutive_rate_limits).toBe(2);
 		expect(markAccountRateLimited).toHaveBeenCalledTimes(1);
 		expect(markAccountRateLimitedDeadlineOnly).not.toHaveBeenCalled();
+	});
+});
+
+describe("applyRateLimitCooldown — header-fed usage", () => {
+	it("drops header readings only for an account-wide quota cooldown", () => {
+		const spy = spyOn(usageCache, "noteAccountWideCooldown");
+		try {
+			const future = Date.now() + 3_600_000;
+			for (const reason of [
+				"session_exhausted_429",
+				"weekly_exhausted_429",
+			] as const) {
+				applyRateLimitCooldown(
+					makeAccount(),
+					{ resetTime: future, reason },
+					makeCtx().ctx,
+				);
+			}
+			expect(spy).toHaveBeenCalledTimes(2);
+
+			spy.mockClear();
+			// Burst, residual and out-of-credits cooldowns; another provider; a
+			// custom endpoint; and a gentle re-probe.
+			applyRateLimitCooldown(
+				makeAccount(),
+				{ resetTime: future, reason: "model_fallback_429" },
+				makeCtx().ctx,
+			);
+			applyRateLimitCooldown(makeAccount(), {}, makeCtx().ctx);
+			applyRateLimitCooldown(
+				makeAccount(),
+				{ floorUntil: future, reason: "out_of_credits" },
+				makeCtx().ctx,
+			);
+			applyRateLimitCooldown(
+				makeAccount({ provider: "codex" }),
+				{ resetTime: future, reason: "weekly_exhausted_429" },
+				makeCtx().ctx,
+			);
+			applyRateLimitCooldown(
+				makeAccount({ custom_endpoint: "https://example.test" }),
+				{ resetTime: future, reason: "weekly_exhausted_429" },
+				makeCtx().ctx,
+			);
+			applyRateLimitCooldown(
+				makeAccount(),
+				{ resetTime: future, reason: "session_exhausted_429" },
+				makeCtx().ctx,
+				{ reprobe: true },
+			);
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });

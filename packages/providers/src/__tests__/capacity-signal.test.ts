@@ -556,11 +556,11 @@ describe("getFreshPollCapacity", () => {
 		age: number | null,
 		data: AnyUsageData | null,
 	): {
-		get: (id: string) => AnyUsageData | null;
-		getAge: (id: string) => number | null;
+		peek: (id: string) => AnyUsageData | null;
+		peekAge: (id: string) => number | null;
 	} => ({
-		get: () => data,
-		getAge: () => age,
+		peek: () => data,
+		peekAge: () => age,
 	});
 
 	const freshData: UsageData = {
@@ -568,7 +568,7 @@ describe("getFreshPollCapacity", () => {
 		seven_day: { utilization: 40, resets_at: iso(600_000_000) },
 	};
 
-	it("returns null when getAge is null (no cached datum)", () => {
+	it("returns null when peekAge is null (no cached datum)", () => {
 		const cache = makeCache(null, freshData);
 		expect(
 			getFreshPollCapacity(cache, "acct", "anthropic", NOW, 60_000),

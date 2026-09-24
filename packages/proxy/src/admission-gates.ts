@@ -435,7 +435,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				now,
 				FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 			);
-			const usageData = usageCache.get(account.id);
+			const usageData = usageCache.peek(account.id);
 			const exclusion = resolveFamilyWeeklyExclusion(
 				account,
 				modelForGate,
@@ -616,7 +616,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				resolveReservationDemotion(
 					account,
 					modelForGate,
-					usageCache.get(account.id),
+					usageCache.peek(account.id),
 					capacityById.get(account.id) ?? null,
 					getLastProtectedFamilyDemand(account.id),
 					now,
