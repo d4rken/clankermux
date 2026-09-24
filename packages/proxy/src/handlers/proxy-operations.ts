@@ -2335,7 +2335,7 @@ export async function proxyWithAccount(
 				const cacheFamilyExclusion = resolveFamilyWeeklyExclusion(
 					account,
 					requestedModel,
-					usageCache.get(account.id),
+					usageCache.peek(account.id),
 					familyFreshCapacity,
 					now,
 				);

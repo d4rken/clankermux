@@ -383,7 +383,7 @@ export async function resolveZeroAccountsOutcome(
 					// The family this account would SERVE, which a literal routing rule
 					// makes different from the family the client asked for.
 					resolvedModelFor(heldAccount),
-					usageCache.get(heldAccount.id),
+					usageCache.peek(heldAccount.id),
 					getFreshPollCapacity(
 						usageCache,
 						heldAccount.id,
@@ -650,7 +650,7 @@ export async function resolveZeroAccountsOutcome(
 						resolveTransientlyCooledFamilySibling(
 							a,
 							family,
-							usageCache.get(a.id),
+							usageCache.peek(a.id),
 							a.rate_limited_until,
 							getProviderOverloadUntil(
 								a.provider,

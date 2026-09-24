@@ -974,7 +974,7 @@ async function handleIngestedProxy(
 					resolveFamilyWeeklyExclusion(
 						heldAccount,
 						heldTargetModel,
-						usageCache.get(heldAccount.id),
+						usageCache.peek(heldAccount.id),
 						getFreshPollCapacity(
 							usageCache,
 							heldAccount.id,
