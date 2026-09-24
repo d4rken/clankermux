@@ -21,8 +21,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { BUSY_RETRY_MAX_DELAY_MS } from "../adapters/bun-sql-adapter";
 import { DatabaseOperations } from "../database-operations";
-import { INCREMENTAL_VACUUM_BATCH_PAGES } from "../incremental-vacuum-worker";
+import {
+	INCREMENTAL_VACUUM_BATCH_PAGES,
+	INCREMENTAL_VACUUM_BATCH_YIELD_MS,
+	PAYLOAD_DELETE_YIELD_MS,
+} from "../incremental-vacuum-worker";
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-vac-batch-test-"));
@@ -83,6 +88,18 @@ function roundTrip<T>(worker: Worker, message: unknown): Promise<T> {
 		worker.postMessage(message);
 	});
 }
+
+describe("maintenance batch yields vs the main connection's busy retry", () => {
+	// See INCREMENTAL_VACUUM_BATCH_YIELD_MS.
+	it("every long-hold yield spans at least two retry intervals", () => {
+		expect(INCREMENTAL_VACUUM_BATCH_YIELD_MS).toBeGreaterThanOrEqual(
+			2 * BUSY_RETRY_MAX_DELAY_MS,
+		);
+		expect(PAYLOAD_DELETE_YIELD_MS).toBeGreaterThanOrEqual(
+			2 * BUSY_RETRY_MAX_DELAY_MS,
+		);
+	});
+});
 
 describe("incremental-vacuum worker: batched reclamation", () => {
 	let tmpDir: string;

@@ -15,12 +15,13 @@ import { isTransientLockError } from "./sqlite-error";
 export const INCREMENTAL_VACUUM_BATCH_PAGES = 2000;
 
 /**
- * Pause between batches so a main-thread write blocked in `busy_timeout` can
- * acquire the just-released writer slot before the worker re-grabs it for the
- * next batch. Negligible against the hourly cadence; only applied when another
- * batch will actually follow.
+ * Pause between batches so a main-thread write waiting on the writer slot can
+ * take it before the worker re-grabs it for the next batch. It has to outlast
+ * the main connection's busy-retry spacing, or most retries land while a batch
+ * holds the slot and one write waits out several batches; pinned in
+ * incremental-vacuum-batching.test.ts. Only applied when another batch follows.
  */
-const INCREMENTAL_VACUUM_BATCH_YIELD_MS = 25;
+export const INCREMENTAL_VACUUM_BATCH_YIELD_MS = 250;
 
 /**
  * Rows per batch for the "cleanup" kind's retention DELETEs. Deliberately small
@@ -33,8 +34,25 @@ const INCREMENTAL_VACUUM_BATCH_YIELD_MS = 25;
  */
 export const CLEANUP_DELETE_BATCH_ROWS = 50;
 
-/** Yield between cleanup delete batches so main-thread writes can grab the slot. */
+/**
+ * Yield between delete batches of small rows (requests, snapshots, headers,
+ * orphan sweeps), whose writer-slot holds are milliseconds.
+ */
 const CLEANUP_DELETE_YIELD_MS = 25;
+
+/**
+ * Yield after a payload delete batch, which holds the writer slot for hundreds
+ * of ms; see INCREMENTAL_VACUUM_BATCH_YIELD_MS.
+ */
+export const PAYLOAD_DELETE_YIELD_MS = 250;
+
+/**
+ * Byte cap on one payload delete batch (age and byte-budget passes), on top of
+ * the row cap. Deleting a payload reads every overflow page of its blob while
+ * holding the writer slot, so the hold scales with bytes. A row larger than the
+ * cap still goes, alone.
+ */
+export const PAYLOAD_EVICT_BATCH_BYTES = 4 * 1024 * 1024;
 
 /**
  * Rows per batch for the snapshot-table retention DELETEs (usage_snapshots /
@@ -371,64 +389,42 @@ function runOptimize(dbPath: string): void {
  * table (e.g. `timestamp < ?`), bound with `cutoff`; `table`/`whereCond` are
  * trusted internal constants, not caller input.
  *
- * TWO deletion modes, and the choice is a correctness decision per table:
- *
- *  - DEFAULT (`atomic` unset/false) — select the target ids first (LIMIT), then
- *    delete exactly those, so the returned count reflects rows *of this table*
- *    deleted, NOT the FK-cascade child rows that `.changes` would additionally
- *    include (which both inflates the count and breaks a `.changes < batchSize`
- *    termination test). REQUIRED for `requests`, whose four ON DELETE CASCADE
- *    children would otherwise be counted.
- *  - `atomic: true` — ONE statement per batch, with the predicate re-applied
- *    inside the delete's subquery. This closes a select-then-delete race: the
- *    id-only DELETE of the default mode does not re-check the predicate, so a
- *    concurrent upsert landing between the two statements (rewriting a row's
- *    json/bytes/timestamp) would have its FRESH payload deleted. Harmless for
- *    the 12h age pass (nothing that old is being upserted) but very much not for
- *    the byte-budget pass, whose cutoff targets recent rows. A single statement
- *    is atomic under autocommit. `.changes` is exact here ONLY because
- *    `request_payloads` has no FK children — never use this mode for a table
- *    that cascades.
+ * Selects the target ids first (LIMIT), then deletes exactly those, so the
+ * returned count reflects rows *of this table* deleted, NOT the FK-cascade
+ * child rows that `.changes` would additionally include (which both inflates
+ * the count and breaks a `.changes < batchSize` termination test). REQUIRED for
+ * `requests`, whose four ON DELETE CASCADE children would otherwise be counted.
+ * The id-only DELETE does not re-check the predicate, so a row rewritten
+ * between the two statements still goes; payloads use
+ * {@link deletePayloadsBatched} for that reason.
  *
  * Loop ends when a batch removes fewer rows than the batch size. A transient
  * lock after progress stops early (deleted rows persist; the next hourly tick
  * resumes); a transient lock on the first batch, or any non-lock error,
  * propagates to the caller's { ok: false }.
- *
- * Exported for the eviction tests, which drive it against a wrapped handle to
- * simulate a concurrent upsert; production callers are in runCleanup().
  */
 export async function deleteBatched(
 	db: Database,
 	table: string,
 	whereCond: string,
 	cutoff: number,
-	opts?: { atomic?: boolean },
 ): Promise<number> {
 	const selectSql = `SELECT id FROM ${table} WHERE ${whereCond} LIMIT ?`;
-	const atomicSql = `DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} WHERE ${whereCond} LIMIT ?)`;
 	let total = 0;
 	for (;;) {
 		let removed: number;
 		try {
-			if (opts?.atomic) {
-				removed = db.run(atomicSql, [
-					cutoff,
-					CLEANUP_DELETE_BATCH_ROWS,
-				]).changes;
-			} else {
-				const ids = db
-					.query(selectSql)
-					.all(cutoff, CLEANUP_DELETE_BATCH_ROWS) as Array<{ id: string }>;
-				if (ids.length > 0) {
-					const placeholders = ids.map(() => "?").join(",");
-					db.run(
-						`DELETE FROM ${table} WHERE id IN (${placeholders})`,
-						ids.map((r) => r.id),
-					);
-				}
-				removed = ids.length;
+			const ids = db
+				.query(selectSql)
+				.all(cutoff, CLEANUP_DELETE_BATCH_ROWS) as Array<{ id: string }>;
+			if (ids.length > 0) {
+				const placeholders = ids.map(() => "?").join(",");
+				db.run(
+					`DELETE FROM ${table} WHERE id IN (${placeholders})`,
+					ids.map((r) => r.id),
+				);
 			}
+			removed = ids.length;
 		} catch (err) {
 			if (isTransientLockError(err) && total > 0) break;
 			throw err;
@@ -437,6 +433,65 @@ export async function deleteBatched(
 		// A short batch means everything matching the predicate is drained.
 		if (removed < CLEANUP_DELETE_BATCH_ROWS) break;
 		await Bun.sleep(CLEANUP_DELETE_YIELD_MS);
+	}
+	return total;
+}
+
+/**
+ * Delete `request_payloads` rows matching `whereCond` (bound with `cutoff`),
+ * oldest first, in batches capped at {@link CLEANUP_DELETE_BATCH_ROWS} rows AND
+ * {@link PAYLOAD_EVICT_BATCH_BYTES} bytes, and return how many were removed.
+ * With 10 × 1 MiB matching rows the batches remove 4, 4, 2, then 0, which ends
+ * the pass. A NULL `bytes` counts as the full cap, so such a row goes alone.
+ *
+ * Each batch is ONE statement with the predicate inside it. A concurrent upsert
+ * can rewrite a row's json/bytes/timestamp at any moment, and the byte-budget
+ * pass targets recent rows, so selecting ids first and deleting them in a
+ * second statement would delete a freshly written payload. `.changes` is an
+ * exact count only because `request_payloads` has no FK children.
+ *
+ * The window orders by (timestamp, bytes) so it runs on the covering
+ * idx_request_payloads_size. `bytes` sits after the `json` blob in the row, so
+ * reading it from the table walks that payload's overflow pages; the plan is
+ * pinned in payload-size-eviction.test.ts.
+ *
+ * Lock handling matches {@link deleteBatched}. Exported for the eviction tests,
+ * which drive it against a wrapped handle.
+ */
+export async function deletePayloadsBatched(
+	db: Database,
+	whereCond: string,
+	cutoff: number,
+): Promise<number> {
+	const sql = `DELETE FROM request_payloads WHERE rowid IN (
+		SELECT rowid FROM (
+			SELECT rowid,
+			       ROW_NUMBER() OVER w AS rn,
+			       SUM(COALESCE(bytes, ${PAYLOAD_EVICT_BATCH_BYTES})) OVER w AS running
+			FROM request_payloads
+			WHERE ${whereCond}
+			WINDOW w AS (ORDER BY timestamp, bytes ROWS UNBOUNDED PRECEDING)
+			ORDER BY timestamp, bytes
+			LIMIT ?
+		)
+		WHERE rn = 1 OR running <= ?
+	)`;
+	let total = 0;
+	for (;;) {
+		let removed: number;
+		try {
+			removed = db.run(sql, [
+				cutoff,
+				CLEANUP_DELETE_BATCH_ROWS,
+				PAYLOAD_EVICT_BATCH_BYTES,
+			]).changes;
+		} catch (err) {
+			if (isTransientLockError(err) && total > 0) break;
+			throw err;
+		}
+		if (removed === 0) break;
+		total += removed;
+		await Bun.sleep(PAYLOAD_DELETE_YIELD_MS);
 	}
 	return total;
 }
@@ -601,15 +656,10 @@ async function runCleanup(
 		db.exec("PRAGMA busy_timeout = 200");
 		applyWorkerPragmas(db);
 
-		// atomic: request_payloads has no FK children, and using one deletion
-		// semantic for the whole table keeps the next reader from picking the
-		// racy one for the size pass below (see deleteBatched).
-		const removedPayloadsByAge = await deleteBatched(
+		const removedPayloadsByAge = await deletePayloadsBatched(
 			db,
-			"request_payloads",
 			"timestamp IS NOT NULL AND timestamp < ?",
 			payloadCutoff,
-			{ atomic: true },
 		);
 
 		// Orphaned payloads (request row already gone). Typically ~0.
@@ -810,12 +860,10 @@ async function runCleanup(
 				// deliberate: measured live, 1741 rows spanned 1739 distinct
 				// timestamps (at most 2 sharing a millisecond), so the worst case is
 				// ~one extra row — far cheaper than tuple-cutoff complexity.
-				removedPayloadsBySize = await deleteBatched(
+				removedPayloadsBySize = await deletePayloadsBatched(
 					db,
-					"request_payloads",
 					"bytes IS NOT NULL AND timestamp IS NOT NULL AND timestamp <= ?",
 					cutoffRow.timestamp,
-					{ atomic: true },
 				);
 			}
 		}

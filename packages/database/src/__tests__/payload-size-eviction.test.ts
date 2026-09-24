@@ -7,7 +7,7 @@
  *     both fresh installs (ensureSchema) and upgraded DBs (ADDITIVE_COLUMNS),
  *   - the payload writer recording the UTF-8 size on every write AND rewrite,
  *   - the eviction pass itself: what it counts, what it may delete, the order
- *     it runs in, and the select-then-delete race the atomic delete closes.
+ *     it runs in, and the select-then-delete race the single-statement delete closes.
  *
  * Governing invariant under test: the budget counts EXACTLY the rows the pass
  * can evict (`bytes IS NOT NULL AND timestamp IS NOT NULL`). Counting a row it
@@ -20,7 +20,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
-import { deleteBatched } from "../incremental-vacuum-worker";
+import {
+	CLEANUP_DELETE_BATCH_ROWS,
+	deleteBatched,
+	deletePayloadsBatched,
+	PAYLOAD_EVICT_BATCH_BYTES,
+} from "../incremental-vacuum-worker";
 import { ensureSchema, runMigrations } from "../migrations";
 import {
 	createPayloadWriteEngine,
@@ -30,6 +35,8 @@ import {
 
 const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const SIZE_PREDICATE =
+	"bytes IS NOT NULL AND timestamp IS NOT NULL AND timestamp <= ?";
 
 let tmpDir: string;
 let dbPath: string;
@@ -599,11 +606,205 @@ describe("byte-budget eviction pass", () => {
 	});
 });
 
-describe("deleteBatched: select-then-delete race", () => {
+describe("deletePayloadsBatched: per-batch byte cap", () => {
+	const MiB = 1024 * 1024;
+
+	/** Count the DELETE statements a pass issues, one per batch. */
+	function countingHandle(db: Database): {
+		handle: Database;
+		batchSizes: number[];
+		statements: Array<{ sql: string; params: unknown[] }>;
+	} {
+		const batchSizes: number[] = [];
+		const statements: Array<{ sql: string; params: unknown[] }> = [];
+		const handle = {
+			query: (sql: string) => db.query(sql),
+			run: (sql: string, params?: unknown[]) => {
+				statements.push({ sql, params: params ?? [] });
+				const res = db.run(sql, params as never);
+				batchSizes.push(res.changes);
+				return res;
+			},
+		} as unknown as Database;
+		return { handle, batchSizes, statements };
+	}
+
+	it("reads sizes from the covering size index, never the payload row", async () => {
+		// `bytes` follows the `json` blob in the row: a table read of it walks the
+		// blob's overflow pages, once per candidate per batch.
+		const now = seedMany(3, 10);
+		const db = open();
+		try {
+			for (const pred of [
+				SIZE_PREDICATE,
+				"timestamp IS NOT NULL AND timestamp < ?",
+			]) {
+				const { handle, statements } = countingHandle(db);
+				await deletePayloadsBatched(handle, pred, now - 1_000_000);
+				const { sql, params } = statements[0] as {
+					sql: string;
+					params: unknown[];
+				};
+				const plan = (
+					db
+						.query(`EXPLAIN QUERY PLAN ${sql}`)
+						.all(...(params as never[])) as Array<{ detail: string }>
+				)
+					.map((r) => r.detail)
+					.join("\n");
+				expect(plan).toContain(
+					"USING COVERING INDEX idx_request_payloads_size",
+				);
+				expect(plan).not.toContain("TEMP B-TREE");
+			}
+		} finally {
+			db.close();
+		}
+	});
+
+	function seedMany(count: number, bytes: number): number {
+		const now = Date.now();
+		const db = new Database(dbPath, { create: true });
+		runMigrations(db);
+		for (let i = 0; i < count; i++) {
+			seedPayload(
+				db,
+				`p-${String(i).padStart(4, "0")}`,
+				now - 100_000 + i,
+				bytes,
+			);
+		}
+		db.close();
+		return now;
+	}
+
+	it("keeps each batch at or under the byte cap, oldest first", async () => {
+		// 10 × 1 MiB against a 4 MiB cap: 4 + 4 + 2, then the empty batch that
+		// ends the pass.
+		expect(PAYLOAD_EVICT_BATCH_BYTES).toBe(4 * MiB);
+		const now = seedMany(10, 1 * MiB);
+		const db = open();
+		try {
+			const { handle, batchSizes } = countingHandle(db);
+			const removed = await deletePayloadsBatched(handle, SIZE_PREDICATE, now);
+			expect(removed).toBe(10);
+			expect(batchSizes).toEqual([4, 4, 2, 0]);
+			expect(payloadIds(db)).toEqual([]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("still deletes a single row larger than the cap, one per batch", async () => {
+		const now = seedMany(3, 6 * MiB);
+		const db = open();
+		try {
+			const { handle, batchSizes } = countingHandle(db);
+			expect(await deletePayloadsBatched(handle, SIZE_PREDICATE, now)).toBe(3);
+			expect(batchSizes).toEqual([1, 1, 1, 0]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("keeps the row cap when rows are tiny", async () => {
+		const now = seedMany(CLEANUP_DELETE_BATCH_ROWS * 2 + 7, 10);
+		const db = open();
+		try {
+			const { handle, batchSizes } = countingHandle(db);
+			expect(await deletePayloadsBatched(handle, SIZE_PREDICATE, now)).toBe(
+				CLEANUP_DELETE_BATCH_ROWS * 2 + 7,
+			);
+			expect(batchSizes).toEqual([
+				CLEANUP_DELETE_BATCH_ROWS,
+				CLEANUP_DELETE_BATCH_ROWS,
+				7,
+				0,
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("leaves rows newer than the cutoff alone", async () => {
+		const now = seedMany(4, 1 * MiB);
+		const db = open();
+		try {
+			// Rows sit at now-100000+i; a cutoff at the second row keeps the last two.
+			const removed = await deletePayloadsBatched(
+				db,
+				SIZE_PREDICATE,
+				now - 100_000 + 1,
+			);
+			expect(removed).toBe(2);
+			expect(payloadIds(db)).toEqual(["p-0002", "p-0003"]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("deletes legacy bytes-IS-NULL rows under the age predicate, each alone", async () => {
+		// An unmeasured row counts as a full cap: without that, 50 legacy blobs
+		// of any size would share one batch.
+		const now = Date.now();
+		const schemaDb = new Database(dbPath, { create: true });
+		runMigrations(schemaDb);
+		seedPayload(schemaDb, "legacy-a", now - 10_000, null);
+		seedPayload(schemaDb, "legacy-b", now - 9_000, null);
+		seedPayload(schemaDb, "fresh", now, 100);
+		schemaDb.close();
+
+		const db = open();
+		try {
+			const { handle, batchSizes } = countingHandle(db);
+			const removed = await deletePayloadsBatched(
+				handle,
+				"timestamp IS NOT NULL AND timestamp < ?",
+				now - 5000,
+			);
+			expect(removed).toBe(2);
+			expect(batchSizes).toEqual([1, 1, 0]);
+			expect(payloadIds(db)).toEqual(["fresh"]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("starts a new batch after an oversized or unmeasured row", async () => {
+		// Oldest first: a 6 MiB row, an unmeasured row, then three 1 MiB rows.
+		// Each of the first two exceeds the cap on its own; the small rows share
+		// the third batch.
+		const now = Date.now();
+		const schemaDb = new Database(dbPath, { create: true });
+		runMigrations(schemaDb);
+		seedPayload(schemaDb, "big", now - 10_000, 6 * MiB);
+		seedPayload(schemaDb, "legacy", now - 9_000, null);
+		seedPayload(schemaDb, "s1", now - 8_000, 1 * MiB);
+		seedPayload(schemaDb, "s2", now - 7_000, 1 * MiB);
+		seedPayload(schemaDb, "s3", now - 6_000, 1 * MiB);
+		schemaDb.close();
+
+		const db = open();
+		try {
+			const { handle, batchSizes } = countingHandle(db);
+			const removed = await deletePayloadsBatched(
+				handle,
+				"timestamp IS NOT NULL AND timestamp < ?",
+				now,
+			);
+			expect(removed).toBe(5);
+			expect(batchSizes).toEqual([1, 1, 3, 0]);
+		} finally {
+			db.close();
+		}
+	});
+});
+
+describe("payload eviction: select-then-delete race", () => {
 	/**
 	 * Wrap a real handle so a concurrent payload upsert lands at the exact
-	 * moment a candidate row has been chosen but not yet deleted. In atomic mode
-	 * the candidate is chosen INSIDE the delete statement, so mutating the row
+	 * moment a candidate row has been chosen but not yet deleted.
+	 * deletePayloadsBatched chooses the candidate INSIDE the delete statement, so mutating the row
 	 * just before the statement runs models precisely that window.
 	 */
 	function wrapWithConcurrentUpsert(
@@ -629,10 +830,7 @@ describe("deleteBatched: select-then-delete race", () => {
 		return { handle, injected: () => injected };
 	}
 
-	const PREDICATE =
-		"bytes IS NOT NULL AND timestamp IS NOT NULL AND timestamp <= ?";
-
-	it("atomic mode does NOT delete a row rewritten after the candidates were chosen", async () => {
+	it("deletePayloadsBatched does NOT delete a row rewritten after the candidates were chosen", async () => {
 		const now = Date.now();
 		const schemaDb = new Database(dbPath, { create: true });
 		runMigrations(schemaDb);
@@ -642,12 +840,10 @@ describe("deleteBatched: select-then-delete race", () => {
 		const db = open();
 		try {
 			const { handle } = wrapWithConcurrentUpsert(db, "p-old", now);
-			const removed = await deleteBatched(
+			const removed = await deletePayloadsBatched(
 				handle,
-				"request_payloads",
-				PREDICATE,
+				SIZE_PREDICATE,
 				now - 5000,
-				{ atomic: true },
 			);
 			expect(removed).toBe(0);
 
@@ -664,8 +860,8 @@ describe("deleteBatched: select-then-delete race", () => {
 		}
 	});
 
-	it("the id-only path (used for cascading tables) DOES lose that row — why payloads use atomic", async () => {
-		// Discriminating counterpart: without the atomic mode the same interleave
+	it("the id-only deleteBatched path (used for cascading tables) DOES lose that row — why eviction uses one statement", async () => {
+		// Discriminating counterpart: with select-then-delete the same interleave
 		// deletes the freshly-written payload. `requests` keeps this path because
 		// its FK cascade makes `.changes` unusable as a per-table count.
 		const now = Date.now();
@@ -680,7 +876,7 @@ describe("deleteBatched: select-then-delete race", () => {
 			const removed = await deleteBatched(
 				handle,
 				"request_payloads",
-				PREDICATE,
+				SIZE_PREDICATE,
 				now - 5000,
 			);
 			expect(removed).toBe(1);

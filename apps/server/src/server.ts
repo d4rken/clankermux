@@ -1167,6 +1167,7 @@ export default async function startServer(options?: {
 		id: "data-retention-cleanup",
 		callback: dataRetentionCleanup,
 		minutes: 60, // every 1 hour
+		maxConcurrent: 1,
 		description: "Periodic data retention cleanup and incremental vacuum",
 	});
 
