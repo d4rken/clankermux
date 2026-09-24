@@ -753,6 +753,78 @@ describe("parked tool calls", () => {
 		expect(h.bridge.status().parked).toBe(1);
 	});
 
+	describe("the model a continuation names", () => {
+		async function parked(model: string) {
+			const h = harness();
+			const t = await start(
+				h,
+				{ tools, messages: [first] },
+				{ meta: { model } },
+			);
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_1",
+						name: "mcp__c__read",
+						input: {},
+					},
+				]),
+			);
+			await reply(t.response);
+			return { h, t };
+		}
+		const results = {
+			tools,
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_1", content: "x" },
+					],
+				},
+			],
+		};
+
+		// The route resolves an alias to a different upstream model; only the
+		// client's own string is compared.
+		for (const model of ["sonnet", MODEL])
+			it(`continues a turn that started on "${model}" with the same name`, async () => {
+				const { h, t } = await parked(model);
+				const call = t.query.callTool("toolu_1", "read");
+				const c = continueTurn(h, t.plan.turnId, results, { model });
+				expect(((await call).content as Array<{ text: string }>)[0]?.text).toBe(
+					"x",
+				);
+				t.query.emit(
+					...streamedMessage([{ type: "text", text: "done" }]),
+					resultMessage(),
+				);
+				expect((await c.response).status).toBe(200);
+			});
+
+		it("refuses another model with 409, recorded, and the turn stays parked", async () => {
+			const { h, t } = await parked("sonnet");
+			const c = continueTurn(h, t.plan.turnId, results, { model: "opus" });
+			const res = await c.response;
+			expect(res.status).toBe(409);
+			expect((await res.json()).error).toMatchObject({
+				type: "invalid_request_error",
+				message: expect.stringContaining('"opus"'),
+			});
+			await waitFor(
+				() => h.repo.turns.get(t.plan.turnId)?.legs[1]?.finished === true,
+			);
+			expect(h.repo.turns.get(t.plan.turnId)?.legs[1]).toMatchObject({
+				kind: "continue",
+				httpStatus: 409,
+				errorPhase: "pre_head",
+			});
+			expect(h.bridge.status().parked).toBe(1);
+		});
+	});
+
 	it("tears a query down when the client never answers, and later results get 409", async () => {
 		const h = harness({ limits: () => ({ parkedTimeoutMs: 80 }) });
 		const t = await start(h, { tools, messages: [first] });
@@ -1379,6 +1451,151 @@ describe("errors", () => {
 		const text = await res.text();
 		expect(text.toLowerCase()).not.toContain("authenticate");
 		expect(text.toLowerCase()).not.toContain("bearer");
+	});
+
+	describe("a conversation too long for the model's context", () => {
+		const overflow = {
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "prompt is too long",
+				code: "context_length_exceeded",
+			},
+		};
+
+		it("answers an inner 400 overflow with its token counts", async () => {
+			const h = harness();
+			const message = "prompt is too long: 215012 tokens > 200000 maximum";
+			failInner(h, {
+				status: 400,
+				errorType: "invalid_request_error",
+				message,
+			});
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(
+				initMessage(),
+				resultMessage({
+					isError: true,
+					result: "Prompt is too long",
+					terminalReason: "prompt_too_long",
+				}),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message,
+					code: "context_length_exceeded",
+				},
+			});
+		});
+
+		it("answers Claude Code's own refusal by its terminal reason", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				resultMessage({
+					isError: true,
+					result: "Context limit reached",
+					terminalReason: "blocking_limit",
+				}),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual(overflow);
+			await settled(h);
+			expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+				status: "failed",
+				httpStatus: 400,
+				errorType: "invalid_request_error",
+			});
+		});
+
+		it("answers Claude Code's error message saying so", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				assistantMessage([{ type: "text", text: "Prompt is too long" }], {
+					error: "invalid_request",
+					model: "<synthetic>",
+				}),
+				resultMessage({ isError: true, result: "Prompt is too long" }),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual(overflow);
+		});
+
+		it("answers an SDK failure saying so", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(initMessage());
+			t.query.fail(new Error("Claude Code process exited: Prompt is too long"));
+			const res = await t.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual(overflow);
+		});
+
+		it("sends it as an SSE error event once output went out", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			const partial = streamedMessage([
+				{ type: "text", text: "partial" },
+			]).slice(0, 3);
+			t.query.emit(initMessage(), ...partial);
+			t.query.emit(
+				resultMessage({
+					isError: true,
+					result: "Prompt is too long",
+					terminalReason: "prompt_too_long",
+				}),
+			);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toEqual(overflow);
+		});
+
+		it("leaves Claude Code's other self-endings at 502", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				assistantMessage(
+					[
+						{
+							type: "text",
+							text: "Claude's response exceeded the output limit",
+						},
+					],
+					{ error: "max_output_tokens", model: "<synthetic>" },
+				),
+				resultMessage({
+					isError: true,
+					subtype: "error_max_structured_output_retries",
+					terminalReason: "structured_output_retry_exhausted",
+				}),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(502);
+			expect((await res.json()).error).not.toHaveProperty("code");
+		});
 	});
 
 	it("answers 502 when Claude Code exits without a result", async () => {

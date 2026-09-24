@@ -697,6 +697,7 @@ export function createClaudeSdkBridge(
 				ownerApiKeyId: meta.apiKeyId,
 				sessionId: newSessionId,
 				accountId: plan.preferredAccountId,
+				requestedModel: meta.model,
 				historyMode: history.mode,
 				query,
 				prompt,
@@ -818,6 +819,10 @@ export function createClaudeSdkBridge(
 				return refuse(bridgeErrors.deadTurn());
 			if (live.ownerApiKeyId !== meta.apiKeyId)
 				return refuse(bridgeErrors.otherOwner());
+			if (meta.model !== live.requestedModel)
+				return refuse(
+					bridgeErrors.modelChanged(live.requestedModel, meta.model),
+				);
 			const body = await readBody(input.request);
 			if ("error" in body) return refuse(body.error);
 			const parsed = parseTurnRequest(

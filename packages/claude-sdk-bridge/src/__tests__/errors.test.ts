@@ -2,8 +2,11 @@ import { describe, expect, it } from "bun:test";
 import type { SdkBridgeInnerOutcome } from "@clankermux/types";
 import {
 	bridgeErrors,
+	contextOverflow,
 	DEFAULT_RETRY_AFTER_SECONDS,
+	errorBody,
 	errorResponse,
+	isContextOverflow,
 	mapClaudeCodeFailure,
 	mapInnerOutcome,
 	sanitizeMessage,
@@ -71,27 +74,100 @@ describe("error mapping", () => {
 		const mapped = mapInnerOutcome(
 			outcome(400, {
 				errorType: "invalid_request_error",
-				message: "prompt is too long",
+				message: "max_tokens: must be at most 128000",
 			}),
 		);
 		expect(mapped).toEqual({
 			status: 400,
 			type: "invalid_request_error",
-			message: "prompt is too long",
+			message: "max_tokens: must be at most 128000",
+			retryAfter: null,
+		});
+	});
+
+	it("answers an inner context overflow as context_length_exceeded, with its token counts", () => {
+		expect(
+			mapInnerOutcome(
+				outcome(400, {
+					errorType: "invalid_request_error",
+					message: "prompt is too long: 215012 tokens > 200000 maximum",
+				}),
+			),
+		).toEqual({
+			status: 400,
+			type: "invalid_request_error",
+			code: "context_length_exceeded",
+			message: "prompt is too long: 215012 tokens > 200000 maximum",
 			retryAfter: null,
 		});
 	});
 
 	it("answers 502 for a Claude Code error with no inner outcome", () => {
-		const mapped = mapClaudeCodeFailure(null, "something broke");
+		const mapped = mapClaudeCodeFailure(null, {
+			text: "something broke",
+			cause: null,
+		});
 		expect(mapped.status).toBe(502);
+		expect(mapped.code).toBeUndefined();
 		expect(mapped.message).toContain("something broke");
 	});
 
+	it("answers Claude Code's own context overflow as context_length_exceeded", () => {
+		expect(
+			mapClaudeCodeFailure(null, {
+				text: "Prompt is too long",
+				cause: "context_overflow",
+			}),
+		).toEqual({
+			status: 400,
+			type: "invalid_request_error",
+			code: "context_length_exceeded",
+			message: "prompt is too long",
+			retryAfter: null,
+		});
+		// The cause decides, not the wording.
+		expect(
+			mapClaudeCodeFailure(null, {
+				text: "Prompt is too long",
+				cause: null,
+			}).status,
+		).toBe(502);
+	});
+
 	it("lets the inner outcome Claude Code gave up on decide", () => {
-		expect(mapClaudeCodeFailure(outcome(529), "API Error: 529").status).toBe(
-			529,
-		);
+		expect(
+			mapClaudeCodeFailure(outcome(529), {
+				text: "Prompt is too long",
+				cause: "context_overflow",
+			}).status,
+		).toBe(529);
+	});
+
+	it("classifies context overflow from Anthropic's and Claude Code's wording and from Claude Code's terminal reasons", () => {
+		for (const text of [
+			"prompt is too long: 215012 tokens > 200000 maximum",
+			"Prompt is too long",
+			'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1 tokens > 0 maximum"}}',
+		])
+			expect(isContextOverflow({ text })).toBe(true);
+		for (const terminalReason of [
+			"prompt_too_long",
+			"blocking_limit",
+			"rapid_refill_breaker",
+		])
+			expect(isContextOverflow({ terminalReason })).toBe(true);
+		expect(isContextOverflow({ text: "max_tokens exceeded" })).toBe(false);
+		expect(isContextOverflow({ terminalReason: "model_error" })).toBe(false);
+		expect(isContextOverflow({})).toBe(false);
+	});
+
+	it("keeps the token counts wherever the overflow wording carried them", () => {
+		expect(
+			contextOverflow(
+				'API Error: 400 {"error":{"message":"prompt is too long: 215012 tokens > 200000 maximum"}}',
+			).message,
+		).toBe("prompt is too long: 215012 tokens > 200000 maximum");
+		expect(contextOverflow(null).message).toBe("prompt is too long");
 	});
 
 	it("never passes Claude Code's credential wording through", () => {
@@ -101,7 +177,7 @@ describe("error mapping", () => {
 			"Invalid API key · Please run /login",
 			"OAuth token has expired",
 		]) {
-			const mapped = mapClaudeCodeFailure(null, text);
+			const mapped = mapClaudeCodeFailure(null, { text, cause: null });
 			expect(mapped.message.toLowerCase()).not.toContain(
 				"failed to authenticate",
 			);
@@ -127,6 +203,28 @@ describe("error mapping", () => {
 		});
 		expect(bridgeErrors.limit("maxTools", 2, 1)).toMatchObject({ status: 400 });
 		expect(bridgeErrors.limit("maxTools", 2, 1).message).toContain("maxTools");
+	});
+
+	it("renders an error's code only when it has one", () => {
+		expect(errorBody(bridgeErrors.shutdown()).error).not.toHaveProperty("code");
+		expect(errorBody(contextOverflow(null))).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "prompt is too long",
+				code: "context_length_exceeded",
+			},
+		});
+	});
+
+	it("refuses a continuation that names another model with 409", () => {
+		const error = bridgeErrors.modelChanged("sonnet", "opus");
+		expect(error).toMatchObject({
+			status: 409,
+			type: "invalid_request_error",
+		});
+		expect(error.message).toContain('"sonnet"');
+		expect(error.message).toContain('"opus"');
 	});
 
 	it("renders JSON with Retry-After", async () => {

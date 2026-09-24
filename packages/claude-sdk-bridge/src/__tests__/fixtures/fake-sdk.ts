@@ -337,6 +337,7 @@ export function resultMessage(
 		subtype?: string;
 		result?: string;
 		errors?: string[];
+		terminalReason?: string;
 	} = {},
 ): SDKMessage {
 	return {
@@ -358,6 +359,7 @@ export function resultMessage(
 		},
 		modelUsage: {},
 		permission_denials: [],
+		...(opts.terminalReason ? { terminal_reason: opts.terminalReason } : {}),
 		uuid: uuid(),
 		session_id: "s",
 	} as unknown as SDKMessage;

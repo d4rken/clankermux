@@ -118,6 +118,32 @@ made private, never deleted: no pid says whether a process still uses them.
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
 
+## How a failed turn reaches the client
+
+The inner call Claude Code gave up on decides (`mapInnerOutcome`). Without
+one, the failure was Claude Code's own (`mapClaudeCodeFailure`), and only a
+typed cause changes its 502. Overflow is recognised in one place,
+`isContextOverflow` in `errors.ts`.
+
+| Source | Client answer |
+| --- | --- |
+| Inner 400 whose message says "prompt is too long" | 400 `invalid_request_error`, `code: context_length_exceeded`, token counts kept |
+| Other inner 400, 403, 429, 503, 529 | same status (403 as `permission_error`) |
+| Inner 401, other 5xx | 502 `api_error` |
+| A streamed inner `error` event | the status its type stands for (`anthropicErrorStatus`), then as above |
+| `terminal_reason` `prompt_too_long`, `blocking_limit`, `rapid_refill_breaker`; an error assistant message or SDK exception saying "Prompt is too long" | 400 `context_length_exceeded` |
+| `max_output_tokens` assistant error, `error_max_turns`, `error_max_structured_output_retries`, `error_during_execution`, exit without a result | 502 `api_error` |
+
+`blocking_limit` is Claude Code refusing before any model call: with
+`DISABLE_AUTO_COMPACT` it is what an oversized history usually meets, so
+that path has no inner outcome. The adapters pass `error.code` through, and
+use the type when there is none. A Chat client that asked for JSON gets a
+mid-stream error with its type's status, 5xx other than 529 as 502.
+
+A continuation must name the model its turn started with, compared as the
+client wrote it (never the upstream model an alias resolves to); another
+name gets 409 `invalid_request_error`.
+
 ## Behaviour that looks like a bug and is not
 
 - **System prompt policy is `drop`.** Only the Claude Code preset is sent.
