@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { IntervalManager } from "./interval-manager";
+import { IntervalManager, registerCleanup } from "./interval-manager";
 
 /**
  * Regression coverage for the RateLimitProgress countdown-freeze bug.
@@ -126,6 +126,37 @@ describe("IntervalManager id collision", () => {
 			}
 		} finally {
 			manager.shutdown();
+		}
+	});
+});
+
+describe("registerCleanup maxConcurrent", () => {
+	it("skips ticks while a previous run is still in flight", async () => {
+		let starts = 0;
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const unregister = registerCleanup({
+			id: "test-cleanup-max-concurrent",
+			callback: async () => {
+				starts++;
+				await gate;
+			},
+			minutes: 20 / 60_000, // 20 ms
+			maxConcurrent: 1,
+		});
+		try {
+			const deadline = Bun.nanoseconds() + 2_000_000_000;
+			while (starts === 0 && Bun.nanoseconds() < deadline) {
+				await Bun.sleep(10);
+			}
+			// Several more ticks elapse while the first run is blocked.
+			await Bun.sleep(200);
+			expect(starts).toBe(1);
+		} finally {
+			release();
+			unregister();
 		}
 	});
 });
