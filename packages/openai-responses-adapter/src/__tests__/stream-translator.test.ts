@@ -148,6 +148,18 @@ describe("translateAnthropicStreamToResponses", () => {
 				{ type: "overloaded_error", message: "prompt is too long" },
 				"overloaded_error",
 			],
+			[
+				{
+					type: "invalid_request_error",
+					message: "prompt is too long",
+					code: "  context_length_exceeded  ",
+				},
+				"context_length_exceeded",
+			],
+			[
+				{ type: "overloaded_error", message: "prompt is too long", code: "  " },
+				"overloaded_error",
+			],
 		] as const) {
 			const events = await collectSseEvents(
 				translateAnthropicStreamToResponses(
@@ -165,6 +177,43 @@ describe("translateAnthropicStreamToResponses", () => {
 				type: "response.failed",
 				response: { error: { code, message: "prompt is too long" } },
 			});
+		}
+	});
+	test("fails the response with defaults for a non-string or blank type and message, and caps type and code", async () => {
+		for (const [error, expected] of [
+			[
+				{ type: 42, message: { nested: true } },
+				{ code: "api_error", message: "An error occurred during streaming" },
+			],
+			[
+				{ type: "   ", message: "   " },
+				{ code: "api_error", message: "An error occurred during streaming" },
+			],
+			[
+				{ type: "t".repeat(500), message: "m" },
+				{ code: "t".repeat(128), message: "m" },
+			],
+			[
+				{ type: "api_error", code: `  ${"c".repeat(500)}`, message: "m" },
+				{ code: "c".repeat(128), message: "m" },
+			],
+		] as const) {
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", {
+							message: { usage: { input_tokens: 1, output_tokens: 0 } },
+						}),
+						sseEvent("error", { type: "error", error }),
+					]),
+					"resp_bad",
+					"m",
+				),
+			);
+			expect(
+				(events.at(-1)?.data as { response: { error: unknown } }).response
+					.error,
+			).toEqual(expected);
 		}
 	});
 	test("preserves initial cache usage and output when final deltas omit those fields", async () => {

@@ -73,6 +73,15 @@ function emitDone(
 	);
 }
 
+const MAX_ERROR_LABEL = 128;
+
+/** An upstream error's `type` or `code`: a nonblank string, trimmed and capped. */
+function errorLabel(value: unknown): string | null {
+	return typeof value === "string" && value.trim()
+		? value.trim().slice(0, MAX_ERROR_LABEL)
+		: null;
+}
+
 function processEvent(
 	eventType: string,
 	data: Record<string, unknown>,
@@ -401,11 +410,12 @@ function processEvent(
 
 	if (eventType === "error") {
 		const err = data.error as Record<string, unknown> | undefined;
-		const errType = (err?.type as string) ?? "api_error";
+		const errType = errorLabel(err?.type) ?? "api_error";
 		const errMsg =
-			(err?.message as string) ?? "An error occurred during streaming";
-		const errCode =
-			typeof err?.code === "string" && err.code.trim() ? err.code : errType;
+			typeof err?.message === "string" && err.message.trim()
+				? err.message
+				: "An error occurred during streaming";
+		const errCode = errorLabel(err?.code) ?? errType;
 		state.streamError = { type: errType, message: errMsg };
 		state.doneSent = true;
 		emitSse(

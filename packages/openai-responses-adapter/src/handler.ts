@@ -515,7 +515,8 @@ async function respondToResponsesRequest(
 				message = anthropicError.error.message;
 			}
 			const code = anthropicError?.error?.code;
-			if (typeof code === "string" && code.trim()) errCode = code.trim();
+			if (typeof code === "string" && code.trim())
+				errCode = code.trim().slice(0, 128);
 		} catch {
 			// Not JSON (or malformed) — fall through to the shared parser, which
 			// tolerates anything and returns null when it recognizes nothing.
