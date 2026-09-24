@@ -134,6 +134,39 @@ describe("translateAnthropicStreamToResponses", () => {
 			});
 		});
 	}
+	test("fails the response with the error's code, or its type when it has none", async () => {
+		for (const [error, code] of [
+			[
+				{
+					type: "invalid_request_error",
+					message: "prompt is too long",
+					code: "context_length_exceeded",
+				},
+				"context_length_exceeded",
+			],
+			[
+				{ type: "overloaded_error", message: "prompt is too long" },
+				"overloaded_error",
+			],
+		] as const) {
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", {
+							message: { usage: { input_tokens: 1, output_tokens: 0 } },
+						}),
+						sseEvent("error", { type: "error", error }),
+					]),
+					"resp_code",
+					"m",
+				),
+			);
+			expect(events.at(-1)?.data).toMatchObject({
+				type: "response.failed",
+				response: { error: { code, message: "prompt is too long" } },
+			});
+		}
+	});
 	test("preserves initial cache usage and output when final deltas omit those fields", async () => {
 		const events = await collectSseEvents(
 			translateAnthropicStreamToResponses(

@@ -1192,6 +1192,29 @@ describe("handleResponsesRequest", () => {
 			expect(body.error.code).toBe("invalid_request_error");
 		});
 
+		test("carries the upstream error.code, which may differ from its type", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: "prompt is too long: 215012 tokens > 200000 maximum",
+							code: "context_length_exceeded",
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+			expect(resp.status).toBe(400);
+			expect((await resp.json()).error).toEqual({
+				message: "prompt is too long: 215012 tokens > 200000 maximum",
+				type: "invalid_request_error",
+				code: "context_length_exceeded",
+			});
+		});
+
 		test("falls back to 'Unknown error' for an unrecognized body, never raw bytes", async () => {
 			// An unrecognized body may hold credentials or prompt text, so the
 			// handler must not excerpt it into the client-facing message.

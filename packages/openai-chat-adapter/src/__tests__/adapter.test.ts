@@ -314,21 +314,22 @@ describe("Chat ingress responses", () => {
 		const s = await (await run({ ...input, stream: true })).text();
 		expect(s).not.toContain('"choices":[]');
 	});
-	for (const [label, s] of [
+	for (const [label, s, status] of [
 		[
 			"upstream error",
 			start() +
 				event("error", {
 					error: { type: "overloaded_error", message: "try later" },
 				}),
+			529,
 		],
-		["missing terminal", start()],
-		["missing finish reason", start() + event("message_stop")],
-		["malformed event", `${start()}data: {oops}\n\n`],
-	]) {
+		["missing terminal", start(), 502],
+		["missing finish reason", start() + event("message_stop"), 502],
+		["malformed event", `${start()}data: {oops}\n\n`, 502],
+	] as const) {
 		it(`rejects ${label} in JSON mode`, async () => {
 			const r = await run(input, response(s));
-			expect(r.status).toBe(502);
+			expect(r.status).toBe(status);
 			expect((await r.json()).error.message).toBeTruthy();
 		});
 		it(`terminates ${label} honestly in streaming mode`, async () => {
@@ -339,6 +340,117 @@ describe("Chat ingress responses", () => {
 			expect(b).not.toContain('"finish_reason":"stop"');
 		});
 	}
+	describe("an upstream error event mid-stream", () => {
+		const overflow = {
+			type: "invalid_request_error",
+			message: "prompt is too long: 215012 tokens > 200000 maximum",
+			code: "context_length_exceeded",
+		};
+		const failing = (error: object) =>
+			response(
+				start() +
+					event("content_block_start", {
+						index: 0,
+						content_block: { type: "text", text: "" },
+					}) +
+					event("content_block_delta", {
+						index: 0,
+						delta: { type: "text_delta", text: "partial" },
+					}) +
+					event("error", { error }),
+			);
+		const streamedError = (body: string) =>
+			JSON.parse(
+				body
+					.split("\n")
+					.filter((l) => l.startsWith("data: {"))
+					.at(-1)
+					?.slice(6) ?? "null",
+			);
+
+		it("keeps its type and code, which may differ, in streaming mode", async () => {
+			const r = await run({ ...input, stream: true }, failing(overflow));
+			const body = await r.text();
+			expect(body).toContain("partial");
+			expect(streamedError(body)).toEqual({
+				error: { ...overflow, param: null },
+			});
+			expect(body).not.toContain("[DONE]");
+		});
+
+		it("answers JSON mode with the status its type stands for", async () => {
+			const r = await run(input, failing(overflow));
+			expect(r.status).toBe(400);
+			expect(await r.json()).toEqual({ error: { ...overflow, param: null } });
+		});
+
+		it("answers an upstream server error in JSON mode as a bad gateway", async () => {
+			const r = await run(
+				input,
+				failing({ type: "api_error", message: "upstream broke" }),
+			);
+			expect(r.status).toBe(502);
+			expect((await r.json()).error).toMatchObject({
+				type: "api_error",
+				code: "api_error",
+			});
+		});
+
+		it("uses its type as the code when it has none", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				failing({ type: "overloaded_error", message: "try later" }),
+			);
+			expect(streamedError(await r.text())).toEqual({
+				error: {
+					type: "overloaded_error",
+					message: "try later",
+					param: null,
+					code: "overloaded_error",
+				},
+			});
+		});
+
+		it("still reports invalid upstream data as such", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				response(`${start()}data: {oops}\n\n`),
+			);
+			expect(streamedError(await r.text())).toEqual({
+				error: {
+					type: "api_error",
+					message: "Malformed upstream SSE event",
+					param: null,
+					code: "invalid_upstream_response",
+				},
+			});
+		});
+	});
+	it("carries an error's own code before the head", async () => {
+		const r = await run(
+			input,
+			Response.json(
+				{
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: "prompt is too long",
+						code: "context_length_exceeded",
+					},
+				},
+				{ status: 400 },
+			),
+		);
+		expect(r.status).toBe(400);
+		expect(await r.json()).toEqual({
+			error: {
+				type: "invalid_request_error",
+				message: "prompt is too long",
+				param: null,
+				code: "context_length_exceeded",
+			},
+		});
+	});
 	it("re-envelopes routing errors and retains status", async () => {
 		const r = await run(
 			input,

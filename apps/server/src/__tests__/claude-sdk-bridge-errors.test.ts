@@ -150,14 +150,40 @@ async function read(response: Response): Promise<Seen> {
 	};
 }
 
-/** A JSON error before the head: the error envelope's message and type. */
-function jsonError(seen: Seen): { message: string; type: string } {
+/** A JSON error before the head: the error envelope's message, type and code. */
+function jsonError(seen: Seen): {
+	message: string;
+	type: string;
+	code?: string;
+} {
 	expect(seen.contentType).toContain("application/json");
 	const body = JSON.parse(seen.text) as {
-		error: { message: string; type: string };
+		error: { message: string; type: string; code?: string };
 	};
 	expect(seen.text).not.toMatch(CREDENTIAL_WORDING);
 	return body.error;
+}
+
+/**
+ * The error an SSE stream ended with: Responses' `response.failed` error, or
+ * Chat's error envelope.
+ */
+function streamedError(
+	seen: Seen,
+	endpoint: Endpoint,
+): Record<string, unknown> {
+	expect(seen.status).toBe(200);
+	expect(seen.contentType).toContain("text/event-stream");
+	expect(seen.text).not.toMatch(CREDENTIAL_WORDING);
+	const payloads = seen.text
+		.split("\n")
+		.filter((line) => line.startsWith("data: {"))
+		.map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+	const last =
+		endpoint === "responses"
+			? payloads.find((p) => p.type === "response.failed")?.response
+			: payloads.at(-1);
+	return (last as { error: Record<string, unknown> }).error;
 }
 
 /** The turn's leg the client's request id names. */
@@ -193,6 +219,12 @@ async function turn(
 	await script(query);
 	return read(await pending);
 }
+
+const OVERFLOW_MESSAGE = "prompt is too long: 215012 tokens > 200000 maximum";
+const OVERFLOW = {
+	type: "error",
+	error: { type: "invalid_request_error", message: OVERFLOW_MESSAGE },
+};
 
 const RATE_LIMITED = {
 	type: "error",
@@ -406,13 +438,85 @@ for (const endpoint of ["responses", "chat"] as const) {
 			expect(seen.text).not.toMatch(CREDENTIAL_WORDING);
 			if (endpoint === "responses") {
 				expect(seen.text).toContain("event: response.failed");
+				expect(streamedError(seen, endpoint)).toEqual({
+					code: "api_error",
+					message: "mock 500 mid-stream",
+				});
 			} else {
-				expect(seen.text).toMatch(
-					/data: \{"error":\{"message":"mock 500 mid-stream"/,
-				);
+				expect(streamedError(seen, endpoint)).toEqual({
+					message: "mock 500 mid-stream",
+					type: "api_error",
+					param: null,
+					code: "api_error",
+				});
 			}
 			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
 				http_status: 502,
+				error_phase: "mid_stream",
+			});
+		});
+
+		it("inner context overflow before the head: 400 context_length_exceeded with the token counts", async () => {
+			const h = await harness();
+			mock.failNext(400, OVERFLOW, {}, 10);
+			const seen = await turn(h, endpoint, async (query) =>
+				relay(query, await callModel(query), "Prompt is too long"),
+			);
+
+			expect(seen.status).toBe(400);
+			expect(seen.retryAfter).toBeNull();
+			expect(jsonError(seen)).toEqual({
+				message: OVERFLOW_MESSAGE,
+				type: "invalid_request_error",
+				code: "context_length_exceeded",
+				...(endpoint === "chat" ? { param: null } : {}),
+			});
+			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
+				http_status: 400,
+				error_phase: "pre_head",
+				error_type: "invalid_request_error",
+			});
+		});
+
+		it("Claude Code's own context-limit refusal: 400 context_length_exceeded", async () => {
+			const h = await harness();
+			const upstreamCalls = mock.requests.length;
+			const seen = await turn(h, endpoint, async (query) => {
+				giveUp(query, "Prompt is too long", "blocking_limit");
+				query.end();
+			});
+
+			expect(seen.status).toBe(400);
+			expect(jsonError(seen)).toMatchObject({
+				message: "prompt is too long",
+				type: "invalid_request_error",
+				code: "context_length_exceeded",
+			});
+			expect(mock.requests.length).toBe(upstreamCalls);
+		});
+
+		it("context overflow after the head: the SSE error keeps its code", async () => {
+			const h = await harness();
+			mock.failNext(400, OVERFLOW, {}, 10);
+			const seen = await turn(h, endpoint, async (query) => {
+				startStreaming(query, MODEL);
+				await Bun.sleep(100);
+				await relay(query, await callModel(query), "Prompt is too long");
+			});
+
+			expect(seen.text).toContain("partial answer");
+			expect(streamedError(seen, endpoint)).toEqual(
+				endpoint === "responses"
+					? { code: "context_length_exceeded", message: OVERFLOW_MESSAGE }
+					: {
+							message: OVERFLOW_MESSAGE,
+							type: "invalid_request_error",
+							param: null,
+							code: "context_length_exceeded",
+						},
+			);
+			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
+				http_status: 400,
 				error_phase: "mid_stream",
 			});
 		});

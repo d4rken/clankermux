@@ -404,6 +404,8 @@ function processEvent(
 		const errType = (err?.type as string) ?? "api_error";
 		const errMsg =
 			(err?.message as string) ?? "An error occurred during streaming";
+		const errCode =
+			typeof err?.code === "string" && err.code.trim() ? err.code : errType;
 		state.streamError = { type: errType, message: errMsg };
 		state.doneSent = true;
 		emitSse(
@@ -417,7 +419,7 @@ function processEvent(
 					created_at: Math.floor(Date.now() / 1000),
 					model: state.model,
 					status: "failed",
-					error: { code: errType, message: errMsg },
+					error: { code: errCode, message: errMsg },
 					output: state.outputItems,
 					usage: translateAnthropicUsage(state.usage),
 				},

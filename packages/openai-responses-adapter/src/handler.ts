@@ -498,12 +498,13 @@ async function respondToResponsesRequest(
 		// whether a body is JSON anyway.
 		const rawErrorBody = await readBoundedText(anthropicResp, req.signal);
 		let errType = "api_error";
+		let errCode: string | null = null;
 		let message: string | null = null;
 
 		try {
 			const anthropicError = JSON.parse(rawErrorBody) as {
 				type?: string;
-				error?: { type?: string; message?: string };
+				error?: { type?: string; message?: string; code?: unknown };
 			};
 			// Blank values count as absent: an empty `error.message` used to
 			// win over the fallback and emit an error with no text at all.
@@ -513,6 +514,8 @@ async function respondToResponsesRequest(
 			if (anthropicError?.error?.message?.trim()) {
 				message = anthropicError.error.message;
 			}
+			const code = anthropicError?.error?.code;
+			if (typeof code === "string" && code.trim()) errCode = code.trim();
 		} catch {
 			// Not JSON (or malformed) — fall through to the shared parser, which
 			// tolerates anything and returns null when it recognizes nothing.
@@ -522,7 +525,7 @@ async function respondToResponsesRequest(
 			error: {
 				message: message ?? parseUpstreamError(rawErrorBody) ?? "Unknown error",
 				type: errType,
-				code: errType,
+				code: errCode ?? errType,
 			},
 		};
 		return new Response(JSON.stringify(errorBody), {
