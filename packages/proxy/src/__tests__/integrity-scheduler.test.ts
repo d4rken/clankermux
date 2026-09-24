@@ -121,6 +121,7 @@ const mockStatSync = mock((path: nodeFs.PathLike) => {
 mock.module("node:fs", () => ({ ...nodeFs, statSync: mockStatSync }));
 
 import {
+	fullCheckInitialDelayMs,
 	runIntegrityCheckOnDemand,
 	runScheduledIntegrityCheck,
 	startFullIntegrityCheckBackground,
@@ -244,6 +245,7 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 	);
 	const getIntegrityStatus = mock(() => ({ ...state }));
 	const getResolvedDbPath = mock(() => opts.dbPath);
+	const restoreFullIntegrityStatus = mock(async () => {});
 
 	return {
 		runQuickIntegrityCheck,
@@ -252,6 +254,7 @@ function makeDbOps(opts: MockDbOpsOptions = {}): DatabaseOperations {
 		recordIntegrityResult,
 		getIntegrityStatus,
 		getResolvedDbPath,
+		restoreFullIntegrityStatus,
 	} as unknown as DatabaseOperations;
 }
 
@@ -341,6 +344,38 @@ describe("startIntegrityScheduler", () => {
 		});
 		expect(typeof stop).toBe("function");
 		stop();
+	});
+
+	it("restores the last full-check outcome before scheduling the full probe", async () => {
+		const dbOps = makeDbOps();
+		const stop = startIntegrityScheduler(dbOps, {
+			quickIntervalHours: 500,
+			fullIntervalHours: 500,
+		});
+		await Promise.resolve();
+		expect(
+			(dbOps.restoreFullIntegrityStatus as ReturnType<typeof mock>).mock.calls
+				.length,
+		).toBe(1);
+		stop();
+	});
+});
+
+describe("fullCheckInitialDelayMs", () => {
+	const HOUR = 3_600_000;
+	const DAY = 24 * HOUR;
+	const now = 1_790_000_000_000;
+
+	it("waits the startup delay when no full check was ever attempted", () => {
+		expect(fullCheckInitialDelayMs(null, now, DAY)).toBe(30 * 60_000);
+	});
+
+	it("waits out the rest of the interval since the last attempt", () => {
+		expect(fullCheckInitialDelayMs(now - 2 * HOUR, now, DAY)).toBe(22 * HOUR);
+	});
+
+	it("never runs sooner than the startup delay, even when overdue", () => {
+		expect(fullCheckInitialDelayMs(now - 3 * DAY, now, DAY)).toBe(30 * 60_000);
 	});
 });
 

@@ -287,6 +287,86 @@ describe("DatabaseOperations.recordIntegrityResult skipped outcomes", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: the full check's outcome survives a restart
+// ---------------------------------------------------------------------------
+
+describe("DatabaseOperations full integrity outcome across restarts", () => {
+	let path: string;
+	let first: DatabaseOperations;
+	let second: DatabaseOperations | null;
+
+	beforeEach(() => {
+		path = tmpDb.next();
+		first = new DatabaseOperations(path);
+		second = null;
+	});
+
+	afterEach(async () => {
+		try {
+			await first?.dispose();
+			await second?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
+	});
+
+	async function restart(): Promise<DatabaseOperations> {
+		await first.dispose();
+		second = new DatabaseOperations(path);
+		await second.restoreFullIntegrityStatus();
+		return second;
+	}
+
+	it("restores a full ok verdict and its timestamps", async () => {
+		await first.recordIntegrityResult("full", "ok");
+		const recorded = first.getIntegrityStatus();
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.lastFullCheckAt).toBe(recorded.lastFullCheckAt);
+		expect(s.lastFullAttemptAt).toBe(recorded.lastFullAttemptAt);
+		expect(s.status).toBe("ok");
+		expect(s.runningKind).toBeNull();
+	});
+
+	it("restores a full corrupt verdict as corrupt", async () => {
+		await first.recordIntegrityResult("full", "corrupt", "row 7 missing");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.status).toBe("corrupt");
+		expect(s.lastFullError).toBe("row 7 missing");
+		expect(s.lastError).toBe("row 7 missing");
+	});
+
+	it("restores a skipped attempt without losing the prior verdict", async () => {
+		await first.recordIntegrityResult("full", "ok");
+		const verified = first.getIntegrityStatus().lastFullCheckAt;
+		await first.recordIntegrityResult("full", "skipped", "worker timed out");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.lastFullCheckAt).toBe(verified);
+		expect(s.lastFullSkipReason).toBe("worker timed out");
+		expect(s.lastFullAttemptAt).toBeGreaterThanOrEqual(verified ?? 0);
+		expect(s.status).toBe("skipped");
+	});
+
+	it("does not persist quick results", async () => {
+		await first.recordIntegrityResult("quick", "corrupt", "quick only");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastQuickResult).toBeNull();
+		expect(s.status).toBe("unchecked");
+	});
+
+	it("leaves a database with no stored full check unchecked", async () => {
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullAttemptAt).toBeNull();
+		expect(s.status).toBe("unchecked");
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Tests: runQuickIntegrityCheck / runFullIntegrityCheck (SQLite mode)
 // ---------------------------------------------------------------------------
 

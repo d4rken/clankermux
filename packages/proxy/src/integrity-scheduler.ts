@@ -44,6 +44,23 @@ const QUICK_INITIAL_DELAY_MS = 30 * TIME_CONSTANTS.SECOND;
  *  startup latency. */
 const FULL_INITIAL_DELAY_MS = 30 * TIME_CONSTANTS.MINUTE;
 
+/**
+ * When the first full check of this process runs: a full interval after the
+ * last attempt (verified or skipped) of any earlier process, and never before
+ * the startup delay. With no attempt on record, just the startup delay.
+ */
+export function fullCheckInitialDelayMs(
+	lastFullAttemptAt: number | null,
+	now: number,
+	fullIntervalMs: number,
+): number {
+	if (lastFullAttemptAt === null) return FULL_INITIAL_DELAY_MS;
+	return Math.max(
+		FULL_INITIAL_DELAY_MS,
+		lastFullAttemptAt + fullIntervalMs - now,
+	);
+}
+
 export function startIntegrityScheduler(
 	dbOps: DatabaseOperations,
 	overrides?: { quickIntervalHours?: number; fullIntervalHours?: number },
@@ -102,14 +119,33 @@ export function startIntegrityScheduler(
 		logger.info("Quick integrity check disabled (interval override = 0)");
 	}
 
+	let stopped = false;
 	if (fullInterval !== null) {
-		handles.push(setTimeout(tickFull, FULL_INITIAL_DELAY_MS));
-		intervals.push(setInterval(tickFull, fullInterval));
+		// The daily cadence spans restarts: first learn when the last full check
+		// ran, so a restart doesn't rescan the whole file every time.
+		void dbOps
+			.restoreFullIntegrityStatus()
+			.catch(() => {})
+			.then(() => {
+				if (stopped) return;
+				const delay = fullCheckInitialDelayMs(
+					dbOps.getIntegrityStatus().lastFullAttemptAt,
+					Date.now(),
+					fullInterval,
+				);
+				handles.push(
+					setTimeout(() => {
+						tickFull();
+						if (!stopped) intervals.push(setInterval(tickFull, fullInterval));
+					}, delay),
+				);
+			});
 	} else {
 		logger.info("Full integrity check disabled (interval override = 0)");
 	}
 
 	return () => {
+		stopped = true;
 		for (const h of handles) clearTimeout(h);
 		for (const i of intervals) clearInterval(i);
 		logger.info("Integrity scheduler stopped");
@@ -118,14 +154,11 @@ export function startIntegrityScheduler(
 
 /**
  * Defensive ceiling on the DB size an AUTOMATIC integrity check will scan.
- * Our full check completes in ~tens of seconds even at 15 GiB (well under the
- * 10-min = 600 s worker cap), so this is NOT a normal-operation gate — it's
- * headroom against pathological growth where a check could exceed the worker
- * timeout. Sizing: at a pessimistic ~4 s/GiB, 64 GiB ≈ 256 s — comfortably
- * under the 600 s cap — and it's >4× our current ~15 GiB, so a healthy green
- * stays reachable across realistic growth while still guarding the genuinely
- * pathological case. Set it too low and the surface pins permanently amber,
- * because a skip never clears to ok on its own.
+ * It was sized for ~4 s/GiB, putting 64 GiB at ~256 s under the 10-min = 600 s
+ * worker cap. Measured on the live 17 GiB database (2026-09-24) the full check
+ * runs ~31 s/GiB (8m44s), so it already sits near the cap and times out under
+ * load well below this ceiling. Set it too low and the surface pins
+ * permanently amber, because a skip never clears to ok on its own.
  *
  * It governs BOTH timer-driven kinds. `quick_check` is cheaper per page than
  * `integrity_check`, but it still walks every b-tree page and the freelist, so
