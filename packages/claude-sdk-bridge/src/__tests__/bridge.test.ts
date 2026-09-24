@@ -42,6 +42,9 @@ import {
 } from "./fixtures/fake-sdk";
 
 type Msg = { role: string; content: unknown };
+
+/** The start meta's key and model, as the proxy's lookup names them. */
+const CALLER = { apiKeyId: "key-1", model: MODEL };
 type Block = { type: string; [key: string]: unknown };
 
 const harnesses: Harness[] = [];
@@ -363,7 +366,7 @@ describe("parked tool calls", () => {
 
 		const call = t.query.callTool("toolu_1", "read", { path: "a.txt" });
 		await waitFor(() => h.bridge.status().parked === 1);
-		expect(h.bridge.findContinuation(["toolu_1"])).toEqual({
+		expect(h.bridge.findContinuation(["toolu_1"], CALLER)).toEqual({
 			turnId: t.plan.turnId,
 			ownerApiKeyId: "key-1",
 		});
@@ -406,7 +409,7 @@ describe("parked tool calls", () => {
 			["start", 200, "tool_use", ["toolu_1"]],
 			["continue", 200, "end_turn", null],
 		]);
-		expect(h.bridge.findContinuation(["toolu_1"])).toBeNull();
+		expect(h.bridge.findContinuation(["toolu_1"], CALLER)).toBeNull();
 	});
 
 	describe("tool names that would not fit the API's 64 characters", () => {
@@ -616,7 +619,7 @@ describe("parked tool calls", () => {
 		await Bun.sleep(30);
 		// The call waits, but the reply is still open: nothing is parked yet.
 		expect(h.bridge.status().parked).toBe(0);
-		expect(h.bridge.findContinuation(["toolu_s1"])).toBeNull();
+		expect(h.bridge.findContinuation(["toolu_s1"], CALLER)).toBeNull();
 		t.query.emit(...events.slice(4));
 		const r = await reply(t.response);
 		expect(r.content.map((b) => b.id)).toEqual(["toolu_s1", "toolu_s2"]);
@@ -649,7 +652,7 @@ describe("parked tool calls", () => {
 			{ type: "text", text: "Here is the answer." },
 		]);
 		expect(r.stop).toBe("end_turn");
-		expect(h.bridge.findContinuation(["toolu_x"])).toBeNull();
+		expect(h.bridge.findContinuation(["toolu_x"], CALLER)).toBeNull();
 	});
 
 	it("does not forward a prefixed name that is not one of the client's tools", async () => {
@@ -792,6 +795,10 @@ describe("parked tool calls", () => {
 		for (const model of ["sonnet", MODEL])
 			it(`continues a turn that started on "${model}" with the same name`, async () => {
 				const { h, t } = await parked(model);
+				expect(
+					h.bridge.findContinuation(["toolu_1"], { apiKeyId: "key-1", model })
+						?.turnId,
+				).toBe(t.plan.turnId);
 				const call = t.query.callTool("toolu_1", "read");
 				const c = continueTurn(h, t.plan.turnId, results, { model });
 				expect(((await call).content as Array<{ text: string }>)[0]?.text).toBe(
@@ -804,24 +811,97 @@ describe("parked tool calls", () => {
 				expect((await c.response).status).toBe(200);
 			});
 
-		it("refuses another model with 409, recorded, and the turn stays parked", async () => {
+		it("hands results under another model to a fresh turn, freeing the parked one", async () => {
+			const { h, t } = await parked("sonnet");
+			const r1 = t.query;
+			expect(
+				h.bridge.findContinuation(["toolu_1"], {
+					apiKeyId: "key-1",
+					model: "opus",
+				}),
+			).toBeNull();
+			expect(h.bridge.status().parked).toBe(0);
+			expect(r1.interrupted).toBe(true);
+			await settled(h);
+			expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("aborted");
+
+			// What the proxy then does with the same request: a start.
+			const issued = {
+				role: "assistant",
+				content: [{ type: "tool_use", id: "toolu_1", name: "read", input: {} }],
+			};
+			const fresh = await start(
+				h,
+				{ tools, messages: [first, issued, ...results.messages] },
+				{ meta: { model: "opus" } },
+			);
+			await waitFor(() => h.repo.turns.has(fresh.plan.turnId));
+			expect(h.repo.turns.get(fresh.plan.turnId)).toMatchObject({
+				historyMode: "rebuild_flattened",
+				rebuildReason: "dead_continuation",
+			});
+		});
+
+		it("leaves another key's results to the refusal, whatever model they name", async () => {
+			const { h, t } = await parked("sonnet");
+			const caller = { apiKeyId: "key-2", model: "opus" };
+			expect(h.bridge.findContinuation(["toolu_1"], caller)?.turnId).toBe(
+				t.plan.turnId,
+			);
+			const c = continueTurn(h, t.plan.turnId, results, caller);
+			expect((await c.response).status).toBe(409);
+			expect(h.bridge.status().parked).toBe(1);
+		});
+
+		it("refuses partial results under another model as stale, and keeps the turn", async () => {
+			const h = harness();
+			const t = await start(
+				h,
+				{ tools, messages: [first] },
+				{ meta: { model: "sonnet" } },
+			);
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{ type: "tool_use", id: "toolu_a", name: "mcp__c__read", input: {} },
+					{ type: "tool_use", id: "toolu_b", name: "mcp__c__read", input: {} },
+				]),
+			);
+			await reply(t.response);
+			const partial = {
+				tools,
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_a", content: "a" },
+						],
+					},
+				],
+			};
+			const caller = { apiKeyId: "key-1", model: "opus" };
+			expect(h.bridge.findContinuation(["toolu_a"], caller)?.turnId).toBe(
+				t.plan.turnId,
+			);
+			const c = continueTurn(h, t.plan.turnId, partial, caller);
+			const res = await c.response;
+			expect(res.status).toBe(409);
+			expect((await res.json()).error.message).toContain("stale tool results");
+			expect(h.bridge.status().parked).toBe(1);
+		});
+
+		it("refuses results under another model sent past the lookup, and frees the turn", async () => {
 			const { h, t } = await parked("sonnet");
 			const c = continueTurn(h, t.plan.turnId, results, { model: "opus" });
 			const res = await c.response;
 			expect(res.status).toBe(409);
-			expect((await res.json()).error).toMatchObject({
-				type: "invalid_request_error",
-				message: expect.stringContaining('"opus"'),
-			});
-			await waitFor(
-				() => h.repo.turns.get(t.plan.turnId)?.legs[1]?.finished === true,
-			);
+			expect((await res.json()).error.message).toContain('"opus"');
+			await settled(h);
+			expect(h.bridge.status().parked).toBe(0);
 			expect(h.repo.turns.get(t.plan.turnId)?.legs[1]).toMatchObject({
 				kind: "continue",
 				httpStatus: 409,
-				errorPhase: "pre_head",
 			});
-			expect(h.bridge.status().parked).toBe(1);
 		});
 	});
 
@@ -845,7 +925,7 @@ describe("parked tool calls", () => {
 		await settled(h);
 		expect(t.query.interrupted).toBe(true);
 		expect(t.query.closed).toBe(true);
-		expect(h.bridge.findContinuation(["toolu_1"])).toBeNull();
+		expect(h.bridge.findContinuation(["toolu_1"], CALLER)).toBeNull();
 		const c = continueTurn(h, t.plan.turnId, {
 			tools,
 			messages: [
@@ -963,8 +1043,10 @@ describe("parked tool calls", () => {
 		it("select a parked turn only by the calls it waits on now", async () => {
 			const h = harness();
 			const { t } = await parkedTwice(h);
-			expect(h.bridge.findContinuation(["r2-b"])?.turnId).toBe(t.plan.turnId);
-			expect(h.bridge.findContinuation(["r1"])).toBeNull();
+			expect(h.bridge.findContinuation(["r2-b"], CALLER)?.turnId).toBe(
+				t.plan.turnId,
+			);
+			expect(h.bridge.findContinuation(["r1"], CALLER)).toBeNull();
 		});
 
 		it("replaying an earlier round gets 409, recorded, and the turn stays parked", async () => {
@@ -1961,7 +2043,7 @@ describe("availability and shutdown", () => {
 			httpStatus: 503,
 			errorPhase: "pre_head",
 		});
-		expect(h.bridge.findContinuation(["toolu_n"])).toBeNull();
+		expect(h.bridge.findContinuation(["toolu_n"], CALLER)).toBeNull();
 	});
 
 	it("answers a continuation during shutdown with 503, recorded on its turn", async () => {

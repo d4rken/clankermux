@@ -13,6 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SdkBridgeLimits } from "@clankermux/claude-sdk-bridge";
 import { clearProviderOverloadCooldown } from "@clankermux/proxy";
+import {
+	resultMessage,
+	streamedMessage,
+} from "../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/fake-sdk";
 import { startMockUpstream } from "../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/mock-upstream";
 import {
 	callModel,
@@ -25,6 +29,7 @@ import {
 import { type Gateway, startGateway } from "./fixtures/sdk-bridge-gateway";
 
 const MODEL = "claude-sonnet-5";
+const OTHER_MODEL = "claude-opus-5";
 /**
  * Fresh account ids per case: the proxy keeps per-account state in memory
  * (cooldown memos, probe gates, affinity), which would outlive a gateway.
@@ -82,7 +87,7 @@ async function harness(
 		root,
 		upstreamUrl: mock.url,
 		accounts: accounts(),
-		models: [MODEL],
+		models: [MODEL, OTHER_MODEL],
 		bridge: {
 			queryFn: sdk.fn,
 			claudeExecutablePath: "/opt/fake/claude",
@@ -534,6 +539,129 @@ for (const endpoint of ["responses", "chat"] as const) {
 			expect(await legOf(h.gw, seen.requestId)).toMatchObject({
 				http_status: 503,
 			});
+		});
+	});
+}
+
+/**
+ * A client that switches model in the middle of a tool loop: the parked turn
+ * cannot serve the new model, so its tool results start a fresh turn on it
+ * instead of a 409 the client would get on every retry.
+ */
+for (const endpoint of ["responses", "chat"] as const) {
+	const chat = endpoint === "chat";
+	const tools = chat
+		? [
+				{
+					type: "function",
+					function: {
+						name: "read",
+						parameters: { type: "object", properties: {} },
+					},
+				},
+			]
+		: [
+				{
+					type: "function",
+					name: "read",
+					parameters: { type: "object", properties: {} },
+				},
+			];
+	const user = chat
+		? { role: "user", content: "read a" }
+		: {
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "read a" }],
+			};
+
+	async function post(gw: Gateway, model: string, history: unknown[]) {
+		const response = await fetch(
+			`${gw.url}/wire/openai/v1/${chat ? "chat/completions" : "responses"}`,
+			{
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${gw.apiKey}`,
+					"content-type": "application/json",
+					"user-agent": "pi/0.86.0",
+				},
+				body: JSON.stringify({
+					model,
+					stream: false,
+					tools,
+					...(chat ? { messages: history } : { input: history }),
+				}),
+			},
+		);
+		return { status: response.status, body: await response.json() };
+	}
+
+	describe(`SDK bridge continuation under another model at /wire/openai ${endpoint}`, () => {
+		it("starts a fresh turn on the new model and frees the parked one", async () => {
+			const h = await harness();
+			const first = post(h.gw, MODEL, [user]);
+			const parked = await h.sdk.next();
+			await parked.nextPrompt();
+			parked.emit(
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_gw_1",
+						name: String(parked.options.allowedTools?.[0]),
+						input: {},
+					},
+				]),
+			);
+			const r1 = await first;
+			expect(r1.status).toBe(200);
+			await waitFor(() => h.gw.bridge.status().parked === 1);
+
+			const history = chat
+				? [
+						user,
+						r1.body.choices[0].message,
+						{ role: "tool", tool_call_id: "toolu_gw_1", content: "A" },
+					]
+				: [
+						user,
+						...r1.body.output,
+						{
+							type: "function_call_output",
+							call_id: "toolu_gw_1",
+							output: "A",
+						},
+					];
+			const second = post(h.gw, OTHER_MODEL, history);
+			const fresh = await h.sdk.next();
+			expect(fresh).not.toBe(parked);
+			expect(parked.interrupted).toBe(true);
+			expect(h.gw.bridge.status().parked).toBe(0);
+			await fresh.nextPrompt();
+			fresh.emit(
+				...streamedMessage([{ type: "text", text: "done" }], {
+					model: OTHER_MODEL,
+				}),
+				resultMessage(),
+			);
+			fresh.end();
+			const r2 = await second;
+
+			expect(r2.status).toBe(200);
+			expect(JSON.stringify(r2.body)).toContain("done");
+			await waitFor(async () => {
+				const rows = await h.gw.query<{ status: string }>(
+					"SELECT status FROM sdk_bridge_turns WHERE status = 'completed'",
+				);
+				return rows.length === 1;
+			});
+			expect(
+				await h.gw.query(
+					"SELECT status, rebuild_reason FROM sdk_bridge_turns ORDER BY started_at",
+				),
+			).toEqual([
+				{ status: "aborted", rebuild_reason: null },
+				{ status: "completed", rebuild_reason: "dead_continuation" },
+			]);
 		});
 	});
 }
