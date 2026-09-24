@@ -176,11 +176,10 @@ export function startIntegrityScheduler(
 
 /**
  * Defensive ceiling on the DB size an AUTOMATIC integrity check will scan.
- * It was sized for ~4 s/GiB, putting 64 GiB at ~256 s under the 10-min = 600 s
- * worker cap. Measured on the live 17 GiB database (2026-09-24) the full check
- * runs ~31 s/GiB (8m44s), so it already sits near the cap and times out under
- * load well below this ceiling. Set it too low and the surface pins
- * permanently amber, because a skip never clears to ok on its own.
+ * Measured on the live 17 GiB database (2026-09-24): quick ~15 s/GiB (4m17s),
+ * full ~31 s/GiB (8m44s). At 64 GiB that is a ~16 min quick scan and a ~33 min
+ * full scan, each holding a WAL reader the whole time. Set it too low and the
+ * surface pins permanently amber, because a skip never clears to ok on its own.
  *
  * It governs BOTH timer-driven kinds. `quick_check` is cheaper per page than
  * `integrity_check`, but it still walks every b-tree page and the freelist, so
