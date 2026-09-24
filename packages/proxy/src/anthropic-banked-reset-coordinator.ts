@@ -143,7 +143,10 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function parseCleared(value: string | null): AnthropicBankedResetWindow[] {
+/** A ledger row's `cleared` JSON; empty when absent or unparseable. */
+export function parseCleared(
+	value: string | null,
+): AnthropicBankedResetWindow[] {
 	if (!value) return [];
 	try {
 		const parsed: unknown = JSON.parse(value);

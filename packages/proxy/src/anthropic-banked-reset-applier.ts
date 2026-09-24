@@ -14,8 +14,9 @@
  *    one a reset lifts, the last cooldown-anchoring auto claim is an hour old,
  *    that window resets on its own no sooner than
  *    {@link BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS} from now, and no other
- *    Anthropic account can serve the same scope. A grant that expires before
- *    that window resets passes the last two gates.
+ *    Anthropic account can serve the same scope (one whose claim restored it
+ *    within the hour serves until a later usage reading says otherwise). A
+ *    grant that expires before that window resets passes the last two gates.
  *
  * Only the server's `next_grant_id` is ever claimed, and only a grant that
  * clears a weekly window: a 5h-only grant is manual-only.
@@ -62,6 +63,7 @@ import {
 import {
 	isOveragePause,
 	overagePauseVerdict,
+	parseCleared,
 } from "./anthropic-banked-reset-coordinator";
 import { cooldownRulesOutAlternative } from "./banked-reset-alternative";
 import { weeklyResetCanLiftPause } from "./codex-reset-credit-applier";
@@ -501,6 +503,11 @@ export interface BankedResetApplyDeps {
 	/**
 	 * Whether other accounts can serve every one of these exhausted windows.
 	 * A usable account whose usage stays unknown counts as able to serve.
+	 * So does one with a `reset` or `already_used` claim resolved within
+	 * {@link BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS}, for each window the claim
+	 * cleared (every window when `cleared` is unknown), until a usage reading
+	 * observed after the claim decides instead; an overage pause does not
+	 * exclude it.
 	 */
 	hasOtherAvailableAccount(
 		accountId: string,
@@ -1111,6 +1118,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		| "getPendingAnthropicBankedResetAttempts"
 		| "getAnthropicBankedResetAutoApplyCooldownAnchorAt"
 		| "getAnthropicBankedResetRearmAt"
+		| "getRestoringAnthropicBankedResetEventsSince"
 		| "claimAnthropicBankedResetAutoAttempt"
 	>;
 	coordinator: {
@@ -1128,13 +1136,14 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 	// One usage read per unknown alternative per forced-read interval: unknown
 	// already blocks the claim, so reading it sooner saves nothing.
 	const usageRefreshAttempts = new Map<string, number>();
-	const usable = (account: Account, now: number) =>
+	const reachable = (account: Account, now: number) =>
 		account.provider === "anthropic" &&
 		Boolean(account.refresh_token) &&
 		!account.disabled &&
-		!account.paused &&
 		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH;
+	const usable = (account: Account, now: number) =>
+		reachable(account, now) && !account.paused;
 	const readUsage = (accountId: string) =>
 		usage.get(accountId) as UsageData | null;
 
@@ -1189,19 +1198,55 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 			return memo;
 		},
 		hasOtherAvailableAccount: async (accountId, windows) => {
-			const [accounts, keys] = await Promise.all([
+			const now = nowMs();
+			const [accounts, keys, restoringRows] = await Promise.all([
 				dbOps.getAllAccounts(),
 				dbOps.getActiveApiKeys(),
+				dbOps.getRestoringAnthropicBankedResetEventsSince(
+					now - BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS,
+				),
 			]);
 			// Traffic pinned to this account has no substitute.
 			if (keys.some((key) => key.pinnedAccountId === accountId)) return false;
-			const now = nowMs();
 			for (const [id, attemptedAt] of usageRefreshAttempts) {
 				if (now - attemptedAt >= BANKED_RESET_CONFIRM_READ_INTERVAL_MS) {
 					usageRefreshAttempts.delete(id);
 				}
 			}
+			const restoring = new Map<string, AnthropicBankedResetEventRow[]>();
+			for (const row of restoringRows) {
+				if (row.account_id === accountId) continue;
+				restoring.set(row.account_id, [
+					...(restoring.get(row.account_id) ?? []),
+					row,
+				]);
+			}
+			// The windows an alternative's restoring claims still hold open: those
+			// no usage reading taken since the claim has settled.
+			const heldWindows = (id: string): AnthropicBankedResetWindow[] => {
+				const rows = restoring.get(id);
+				if (!rows) return [];
+				const observedAt = usage.peekWithAge(id)?.observedAtMs ?? null;
+				return windows.filter((window) =>
+					rows.some((row) => {
+						if (row.resolved_at === null) return false;
+						if (observedAt !== null && observedAt > row.resolved_at) {
+							return false;
+						}
+						const cleared = parseCleared(row.cleared);
+						return cleared.length === 0 || cleared.includes(window);
+					}),
+				);
+			};
+			const holders: string[] = [];
 			const served = new Set<AnthropicBankedResetWindow>();
+			const coversAll = () => {
+				const covered = new Set(served);
+				for (const id of holders) {
+					for (const window of heldWindows(id)) covered.add(window);
+				}
+				return covered.size === windows.length;
+			};
 			const unknown: Account[] = [];
 			const note = (
 				account: Account,
@@ -1224,12 +1269,24 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 				return anyUnknown;
 			};
 			for (const account of accounts) {
-				if (account.id === accountId || !usable(account, now)) continue;
-				if (note(account, now, false)) unknown.push(account);
+				if (account.id === accountId) continue;
+				if (usable(account, now)) {
+					if (restoring.has(account.id)) holders.push(account.id);
+					if (note(account, now, false)) unknown.push(account);
+				} else if (
+					// The weekly trigger claims through an overage pause, and only a
+					// post-claim reading lifts it.
+					restoring.has(account.id) &&
+					account.paused &&
+					reachable(account, now)
+				) {
+					const marker = await dbOps.getAccountPauseMarker(account.id);
+					if (marker && isOveragePause(marker)) holders.push(account.id);
+				}
 			}
 			// One read each; a reading that stays unknown counts as able to serve.
 			for (const account of unknown) {
-				if (served.size === windows.length) break;
+				if (coversAll()) break;
 				if (!usageRefreshAttempts.has(account.id)) {
 					usageRefreshAttempts.set(account.id, nowMs());
 					try {
@@ -1244,7 +1301,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 				const current = await dbOps.getAccount(account.id);
 				if (current && usable(current, nowMs())) note(current, nowMs(), true);
 			}
-			return served.size === windows.length;
+			return coversAll();
 		},
 		claimAutoAttempt: (input) =>
 			dbOps.claimAnthropicBankedResetAutoAttempt(input),
