@@ -36,7 +36,10 @@ import type {
 	RunwayWindowSummary,
 	UsagePrediction,
 } from "@clankermux/types";
-import { buildPredictionsForAccounts } from "./build-account-predictions-for";
+import {
+	buildPredictionsForAccounts,
+	predictionLiveReading,
+} from "./build-account-predictions-for";
 import {
 	getCachedOrPersistedCodexUsage,
 	loadPersistedCodexUsageColumns,
@@ -535,7 +538,7 @@ export async function computeRunwayScan(
 	const entryByAccount = new Map(
 		accounts.map((a) => [a.id, usageCache.peekWithAge(a.id)] as const),
 	);
-	const routingFreshUsageByAccount = new Map<string, AnyUsageData | null>(
+	const _routingFreshUsageByAccount = new Map<string, AnyUsageData | null>(
 		accounts.map((a) => {
 			const entry = entryByAccount.get(a.id);
 			return [
@@ -545,14 +548,18 @@ export async function computeRunwayScan(
 		}),
 	);
 
-	// Routing-fresh ONLY, deliberately: the prediction appends its input as a
-	// data point stamped `t: now`, so the persisted Codex resolution below must
-	// not reach it. A Codex account restored from the column reports its
-	// utilization with `prediction: null`.
+	// The routing-fresh poll entries ONLY, deliberately: the prediction appends
+	// its input as a data point at its observation time, so the persisted Codex
+	// resolution below must not reach it. A Codex account restored from the
+	// column reports its utilization with `prediction: null`.
 	const predictionByAccount = await buildPredictionsForAccounts(
 		dbOps,
 		accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),
-		routingFreshUsageByAccount,
+		new Map(
+			accounts.map(
+				(a) => [a.id, predictionLiveReading(entryByAccount.get(a.id))] as const,
+			),
+		),
 		now,
 	);
 

@@ -111,7 +111,10 @@ import {
 	removeAccountById,
 	resumeAccount,
 } from "../services/admin/accounts";
-import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
+import {
+	buildPredictionsForAccounts,
+	predictionLiveReading,
+} from "../services/build-account-predictions-for";
 import {
 	readOpenRouterAccountMetadata,
 	refreshOpenRouterAccountMetadata,
@@ -722,9 +725,8 @@ export async function listAccountResponses(
 		//    OF a stated time and stay honest when that time is minutes ago.
 		//  - `routingFreshUsageByAccount` (ROUTING TTL, 10 min, poll only): the
 		//    exhaustion prediction, which appends the live reading as a data point
-		//    stamped `t: now` (see build-account-predictions.ts) — an aged reading
-		//    injected there would read as a fresh sample and skew the regression.
-		//    It fits the poll's own series, so it takes the poll's reading.
+		//    at its observation time. It fits the poll's own snapshot series, so it
+		//    takes the poll's reading.
 		//  - `routingViewUsageByAccount` (ROUTING TTL, header-fed): what the proxy
 		//    routes and throttles on right now. Used by the throttle annotation and
 		//    the SESSION half of the account-wide exhaustion verdict (below).
@@ -783,13 +785,13 @@ export async function listAccountResponses(
 			),
 		);
 		const routingFreshUsageByAccount = new Map(
-			accounts.map((a) => {
-				const entry = liveUsageEntryByAccount.get(a.id);
-				return [
-					a.id,
-					entry && entry.ageMs <= USAGE_CACHE_TTL_MS ? entry.data : null,
-				] as const;
-			}),
+			accounts.map(
+				(a) =>
+					[
+						a.id,
+						predictionLiveReading(liveUsageEntryByAccount.get(a.id)),
+					] as const,
+			),
 		);
 
 		// Earned Codex resets come from a separate read-only account endpoint, not
@@ -875,8 +877,7 @@ export async function listAccountResponses(
 		// `prediction: null`.
 		//
 		// Sourced from `routingFreshUsageByAccount`, NOT the display view: the
-		// service appends this reading with `t: now`, so a reading that is minutes
-		// old would enter the regression claiming to be current.
+		// service appends this poll reading at its own observation time.
 		const predictionByAccount = await buildPredictionsForAccounts(
 			dbOps,
 			accounts.map((a) => ({ id: a.id, provider: a.provider ?? null })),

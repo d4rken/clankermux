@@ -6,7 +6,7 @@ import {
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
-import type { AnyUsageData } from "@clankermux/providers";
+import { type AnyUsageData, USAGE_CACHE_TTL_MS } from "@clankermux/providers";
 import type { AccountUsagePrediction, FullUsageData } from "@clankermux/types";
 import {
 	type AccountPredictionInput,
@@ -25,6 +25,32 @@ const log = new Logger("AccountPredictions");
  * Inline named constant (no env knobs, per project rule).
  */
 const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/** A poll reading as a prediction input, with its own observation time. */
+export interface PredictionLiveReading {
+	data: AnyUsageData;
+	observedAtMs: number | null;
+}
+
+/**
+ * A usage-cache poll entry (`usageCache.peekWithAge`) as a prediction input:
+ * null past the routing TTL. The poll entry and never the header-fed view,
+ * because the regression fits the poll's own snapshot series.
+ */
+export function predictionLiveReading(
+	entry:
+		| {
+				data: AnyUsageData;
+				ageMs: number;
+				observedAtMs: number | null;
+		  }
+		| null
+		| undefined,
+): PredictionLiveReading | null {
+	return entry && entry.ageMs <= USAGE_CACHE_TTL_MS
+		? { data: entry.data, observedAtMs: entry.observedAtMs }
+		: null;
+}
 
 /**
  * Whether an extracted window carries anything to predict from. A recognised
@@ -47,12 +73,12 @@ function hasWindowReading(extracted: ExtractedValue | null): boolean {
  * have left the lookback constant, the snapshot query, the build call and the
  * error policy duplicated at both call sites.
  *
- * `routingFreshUsageByAccount` must be the ROUTING-fresh view of the usage
- * cache, NOT the display view. `buildAccountUsagePredictions` appends the live
- * reading as a data point stamped `t: now`, so a reading that is minutes old
- * would enter the regression claiming to be current and flatten or skew the
- * forecast. An account whose reading has aged past the routing TTL arrives here
- * as `null` and simply gets no prediction until the next poll lands.
+ * `liveReadingByAccount` must hold the poll entries under the routing TTL
+ * (see {@link predictionLiveReading}), NOT the display view.
+ * `buildAccountUsagePredictions` appends the live reading as a data point at
+ * its observation time, and a reading with no known observation time is not
+ * appended. An account whose reading has aged past the routing TTL arrives here
+ * as `null` and gets no live point until the next poll lands.
  *
  * A DB or compute failure yields an EMPTY MAP rather than propagating: the
  * prediction is garnish on a response that must still be served, so callers can
@@ -61,7 +87,7 @@ function hasWindowReading(extracted: ExtractedValue | null): boolean {
 export async function buildPredictionsForAccounts(
 	dbOps: DatabaseOperations,
 	accounts: { id: string; provider: string | null }[],
-	routingFreshUsageByAccount: ReadonlyMap<string, AnyUsageData | null>,
+	liveReadingByAccount: ReadonlyMap<string, PredictionLiveReading | null>,
 	now: number,
 ): Promise<Map<string, AccountUsagePrediction>> {
 	const inputs: AccountPredictionInput[] = [];
@@ -70,8 +96,9 @@ export async function buildPredictionsForAccounts(
 		// The regression itself is provider-agnostic; what it needs is a recorded
 		// snapshot series to fit, which is exactly what this set names.
 		if (!USAGE_HISTORY_PROVIDERS.has(provider)) continue;
-		const live = routingFreshUsageByAccount.get(account.id);
-		if (!live || typeof live !== "object") continue;
+		const reading = liveReadingByAccount.get(account.id);
+		const live = reading?.data;
+		if (!reading || !live || typeof live !== "object") continue;
 		// Read the windows through the shared extractors: each provider names them
 		// differently, and reading the Anthropic keys directly dropped every
 		// account whose payload has neither, one line after the filter admitted it.
@@ -91,6 +118,7 @@ export async function buildPredictionsForAccounts(
 						resetsAtMs: fiveHour.resetMs,
 					}
 				: null,
+			observedAtMs: reading.observedAtMs,
 		});
 	}
 

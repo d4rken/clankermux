@@ -60,6 +60,7 @@ describe("buildAccountUsagePredictions", () => {
 				// Off the extrapolated line (history slope 10 => would be 40 at NOW):
 				// 60 bends the slope up and pulls the ETA in.
 				fiveHour: { utilization: 60, resetsAtMs: RESET },
+				observedAtMs: NOW,
 			},
 		];
 
@@ -105,7 +106,9 @@ describe("buildAccountUsagePredictions", () => {
 				fiveHourReset: RESET,
 			}),
 		);
-		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
+		const inputs: AccountPredictionInput[] = [
+			{ accountId, fiveHour: null, observedAtMs: NOW },
+		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
 		const pred = result.get(accountId);
@@ -132,7 +135,9 @@ describe("buildAccountUsagePredictions", () => {
 				sevenDayReset: RESET,
 			}),
 		];
-		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
+		const inputs: AccountPredictionInput[] = [
+			{ accountId, fiveHour: null, observedAtMs: NOW },
+		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
 		// 20h > 6h => excluded from the 5h fit => no points at all. The weekly
@@ -156,7 +161,11 @@ describe("buildAccountUsagePredictions", () => {
 			}),
 		);
 		const inputs: AccountPredictionInput[] = [
-			{ accountId, fiveHour: { utilization: 60, resetsAtMs: RESET } },
+			{
+				accountId,
+				fiveHour: { utilization: 60, resetsAtMs: RESET },
+				observedAtMs: NOW,
+			},
 		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
@@ -173,6 +182,7 @@ describe("buildAccountUsagePredictions", () => {
 			{
 				accountId,
 				fiveHour: { utilization: 25, resetsAtMs: RESET },
+				observedAtMs: NOW,
 			},
 		];
 
@@ -186,7 +196,9 @@ describe("buildAccountUsagePredictions", () => {
 
 	test("no data at all => account absent from the Map", () => {
 		const accountId = "acc-empty";
-		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
+		const inputs: AccountPredictionInput[] = [
+			{ accountId, fiveHour: null, observedAtMs: NOW },
+		];
 
 		const result = buildAccountUsagePredictions(inputs, [], NOW);
 		expect(result.has(accountId)).toBe(false);
@@ -224,8 +236,8 @@ describe("buildAccountUsagePredictions", () => {
 			),
 		];
 		const inputs: AccountPredictionInput[] = [
-			{ accountId: a, fiveHour: null },
-			{ accountId: b, fiveHour: null },
+			{ accountId: a, fiveHour: null, observedAtMs: NOW },
+			{ accountId: b, fiveHour: null, observedAtMs: NOW },
 		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
@@ -270,6 +282,7 @@ describe("buildAccountUsagePredictions", () => {
 				accountId,
 				// utilization null => the live point must not be appended.
 				fiveHour: { utilization: null, resetsAtMs: RESET },
+				observedAtMs: NOW,
 			},
 		];
 
@@ -282,5 +295,75 @@ describe("buildAccountUsagePredictions", () => {
 			})),
 		);
 		expect(result.get(accountId)?.fiveHour).toEqual(expected);
+	});
+});
+
+describe("buildAccountUsagePredictions — the live point's time", () => {
+	const accountId = "acc-live-time";
+	const history = [10, 20, 30].map((pct, i) =>
+		sample({
+			accountId,
+			sampledAt: NOW - (3 - i) * HOUR_MS,
+			fiveHourPct: pct,
+			fiveHourReset: RESET,
+		}),
+	);
+	const historyPoints = history.map((s) => ({
+		t: s.sampledAt,
+		utilization: s.fiveHourPct as number,
+		resetsAt: RESET,
+	}));
+	const run = (observedAtMs: number | null) =>
+		buildAccountUsagePredictions(
+			[
+				{
+					accountId,
+					fiveHour: { utilization: 60, resetsAtMs: RESET },
+					observedAtMs,
+				},
+			],
+			history,
+			NOW,
+		).get(accountId)?.fiveHour;
+
+	test("is stamped with the reading's observation time, not now", () => {
+		const observedAt = NOW - 30 * 60_000;
+		const expected = computeUsagePrediction([
+			...historyPoints,
+			{ t: observedAt, utilization: 60, resetsAt: RESET },
+		]);
+		expect(run(observedAt)).toEqual(expected);
+		expect(expected).not.toEqual(
+			computeUsagePrediction([
+				...historyPoints,
+				{ t: NOW, utilization: 60, resetsAt: RESET },
+			]),
+		);
+	});
+
+	test("is left out without an observation time", () => {
+		expect(run(null)).toEqual(computeUsagePrediction(historyPoints));
+	});
+
+	test("is left out when no newer than the last stored snapshot", () => {
+		expect(run(NOW - HOUR_MS)).toEqual(computeUsagePrediction(historyPoints));
+		expect(run(NOW - 2 * HOUR_MS)).toEqual(
+			computeUsagePrediction(historyPoints),
+		);
+	});
+
+	test("keeps the 6h lookback cutoff", () => {
+		const result = buildAccountUsagePredictions(
+			[
+				{
+					accountId,
+					fiveHour: { utilization: 60, resetsAtMs: RESET },
+					observedAtMs: NOW - 7 * HOUR_MS,
+				},
+			],
+			[],
+			NOW,
+		);
+		expect(result.has(accountId)).toBe(false);
 	});
 });

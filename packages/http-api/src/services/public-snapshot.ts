@@ -42,7 +42,10 @@ import { resolveRateLimitPresentation } from "../handlers/accounts";
 // rollup asks it the same question the wire does. Type-only in the other
 // direction, so this is not a runtime cycle.
 import { toPublicAvailabilityState } from "../handlers/public/dto";
-import { buildPredictionsForAccounts } from "./build-account-predictions-for";
+import {
+	buildPredictionsForAccounts,
+	predictionLiveReading,
+} from "./build-account-predictions-for";
 import { createPublicReadMemo } from "./public-read-memo";
 
 import {
@@ -954,7 +957,12 @@ export function createPublicSnapshotReader(
 		const predictions = await buildPredictionsForAccounts(
 			dbOps,
 			rows.map((row) => ({ id: row.id, provider: row.provider ?? null })),
-			routingFresh,
+			new Map(
+				rows.map(
+					(row) =>
+						[row.id, predictionLiveReading(readings.get(row.id))] as const,
+				),
+			),
 			now,
 		).catch((error) => {
 			log.debug(
