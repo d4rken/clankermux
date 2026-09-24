@@ -115,21 +115,23 @@ destinations.
 
 What differs from a direct request:
 
-* Claude Code's own system prompt is sent. For pi, the parts of pi's prompt
-  that carry your instructions are appended to it: project context files
-  (`AGENTS.md`), the skills list, `APPEND_SYSTEM.md`, the working directory,
-  and a replaced prompt (`SYSTEM.md`, a subagent persona) in place of pi's
-  own opening. pi's tool list, rules and documentation pointers are left out,
-  and so are sections extensions add. pi must declare its prompt layout with
-  `x-clankermux-pi-prompt: 0.87`. A pi turn is refused with a 400 rather
-  than sent without your instructions when the header is missing or names a
-  version ClankerMux has no fixtures for (`sdk_bridge_prompt_unsupported`),
-  when the prompt does not parse as that layout, for example because a
-  context file contains `</project_context>` (`sdk_bridge_prompt_malformed`),
-  or when the kept text contains pi's own opening line or both
-  `docs/custom-provider.md` and `docs/packages.md`, which subscription
-  accounts answer with a 400 (`sdk_bridge_prompt_refused`).
-  Other clients' system prompts are not sent.
+* Claude Code's own system prompt is sent. For pi, pi's prompt is appended
+  to it without pi's own opening, tool list, rules and documentation
+  pointers; everything after those (project context files, skills,
+  `APPEND_SYSTEM.md`, the working directory, extension sections and text
+  extensions add) reaches the model unchanged. A replaced prompt
+  (`SYSTEM.md`, a subagent persona) is sent whole. pi must declare its
+  prompt layout with `x-clankermux-pi-prompt: 0.87`; the layouts ClankerMux
+  serves are listed at `clankermux.piPromptVersions` in the
+  `/wire/openai/v1/models?clankermux_metadata=1` response. A pi turn is
+  refused with a 400 rather than sent without your instructions when the
+  header is missing or names another version
+  (`sdk_bridge_prompt_unsupported`), when `</tools>`, `</rules>` or
+  `</docs>` appears more than once or pi's opening lacks the sections that
+  follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
+  contains pi's opening line or both `docs/custom-provider.md` and
+  `docs/packages.md`, which subscription accounts answer with a 400
+  (`sdk_bridge_prompt_refused`). Other clients' system prompts are not sent.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
   `tool_choice` that forces or forbids tool use are rejected with a 400 naming
   the field, unless another destination in the route can serve the request.

@@ -128,35 +128,46 @@ the conversation claim, so it supersedes no parked turn and leaves a
 `rejected` row with its `pre_head` leg.
 
 - `drop` (every harness but `pi`): the `claude_code` preset alone.
-- `pi-projection-v1` (`clientHarness === "pi"`): pi's prompt is parsed by
-  its outer section edges (`pi-prompt.ts`) and part of it is appended to the
-  preset, blank-line joined: a replaced preamble first, then
-  `project_context`, `skills`, `addendum`, `cwd`, each byte for byte. Stock
-  preamble, `tools`, `rules`, `docs` and extension sections are dropped; the
-  extension names go into the detail. Sectionless text (a forced prompt) is
-  appended whole.
+- `pi-head-v1` (`clientHarness === "pi"`, `pi-prompt.ts`): when the text
+  starts with pi's stock preamble followed by `<tools>`, `<rules>` and
+  `<docs>`, that head and the blank line after it are removed; everything
+  after it is appended to the preset byte for byte and never parsed. Any
+  other text (a replaced preamble, a forced prompt without the head) is
+  appended whole. pi's section updates to `tools`, `rules`, `docs`, or the
+  preamble back to stock are removed; every other update and every
+  `Removed system prompt section` message stays.
+
+It strips rather than selects because pi's extensions append to the
+prompt: claude-context returns pi's prompt plus raw guidance after `<cwd>`,
+pi-subagents appends `<advertised_subagents>`, both as forced prompts. The
+head is the only part that draws the subscription 400, and pi always
+renders it first.
 
 pi declares its layout in `x-clankermux-pi-prompt` (threaded as
-`SdkBridgeTurnMeta.piPromptVersion`). A version is supported only while it
-has fixtures under `__tests__/fixtures/pi-prompts/<version>/`, written by
-`scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's own
-`buildSystemPromptSections`. A new pi release is refused until its fixtures
-are generated and its layout added to `LAYOUTS`.
+`SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
+(`HEADS` in `pi-prompt.ts`); releases with a byte-identical head share an
+entry. A version is supported only while it has fixtures under
+`__tests__/fixtures/pi-prompts/<version>/`, written by
+`scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
+own builder and the claude-context and pi-subagents code that rewrites the
+prompt. Only a pi release that changes the head or the update wording
+needs new fixtures. Discovery lists the versions at
+`clankermux.piPromptVersions` in the OpenAI-shape
+`/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
+is refused.
 
 All refusals are `400 invalid_request_error`:
 
 | `error.code` | When |
 | --- | --- |
 | `sdk_bridge_prompt_unsupported` | header missing, or a version without fixtures |
-| `sdk_bridge_prompt_malformed` | a kept section's closing tag outside its own terminator (pi does not escape context files), duplicated or out-of-order sections, text between sections, no `cwd`, a stock preamble without `tools`/`rules`/`docs` |
-| `sdk_bridge_prompt_refused` | the append would carry pi's preamble line at a line start, or `docs/custom-provider.md` and `docs/packages.md` in one part; subscription accounts answer those with a 400 |
+| `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more often than the head and its updates account for (at least once is always allowed), or the stock preamble not followed by the full head |
+| `sdk_bridge_prompt_refused` | the forwarded text carries pi's preamble line at a line start, or both `docs/custom-provider.md` and `docs/packages.md`; subscription accounts answer those with a 400. A persona embedding its parent's pi prompt lands here too |
 
-pi sends a section that changes mid-session as a later system message
-(`Updated system prompt section "skills":` + the block, or `Removed system
-prompt section "x".`). The Responses adapter folds every instruction
-message into `system`, so the parser applies those updates in order before
-projecting. The Chat adapter refuses instruction messages after the first
-non-instruction one, so there only leading ones arrive.
+The Responses adapter folds every instruction message into `system`, so
+pi's later section updates arrive after the leading prompt. The Chat
+adapter refuses instruction messages after the first non-instruction one,
+so there only leading ones arrive.
 
 Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code
@@ -203,8 +214,8 @@ still refused, and stale or partial ones keep their own 409.
 
 - **pi's own prompt text is never forwarded whole.** Stock pi's system
   prompt reproducibly draws a 400 "out of extra usage" from subscription
-  accounts (gotgenes/pi-packages#883), which is why `pi-projection-v1` drops
-  the preamble and docs and checks the result. An "out of extra usage" 400
+  accounts (gotgenes/pi-packages#883), which is why `pi-head-v1` removes
+  pi's head and checks the rest. An "out of extra usage" 400
   from an inner call reaches the client verbatim and changes no account.
 - **"Failed to authenticate".** The CLI reports any 403 from its base URL that
   way. The inner listener rewrites a ClankerMux 403 to 400 for the child, and
