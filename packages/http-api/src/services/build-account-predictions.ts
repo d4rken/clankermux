@@ -77,8 +77,8 @@ export function buildAccountUsagePredictions(
 		// Append the live point so the prediction never lags the sampler, at the
 		// instant it was observed. A reading no newer than the last snapshot is
 		// already in the series, or older than it.
-		const lastSampledAt = accountSamples.reduce(
-			(latest, s) => Math.max(latest, s.sampledAt),
+		const lastSampledAt = fiveHourPoints.reduce(
+			(latest, p) => Math.max(latest, p.t),
 			Number.NEGATIVE_INFINITY,
 		);
 		if (

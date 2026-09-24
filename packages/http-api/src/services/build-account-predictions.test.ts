@@ -352,6 +352,33 @@ describe("buildAccountUsagePredictions — the live point's time", () => {
 		);
 	});
 
+	test("is compared only against snapshots that carry a 5h reading", () => {
+		const observedAt = NOW - 30 * 60_000;
+		const weeklyOnly = sample({
+			accountId,
+			sampledAt: NOW - 10 * 60_000,
+			sevenDayPct: 40,
+			sevenDayReset: RESET,
+		});
+		const result = buildAccountUsagePredictions(
+			[
+				{
+					accountId,
+					fiveHour: { utilization: 60, resetsAtMs: RESET },
+					observedAtMs: observedAt,
+				},
+			],
+			[...history, weeklyOnly],
+			NOW,
+		).get(accountId)?.fiveHour;
+		expect(result).toEqual(
+			computeUsagePrediction([
+				...historyPoints,
+				{ t: observedAt, utilization: 60, resetsAt: RESET },
+			]),
+		);
+	});
+
 	test("keeps the 6h lookback cutoff", () => {
 		const result = buildAccountUsagePredictions(
 			[
