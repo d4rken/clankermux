@@ -81,7 +81,9 @@ one reading. A new consumer picks one of the two on purpose.
 - Header readings are bound to the poller: the attempt captures
   `usageHeaderEpoch` before sending, and stop/restart/`delete`/
   `fenceAndRefetch` reissue it, so a response sent under old credentials never
-  lands.
+  lands. An account-wide quota cooldown (`weekly_exhausted_429`,
+  `session_exhausted_429`) reissues it too and re-arms the active poll, so the
+  cooled 429's own headers never re-feed the view.
 - The routing view is fresh only while `seven_day_oauth_apps` (finite) and
   enabled `extra_usage` (finite) are within the bound too; headers never carry
   them.
