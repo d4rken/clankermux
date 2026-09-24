@@ -1285,6 +1285,43 @@ describe("RateLimitProgress", () => {
 				);
 			});
 
+			it("drops the caption when header-fed windows are current though the poll is not", () => {
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={liveWindows()}
+						usageAsOfIso={new Date(Date.now() - 11 * 60 * 1000).toISOString()}
+						usageWindowAsOfIso={{
+							five_hour: new Date(Date.now() - 60 * 1000).toISOString(),
+							seven_day: new Date(Date.now() - 60 * 1000).toISOString(),
+						}}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				expect(html).not.toContain("Live usage as of");
+				expect(html).toContain("42%");
+			});
+
+			it("states each window's own age once the windows' ages differ", () => {
+				const html = renderToStaticMarkup(
+					<RateLimitProgress
+						resetIso={null}
+						usageData={liveWindows()}
+						usageAsOfIso={new Date(Date.now() - 25 * 60 * 1000).toISOString()}
+						usageWindowAsOfIso={{
+							five_hour: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
+						}}
+						provider="anthropic"
+						showWeekly
+					/>,
+				);
+
+				// One caption per aged card rather than one under the grid.
+				expect(html.match(/Live usage as of/g)?.length).toBe(2);
+			});
+
 			it("does not annotate a reading that is still within the routing TTL", () => {
 				const asOf = new Date(Date.now() - 2 * 60 * 1000);
 				const html = renderToStaticMarkup(

@@ -178,6 +178,7 @@ export * from "./lifecycle";
 export {
 	canonicalWindowKind,
 	usageObservedAtMs,
+	usageWindowObservedAtMs,
 	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,
 	weeklyRedEligible,

@@ -25,6 +25,7 @@ import {
 } from "./capacity-runway";
 import {
 	usageObservedAtMs,
+	usageWindowObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
@@ -524,7 +525,7 @@ function windowReadingOf(
 				extracted.resetMs == null
 					? null
 					: computeWindowStartMs(extracted.resetMs, window),
-			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
+			observedAtMs: usageWindowObservedAtMs(account, window),
 			windowKind: window,
 		}),
 	};
@@ -1278,7 +1279,7 @@ export function computePoolUsage(
 			continue;
 		}
 
-		const observedAtMs = usageObservedAtMs(account.usageAsOfIso);
+		const observedAtMs = usageWindowObservedAtMs(account, window);
 		// A 0% window whose structural start tracks the reading is one the provider
 		// has not started: its reset slides forward every poll, so it must never be
 		// offered as a deadline. `window` is passed so a calendar cycle, which

@@ -7,7 +7,7 @@ import {
 	isAnthropicStyleShape,
 	normalizeAnthropicUsage,
 	pickBindingScopedLimit,
-	usageObservedAtMs,
+	usageWindowObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "@clankermux/core";
@@ -231,7 +231,7 @@ function deriveLiveState(
 			// both return the empty answer for a family. Going through the policy
 			// means a future change reaches this line without another edit here.
 			lifetimeConfidence: weeklyLifetimeConfidence(windowKind),
-			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
+			observedAtMs: usageWindowObservedAtMs(account, windowKind),
 			anchor: windowBurnAnchor(account.burnAnchors, windowKind),
 		},
 		now,

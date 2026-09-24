@@ -250,6 +250,7 @@ export function AccountUtilizationCard({
 										burnAnchors={account.burnAnchors}
 										staleUsage={account.staleUsage}
 										usageAsOfIso={account.usageAsOfIso}
+										usageWindowAsOfIso={account.usageWindowAsOfIso}
 										usageRateLimitedUntil={account.usageRateLimitedUntil}
 										usageThrottledUntil={account.usageThrottledUntil}
 										usageThrottledWindows={account.usageThrottledWindows}

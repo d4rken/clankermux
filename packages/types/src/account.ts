@@ -650,6 +650,15 @@ export interface AccountResponse {
 	 * instead of pretending live data is unavailable. DISPLAY-ONLY.
 	 */
 	usageAsOfIso?: string | null;
+	/**
+	 * When each window in `usageData` that response headers fed was observed
+	 * (ISO), keyed by window. Only the account-wide `five_hour` and `seven_day`
+	 * windows can be header-fed; a window absent here is the poll's and is as
+	 * of `usageAsOfIso`. Null when no window was header-fed. DISPLAY-ONLY.
+	 */
+	usageWindowAsOfIso?: Partial<
+		Record<"five_hour" | "seven_day", string>
+	> | null;
 	prediction?: AccountUsagePrediction | null; // Server-computed regression-backed exhaustion prediction per window
 	/**
 	 * Last observed mid-window downward usage revision per account-wide window
