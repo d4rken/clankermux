@@ -291,6 +291,11 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 			code: "grant_mismatch" as const,
 			message: "bound to g2",
 		}));
+		const stale = mock(async () => ({
+			status: "failed" as const,
+			code: "stale_grant" as const,
+			message: "Banked reset g1 is no longer the next usable grant",
+		}));
 		const failed = mock(async () => ({
 			status: "failed" as const,
 			code: "error" as const,
@@ -305,6 +310,14 @@ describe("POST /api/accounts/:id/banked-resets/claim", () => {
 				)
 			).status,
 		).toBe(409);
+		const staleRes = await createAnthropicBankedResetClaimHandler(
+			dbOps({}),
+			stale,
+		)(post(body), "acct-1");
+		expect(staleRes.status).toBe(409);
+		expect((await staleRes.json()).error).toBe(
+			"Banked reset g1 is no longer the next usable grant",
+		);
 		expect(
 			(
 				await createAnthropicBankedResetClaimHandler(dbOps({}), failed)(

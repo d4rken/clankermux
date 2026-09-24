@@ -1497,7 +1497,12 @@ export type AnthropicBankedResetClaimDispatchOutcome =
 	| {
 			/** No request was sent. */
 			status: "failed";
-			code: "busy" | "grant_mismatch" | "account_state" | "error";
+			code:
+				| "busy"
+				| "grant_mismatch"
+				| "stale_grant"
+				| "account_state"
+				| "error";
 			message: string;
 	  }
 	| {
