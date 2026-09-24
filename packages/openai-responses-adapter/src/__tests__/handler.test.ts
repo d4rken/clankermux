@@ -1192,6 +1192,28 @@ describe("handleResponsesRequest", () => {
 			expect(body.error.code).toBe("invalid_request_error");
 		});
 
+		test("trims and caps the upstream error's type and code at 128 characters", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: {
+							type: ` ${"t".repeat(500)} `,
+							message: "m",
+							code: ` ${"c".repeat(500)}`,
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+			expect((await resp.json()).error).toEqual({
+				message: "m",
+				type: "t".repeat(128),
+				code: "c".repeat(128),
+			});
+		});
+
 		test("carries the upstream error.code, which may differ from its type", async () => {
 			const resp = await translate(
 				new Response(

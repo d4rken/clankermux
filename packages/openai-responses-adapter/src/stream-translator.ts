@@ -76,7 +76,7 @@ function emitDone(
 const MAX_ERROR_LABEL = 128;
 
 /** An upstream error's `type` or `code`: a nonblank string, trimmed and capped. */
-function errorLabel(value: unknown): string | null {
+export function errorLabel(value: unknown): string | null {
 	return typeof value === "string" && value.trim()
 		? value.trim().slice(0, MAX_ERROR_LABEL)
 		: null;

@@ -180,7 +180,11 @@ export function mapClaudeCodeFailure(
 	failure: ClaudeCodeFailure,
 ): BridgeError {
 	if (failure.cause === "context_overflow" && decisive?.status === 400)
-		return contextOverflow(decisive.message ?? failure.text);
+		return contextOverflow(
+			isContextOverflow({ text: decisive.message })
+				? decisive.message
+				: failure.text,
+		);
 	if (decisive) return mapInnerOutcome(decisive);
 	if (failure.cause === "context_overflow")
 		return contextOverflow(failure.text);

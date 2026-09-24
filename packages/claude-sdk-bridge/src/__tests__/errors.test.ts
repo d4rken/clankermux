@@ -166,6 +166,23 @@ describe("error mapping", () => {
 		).toBeUndefined();
 	});
 
+	it("keeps Claude Code's token counts when the decisive 400's own message is no overflow evidence", () => {
+		expect(
+			mapClaudeCodeFailure(outcome(400, { message: "Bad request" }), {
+				text: "prompt is too long: 9 tokens > 8 maximum",
+				cause: "context_overflow",
+			}).message,
+		).toBe("prompt is too long: 9 tokens > 8 maximum");
+		expect(
+			mapClaudeCodeFailure(
+				outcome(400, {
+					message: "prompt is too long: 215012 tokens > 200000 maximum",
+				}),
+				{ text: "Prompt is too long", cause: "context_overflow" },
+			).message,
+		).toBe("prompt is too long: 215012 tokens > 200000 maximum");
+	});
+
 	it("answers 502 for a Claude Code error with no inner outcome", () => {
 		const mapped = mapClaudeCodeFailure(null, {
 			text: "something broke",

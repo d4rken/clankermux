@@ -11,7 +11,10 @@ import {
 } from "./native-nonstream";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
-import { translateAnthropicStreamToResponses } from "./stream-translator";
+import {
+	errorLabel,
+	translateAnthropicStreamToResponses,
+} from "./stream-translator";
 import {
 	createToolTranslation,
 	type ToolTranslation,
@@ -504,19 +507,15 @@ async function respondToResponsesRequest(
 		try {
 			const anthropicError = JSON.parse(rawErrorBody) as {
 				type?: string;
-				error?: { type?: string; message?: string; code?: unknown };
+				error?: { type?: unknown; message?: string; code?: unknown };
 			};
 			// Blank values count as absent: an empty `error.message` used to
 			// win over the fallback and emit an error with no text at all.
-			if (anthropicError?.error?.type?.trim()) {
-				errType = anthropicError.error.type.trim();
-			}
+			errType = errorLabel(anthropicError?.error?.type) ?? errType;
 			if (anthropicError?.error?.message?.trim()) {
 				message = anthropicError.error.message;
 			}
-			const code = anthropicError?.error?.code;
-			if (typeof code === "string" && code.trim())
-				errCode = code.trim().slice(0, 128);
+			errCode = errorLabel(anthropicError?.error?.code);
 		} catch {
 			// Not JSON (or malformed) — fall through to the shared parser, which
 			// tolerates anything and returns null when it recognizes nothing.
