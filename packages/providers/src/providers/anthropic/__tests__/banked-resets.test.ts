@@ -816,6 +816,19 @@ describe("anthropicBankedResetCache", () => {
 		).toBe(true);
 	});
 
+	it("keeps a due mark set while a read was in flight", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		const markAtStart = anthropicBankedResetCache.dueMark(ID);
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW + 1, markAtStart);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 2)).toBe(true);
+
+		// A read that started after the mark clears it.
+		const next = anthropicBankedResetCache.dueMark(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW + 3, next);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 4)).toBe(false);
+	});
+
 	it("drops a due mark on delete", () => {
 		anthropicBankedResetCache.markDue(ID);
 		anthropicBankedResetCache.delete(ID);

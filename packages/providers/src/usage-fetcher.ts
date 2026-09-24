@@ -975,17 +975,21 @@ function grokSubscriptionCapacity(
  * cooldown is ever written from it.
  */
 /**
- * Utilization per Anthropic window, keyed so a scoped `limits[]` entry
- * compares only with the same scope in another reading.
+ * How many windows under each key are at 100% or more. A scoped `limits[]`
+ * entry is keyed by its model id, else its display name; entries with neither
+ * share a key and are only counted, as nothing pairs one with its own earlier
+ * reading.
  */
-function anthropicWindowUtilization(
+function anthropicWindowsAtLimit(
 	data: AnthropicUsageData,
 ): Map<string, number> {
 	const out = new Map<string, number>();
 	const add = (key: string, utilization: number | null | undefined) => {
-		if (typeof utilization === "number" && Number.isFinite(utilization)) {
-			out.set(key, utilization);
-		}
+		const atLimit =
+			typeof utilization === "number" &&
+			Number.isFinite(utilization) &&
+			utilization >= 100;
+		out.set(key, (out.get(key) ?? 0) + (atLimit ? 1 : 0));
 	};
 	add("five_hour", data.five_hour?.utilization);
 	add("seven_day", data.seven_day?.utilization);
@@ -993,22 +997,32 @@ function anthropicWindowUtilization(
 	add("seven_day_opus", data.seven_day_opus?.utilization);
 	add("seven_day_sonnet", data.seven_day_sonnet?.utilization);
 	for (const entry of data.limits ?? []) {
+		const model = entry.scope?.model;
+		const identity =
+			model?.id != null
+				? `id=${model.id}`
+				: model?.display_name != null
+					? `name=${model.display_name}`
+					: "";
 		add(
-			`limit:${entry.kind}:${entry.group}:${entry.scope?.model?.id ?? ""}:${entry.scope?.surface ?? ""}`,
+			`limit:${entry.kind}:${entry.group}:${entry.scope?.surface ?? ""}:${identity}`,
 			entry.percent,
 		);
 	}
 	return out;
 }
 
-/** True when `next` has a window at 100% or more that `previous` had below it or lacked. */
+/**
+ * True when `next` has more windows at 100% or more under some key than
+ * `previous` had: one that was below its limit, or absent, has reached it.
+ */
 export function anthropicReachedNewLimit(
 	previous: AnthropicUsageData,
 	next: AnthropicUsageData,
 ): boolean {
-	const before = anthropicWindowUtilization(previous);
-	for (const [key, utilization] of anthropicWindowUtilization(next)) {
-		if (utilization >= 100 && (before.get(key) ?? 0) < 100) return true;
+	const before = anthropicWindowsAtLimit(previous);
+	for (const [key, count] of anthropicWindowsAtLimit(next)) {
+		if (count > (before.get(key) ?? 0)) return true;
 	}
 	return false;
 }

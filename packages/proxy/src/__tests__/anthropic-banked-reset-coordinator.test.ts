@@ -392,6 +392,24 @@ describe("refreshStatus", () => {
 		}
 	});
 
+	it("keeps a due mark set while its read was in flight, and clears one set before", async () => {
+		const c = coordinator();
+		anthropicBankedResetCache.markDue(ACCOUNT_ID);
+		await c.refreshStatus(ACCOUNT_ID, true);
+		expect(anthropicBankedResetCache.needsRefresh(ACCOUNT_ID, clock)).toBe(
+			false,
+		);
+
+		statusImpl = async () => {
+			anthropicBankedResetCache.markDue(ACCOUNT_ID);
+			return { status: status(), httpStatus: 200, retryAfterMs: null };
+		};
+		await c.refreshStatus(ACCOUNT_ID, true);
+		expect(anthropicBankedResetCache.needsRefresh(ACCOUNT_ID, clock)).toBe(
+			true,
+		);
+	});
+
 	it("shares one in-flight read and honours the cache when not forced", async () => {
 		const c = coordinator();
 		await Promise.all([

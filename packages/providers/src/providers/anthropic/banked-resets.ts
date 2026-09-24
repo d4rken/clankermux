@@ -414,25 +414,43 @@ export interface AnthropicBankedResetCacheEntry {
 class AnthropicBankedResetCache {
 	private readonly entries = new Map<string, AnthropicBankedResetCacheEntry>();
 	private readonly lastAttemptAt = new Map<string, number>();
-	private readonly due = new Set<string>();
+	/** Per account, the sequence number of its latest unanswered due mark. */
+	private readonly dueMarks = new Map<string, number>();
+	private dueSeq = 0;
 
 	get(accountId: string): AnthropicBankedResetCacheEntry | null {
 		return this.entries.get(accountId) ?? null;
 	}
 
+	/**
+	 * `markAtReadStart` is {@link dueMark} taken when the read producing
+	 * `status` was sent: a mark set after that stays due. Omitted, any mark
+	 * is answered.
+	 */
 	set(
 		accountId: string,
 		status: AnthropicBankedResetStatus,
 		now = Date.now(),
+		markAtReadStart?: number | null,
 	): void {
 		this.entries.set(accountId, { status, fetchedAt: now });
 		this.lastAttemptAt.set(accountId, now);
-		this.due.delete(accountId);
+		if (
+			markAtReadStart === undefined ||
+			(this.dueMarks.get(accountId) ?? null) === markAtReadStart
+		) {
+			this.dueMarks.delete(accountId);
+		}
 	}
 
-	/** Make the next read due whatever the TTL says; a stored status clears it. */
+	/** Make the next read due whatever the TTL says; a later read clears it. */
 	markDue(accountId: string): void {
-		this.due.add(accountId);
+		this.dueMarks.set(accountId, ++this.dueSeq);
+	}
+
+	/** The account's current due mark, null when none; see {@link set}. */
+	dueMark(accountId: string): number | null {
+		return this.dueMarks.get(accountId) ?? null;
 	}
 
 	/** Record a read that produced no status. */
@@ -450,7 +468,7 @@ class AnthropicBankedResetCache {
 		) {
 			return false;
 		}
-		if (!entry || this.due.has(accountId)) return true;
+		if (!entry || this.dueMarks.has(accountId)) return true;
 
 		const { status, fetchedAt } = entry;
 		const ttl = status.eligible
@@ -475,13 +493,13 @@ class AnthropicBankedResetCache {
 	delete(accountId: string): void {
 		this.entries.delete(accountId);
 		this.lastAttemptAt.delete(accountId);
-		this.due.delete(accountId);
+		this.dueMarks.delete(accountId);
 	}
 
 	clear(): void {
 		this.entries.clear();
 		this.lastAttemptAt.clear();
-		this.due.clear();
+		this.dueMarks.clear();
 	}
 }
 

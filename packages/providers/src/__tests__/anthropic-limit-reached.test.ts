@@ -100,6 +100,50 @@ describe("Anthropic limit-reached notification", () => {
 		).toEqual([0, 1, 1]);
 	});
 
+	it("tells scoped limits without a model id apart by display name, in any order", async () => {
+		const scoped = (name: string, percent: number) => ({
+			kind: "weekly",
+			group: "model",
+			percent,
+			resets_at: resetsAt(),
+			scope: { model: { id: null, display_name: name } },
+			is_active: true,
+		});
+		const withLimits = (...limits: unknown[]) => ({
+			...reading(10, 50),
+			limits,
+		});
+		expect(
+			await pollSequence("anthropic", [
+				withLimits(scoped("Fable", 100), scoped("Opus", 50)),
+				withLimits(scoped("Opus", 50), scoped("Fable", 100)),
+				withLimits(scoped("Opus", 100), scoped("Fable", 100)),
+			]),
+		).toEqual([0, 0, 1]);
+	});
+
+	it("counts scoped limits with no identity at all, so another one reaching 100% fires", async () => {
+		const anonymous = (percent: number) => ({
+			kind: "weekly",
+			group: "model",
+			percent,
+			resets_at: resetsAt(),
+			scope: null,
+			is_active: true,
+		});
+		const withLimits = (...limits: unknown[]) => ({
+			...reading(10, 50),
+			limits,
+		});
+		expect(
+			await pollSequence("anthropic", [
+				withLimits(anonymous(100), anonymous(50)),
+				withLimits(anonymous(50), anonymous(100)),
+				withLimits(anonymous(100), anonymous(100)),
+			]),
+		).toEqual([0, 0, 1]);
+	});
+
 	it("does not fire on the first reading, with nothing to compare", async () => {
 		expect(await pollSequence("anthropic", [reading(100, 100)])).toEqual([0]);
 	});
