@@ -108,12 +108,11 @@ function digestToUuid(digest: Buffer): string {
 	const hex = bytes.toString("hex");
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-// Model used by the on-demand usage probe (on-demand-fetch.ts). This MUST be a
-// CURRENTLY-SERVED Codex model: retired slugs get a 400 from the backend, which
-// silently breaks usage sampling ("Codex returned no usage headers (status
-// 400)"). gpt-5-codex was retired and caused exactly that — keep this pinned to
-// the cheapest currently-served model.
-export const CODEX_PING_MODEL = "gpt-5.4-mini";
+// Model the Codex native ping (window priming) sends. It MUST be a model
+// ChatGPT-account Codex currently serves and one that accepts reasoning effort
+// "none": anything else gets a 400 and the ping silently primes nothing. Pinned
+// with its evidence in native-ping.test.ts.
+export const CODEX_PING_MODEL = "gpt-5.6-sol";
 
 // Structured (non-text) tool_result blocks larger than this are replaced with a
 // size marker: replaying megabyte payloads (e.g. base64 documents) into every

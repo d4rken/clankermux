@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
+import { chatGptBackendReasoningEffortsFor } from "../backend-params";
 import { CODEX_USER_AGENT, CODEX_VERSION } from "../client-identity";
 import { sendCodexNativePing } from "../native-ping";
 import { CODEX_PING_MODEL } from "../provider";
@@ -59,6 +60,17 @@ describe("sendCodexNativePing", () => {
 		expect(headers.get("User-Agent")).toBe(CODEX_USER_AGENT);
 		expect(headers.get("originator")).toBe("codex_exec");
 		expect(headers.get("Accept")).toBe("text/event-stream");
+	});
+
+	// The ping must use a model ChatGPT-account Codex serves, at an effort that
+	// model accepts. gpt-5.4-mini failed every scheduled prime until
+	// 2026-09-24 with: "The 'gpt-5.4-mini' model is not supported when using
+	// Codex with a ChatGPT account." GPT-6 models reject effort "none".
+	it("pings with a ChatGPT-account model that accepts the effort it sends", () => {
+		expect(CODEX_PING_MODEL).toBe("gpt-5.6-sol");
+		expect(chatGptBackendReasoningEffortsFor(CODEX_PING_MODEL)).toContain(
+			"none",
+		);
 	});
 
 	it("returns a header-only bodyless response and cancels the upstream body", async () => {
