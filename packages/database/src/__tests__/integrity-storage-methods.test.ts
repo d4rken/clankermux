@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 
 // ---------------------------------------------------------------------------
 // Minimal DatabaseOperations stand-in exposing only the methods under test.
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { tempDbTracker } from "@clankermux/test-support";
 import { DatabaseOperations } from "../database-operations";
+import { StrategyRepository } from "../repositories/strategy.repository";
 
 const tmpDb = tempDbTracker("test-integrity");
 
@@ -283,6 +284,112 @@ describe("DatabaseOperations.recordIntegrityResult skipped outcomes", () => {
 		const done = dbOps.getIntegrityStatus();
 		expect(done.status).toBe("ok");
 		expect(done.lastFullSkipReason).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Tests: the full check's outcome survives a restart
+// ---------------------------------------------------------------------------
+
+describe("DatabaseOperations full integrity outcome across restarts", () => {
+	let path: string;
+	let first: DatabaseOperations;
+	let second: DatabaseOperations | null;
+
+	beforeEach(() => {
+		path = tmpDb.next();
+		first = new DatabaseOperations(path);
+		second = null;
+	});
+
+	afterEach(async () => {
+		try {
+			await first?.dispose();
+			await second?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
+	});
+
+	async function restart(): Promise<DatabaseOperations> {
+		await first.dispose();
+		second = new DatabaseOperations(path);
+		await second.restoreFullIntegrityStatus();
+		return second;
+	}
+
+	it("restores a full ok verdict and its timestamps", async () => {
+		await first.recordIntegrityResult("full", "ok");
+		const recorded = first.getIntegrityStatus();
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.lastFullCheckAt).toBe(recorded.lastFullCheckAt);
+		expect(s.lastFullAttemptAt).toBe(recorded.lastFullAttemptAt);
+		expect(s.status).toBe("ok");
+		expect(s.runningKind).toBeNull();
+	});
+
+	it("restores a full corrupt verdict as corrupt", async () => {
+		await first.recordIntegrityResult("full", "corrupt", "row 7 missing");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.status).toBe("corrupt");
+		expect(s.lastFullError).toBe("row 7 missing");
+		expect(s.lastError).toBe("row 7 missing");
+	});
+
+	it("restores a skipped attempt without losing the prior verdict", async () => {
+		await first.recordIntegrityResult("full", "ok");
+		const verified = first.getIntegrityStatus().lastFullCheckAt;
+		await first.recordIntegrityResult("full", "skipped", "worker timed out");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.lastFullCheckAt).toBe(verified);
+		expect(s.lastFullSkipReason).toBe("worker timed out");
+		expect(s.lastFullAttemptAt).toBeGreaterThanOrEqual(verified ?? 0);
+		expect(s.status).toBe("skipped");
+	});
+
+	it("keeps the newest full outcome when an earlier write is still pending", async () => {
+		const realSet = StrategyRepository.prototype.set;
+		let calls = 0;
+		const set = spyOn(StrategyRepository.prototype, "set").mockImplementation(
+			async function (
+				this: StrategyRepository,
+				...args: Parameters<StrategyRepository["set"]>
+			) {
+				// The first write stalls, as behind a busy writer, until the
+				// second record has been made.
+				if (++calls === 1) await Bun.sleep(30);
+				return realSet.apply(this, args);
+			},
+		);
+
+		const older = first.recordIntegrityResult("full", "corrupt", "stale");
+		const newer = first.recordIntegrityResult("full", "ok");
+		await Promise.all([older, newer]);
+		set.mockRestore();
+		expect(calls).toBeGreaterThanOrEqual(2);
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullResult).toBe("ok");
+		expect(s.status).toBe("ok");
+	});
+
+	it("does not persist quick results", async () => {
+		await first.recordIntegrityResult("quick", "corrupt", "quick only");
+
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastQuickResult).toBeNull();
+		expect(s.status).toBe("unchecked");
+	});
+
+	it("leaves a database with no stored full check unchecked", async () => {
+		const s = (await restart()).getIntegrityStatus();
+		expect(s.lastFullAttemptAt).toBeNull();
+		expect(s.status).toBe("unchecked");
 	});
 });
 
