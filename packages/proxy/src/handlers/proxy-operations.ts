@@ -26,6 +26,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
+	anthropicBankedResetCache,
 	DevinSessionAuthenticationError,
 	devinClient,
 	getDevinRequestProvenance,
@@ -2317,12 +2318,18 @@ export async function proxyWithAccount(
 					// same family, and earned this same 429 — eighteen times in seven
 					// minutes on 2026-08-17. Family-scoped by construction, so it does
 					// not undo the deliberate no-account-wide-cooldown decision below.
-					recordFamilyWeeklyExhausted(
-						account.id,
-						familyExclusion.family,
-						familyExclusion.resetAt,
-						now,
-					);
+					if (
+						recordFamilyWeeklyExhausted(
+							account.id,
+							familyExclusion.family,
+							familyExclusion.resetAt,
+							now,
+						) &&
+						account.provider === "anthropic"
+					) {
+						// A limit just reached is when a banked reset can be claimed.
+						anthropicBankedResetCache.markDue(account.id);
+					}
 					completeRateLimitProbe(
 						account,
 						"abandoned",

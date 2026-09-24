@@ -54,6 +54,7 @@ import {
 } from "@clankermux/openai-responses-adapter";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
+	anthropicBankedResetCache,
 	canFetchAnthropicProfile,
 	extractCodexIdentity,
 	fetchAnthropicProfile,
@@ -524,6 +525,10 @@ function startUsagePollingWithRefresh(
 								),
 							logger,
 						}),
+					onAnthropicLimitReached:
+						account.provider === "anthropic"
+							? (accountId) => anthropicBankedResetCache.markDue(accountId)
+							: undefined,
 					getLastActivityMs: (accountId) =>
 						proxyContext.dbOps
 							.getAccount(accountId)

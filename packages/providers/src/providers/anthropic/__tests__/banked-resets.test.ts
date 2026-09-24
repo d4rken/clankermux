@@ -2,11 +2,15 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { CLAUDE_CLI_VERSION } from "@clankermux/core";
 import { mockFetch } from "@clankermux/test-support";
-import type { AnthropicBankedResetStatus } from "@clankermux/types";
+import type {
+	AnthropicBankedResetGrant,
+	AnthropicBankedResetStatus,
+} from "@clankermux/types";
 import { anthropicOAuthUsageHeaders } from "../../../usage-fetcher";
 import {
 	ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS,
-	ANTHROPIC_BANKED_RESET_REFRESH_MS,
+	ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS,
+	ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS,
 	ANTHROPIC_BANKED_RESET_RETRY_MS,
 	ANTHROPIC_BANKED_RESET_STATUS_ENDPOINT,
 	anthropicBankedResetCache,
@@ -534,25 +538,145 @@ describe("anthropicBankedResetCache", () => {
 		expect(anthropicBankedResetCache.get(ID)).toBeNull();
 	});
 
-	it("holds a stored status for 15 minutes", () => {
+	function parsedGrant(
+		overrides: Partial<AnthropicBankedResetGrant> = {},
+	): AnthropicBankedResetGrant {
+		return {
+			id: "g1",
+			label: null,
+			resetsTotal: 1,
+			resetsLeft: 1,
+			startsAt: null,
+			endsAt: null,
+			clears: ["seven_day"],
+			paused: false,
+			usableNow: true,
+			useRequiresLimit: true,
+			percentUsed: {},
+			blocking: [],
+			...overrides,
+		};
+	}
+
+	/** The first instant after a read at NOW at which needsRefresh is true. */
+	function readDueAfter(stored: AnthropicBankedResetStatus): number {
+		anthropicBankedResetCache.set(ID, stored, NOW);
+		let lo = 0;
+		let hi = 30 * 24 * 60 * 60_000;
+		while (lo < hi) {
+			const mid = Math.floor((lo + hi) / 2);
+			if (anthropicBankedResetCache.needsRefresh(ID, NOW + mid)) hi = mid;
+			else lo = mid + 1;
+		}
+		return lo;
+	}
+
+	const MINUTE = 60_000;
+	const HOUR = 60 * MINUTE;
+	const DAY = 24 * HOUR;
+
+	it("holds a stored status with no instant ahead for 6 hours", () => {
 		anthropicBankedResetCache.set(ID, status(), NOW);
 		expect(anthropicBankedResetCache.get(ID)).toEqual({
 			status: status(),
 			fetchedAt: NOW,
 		});
+		expect(readDueAfter(status())).toBe(ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS);
+		expect(ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS).toBe(6 * HOUR);
+		expect(ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS).toBe(15 * MINUTE);
+	});
+
+	it("re-reads after half the time to the nearest deadline, within 15 minutes to 6 hours", () => {
+		const endingIn = (ms: number) =>
+			status({
+				grants: [parsedGrant({ endsAt: NOW + ms })],
+				nextGrantId: "g1",
+			});
+		expect(readDueAfter(endingIn(29 * DAY))).toBe(6 * HOUR);
+		expect(readDueAfter(endingIn(50 * MINUTE))).toBe(25 * MINUTE);
+		expect(readDueAfter(endingIn(20 * MINUTE))).toBe(15 * MINUTE);
+		// The cooldown is nearer than the grant's end.
 		expect(
-			anthropicBankedResetCache.needsRefresh(
-				ID,
-				NOW + ANTHROPIC_BANKED_RESET_REFRESH_MS - 1,
+			readDueAfter(
+				status({
+					grants: [parsedGrant({ endsAt: NOW + 29 * DAY })],
+					nextGrantId: "g1",
+					cooldownUntil: NOW + 2 * HOUR,
+				}),
 			),
-		).toBe(false);
+		).toBe(1 * HOUR);
+		// A grant that becomes usable later: its start is the deadline.
 		expect(
-			anthropicBankedResetCache.needsRefresh(
-				ID,
-				NOW + ANTHROPIC_BANKED_RESET_REFRESH_MS,
+			readDueAfter(
+				status({
+					grants: [
+						parsedGrant({
+							startsAt: NOW + 3 * HOUR,
+							endsAt: NOW + 29 * DAY,
+							usableNow: false,
+						}),
+					],
+				}),
 			),
-		).toBe(true);
-		expect(ANTHROPIC_BANKED_RESET_REFRESH_MS).toBe(15 * 60_000);
+		).toBe(90 * MINUTE);
+		// The nearest deadline across grants wins.
+		expect(
+			readDueAfter(
+				status({
+					grants: [
+						parsedGrant({ id: "g1", endsAt: NOW + 29 * DAY }),
+						parsedGrant({ id: "g2", endsAt: NOW + 4 * HOUR }),
+					],
+					nextGrantId: "g1",
+				}),
+			),
+		).toBe(2 * HOUR);
+	});
+
+	it("counts the weekly reset as a deadline", () => {
+		expect(
+			readDueAfter(
+				status({
+					grants: [parsedGrant({ endsAt: NOW + 29 * DAY })],
+					nextGrantId: "g1",
+					weeklyResetsAt: NOW + 3 * HOUR,
+				}),
+			),
+		).toBe(90 * MINUTE);
+	});
+
+	it("re-reads once weekly_resets_at passes", () => {
+		const weeklyResetsAt = NOW + 20 * MINUTE;
+		anthropicBankedResetCache.set(ID, status({ weeklyResetsAt }), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 15 * MINUTE)).toBe(
+			true,
+		);
+		anthropicBankedResetCache.set(
+			ID,
+			status({ weeklyResetsAt }),
+			NOW + 15 * MINUTE,
+		);
+		expect(anthropicBankedResetCache.needsRefresh(ID, weeklyResetsAt - 1)).toBe(
+			false,
+		);
+		expect(anthropicBankedResetCache.needsRefresh(ID, weeklyResetsAt)).toBe(
+			true,
+		);
+	});
+
+	it("does not count instants already past at read time as deadlines", () => {
+		expect(
+			readDueAfter(
+				status({
+					grants: [
+						parsedGrant({ startsAt: NOW - DAY, endsAt: NOW + 29 * DAY }),
+					],
+					nextGrantId: "g1",
+					cooldownUntil: NOW - MINUTE,
+					weeklyResetsAt: NOW - MINUTE,
+				}),
+			),
+		).toBe(6 * HOUR);
 	});
 
 	it("retries a failed read after 5 minutes, with or without a stored status", () => {
@@ -574,7 +698,7 @@ describe("anthropicBankedResetCache", () => {
 		// A stored status past its TTL whose re-read just failed waits out the
 		// retry interval instead of re-reading on every call.
 		anthropicBankedResetCache.set(ID, status(), NOW);
-		const failedAt = NOW + ANTHROPIC_BANKED_RESET_REFRESH_MS;
+		const failedAt = NOW + ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS;
 		anthropicBankedResetCache.markAttempt(ID, failedAt);
 		expect(anthropicBankedResetCache.needsRefresh(ID, failedAt + 1)).toBe(
 			false,
@@ -591,25 +715,7 @@ describe("anthropicBankedResetCache", () => {
 		const endsAt = NOW + 60_000;
 		anthropicBankedResetCache.set(
 			ID,
-			status({
-				grants: [
-					{
-						id: "g1",
-						label: null,
-						resetsTotal: 1,
-						resetsLeft: 1,
-						startsAt: null,
-						endsAt,
-						clears: ["seven_day"],
-						paused: false,
-						usableNow: true,
-						useRequiresLimit: true,
-						percentUsed: {},
-						blocking: [],
-					},
-				],
-				nextGrantId: "g1",
-			}),
+			status({ grants: [parsedGrant({ endsAt })], nextGrantId: "g1" }),
 			NOW,
 		);
 		expect(anthropicBankedResetCache.needsRefresh(ID, endsAt - 1)).toBe(false);
@@ -650,36 +756,84 @@ describe("anthropicBankedResetCache", () => {
 				status({ eligible: false, ineligibleReason: reason }),
 				NOW,
 			);
+			// A grant starting sooner does not shorten it.
 			expect(
-				anthropicBankedResetCache.needsRefresh(
-					ID,
-					NOW + ANTHROPIC_BANKED_RESET_REFRESH_MS,
+				readDueAfter(
+					status({
+						eligible: false,
+						ineligibleReason: reason,
+						grants: [parsedGrant({ startsAt: NOW + 2 * HOUR })],
+					}),
 				),
-			).toBe(false);
-			expect(
-				anthropicBankedResetCache.needsRefresh(
-					ID,
-					NOW + ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS,
-				),
-			).toBe(true);
+			).toBe(ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS);
 		}
 		expect(ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS).toBe(6 * 60 * 60_000);
 	});
 
-	it("keeps the 15-minute TTL for other ineligible reasons", () => {
+	it("keeps the 15-minute TTL for other ineligible reasons, whatever their deadlines", () => {
 		for (const reason of ["cli_version", "unavailable", "unknown"] as const) {
-			anthropicBankedResetCache.set(
-				ID,
-				status({ eligible: false, ineligibleReason: reason }),
-				NOW,
-			);
 			expect(
-				anthropicBankedResetCache.needsRefresh(
-					ID,
-					NOW + ANTHROPIC_BANKED_RESET_REFRESH_MS,
+				readDueAfter(status({ eligible: false, ineligibleReason: reason })),
+			).toBe(ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS);
+			expect(
+				readDueAfter(
+					status({
+						eligible: false,
+						ineligibleReason: reason,
+						grants: [parsedGrant({ endsAt: NOW + 29 * DAY })],
+						cooldownUntil: NOW + 2 * HOUR,
+					}),
 				),
-			).toBe(true);
+			).toBe(15 * MINUTE);
 		}
+	});
+
+	it("markDue makes a fresh status due for exactly one read", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(false);
+		anthropicBankedResetCache.markDue(ID);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(true);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 2)).toBe(true);
+		anthropicBankedResetCache.set(ID, status(), NOW + 3);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 4)).toBe(false);
+	});
+
+	it("keeps a due mark through a failed read, behind the retry interval", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.markAttempt(ID, NOW + 1);
+		expect(
+			anthropicBankedResetCache.needsRefresh(
+				ID,
+				NOW + ANTHROPIC_BANKED_RESET_RETRY_MS,
+			),
+		).toBe(false);
+		expect(
+			anthropicBankedResetCache.needsRefresh(
+				ID,
+				NOW + 1 + ANTHROPIC_BANKED_RESET_RETRY_MS,
+			),
+		).toBe(true);
+	});
+
+	it("keeps a due mark set while a read was in flight", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		const markAtStart = anthropicBankedResetCache.dueMark(ID);
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW + 1, markAtStart);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 2)).toBe(true);
+
+		// A read that started after the mark clears it.
+		const next = anthropicBankedResetCache.dueMark(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW + 3, next);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 4)).toBe(false);
+	});
+
+	it("drops a due mark on delete", () => {
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.delete(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(false);
 	});
 
 	it("forgets an account on delete", () => {

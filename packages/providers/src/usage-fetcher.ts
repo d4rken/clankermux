@@ -201,6 +201,8 @@ export interface PollingPolicy {
 	onAnthropicUsageObservation?: (
 		observation: AnthropicUsageObservation,
 	) => Promise<void>;
+	/** An Anthropic reading shows a window at its limit that the last one did not. */
+	onAnthropicLimitReached?: (accountId: string) => void;
 }
 
 /**
@@ -972,6 +974,59 @@ function grokSubscriptionCapacity(
  * representative utilization: it caps the web tools, and no account-wide
  * cooldown is ever written from it.
  */
+/**
+ * How many windows under each key are at 100% or more. A scoped `limits[]`
+ * entry is keyed by its model id, else its display name; entries with neither
+ * share a key and are only counted, as nothing pairs one with its own earlier
+ * reading.
+ */
+function anthropicWindowsAtLimit(
+	data: AnthropicUsageData,
+): Map<string, number> {
+	const out = new Map<string, number>();
+	const add = (key: string, utilization: number | null | undefined) => {
+		const atLimit =
+			typeof utilization === "number" &&
+			Number.isFinite(utilization) &&
+			utilization >= 100;
+		out.set(key, (out.get(key) ?? 0) + (atLimit ? 1 : 0));
+	};
+	add("five_hour", data.five_hour?.utilization);
+	add("seven_day", data.seven_day?.utilization);
+	add("seven_day_oauth_apps", data.seven_day_oauth_apps?.utilization);
+	add("seven_day_opus", data.seven_day_opus?.utilization);
+	add("seven_day_sonnet", data.seven_day_sonnet?.utilization);
+	for (const entry of data.limits ?? []) {
+		const model = entry.scope?.model;
+		const identity =
+			model?.id != null
+				? `id=${model.id}`
+				: model?.display_name != null
+					? `name=${model.display_name}`
+					: "";
+		add(
+			`limit:${entry.kind}:${entry.group}:${entry.scope?.surface ?? ""}:${identity}`,
+			entry.percent,
+		);
+	}
+	return out;
+}
+
+/**
+ * True when `next` has more windows at 100% or more under some key than
+ * `previous` had: one that was below its limit, or absent, has reached it.
+ */
+export function anthropicReachedNewLimit(
+	previous: AnthropicUsageData,
+	next: AnthropicUsageData,
+): boolean {
+	const before = anthropicWindowsAtLimit(previous);
+	for (const [key, count] of anthropicWindowsAtLimit(next)) {
+		if (count > (before.get(key) ?? 0)) return true;
+	}
+	return false;
+}
+
 function collectZaiObservedWindows(usage: ZaiUsageData): ObservedWindow[] {
 	const out: ObservedWindow[] = [];
 	for (const window of [usage.tokens_limit, usage.tokens_limit_weekly]) {
@@ -1230,6 +1285,10 @@ class UsageCache {
 	>();
 	private anthropicObservationTasks = new Map<string, Promise<void>>();
 	private anthropicObservationVersions = new Map<string, number>();
+	private anthropicLimitReachedCallbacks = new Map<
+		string,
+		(accountId: string) => void
+	>();
 	private usagePermissionDeniedCallbacks = new Map<
 		string,
 		(accountId: string) => void
@@ -1653,6 +1712,12 @@ class UsageCache {
 				policy.onAnthropicUsageObservation,
 			);
 		else this.anthropicUsageObservers.delete(accountId);
+		if (policy?.onAnthropicLimitReached)
+			this.anthropicLimitReachedCallbacks.set(
+				accountId,
+				policy.onAnthropicLimitReached,
+			);
+		else this.anthropicLimitReachedCallbacks.delete(accountId);
 		this.anthropicObservationVersions.set(accountId, 0);
 		this.anthropicObservationTasks.delete(accountId);
 
@@ -1934,6 +1999,7 @@ class UsageCache {
 			this.anthropicUsageObservers.delete(accountId);
 			this.anthropicObservationTasks.delete(accountId);
 			this.anthropicObservationVersions.delete(accountId);
+			this.anthropicLimitReachedCallbacks.delete(accountId);
 			this.tokenRefreshFailureHandlers.delete(accountId);
 			this.usagePermissionDeniedAccounts.delete(accountId);
 			this.hasSucceededOnce.delete(accountId);
@@ -2437,6 +2503,20 @@ class UsageCache {
 							"anthropic",
 							callback,
 						);
+					const limitReached =
+						this.anthropicLimitReachedCallbacks.get(accountId);
+					const previous = this.cache.get(accountId);
+					if (
+						limitReached &&
+						(provider ?? "anthropic") === "anthropic" &&
+						previous &&
+						anthropicReachedNewLimit(
+							previous.data as AnthropicUsageData,
+							result.data as AnthropicUsageData,
+						)
+					) {
+						limitReached(accountId);
+					}
 					this.writeFetchedEntry(accountId, result.data);
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,

@@ -82,20 +82,23 @@ function pruneExpired(now: number): void {
  * would expire on its first read. One further out than any real weekly window
  * is discarded too: it can only have come from a misread header, and honouring
  * it would outlast every window it might have meant.
+ *
+ * True when this recorded an exhaustion the memo did not already hold.
  */
 export function recordFamilyWeeklyExhausted(
 	accountId: string,
 	family: ModelFamily,
 	resetAt: number,
 	now: number,
-): void {
-	if (!Number.isFinite(resetAt) || resetAt <= now) return;
-	if (resetAt > now + MAX_MEMO_HORIZON_MS) return;
+): boolean {
+	if (!Number.isFinite(resetAt) || resetAt <= now) return false;
+	if (resetAt > now + MAX_MEMO_HORIZON_MS) return false;
 	pruneExpired(now);
-	if (memo.size >= MAX_MEMO_ENTRIES && !memo.has(keyFor(accountId, family))) {
-		return;
-	}
-	memo.set(keyFor(accountId, family), { resetAt, observedAt: now });
+	const key = keyFor(accountId, family);
+	const known = memo.has(key);
+	if (memo.size >= MAX_MEMO_ENTRIES && !known) return false;
+	memo.set(key, { resetAt, observedAt: now });
+	return !known;
 }
 
 /**

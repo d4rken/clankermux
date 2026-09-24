@@ -31,6 +31,30 @@ describe("family-weekly memo", () => {
 		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT, "fable", NOW)).toBeNull();
 	});
 
+	it("reports whether a record is new: a live entry's repeat is not, an expired one's is", () => {
+		expect(
+			recordFamilyWeeklyExhausted(ACCOUNT, "fable", NOW + 4 * HOUR, NOW),
+		).toBe(true);
+		expect(
+			recordFamilyWeeklyExhausted(ACCOUNT, "fable", NOW + 5 * HOUR, NOW + 1),
+		).toBe(false);
+		expect(
+			recordFamilyWeeklyExhausted(ACCOUNT, "opus", NOW + 4 * HOUR, NOW + 1),
+		).toBe(true);
+		expect(
+			recordFamilyWeeklyExhausted(
+				ACCOUNT,
+				"fable",
+				NOW + 12 * HOUR,
+				NOW + 5 * HOUR,
+			),
+		).toBe(true);
+		// Discarded, so nothing was recorded.
+		expect(recordFamilyWeeklyExhausted(OTHER_ACCOUNT, "fable", NOW, NOW)).toBe(
+			false,
+		);
+	});
+
 	it("remembers a recorded exhaustion until its reset time", () => {
 		recordFamilyWeeklyExhausted(ACCOUNT, "fable", NOW + 4 * HOUR, NOW);
 
