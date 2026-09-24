@@ -384,16 +384,46 @@ describe("Chat ingress responses", () => {
 			expect(await r.json()).toEqual({ error: { ...overflow, param: null } });
 		});
 
-		it("answers an upstream server error in JSON mode as a bad gateway", async () => {
-			const r = await run(
-				input,
-				failing({ type: "api_error", message: "upstream broke" }),
-			);
-			expect(r.status).toBe(502);
-			expect((await r.json()).error).toMatchObject({
-				type: "api_error",
-				code: "api_error",
+		// A 401 or 403 would tell the client its own key is bad; the failure
+		// was the upstream's.
+		for (const [type, status] of [
+			["api_error", 502],
+			["timeout_error", 502],
+			["authentication_error", 502],
+			["permission_error", 502],
+			["billing_error", 502],
+			["not_found_error", 502],
+			["not_an_anthropic_type", 502],
+			["request_too_large", 413],
+			["rate_limit_error", 429],
+			["overloaded_error", 529],
+		] as const)
+			it(`answers ${type} in JSON mode with ${status}`, async () => {
+				const r = await run(input, failing({ type, message: "upstream says" }));
+				expect(r.status).toBe(status);
+				expect((await r.json()).error).toMatchObject({ type, code: type });
 			});
+
+		it("gives a JSON-mode 429 or 529 the default Retry-After, and nothing else one", async () => {
+			for (const [type, retryAfter] of [
+				["rate_limit_error", "30"],
+				["overloaded_error", "30"],
+				["api_error", null],
+				["invalid_request_error", null],
+			] as const) {
+				const r = await run(input, failing({ type, message: "later" }));
+				expect(r.headers.get("retry-after")).toBe(retryAfter);
+			}
+		});
+
+		it("caps the type and code it passes on", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				failing({ type: "t".repeat(500), code: "c".repeat(500), message: "m" }),
+			);
+			const { error } = streamedError(await r.text());
+			expect(error.type).toBe("t".repeat(128));
+			expect(error.code).toBe("c".repeat(128));
 		});
 
 		it("uses its type as the code when it has none", async () => {
