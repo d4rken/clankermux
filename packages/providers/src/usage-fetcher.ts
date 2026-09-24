@@ -48,6 +48,7 @@ import {
 	headerWindowsFromClaims,
 	isUsageViewFresh,
 	mergeHeaderWindows,
+	reportsPollOnlyAxis,
 	type UsageView,
 } from "./usage-header-view";
 import {
@@ -161,6 +162,11 @@ export const UI_STALE_HORIZON_MS = 30 * 60_000;
  * ACTIVITY_RECENCY_MS: how recently an account must have served a request to be
  * treated as "active" (poll at the configured active cadence). 15 minutes.
  *
+ * HEADER-FED: an active account whose routing view is being kept fresh by its
+ * own responses' 5h/7d headers polls at the idle cadence anyway (see
+ * `UsageCache.isHeaderFed`); the poll then only has to keep the view's base and
+ * the windows headers do not carry within the cache TTL.
+ *
  * MAX_BACKOFF_MS: ceiling for the exponential failure backoff (unchanged).
  */
 const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
@@ -236,6 +242,9 @@ export interface PollingPolicy {
  * {@link computePollDelay} clamps the final DELAY of both branches to the same
  * ceiling. At that ceiling idle simply equals active, so the "idle is never
  * faster than active" rule still holds while the schedule stays inside the TTL.
+ *
+ * `headerFresh` selects the idle cadence whatever the activity, marked
+ * `headerFed` so the schedule can tell it from a cold account.
  */
 export function computeDemandAwareInterval(
 	opts: Pick<
@@ -245,7 +254,8 @@ export function computeDemandAwareInterval(
 	lastActivityMs: number | null,
 	activeIntervalMs: number,
 	now: number,
-): { intervalMs: number; isIdle: boolean } {
+	headerFresh = false,
+): { intervalMs: number; isIdle: boolean; headerFed?: true } {
 	if (!opts.demandAware) return { intervalMs: activeIntervalMs, isIdle: false };
 	const idleIntervalMs = Math.max(
 		activeIntervalMs,
@@ -254,6 +264,8 @@ export function computeDemandAwareInterval(
 			USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
 		),
 	);
+	if (headerFresh)
+		return { intervalMs: idleIntervalMs, isIdle: true, headerFed: true };
 	const recencyMs = opts.activityRecencyMs ?? ACTIVITY_RECENCY_MS;
 	if (lastActivityMs != null && now - lastActivityMs < recencyMs) {
 		return { intervalMs: activeIntervalMs, isIdle: false };
@@ -295,11 +307,13 @@ export function computePollDelay(params: {
 	activityRecencyMs?: number;
 	activeIntervalMs: number;
 	lastActivityMs: number | null;
+	/** The account's routing view is being kept fresh by response headers. */
+	headerFresh?: boolean;
 	failures: number;
 	retryAfterMs: number | null;
 	now: number;
 	jitterFraction: number;
-}): { delayMs: number; isIdle: boolean } {
+}): { delayMs: number; isIdle: boolean; headerFed?: true } {
 	if (params.retryAfterMs != null)
 		return { delayMs: params.retryAfterMs, isIdle: false };
 	if (params.failures > 0) {
@@ -311,11 +325,12 @@ export function computePollDelay(params: {
 			isIdle: false,
 		};
 	}
-	const { intervalMs, isIdle } = computeDemandAwareInterval(
+	const { intervalMs, isIdle, headerFed } = computeDemandAwareInterval(
 		params,
 		params.lastActivityMs,
 		params.activeIntervalMs,
 		params.now,
+		params.headerFresh,
 	);
 	const fraction = isIdle
 		? idleJitterFraction(params.jitterFraction)
@@ -326,7 +341,7 @@ export function computePollDelay(params: {
 	const delayMs = params.demandAware
 		? Math.min(jittered, USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS)
 		: jittered;
-	return { delayMs, isIdle };
+	return headerFed ? { delayMs, isIdle, headerFed } : { delayMs, isIdle };
 }
 
 export interface UsageWindow {
@@ -1408,7 +1423,12 @@ class UsageCache {
 	// whether an idle-sleeping account should be re-armed to the active cadence.
 	private pollSchedule = new Map<
 		string,
-		{ wakeAt: number; isIdle: boolean; activeBaseMs: number }
+		{
+			wakeAt: number;
+			isIdle: boolean;
+			activeBaseMs: number;
+			headerFed?: true;
+		}
 	>();
 	private anthropicReadStore: AnthropicUsageReadStore | null = null;
 	// Kept across stopPolling: restarting an account's poller must not reopen
@@ -1576,15 +1596,18 @@ class UsageCache {
 		// it to negative-only for the IDLE cadence (which must never overshoot its
 		// refresh-before-expiry cap).
 		const jitterFraction = (Math.random() - 0.5) * 0.4;
-		const { delayMs, isIdle } = computePollDelay({
+		const now = Date.now();
+		const { delayMs, isIdle, headerFed } = computePollDelay({
 			demandAware: policy?.demandAware,
 			idleIntervalMs: policy?.idleIntervalMs,
 			activityRecencyMs: policy?.activityRecencyMs,
 			activeIntervalMs: activeBaseMs,
 			lastActivityMs,
+			headerFresh:
+				!!policy?.demandAware && this.isHeaderFed(accountId, activeBaseMs, now),
 			failures,
 			retryAfterMs,
-			now: Date.now(),
+			now,
 			jitterFraction,
 		});
 
@@ -1678,7 +1701,39 @@ class UsageCache {
 			wakeAt: Date.now() + delayMs,
 			isIdle,
 			activeBaseMs,
+			...(headerFed ? { headerFed } : {}),
 		});
+	}
+
+	/**
+	 * Whether the account's routing view stays fresh from its own responses'
+	 * headers without this poll: 5h and 7d both taken from a header reading
+	 * observed within the routing bound (twice the active cadence, as for
+	 * `usage_poll_interval_ms`), and no poll-only axis reported that would still
+	 * need the poll inside that bound. A view with no poll base in the cache TTL
+	 * does not count, so a failing poll keeps its own cadence.
+	 */
+	private isHeaderFed(
+		accountId: string,
+		activeBaseMs: number,
+		now: number,
+	): boolean {
+		const stored = this.headerWindows.get(accountId);
+		if (!stored?.fiveHour || !stored.sevenDay) return false;
+		const boundMs = 2 * activeBaseMs;
+		if (
+			now - stored.fiveHour.observedAtMs > boundMs ||
+			now - stored.sevenDay.observedAtMs > boundMs
+		) {
+			return false;
+		}
+		const view = this.peekUsageView(accountId, "anthropic", now);
+		return (
+			view !== null &&
+			view.fiveHour.source !== "poll" &&
+			view.sevenDay.source !== "poll" &&
+			!reportsPollOnlyAxis(view.data)
+		);
 	}
 
 	/**
@@ -1709,6 +1764,9 @@ class UsageCache {
 		// Only re-arm when currently sleeping on an IDLE timer. An active or
 		// backoff timer is left untouched (backoff must keep winning).
 		if (!sched?.isIdle) return;
+		// Fresh response headers already keep routing current: stay on the idle
+		// timer. Once they lapse, activity re-arms as for any idle account.
+		if (this.isHeaderFed(accountId, sched.activeBaseMs, now)) return;
 		// Skip if the pending idle wake is already within ~one active interval
 		// (incl. max +20% jitter) — re-arming could only push it further out.
 		if (sched.wakeAt - now <= sched.activeBaseMs * 1.2) return;

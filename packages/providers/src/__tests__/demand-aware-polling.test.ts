@@ -735,3 +735,173 @@ describe("demand-aware cadence — noteActivity re-arm (integration)", () => {
 		});
 	});
 });
+
+describe("demand-aware cadence — header-fed accounts", () => {
+	it("fresh header readings pick the idle cadence despite recent activity", () => {
+		const r = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: ACTIVE,
+			lastActivityMs: NOW - 1_000,
+			headerFresh: true,
+			failures: 0,
+			retryAfterMs: null,
+			now: NOW,
+			jitterFraction: 0,
+		});
+		expect(r).toEqual({ delayMs: IDLE_CAP, isIdle: true, headerFed: true });
+	});
+
+	it("failure backoff and retry-after still win over header freshness", () => {
+		const base = {
+			demandAware: true,
+			activeIntervalMs: ACTIVE,
+			lastActivityMs: NOW,
+			headerFresh: true,
+			now: NOW,
+			jitterFraction: 0,
+		};
+		expect(
+			computePollDelay({ ...base, failures: 1, retryAfterMs: null }),
+		).toEqual({ delayMs: ACTIVE * 2, isIdle: false });
+		expect(computePollDelay({ ...base, failures: 0, retryAfterMs: 5 })).toEqual(
+			{ delayMs: 5, isIdle: false },
+		);
+	});
+
+	it("a non-demand-aware poller ignores header freshness", () => {
+		expect(computeDemandAwareInterval({}, null, ACTIVE, NOW, true)).toEqual({
+			intervalMs: ACTIVE,
+			isIdle: false,
+		});
+	});
+
+	describe("integration", () => {
+		// The header freshness bound is twice the active cadence, so these
+		// intervals keep a header fresh for 600ms.
+		const ACTIVE_MS = 300;
+		const HOUR = 3_600_000;
+		const fiveReset = Math.floor((Date.now() + 2 * HOUR) / 1000) * 1000;
+		const weekReset = Math.floor((Date.now() + 90 * HOUR) / 1000) * 1000;
+		const ids: string[] = [];
+		let fetchCalls = 0;
+		let fetchSpy: ReturnType<typeof spyOn>;
+
+		beforeEach(() => {
+			fetchCalls = 0;
+			fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+				mockFetch(async () => {
+					fetchCalls++;
+					return new Response(
+						JSON.stringify({
+							five_hour: {
+								utilization: 10,
+								resets_at: new Date(fiveReset).toISOString(),
+							},
+							seven_day: {
+								utilization: 20,
+								resets_at: new Date(weekReset).toISOString(),
+							},
+						}),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					);
+				}),
+			);
+		});
+		afterEach(() => {
+			for (const id of ids.splice(0)) usageCache.stopPolling(id);
+			fetchSpy.mockRestore();
+		});
+
+		const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		const schedule = (id: string) =>
+			(
+				usageCache as unknown as {
+					pollSchedule: Map<string, { isIdle: boolean; headerFed?: boolean }>;
+				}
+			).pollSchedule.get(id);
+
+		function start(label: string): string {
+			const id = `hdr-cadence-${label}-${Date.now()}`;
+			ids.push(id);
+			usageCache.startPolling(
+				id,
+				async () => "fake-token",
+				"anthropic",
+				ACTIVE_MS,
+				null,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ demandAware: true, idleIntervalMs: 100_000 },
+			);
+			return id;
+		}
+
+		function feed(id: string): void {
+			usageCache.recordUsageHeaders(
+				id,
+				usageCache.usageHeaderEpoch(id),
+				[
+					{
+						claim: "5h",
+						status: "allowed",
+						utilization: 0.1,
+						resetMs: fiveReset,
+						surpassedThreshold: null,
+					},
+					{
+						claim: "7d",
+						status: "allowed",
+						utilization: 0.2,
+						resetMs: weekReset,
+						surpassedThreshold: null,
+					},
+				],
+				Date.now(),
+			);
+		}
+
+		it("fresh headers + repeated activity keep the idle cadence", async () => {
+			const id = start("fresh");
+			feed(id);
+			await wait(40);
+			expect(fetchCalls).toBe(1);
+			expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+
+			for (let i = 0; i < 4; i++) {
+				feed(id);
+				usageCache.noteActivity(id);
+				await wait(150);
+			}
+			// The active cadence would have polled at least once by now.
+			expect(fetchCalls).toBe(1);
+			expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+		});
+
+		it("activity re-arms the active cadence once the headers go stale", async () => {
+			const id = start("stale");
+			feed(id);
+			await wait(40);
+			expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+
+			await wait(700);
+			expect(fetchCalls).toBe(1);
+			usageCache.noteActivity(id);
+			await wait(500);
+			expect(fetchCalls).toBeGreaterThan(1);
+		});
+
+		it("without header readings, activity re-arms the active cadence", async () => {
+			const id = start("none");
+			await wait(40);
+			expect(schedule(id)).toMatchObject({ isIdle: true });
+			expect(schedule(id)?.headerFed).toBeUndefined();
+
+			usageCache.noteActivity(id);
+			await wait(500);
+			expect(fetchCalls).toBeGreaterThan(1);
+		});
+	});
+});
