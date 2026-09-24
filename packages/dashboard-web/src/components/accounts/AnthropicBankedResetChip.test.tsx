@@ -225,12 +225,12 @@ describe("AnthropicBankedResetChip — auto-apply tooltip line", () => {
 		[
 			false,
 			true,
-			"Auto-apply armed (weekly limit) — the next banked reset is applied at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
+			"Auto-apply armed (weekly limit) — the next banked reset is applied at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 72 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
 		],
 		[
 			true,
 			true,
-			"Auto-apply armed (expiry + weekly limit) — the next banked reset is applied shortly before it expires, and at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
+			"Auto-apply armed (expiry + weekly limit) — the next banked reset is applied shortly before it expires, and at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 72 hours away, or when it would expire before that limit lifts. Manual pauses conserve banked resets.",
 		],
 	])("expiry=%s weekly=%s reads '%s'", (expiry, weekly, line) => {
 		expect(

@@ -98,7 +98,7 @@ const AUTO_APPLY_EXPIRY_ANTHROPIC: AccountPolicyDescriptor = {
 const AUTO_APPLY_WEEKLY_ANTHROPIC: AccountPolicyDescriptor = {
 	...AUTO_APPLY_WEEKLY_LABELS,
 	description:
-		"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 12 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+		"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 72 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 };
 
 const AUTO_APPLY_EXPIRY_CODEX: AccountPolicyDescriptor = {

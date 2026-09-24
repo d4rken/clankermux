@@ -63,7 +63,7 @@ function grant(
 		resetsTotal: 2,
 		resetsLeft: 2,
 		startsAt: null,
-		endsAt: NOW + 3 * DAY,
+		endsAt: NOW + 8 * DAY,
 		clears: ["seven_day"],
 		paused: false,
 		usableNow: true,
@@ -106,7 +106,7 @@ function decide(
 		status: inputs.status === undefined ? status() : inputs.status,
 		autoApplyCooldownAnchorAt: inputs.anchor ?? null,
 		rearmAt: inputs.rearmAt ?? null,
-		windowResetsAt: inputs.windowResetsAt ?? { seven_day: NOW + 2 * DAY },
+		windowResetsAt: inputs.windowResetsAt ?? { seven_day: NOW + 4 * DAY },
 		now: NOW,
 	});
 }
@@ -328,23 +328,26 @@ describe("decideBankedResetAction", () => {
 			) => {
 				const decision = decide({
 					account: weeklyOnly,
-					status: status({ weeklyResetsAt }),
+					status: status({
+						weeklyResetsAt,
+						grants: [grant({ endsAt: NOW + 5 * DAY })],
+					}),
 					windowResetsAt,
 				});
 				return decision.action === "claim" && decision.cause === "weekly-limit"
 					? decision.lastChance
 					: undefined;
 			};
-			expect(lastChance({ seven_day: NOW + 4 * DAY })).toBe(true);
-			expect(lastChance({ seven_day: NOW + 2 * DAY })).toBe(false);
-			expect(lastChance({}, NOW + 4 * DAY)).toBe(true);
+			expect(lastChance({ seven_day: NOW + 6 * DAY })).toBe(true);
+			expect(lastChance({ seven_day: NOW + 4 * DAY })).toBe(false);
+			expect(lastChance({}, NOW + 6 * DAY)).toBe(true);
 			expect(lastChance({})).toBeUndefined();
 		});
 
 		describe("minimum gain", () => {
 			const HOUR = 60 * 60_000;
 
-			it("keeps the grant when the exhausted window resets on its own within 12h", () => {
+			it("keeps the grant when the exhausted window resets on its own within 72h", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
@@ -361,16 +364,40 @@ describe("decideBankedResetAction", () => {
 				).toEqual({ action: "skip", reason: "reset-soon" });
 			});
 
-			it("claims when the natural reset is 13h away", () => {
+			it("keeps a grant that outlives a natural reset 71h away", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
-						windowResetsAt: { seven_day: NOW + 13 * HOUR },
+						windowResetsAt: { seven_day: NOW + 71 * HOUR },
+					}),
+				).toEqual({ action: "skip", reason: "reset-soon" });
+			});
+
+			it("claims on the last chance when the natural reset is 71h away", () => {
+				expect(
+					decide({
+						account: weeklyOnly,
+						windowResetsAt: { seven_day: NOW + 71 * HOUR },
+						status: status({ grants: [grant({ endsAt: NOW + 70 * HOUR })] }),
 					}),
 				).toMatchObject({
 					action: "claim",
 					cause: "weekly-limit",
-					resetsAt: NOW + 13 * HOUR,
+					resetsAt: NOW + 71 * HOUR,
+					lastChance: true,
+				});
+			});
+
+			it("claims when the natural reset is exactly 72h away", () => {
+				expect(
+					decide({
+						account: weeklyOnly,
+						windowResetsAt: { seven_day: NOW + 72 * HOUR },
+					}),
+				).toMatchObject({
+					action: "claim",
+					cause: "weekly-limit",
+					resetsAt: NOW + 72 * HOUR,
 					lastChance: false,
 				});
 			});
@@ -407,7 +434,7 @@ describe("decideBankedResetAction", () => {
 					account: weeklyOnly,
 					windowResetsAt: {
 						seven_day: NOW + 2 * HOUR,
-						seven_day_opus: NOW + 20 * HOUR,
+						seven_day_opus: NOW + 4 * DAY,
 					},
 					status: status({
 						exhausted: ["seven_day", "seven_day_opus"],
@@ -417,11 +444,11 @@ describe("decideBankedResetAction", () => {
 				expect(decision).toMatchObject({
 					action: "claim",
 					windows: ["seven_day", "seven_day_opus"],
-					resetsAt: NOW + 20 * HOUR,
+					resetsAt: NOW + 4 * DAY,
 				});
 			});
 
-			it("claims on the last chance even when the window resets within 12h", () => {
+			it("claims on the last chance even when the window resets within 72h", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
@@ -591,7 +618,7 @@ function harness(
 							five_hour: { utilization: 10, resets_at: null },
 							seven_day: {
 								utilization: 100,
-								resets_at: new Date(NOW + DAY).toISOString(),
+								resets_at: new Date(NOW + 4 * DAY).toISOString(),
 							},
 						} as UsageData)
 					: options.usage,
@@ -638,7 +665,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 	});
 
 	it("never claims at the weekly limit on the expiry toggle alone", async () => {
-		// At its weekly limit, the grant three days from its use-by date.
+		// At its weekly limit, the grant eight days from its use-by date.
 		expect(decide({ account: expiryOnly })).toEqual({
 			action: "skip",
 			reason: "not-near-expiry",
@@ -708,7 +735,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				exhausted: [],
 				grants: [grant({ clears: ["seven_day_opus"] })],
 			}),
-			memo: { opus: NOW + DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.forcedReads).toBe(1);
@@ -720,7 +747,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 			accounts: [weeklyOnly],
 			usage: null,
 			status: status({ exhausted: [] }),
-			memo: { opus: NOW + DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.forcedReads).toBe(0);
@@ -756,7 +783,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		expect(h.forcedReads).toBe(0);
 	});
 
-	it("forces no read when the at-limit window resets on its own within 12h", async () => {
+	it("forces no read when the at-limit window resets on its own within 72h", async () => {
 		const h = harness({
 			accounts: [weeklyOnly],
 			usage: {
@@ -772,8 +799,25 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		expect(h.poolChecks).toEqual([]);
 	});
 
+	it("forces no read and dispatches nothing when the at-limit window resets 71h away", async () => {
+		const h = harness({
+			accounts: [weeklyOnly],
+			usage: {
+				five_hour: { utilization: 10, resets_at: null },
+				seven_day: {
+					utilization: 100,
+					resets_at: new Date(NOW + 71 * 60 * 60_000).toISOString(),
+				},
+			} as UsageData,
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(0);
+		expect(h.claims).toEqual([]);
+		expect(h.dispatched).toEqual([]);
+	});
+
 	it("forces no read during the weekly cooldown, last chance included", async () => {
-		for (const endsAt of [NOW + 3 * DAY, NOW + DAY / 2]) {
+		for (const endsAt of [NOW + 8 * DAY, NOW + DAY / 2]) {
 			const h = harness({
 				accounts: [weeklyOnly],
 				status: status({ grants: [grant({ endsAt })] }),
@@ -811,7 +855,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				exhausted: ["seven_day_opus"],
 				grants: [grant({ clears: ["seven_day_opus"] })],
 			}),
-			memo: { opus: NOW + 3 * DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.claims).toEqual([{ grantId: "g1", cause: "weekly-limit" }]);
@@ -1056,7 +1100,7 @@ function fleet(members: FleetMember[]) {
 				seven_day: {
 					utilization: 100,
 					resets_at: new Date(
-						byId.get(id)?.weeklyResetsAt ?? NOW + DAY,
+						byId.get(id)?.weeklyResetsAt ?? NOW + 4 * DAY,
 					).toISOString(),
 				},
 			}) as UsageData,
@@ -1090,9 +1134,9 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("spends one grant per tick, on the account whose window resets latest", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
-			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
-			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 3 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 6 * DAY },
+			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 5 * DAY },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
 		expect(f.dispatched.map(({ accountId }) => accountId)).toEqual(["b"]);
@@ -1113,14 +1157,14 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("falls through to the next account when the first fails its confirmation", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
 			{
 				id: "b",
 				account: weeklyOnly,
-				weeklyResetsAt: NOW + 4 * DAY,
+				weeklyResetsAt: NOW + 6 * DAY,
 				forcedReadFails: true,
 			},
-			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 3 * DAY },
+			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 5 * DAY },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
 		expect(f.forcedReads).toEqual(["b", "c"]);
@@ -1129,8 +1173,8 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("still claims an expiring grant on another account in the same tick", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
-			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 6 * DAY },
 			{ id: "e", account: expiryOnly, status: expiring },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
@@ -1240,7 +1284,7 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 // ---------------------------------------------------------------------------
 
 function usageWith(windows: Record<string, number>): UsageData {
-	const at = new Date(NOW + DAY).toISOString();
+	const at = new Date(NOW + 4 * DAY).toISOString();
 	const data: Record<string, unknown> = {
 		five_hour: { utilization: 0, resets_at: at },
 		seven_day: { utilization: windows.seven_day ?? 0, resets_at: at },

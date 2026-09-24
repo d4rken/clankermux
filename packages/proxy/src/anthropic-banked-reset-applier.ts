@@ -90,7 +90,7 @@ export const BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS = 60 * 60 * 1_000;
  * claim gains only the time until the cleared window would reset anyway. It
  * needs at least this much of it, unless the grant expires first.
  */
-export const BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS = 12 * 60 * 60 * 1_000;
+export const BANKED_RESET_WEEKLY_LIMIT_MIN_GAIN_MS = 72 * 60 * 60 * 1_000;
 /**
  * At most one forced status read per account in this span. The read shares
  * the usage poll's rate-limit bucket, and an account held at its limit (a

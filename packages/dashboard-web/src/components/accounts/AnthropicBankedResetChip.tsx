@@ -41,7 +41,7 @@ import {
 
 /** Completes "the next banked reset is applied …" in the chip tooltip. */
 const ANTHROPIC_WEEKLY_RULE =
-	"at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 12 hours away, or when it would expire before that limit lifts";
+	"at a weekly limit it clears when no other Claude account can serve and the account's natural weekly reset is at least 72 hours away, or when it would expire before that limit lifts";
 
 /**
  * Claim rejections the same request can never turn around: bad input, a
