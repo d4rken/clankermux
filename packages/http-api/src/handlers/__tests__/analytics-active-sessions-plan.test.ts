@@ -8,8 +8,8 @@
  * benchmark in the suite would be flaky.
  *
  * The fixture deliberately seeds MISLEADING `sqlite_stat1` rows, reproducing
- * the live database's state — `request_routing` recorded at 71 rows from when
- * the table was new, against 362k real ones — because that is what makes a
+ * the live database's lagging stats — `request_routing` recorded at 71 rows
+ * against 362k real ones when this was written — because that is what makes a
  * plain `JOIN` plan as `SCAN rr` plus a per-row probe into `requests`.
  */
 
@@ -219,5 +219,21 @@ describe("activeSessions query plan — range=all", () => {
 		const plan = planFor(only(sqls, BY_ACCOUNT));
 
 		expect(outerTableAlias(plan)).toBe("rr");
+	});
+
+	// The total and the buckets both read session_requests. Inlined into each
+	// UNION branch, the all-history join ran twice (48s on the live DB,
+	// 2026-09-24); materialized, it runs once.
+	it("joins requests to request_routing once for the total and the buckets", async () => {
+		const sqls = await capturedSql({ range: "all" });
+		const plan = planFor(only(sqls, SESSION_CTE));
+
+		expect(plan).toContain("MATERIALIZE session_requests");
+		const reads = (alias: string) =>
+			plan.filter((detail) =>
+				new RegExp(`^(?:SCAN|SEARCH) ${alias}\\b`).test(detail),
+			);
+		expect(reads("rr")).toHaveLength(1);
+		expect(reads("r")).toHaveLength(1);
 	});
 });

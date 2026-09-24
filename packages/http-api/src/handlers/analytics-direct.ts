@@ -1447,14 +1447,16 @@ export function createAnalyticsHandler(context: APIContext) {
 			// emitted first in the SQL string) precede the two bucket placeholders
 			// (the bucket sub-select comes after the CTE).
 			//
+			// The CTE is MATERIALIZED: both the total and the buckets read it, and
+			// inlined into each UNION branch the join ran twice.
+			//
 			// JOIN ORDER IS PINNED, CONDITIONALLY. `CROSS JOIN` in SQLite is not a
 			// cartesian product: it is the documented way to force the left table to
 			// be the outer loop. Only that freedom differs — the join order written
 			// in the text is identical either way.
 			//
-			// Why pin: the live DB's `sqlite_stat1` records
-			// `request_routing|idx_request_routing_affinity|71 24 1` — 71 rows, stale
-			// from when the table was new, against 362k real ones. On those numbers a
+			// Why pin: the live DB's `sqlite_stat1` lags `request_routing`'s real
+			// size (71 rows against 362k when this was written). On such numbers a
 			// plain JOIN is planned as `SCAN rr` plus a per-row probe into `requests`,
 			// which is the wrong way round once a selective `r.timestamp > ?` exists.
 			//
@@ -1474,7 +1476,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						sessions: number;
 					}>(
 						`
-				WITH session_requests AS (
+				WITH session_requests AS MATERIALIZED (
 					SELECT
 						rr.affinity_key_hash AS hash,
 						rr.affinity_scope AS scope,
