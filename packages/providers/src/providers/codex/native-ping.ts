@@ -9,6 +9,79 @@ import {
 const log = new Logger("CodexNativePing");
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const ERROR_BODY_LOG_BYTES = 2048;
+const ERROR_BODY_READ_TIMEOUT_MS = 1_000;
+
+/**
+ * Up to `limit` bytes of `body` as text, giving up after `timeoutMs` (the
+ * request's abort timer is already cleared once headers arrive).
+ */
+async function readBodyPrefix(
+	body: ReadableStream<Uint8Array> | null,
+	limit: number,
+	timeoutMs: number,
+): Promise<string> {
+	if (!body) return "";
+	const reader = body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	let bytes = 0;
+	// Cancelling the reader settles a pending read as done.
+	const timer = setTimeout(() => {
+		reader.cancel().catch(() => {});
+	}, timeoutMs);
+	try {
+		while (bytes < limit) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const slice = value.subarray(0, limit - bytes);
+			bytes += slice.byteLength;
+			text += decoder.decode(slice, { stream: true });
+		}
+		return text + decoder.decode();
+	} catch (error) {
+		return `(error body unreadable: ${String(error)})`;
+	} finally {
+		clearTimeout(timer);
+		reader.releaseLock();
+	}
+}
+
+/**
+ * Cancel the ping's body. We rely on the server honoring stream cancellation
+ * to avoid generating further tokens; the abort-after-headers cancel is the cap.
+ */
+async function cancelBody(
+	body: ReadableStream<Uint8Array> | null,
+): Promise<void> {
+	try {
+		await body?.cancel();
+	} catch (error) {
+		log.debug("Codex native ping response body cancel threw:", error);
+	}
+}
+
+async function logRejection(
+	body: ReadableStream<Uint8Array> | null,
+	status: number,
+	statusText: string,
+): Promise<void> {
+	// Runs detached; the body is cancelled whether or not reading or logging fails.
+	try {
+		const reason = await readBodyPrefix(
+			body,
+			ERROR_BODY_LOG_BYTES,
+			ERROR_BODY_READ_TIMEOUT_MS,
+		);
+		log.warn(`Codex native ping rejected: ${status} ${statusText} ${reason}`);
+	} catch (error) {
+		log.warn(
+			`Codex native ping rejected: ${status} ${statusText} (error body unreadable: ${String(error)})`,
+		);
+	} finally {
+		await cancelBody(body);
+	}
+}
 
 /**
  * Pure transport for the minimal Codex `/responses` "ping". Builds the tiny
@@ -88,12 +161,13 @@ export async function sendCodexNativePing(
 	const status = upstream.status;
 	const statusText = upstream.statusText;
 
-	// Drain/cancel the body. We rely on the server honoring stream cancellation
-	// to avoid generating further tokens; the abort-after-headers cancel is the cap.
-	try {
-		await upstream.body?.cancel();
-	} catch (error) {
-		log.debug("Codex native ping response body cancel threw:", error);
+	if (upstream.ok) {
+		await cancelBody(upstream.body);
+	} else {
+		// A rejected ping carries its reason only in the body, and callers see
+		// just the status. Logged in the background: the scheduler primes
+		// accounts one after another and must not wait on a slow error body.
+		void logRejection(upstream.body, status, statusText).catch(() => {});
 	}
 
 	return new Response(null, {

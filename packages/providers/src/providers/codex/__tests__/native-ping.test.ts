@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import { CODEX_USER_AGENT, CODEX_VERSION } from "../client-identity";
 import { sendCodexNativePing } from "../native-ping";
 import { CODEX_PING_MODEL } from "../provider";
@@ -125,6 +126,138 @@ describe("sendCodexNativePing", () => {
 			"1774700000",
 		);
 		expect(response.body).toBeNull();
+	});
+
+	describe("rejected ping", () => {
+		let warn: ReturnType<typeof spyOn>;
+
+		beforeEach(() => {
+			warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			warn.mockRestore();
+		});
+
+		/** The rejection is logged in the background; wait for it. */
+		async function until(condition: () => boolean): Promise<void> {
+			const deadline = Date.now() + 3_000;
+			while (!condition()) {
+				if (Date.now() > deadline) throw new Error("condition never held");
+				await Bun.sleep(5);
+			}
+		}
+
+		it("logs the upstream error body with the status", async () => {
+			const error = JSON.stringify({
+				detail: "The 'gpt-5.4-mini' model is not supported.",
+			});
+			globalThis.fetch = makeMockFetch(
+				new Response(error, { status: 400, statusText: "Bad Request" }),
+			);
+
+			const response = await sendCodexNativePing(
+				"test-token",
+				"https://example.test/codex/responses",
+			);
+
+			expect(response.status).toBe(400);
+			expect(response.body).toBeNull();
+			await until(() => warn.mock.calls.length > 0);
+			expect(warn).toHaveBeenCalledTimes(1);
+			const logged = warn.mock.calls[0].join(" ");
+			expect(logged).toContain("400");
+			expect(logged).toContain(error);
+		});
+
+		it("reads at most a bounded prefix of the error body, then cancels it", async () => {
+			let cancelled = false;
+			const chunk = new TextEncoder().encode("x".repeat(1024));
+			const endless = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.enqueue(chunk);
+				},
+				cancel() {
+					cancelled = true;
+				},
+			});
+			globalThis.fetch = makeMockFetch(
+				new Response(endless, { status: 400, statusText: "Bad Request" }),
+			);
+
+			await sendCodexNativePing(
+				"test-token",
+				"https://example.test/codex/responses",
+			);
+
+			await until(() => cancelled);
+			const logged = warn.mock.calls[0].join(" ");
+			expect(logged.length).toBeLessThan(4 * 1024);
+		});
+
+		it("returns without waiting for an error body that never arrives, then gives it up", async () => {
+			let cancelled = false;
+			const stalled = new ReadableStream<Uint8Array>({
+				cancel() {
+					cancelled = true;
+				},
+			});
+			globalThis.fetch = makeMockFetch(
+				new Response(stalled, { status: 400, statusText: "Bad Request" }),
+			);
+
+			const startedAt = Date.now();
+			const response = await sendCodexNativePing(
+				"test-token",
+				"https://example.test/codex/responses",
+			);
+
+			expect(response.status).toBe(400);
+			expect(Date.now() - startedAt).toBeLessThan(200);
+			expect(cancelled).toBe(false);
+
+			await until(() => cancelled);
+			expect(warn).toHaveBeenCalledTimes(1);
+		});
+
+		it("still logs the status when the error body cannot be read", async () => {
+			const response = new Response("locked", {
+				status: 400,
+				statusText: "Bad Request",
+			});
+			response.body?.getReader();
+			globalThis.fetch = makeMockFetch(response);
+
+			const result = await sendCodexNativePing(
+				"test-token",
+				"https://example.test/codex/responses",
+			);
+
+			expect(result.status).toBe(400);
+			await until(() => warn.mock.calls.length > 0);
+			expect(warn.mock.calls[0].join(" ")).toContain("400");
+		});
+
+		it("does not read or log a successful ping's body", async () => {
+			let pulled = false;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					pull() {
+						pulled = true;
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			globalThis.fetch = makeMockFetch(new Response(body, { status: 200 }));
+
+			await sendCodexNativePing(
+				"test-token",
+				"https://example.test/codex/responses",
+			);
+
+			expect(pulled).toBe(false);
+			expect(warn).not.toHaveBeenCalled();
+		});
 	});
 
 	it("throws before issuing any fetch on an empty token", async () => {
