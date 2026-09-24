@@ -115,9 +115,21 @@ destinations.
 
 What differs from a direct request:
 
-* The client's system prompt is not sent; Claude Code's own is. Its
-  instructions and project context (pi's `AGENTS.md`, for example) do not
-  reach the model.
+* Claude Code's own system prompt is sent. For pi, the parts of pi's prompt
+  that carry your instructions are appended to it: project context files
+  (`AGENTS.md`), the skills list, `APPEND_SYSTEM.md`, the working directory,
+  and a replaced prompt (`SYSTEM.md`, a subagent persona) in place of pi's
+  own opening. pi's tool list, rules and documentation pointers are left out,
+  and so are sections extensions add. pi must declare its prompt layout with
+  `x-clankermux-pi-prompt: 0.87`. A pi turn is refused with a 400 rather
+  than sent without your instructions when the header is missing or names a
+  version ClankerMux has no fixtures for (`sdk_bridge_prompt_unsupported`),
+  when the prompt does not parse as that layout, for example because a
+  context file contains `</project_context>` (`sdk_bridge_prompt_malformed`),
+  or when the kept text contains pi's own opening line or both
+  `docs/custom-provider.md` and `docs/packages.md`, which subscription
+  accounts answer with a 400 (`sdk_bridge_prompt_refused`).
+  Other clients' system prompts are not sent.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
   `tool_choice` that forces or forbids tool use are rejected with a 400 naming
   the field, unless another destination in the route can serve the request.
