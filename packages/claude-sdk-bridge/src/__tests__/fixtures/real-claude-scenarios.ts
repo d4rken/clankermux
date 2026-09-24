@@ -630,7 +630,10 @@ await scenario("deadContinuation", async () => {
 			],
 		});
 		// What the proxy does with results no live query waits on: a start.
-		const continued = shortLived.findContinuation([String(tu?.id)]);
+		const continued = shortLived.findContinuation([String(tu?.id)], {
+			apiKeyId: "key-1",
+			model: MODEL,
+		});
 		const from = mock.requests.length;
 		const r2 = await turn(history, {}, undefined, shortLived);
 		await settled(shortLived);

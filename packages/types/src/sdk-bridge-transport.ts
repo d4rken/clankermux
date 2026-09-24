@@ -131,10 +131,13 @@ export interface SdkBridgeTransport {
 	}): Promise<Response>;
 	/**
 	 * The live parked turn waiting on these tool_result ids now, if any. Ids a
-	 * turn handed out in an earlier round do not select it.
+	 * turn handed out in an earlier round do not select it. When the caller's
+	 * own turn waits on them but the caller names another model, that turn is
+	 * torn down and this answers null, so the request starts a fresh turn.
 	 */
 	findContinuation(
 		toolUseIds: readonly string[],
+		caller: { apiKeyId: string | null; model: string },
 	): { turnId: string; ownerApiKeyId: string | null } | null;
 	continueTurn(input: {
 		turnId: string;
@@ -202,6 +205,8 @@ export interface SdkBridgeInnerOutcome {
 	requestId: string;
 	status: number;
 	errorType: string | null;
+	/** The error's `code`, when it had one: a nonblank string, capped. */
+	errorCode?: string | null;
 	message: string | null;
 	retryAfter: string | null;
 	accountId: string | null;

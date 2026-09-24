@@ -385,6 +385,25 @@ export class AnthropicBankedResetEventRepository extends BaseRepository<Anthropi
 		return row?.latest ?? null;
 	}
 
+	/**
+	 * Claims that restored an account's windows (`reset` or `already_used`),
+	 * manual and auto, resolved at or after `sinceMs`, every account, newest
+	 * first.
+	 */
+	async findRestoringSince(
+		sinceMs: number,
+	): Promise<AnthropicBankedResetEventRow[]> {
+		return this.query<AnthropicBankedResetEventRow>(
+			`
+			SELECT * FROM anthropic_banked_reset_events
+			WHERE status IN ('reset','already_used')
+				AND resolved_at IS NOT NULL AND resolved_at >= ?
+			ORDER BY resolved_at DESC, id DESC
+		`,
+			[sinceMs],
+		);
+	}
+
 	/** Rows still owing a verdict, every account, oldest first. */
 	async findRecoveryPending(): Promise<AnthropicBankedResetEventRow[]> {
 		return this.query<AnthropicBankedResetEventRow>(

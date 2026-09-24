@@ -25,6 +25,7 @@ import {
 	ANTHROPIC_BANKED_RESET_REPLAY_WINDOW_MS,
 	type AnthropicBankedResetClaimResult,
 	type AnthropicBankedResetStatus,
+	type AnthropicBankedResetWindow,
 } from "@clankermux/types";
 import {
 	ANTHROPIC_BANKED_RESET_READ_SPACING_MS,
@@ -70,6 +71,11 @@ let usageReading: unknown = null;
 let refetchSucceeds = true;
 /** Ledger methods replaced on the coordinator's dbOps, e.g. to make one throw. */
 let dbOverrides: Partial<DatabaseOperations>;
+let windowsRestoredImpl: (
+	accountId: string,
+	cleared: AnthropicBankedResetWindow[],
+	claimStartedAt: number,
+) => Promise<void>;
 
 const fetchStatus = mock(() => statusImpl());
 const claim = mock(
@@ -82,6 +88,13 @@ const claim = mock(
 const fetchProfile = mock(() => profileImpl());
 const getValidAccessToken = mock(async () => "token");
 const refreshAccessTokenSafe = mock(async () => "fresh-token");
+const onWindowsRestored = mock(
+	(
+		accountId: string,
+		cleared: AnthropicBankedResetWindow[],
+		claimStartedAt: number,
+	) => windowsRestoredImpl(accountId, cleared, claimStartedAt),
+);
 const usage = {
 	fenceAndRefetch: mock(async (_id: string) => refetchSucceeds),
 	get: mock((_id: string) => usageReading as never),
@@ -193,6 +206,7 @@ function coordinator(
 			usage,
 			now: () => clock,
 			readGate,
+			onWindowsRestored,
 		},
 	);
 }
@@ -223,7 +237,9 @@ beforeEach(() => {
 	usageReading = reading(10, 10);
 	refetchSucceeds = true;
 	dbOverrides = {};
+	windowsRestoredImpl = async () => {};
 	for (const fn of [
+		onWindowsRestored,
 		fetchStatus,
 		claim,
 		fetchProfile,
@@ -1164,6 +1180,114 @@ describe("the overage pause a reset owes a verdict", () => {
 		expect(resumedAny()).toBe(false);
 		releaseRefetch?.(false);
 		await pending;
+	});
+});
+
+describe("the cooldown a restoring claim lifts", () => {
+	it("awaits the callback after resolving the ledger row, with the answer's cleared windows and the claim's start", async () => {
+		let postedAt: number | undefined;
+		claimImpl = async () => {
+			postedAt = clock;
+			clock += 5_000;
+			return claimResult({ cleared: ["five_hour", "seven_day"] });
+		};
+		let ledgerAtCallback: string | undefined;
+		let finished = false;
+		windowsRestoredImpl = async () => {
+			ledgerAtCallback = (
+				await realDbOps.getAnthropicBankedResetEventByRequestId(
+					ACCOUNT_ID,
+					"req-lift-cooldown",
+				)
+			)?.status;
+			await Bun.sleep(1);
+			finished = true;
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-lift-cooldown",
+		});
+		expect(finished).toBe(true);
+		expect(ledgerAtCallback).toBe("reset");
+		expect(postedAt).toBe(NOW);
+		expect(onWindowsRestored.mock.calls).toEqual([
+			[ACCOUNT_ID, ["five_hour", "seven_day"], NOW],
+		]);
+		expect(outcome.status === "completed" && outcome.ledgerStatus).toBe(
+			"reset",
+		);
+	});
+
+	it("is called for already_used on a replayed request id", async () => {
+		claimImpl = async () =>
+			claimResult({
+				result: "error",
+				httpStatus: null,
+				errorMessage: "timeout",
+			});
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-replay-lift",
+		});
+		expect(onWindowsRestored).not.toHaveBeenCalled();
+
+		clock = NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS;
+		claimImpl = async () => claimResult({ result: "already_used" });
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-replay-lift",
+		});
+		expect(onWindowsRestored.mock.calls).toEqual([
+			[ACCOUNT_ID, ["seven_day"], NOW + BANKED_RESET_CLAIM_RETRY_MIN_MS],
+		]);
+	});
+
+	it("is not called for an answer that restores nothing", async () => {
+		const answers: Array<Partial<AnthropicBankedResetClaimResult>> = [
+			{ result: "not_limited", reason: "not_limited", cleared: [] },
+			{ result: "cooldown", cleared: [], cooldownUntil: NOW + 60_000 },
+			{ result: "ineligible", reason: "tier", cleared: [] },
+			{ result: "already_used", cleared: [] },
+			{ result: "unavailable", resetsLeft: null, cleared: [] },
+			{ result: "rate_limited", httpStatus: 429, retryAfterMs: 60_000 },
+		];
+		for (const [i, answer] of answers.entries()) {
+			claimImpl = async () => claimResult(answer);
+			// One account per answer: an unanswered claim stays pending.
+			const outcome = await coordinator().claim(`acct-no-lift-${i}`, {
+				grantId: "g1",
+				requestId: `req-no-lift-${i}`,
+			});
+			expect(outcome.status).toBe("completed");
+		}
+		expect(claim).toHaveBeenCalledTimes(answers.length);
+		expect(onWindowsRestored).not.toHaveBeenCalled();
+	});
+
+	it("a throwing callback does not fail the claim", async () => {
+		windowsRestoredImpl = async () => {
+			throw new Error("database is locked");
+		};
+		const outcome = await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-lift-throws",
+		});
+		expect(onWindowsRestored).toHaveBeenCalledTimes(1);
+		expect(outcome.status).toBe("completed");
+		if (outcome.status !== "completed") return;
+		expect(outcome.ledgerStatus).toBe("reset");
+		expect(outcome.result?.result).toBe("reset");
+	});
+
+	it("runs while an overage pause stays until the post-claim reading", async () => {
+		Object.assign(baseAccount, OVERAGE_PAUSED);
+		refetchSucceeds = false;
+		await coordinator().claim(ACCOUNT_ID, {
+			grantId: "g1",
+			requestId: "req-lift-paused",
+		});
+		expect(onWindowsRestored).toHaveBeenCalledTimes(1);
+		expect(resumedAny()).toBe(false);
 	});
 });
 

@@ -49,8 +49,10 @@ function seed(
 		const insReq = db.prepare(
 			"INSERT INTO requests (id, timestamp, method, path) VALUES (?, ?, 'POST', '/v1/m')",
 		);
+		// `bytes` as the payload writer records it; an unmeasured row would be
+		// deleted one per batch.
 		const insPay = db.prepare(
-			"INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)",
+			"INSERT INTO request_payloads (id, json, timestamp, bytes) VALUES (?, ?, ?, 2)",
 		);
 		// Child tables that rely on ON DELETE CASCADE (no own age/orphan pass).
 		const insRouting = db.prepare(

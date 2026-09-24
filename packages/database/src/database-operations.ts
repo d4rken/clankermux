@@ -455,6 +455,68 @@ export interface RetentionStorageUsage {
 	types: StorageUsageType[];
 }
 
+/** `strategies` row holding the last full integrity check's outcome. */
+const FULL_INTEGRITY_STRATEGY = "integrity:full";
+
+interface StoredFullIntegrity {
+	checkAt: number | null;
+	result: "ok" | "corrupt" | null;
+	error: string | null;
+	attemptAt: number | null;
+	skipReason: string | null;
+}
+
+/** A stored row with any field of the wrong type is ignored whole. */
+function parseStoredFullIntegrity(
+	config: Record<string, unknown>,
+): StoredFullIntegrity | null {
+	const time = (v: unknown) =>
+		v === null || (typeof v === "number" && Number.isFinite(v));
+	const text = (v: unknown) => v === null || typeof v === "string";
+	const { checkAt, result, error, attemptAt, skipReason } = config;
+	if (
+		!time(checkAt) ||
+		!time(attemptAt) ||
+		!text(error) ||
+		!text(skipReason) ||
+		!(result === null || result === "ok" || result === "corrupt")
+	) {
+		return null;
+	}
+	return {
+		checkAt: checkAt as number | null,
+		result: result as "ok" | "corrupt" | null,
+		error: error as string | null,
+		attemptAt: attemptAt as number | null,
+		skipReason: skipReason as string | null,
+	};
+}
+
+/**
+ * Recompute the collapsed `status` by precedence:
+ *   1. corrupt (a verified corrupt verdict wins; a skip can't clear it)
+ *   2. skipped (most recent attempt of some kind couldn't complete)
+ *   3. ok (some kind has a verified ok)
+ *   4. unchecked (nothing verified, nothing skipped)
+ */
+function collapseIntegrityStatus(next: IntegrityStatus): IntegrityStatus {
+	if (next.lastFullResult === "corrupt" || next.lastQuickResult === "corrupt") {
+		return {
+			...next,
+			status: "corrupt",
+			lastError:
+				next.lastFullError ?? next.lastQuickError ?? "integrity check failed",
+		};
+	}
+	if (next.lastFullSkipReason !== null || next.lastQuickSkipReason !== null) {
+		return { ...next, status: "skipped", lastError: null };
+	}
+	if (next.lastQuickResult === "ok" || next.lastFullResult === "ok") {
+		return { ...next, status: "ok", lastError: null };
+	}
+	return { ...next, status: "unchecked", lastError: null };
+}
+
 /**
  * DatabaseOperations using Repository Pattern
  * Provides a clean, organized interface for database operations
@@ -511,6 +573,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		lastFullAttemptAt: null,
 		lastFullSkipReason: null,
 	};
+	/** Tail of the queued full-integrity writes; see persistFullIntegrity(). */
+	private fullIntegrityWrites: Promise<void> = Promise.resolve();
 	/**
 	 * Cached per-data-type storage-usage measurement, with the epoch ms it was
 	 * computed. Reused for {@link RETENTION_STORAGE_USAGE_TTL_MS}; invalidated by
@@ -885,7 +949,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		kind: "quick" | "full",
 		result: "ok" | "corrupt" | "skipped",
 		detail?: string | null,
-	): void {
+	): Promise<void> {
 		const now = Date.now();
 		const next: IntegrityStatus = {
 			...this.integrityStatus,
@@ -935,32 +999,67 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			next.lastCheckAt = now;
 		}
 
-		// Recompute collapsed status by precedence:
-		//   1. corrupt (a verified corrupt verdict wins; a skip can't clear it)
-		//   2. skipped (most recent attempt of some kind couldn't complete)
-		//   3. ok (some kind has a verified ok)
-		//   4. unchecked (nothing verified, nothing skipped)
-		const fullCorrupt = next.lastFullResult === "corrupt";
-		const quickCorrupt = next.lastQuickResult === "corrupt";
-		if (fullCorrupt || quickCorrupt) {
-			next.status = "corrupt";
-			next.lastError =
-				next.lastFullError ?? next.lastQuickError ?? "integrity check failed";
-		} else if (
-			next.lastFullSkipReason !== null ||
-			next.lastQuickSkipReason !== null
-		) {
-			next.status = "skipped";
-			next.lastError = null;
-		} else if (next.lastQuickResult === "ok" || next.lastFullResult === "ok") {
-			next.status = "ok";
-			next.lastError = null;
-		} else {
-			next.status = "unchecked";
-			next.lastError = null;
-		}
+		this.integrityStatus = collapseIntegrityStatus(next);
+		return kind === "full" ? this.persistFullIntegrity() : Promise.resolve();
+	}
 
-		this.integrityStatus = next;
+	/**
+	 * Store the full check's outcome so a restart knows when it last ran and
+	 * what it found. Never rejects: a lost write only costs an early recheck.
+	 * Writes run one after another, each taking its snapshot when it starts, so
+	 * a write held up behind a busy writer can't land an older outcome last.
+	 */
+	private persistFullIntegrity(): Promise<void> {
+		this.fullIntegrityWrites = this.fullIntegrityWrites.then(async () => {
+			const s = this.integrityStatus;
+			const stored: StoredFullIntegrity = {
+				checkAt: s.lastFullCheckAt,
+				result: s.lastFullResult,
+				error: s.lastFullError,
+				attemptAt: s.lastFullAttemptAt,
+				skipReason: s.lastFullSkipReason,
+			};
+			try {
+				await this.strategy.set(FULL_INTEGRITY_STRATEGY, { ...stored });
+			} catch (error) {
+				console.warn(
+					"Could not store the full integrity check outcome:",
+					error,
+				);
+			}
+		});
+		return this.fullIntegrityWrites;
+	}
+
+	/**
+	 * Load the last full check's outcome stored by a previous process. Leaves
+	 * the in-memory status alone when a full check already ran in this one.
+	 */
+	async restoreFullIntegrityStatus(): Promise<void> {
+		let stored: StoredFullIntegrity | null = null;
+		try {
+			const row = await this.strategy.getStrategy(FULL_INTEGRITY_STRATEGY);
+			stored = row ? parseStoredFullIntegrity(row.config) : null;
+		} catch (error) {
+			console.warn("Could not load the stored full integrity check:", error);
+		}
+		if (!stored || this.integrityStatus.lastFullAttemptAt !== null) return;
+
+		const next: IntegrityStatus = {
+			...this.integrityStatus,
+			lastFullCheckAt: stored.checkAt,
+			lastFullResult: stored.result,
+			lastFullError: stored.error,
+			lastFullAttemptAt: stored.attemptAt,
+			lastFullSkipReason: stored.skipReason,
+		};
+		if (
+			stored.checkAt !== null &&
+			stored.checkAt > (next.lastCheckAt ?? Number.NEGATIVE_INFINITY)
+		) {
+			next.lastCheckAt = stored.checkAt;
+		}
+		this.integrityStatus = collapseIntegrityStatus(next);
 	}
 
 	/**
@@ -3320,6 +3419,12 @@ OAuth tokens will need to be re-authenticated.
 		return this.anthropicBankedResetEvents.getLatestAutoApplyCooldownAnchorAt(
 			accountId,
 		);
+	}
+
+	async getRestoringAnthropicBankedResetEventsSince(
+		sinceMs: number,
+	): Promise<AnthropicBankedResetEventRow[]> {
+		return this.anthropicBankedResetEvents.findRestoringSince(sinceMs);
 	}
 
 	async getNextAnthropicBankedResetAttemptSeq(

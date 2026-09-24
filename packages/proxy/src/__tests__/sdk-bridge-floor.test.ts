@@ -668,6 +668,15 @@ describe("SDK bridge continuations", () => {
 		expect(routingAttempts(h.ctx)).toEqual([]);
 	});
 
+	it("name the key and the model as the client asked for it, for the bridge to compare with the turn's", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+
+		await run(flooredRequest({ ...toolResults, model: "sonnet" }), h.ctx);
+
+		expect(bridge.lookupCallers).toEqual([{ apiKeyId: KEY, model: "sonnet" }]);
+		expect(bridge.continues[0]?.meta.model).toBe("sonnet");
+	});
+
 	it("leave another key's turn to the bridge, which refuses and records it", async () => {
 		const { bridge, h } = await withContinuation("someone-else");
 		bridge.continueTurn = async ({ turnId, meta }) => {

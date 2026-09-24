@@ -63,7 +63,7 @@ function grant(
 		resetsTotal: 2,
 		resetsLeft: 2,
 		startsAt: null,
-		endsAt: NOW + 3 * DAY,
+		endsAt: NOW + 8 * DAY,
 		clears: ["seven_day"],
 		paused: false,
 		usableNow: true,
@@ -106,7 +106,7 @@ function decide(
 		status: inputs.status === undefined ? status() : inputs.status,
 		autoApplyCooldownAnchorAt: inputs.anchor ?? null,
 		rearmAt: inputs.rearmAt ?? null,
-		windowResetsAt: inputs.windowResetsAt ?? { seven_day: NOW + 2 * DAY },
+		windowResetsAt: inputs.windowResetsAt ?? { seven_day: NOW + 4 * DAY },
 		now: NOW,
 	});
 }
@@ -328,23 +328,26 @@ describe("decideBankedResetAction", () => {
 			) => {
 				const decision = decide({
 					account: weeklyOnly,
-					status: status({ weeklyResetsAt }),
+					status: status({
+						weeklyResetsAt,
+						grants: [grant({ endsAt: NOW + 5 * DAY })],
+					}),
 					windowResetsAt,
 				});
 				return decision.action === "claim" && decision.cause === "weekly-limit"
 					? decision.lastChance
 					: undefined;
 			};
-			expect(lastChance({ seven_day: NOW + 4 * DAY })).toBe(true);
-			expect(lastChance({ seven_day: NOW + 2 * DAY })).toBe(false);
-			expect(lastChance({}, NOW + 4 * DAY)).toBe(true);
+			expect(lastChance({ seven_day: NOW + 6 * DAY })).toBe(true);
+			expect(lastChance({ seven_day: NOW + 4 * DAY })).toBe(false);
+			expect(lastChance({}, NOW + 6 * DAY)).toBe(true);
 			expect(lastChance({})).toBeUndefined();
 		});
 
 		describe("minimum gain", () => {
 			const HOUR = 60 * 60_000;
 
-			it("keeps the grant when the exhausted window resets on its own within 12h", () => {
+			it("keeps the grant when the exhausted window resets on its own within 72h", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
@@ -361,16 +364,40 @@ describe("decideBankedResetAction", () => {
 				).toEqual({ action: "skip", reason: "reset-soon" });
 			});
 
-			it("claims when the natural reset is 13h away", () => {
+			it("keeps a grant that outlives a natural reset 71h away", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
-						windowResetsAt: { seven_day: NOW + 13 * HOUR },
+						windowResetsAt: { seven_day: NOW + 71 * HOUR },
+					}),
+				).toEqual({ action: "skip", reason: "reset-soon" });
+			});
+
+			it("claims on the last chance when the natural reset is 71h away", () => {
+				expect(
+					decide({
+						account: weeklyOnly,
+						windowResetsAt: { seven_day: NOW + 71 * HOUR },
+						status: status({ grants: [grant({ endsAt: NOW + 70 * HOUR })] }),
 					}),
 				).toMatchObject({
 					action: "claim",
 					cause: "weekly-limit",
-					resetsAt: NOW + 13 * HOUR,
+					resetsAt: NOW + 71 * HOUR,
+					lastChance: true,
+				});
+			});
+
+			it("claims when the natural reset is exactly 72h away", () => {
+				expect(
+					decide({
+						account: weeklyOnly,
+						windowResetsAt: { seven_day: NOW + 72 * HOUR },
+					}),
+				).toMatchObject({
+					action: "claim",
+					cause: "weekly-limit",
+					resetsAt: NOW + 72 * HOUR,
 					lastChance: false,
 				});
 			});
@@ -407,7 +434,7 @@ describe("decideBankedResetAction", () => {
 					account: weeklyOnly,
 					windowResetsAt: {
 						seven_day: NOW + 2 * HOUR,
-						seven_day_opus: NOW + 20 * HOUR,
+						seven_day_opus: NOW + 4 * DAY,
 					},
 					status: status({
 						exhausted: ["seven_day", "seven_day_opus"],
@@ -417,11 +444,11 @@ describe("decideBankedResetAction", () => {
 				expect(decision).toMatchObject({
 					action: "claim",
 					windows: ["seven_day", "seven_day_opus"],
-					resetsAt: NOW + 20 * HOUR,
+					resetsAt: NOW + 4 * DAY,
 				});
 			});
 
-			it("claims on the last chance even when the window resets within 12h", () => {
+			it("claims on the last chance even when the window resets within 72h", () => {
 				expect(
 					decide({
 						account: weeklyOnly,
@@ -591,7 +618,7 @@ function harness(
 							five_hour: { utilization: 10, resets_at: null },
 							seven_day: {
 								utilization: 100,
-								resets_at: new Date(NOW + DAY).toISOString(),
+								resets_at: new Date(NOW + 4 * DAY).toISOString(),
 							},
 						} as UsageData)
 					: options.usage,
@@ -635,6 +662,19 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				},
 			},
 		]);
+	});
+
+	it("never claims at the weekly limit on the expiry toggle alone", async () => {
+		// At its weekly limit, the grant eight days from its use-by date.
+		expect(decide({ account: expiryOnly })).toEqual({
+			action: "skip",
+			reason: "not-near-expiry",
+		});
+		const h = harness({ accounts: [expiryOnly] });
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(0);
+		expect(h.claims).toEqual([]);
+		expect(h.dispatched).toEqual([]);
 	});
 
 	it("forces at most one status read per account per confirm interval", async () => {
@@ -695,7 +735,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				exhausted: [],
 				grants: [grant({ clears: ["seven_day_opus"] })],
 			}),
-			memo: { opus: NOW + DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.forcedReads).toBe(1);
@@ -707,7 +747,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 			accounts: [weeklyOnly],
 			usage: null,
 			status: status({ exhausted: [] }),
-			memo: { opus: NOW + DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.forcedReads).toBe(0);
@@ -743,7 +783,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		expect(h.forcedReads).toBe(0);
 	});
 
-	it("forces no read when the at-limit window resets on its own within 12h", async () => {
+	it("forces no read when the at-limit window resets on its own within 72h", async () => {
 		const h = harness({
 			accounts: [weeklyOnly],
 			usage: {
@@ -759,8 +799,25 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 		expect(h.poolChecks).toEqual([]);
 	});
 
+	it("forces no read and dispatches nothing when the at-limit window resets 71h away", async () => {
+		const h = harness({
+			accounts: [weeklyOnly],
+			usage: {
+				five_hour: { utilization: 10, resets_at: null },
+				seven_day: {
+					utilization: 100,
+					resets_at: new Date(NOW + 71 * 60 * 60_000).toISOString(),
+				},
+			} as UsageData,
+		});
+		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
+		expect(h.forcedReads).toBe(0);
+		expect(h.claims).toEqual([]);
+		expect(h.dispatched).toEqual([]);
+	});
+
 	it("forces no read during the weekly cooldown, last chance included", async () => {
-		for (const endsAt of [NOW + 3 * DAY, NOW + DAY / 2]) {
+		for (const endsAt of [NOW + 8 * DAY, NOW + DAY / 2]) {
 			const h = harness({
 				accounts: [weeklyOnly],
 				status: status({ grants: [grant({ endsAt })] }),
@@ -798,7 +855,7 @@ describe("AnthropicBankedResetApplyScheduler", () => {
 				exhausted: ["seven_day_opus"],
 				grants: [grant({ clears: ["seven_day_opus"] })],
 			}),
-			memo: { opus: NOW + 3 * DAY },
+			memo: { opus: NOW + 4 * DAY },
 		});
 		await new AnthropicBankedResetApplyScheduler(h.deps).tick();
 		expect(h.claims).toEqual([{ grantId: "g1", cause: "weekly-limit" }]);
@@ -1043,7 +1100,7 @@ function fleet(members: FleetMember[]) {
 				seven_day: {
 					utilization: 100,
 					resets_at: new Date(
-						byId.get(id)?.weeklyResetsAt ?? NOW + DAY,
+						byId.get(id)?.weeklyResetsAt ?? NOW + 4 * DAY,
 					).toISOString(),
 				},
 			}) as UsageData,
@@ -1077,9 +1134,9 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("spends one grant per tick, on the account whose window resets latest", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
-			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
-			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 3 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 6 * DAY },
+			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 5 * DAY },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
 		expect(f.dispatched.map(({ accountId }) => accountId)).toEqual(["b"]);
@@ -1100,14 +1157,14 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("falls through to the next account when the first fails its confirmation", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
 			{
 				id: "b",
 				account: weeklyOnly,
-				weeklyResetsAt: NOW + 4 * DAY,
+				weeklyResetsAt: NOW + 6 * DAY,
 				forcedReadFails: true,
 			},
-			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 3 * DAY },
+			{ id: "c", account: weeklyOnly, weeklyResetsAt: NOW + 5 * DAY },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
 		expect(f.forcedReads).toEqual(["b", "c"]);
@@ -1116,8 +1173,8 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 
 	it("still claims an expiring grant on another account in the same tick", async () => {
 		const f = fleet([
-			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 2 * DAY },
-			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "a", account: weeklyOnly, weeklyResetsAt: NOW + 4 * DAY },
+			{ id: "b", account: weeklyOnly, weeklyResetsAt: NOW + 6 * DAY },
 			{ id: "e", account: expiryOnly, status: expiring },
 		]);
 		await new AnthropicBankedResetApplyScheduler(f.deps).tick();
@@ -1227,7 +1284,7 @@ describe("AnthropicBankedResetApplyScheduler weekly-limit ranking", () => {
 // ---------------------------------------------------------------------------
 
 function usageWith(windows: Record<string, number>): UsageData {
-	const at = new Date(NOW + DAY).toISOString();
+	const at = new Date(NOW + 4 * DAY).toISOString();
 	const data: Record<string, unknown> = {
 		five_hour: { utilization: 0, resets_at: at },
 		seven_day: { utilization: windows.seven_day ?? 0, resets_at: at },
@@ -1236,6 +1293,48 @@ function usageWith(windows: Record<string, number>): UsageData {
 		if (key !== "seven_day") data[key] = { utilization: value, resets_at: at };
 	}
 	return data as UsageData;
+}
+
+/** What getRestoringAnthropicBankedResetEventsSince selects in SQL. */
+function restoringSince(
+	ledger: AnthropicBankedResetEventRow[],
+	sinceMs: number,
+): AnthropicBankedResetEventRow[] {
+	return ledger
+		.filter(
+			(row) =>
+				(row.status === "reset" || row.status === "already_used") &&
+				row.resolved_at !== null &&
+				row.resolved_at >= sinceMs,
+		)
+		.sort((a, b) => (b.resolved_at ?? 0) - (a.resolved_at ?? 0));
+}
+
+function observation(data: UsageData, observedAtMs: number | null) {
+	return {
+		data,
+		ageMs: 0,
+		sampledAtMs: observedAtMs ?? 0,
+		observedAtMs,
+	};
+}
+
+/** A resolved claim on `accountId`: `reset`, clearing the week, 5 minutes ago. */
+function restoredRow(
+	accountId: string,
+	overrides: Partial<AnthropicBankedResetEventRow> = {},
+): AnthropicBankedResetEventRow {
+	return pendingRow({
+		id: `${accountId}:g1:1`,
+		account_id: accountId,
+		account_name: accountId,
+		request_id: `${accountId}-request`,
+		status: "reset",
+		cleared: JSON.stringify(["five_hour", "seven_day"]),
+		created_at: NOW - 6 * 60_000,
+		resolved_at: NOW - 5 * 60_000,
+		...overrides,
+	});
 }
 
 function poolScheduler(options: {
@@ -1248,6 +1347,11 @@ function poolScheduler(options: {
 		usageAfterRefresh?: UsageData | null;
 	}>;
 	keys?: Array<Partial<ApiKey>>;
+	/** Ledger rows; the restoring-claims query filters them as its SQL does. */
+	ledger?: AnthropicBankedResetEventRow[];
+	/** When each account's cached usage reading was observed. */
+	observedAt?: Record<string, number | null>;
+	pauseMarkers?: Record<string, AccountPauseMarker>;
 }) {
 	const self = account(weeklyOnly);
 	const others = options.others.map(({ account: overrides }, index) =>
@@ -1288,9 +1392,12 @@ function poolScheduler(options: {
 			getPendingAnthropicBankedResetAttempts: async () => [],
 			getAnthropicBankedResetAutoApplyCooldownAnchorAt: async () => null,
 			getAnthropicBankedResetRearmAt: async () => null,
+			getRestoringAnthropicBankedResetEventsSince: async (sinceMs) =>
+				restoringSince(options.ledger ?? [], sinceMs),
 			getAnthropicBankedResetRecoveryPending: async () => [],
 			clearAnthropicBankedResetRecoveryPending: async () => true,
-			getAccountPauseMarker: async () => null,
+			getAccountPauseMarker: async (id: string) =>
+				options.pauseMarkers?.[id] ?? null,
 			resumeAccountIfOveragePausedAt: async () => false,
 			claimAnthropicBankedResetAutoAttempt: async (input) => ({
 				id: `acct-1:${input.grantId}:1`,
@@ -1302,7 +1409,12 @@ function poolScheduler(options: {
 		coordinator: { refreshStatus: async () => ({ success: true }) },
 		usage: {
 			get: (id: string) => usageById.get(id) ?? null,
-			peekWithAge: () => null,
+			peekWithAge: (id: string) => {
+				const data = usageById.get(id);
+				return data
+					? observation(data, options.observedAt?.[id] ?? null)
+					: null;
+			},
 			refreshNow,
 		},
 		overrides: {
@@ -1484,6 +1596,429 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 		});
 		await scheduler.tick();
 		expect(dispatched).toHaveLength(1);
+	});
+});
+
+describe("createAnthropicBankedResetApplyScheduler pool gate: restoring claims", () => {
+	const MINUTE = 60_000;
+	const overagePause: AccountPauseMarker = {
+		paused: true,
+		pauseReason: "overage",
+		autoPauseOnOverageEnabled: true,
+		pauseEpoch: 3,
+		pauseChangedAt: NOW - DAY,
+	};
+
+	/**
+	 * acct-1 at its weekly limit beside one alternative, other-0, whose cached
+	 * reading (observed 10 minutes ago unless set) shows its week at 100 %.
+	 */
+	async function dispatches(options: {
+		rows: AnthropicBankedResetEventRow[];
+		account?: Partial<Account>;
+		usage?: UsageData;
+		observedAt?: number | null;
+		pauseMarker?: AccountPauseMarker;
+	}): Promise<number> {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [
+				{
+					account: options.account ?? {},
+					usage: options.usage ?? usageWith({ seven_day: 100 }),
+				},
+			],
+			ledger: options.rows,
+			observedAt: {
+				"other-0":
+					options.observedAt === undefined
+						? NOW - 10 * MINUTE
+						: options.observedAt,
+			},
+			pauseMarkers: options.pauseMarker
+				? { "other-0": options.pauseMarker }
+				: undefined,
+		});
+		await scheduler.tick();
+		return dispatched.length;
+	}
+
+	it("claims while the at-limit alternative has no restoring claim", async () => {
+		expect(await dispatches({ rows: [] })).toBe(1);
+	});
+
+	it("counts the alternative as serving until a reading postdates its claim", async () => {
+		expect(await dispatches({ rows: [restoredRow("other-0")] })).toBe(0);
+		expect(
+			await dispatches({ rows: [restoredRow("other-0")], observedAt: null }),
+		).toBe(0);
+	});
+
+	it("does not hold for a claim that cleared other windows only", async () => {
+		const rows = [
+			restoredRow("other-0", { cleared: JSON.stringify(["five_hour"]) }),
+		];
+		expect(await dispatches({ rows })).toBe(1);
+	});
+
+	it("holds every window when the claim's cleared list is unknown", async () => {
+		for (const cleared of [null, "[]", "not json"]) {
+			const rows = [restoredRow("other-0", { cleared })];
+			expect(await dispatches({ rows })).toBe(0);
+		}
+	});
+
+	it("covers a window when any of the account's restoring claims cleared it", async () => {
+		const rows = [
+			restoredRow("other-0", {
+				id: "other-0:g1:2",
+				attempt_seq: 2,
+				cleared: JSON.stringify(["five_hour"]),
+				resolved_at: NOW - MINUTE,
+			}),
+			restoredRow("other-0", {
+				cleared: JSON.stringify(["seven_day"]),
+				resolved_at: NOW - 20 * MINUTE,
+			}),
+		];
+		expect(await dispatches({ rows, observedAt: NOW - 30 * MINUTE })).toBe(0);
+	});
+
+	it("releases the hold on a post-claim reading still at the limit", async () => {
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				observedAt: NOW - MINUTE,
+			}),
+		).toBe(1);
+	});
+
+	it("serves by a post-claim reading with headroom", async () => {
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				usage: usageWith({ seven_day: 0 }),
+				observedAt: NOW - MINUTE,
+			}),
+		).toBe(0);
+	});
+
+	it("drops a claim resolved more than the cooldown ago", async () => {
+		const rows = [
+			restoredRow("other-0", {
+				resolved_at: NOW - BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS - 1,
+			}),
+		];
+		expect(await dispatches({ rows, observedAt: null })).toBe(1);
+	});
+
+	it("ignores the claiming account's own restoring claim", async () => {
+		expect(await dispatches({ rows: [restoredRow("acct-1")] })).toBe(1);
+	});
+
+	it("does not hold for a disabled alternative", async () => {
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				account: { disabled: true },
+			}),
+		).toBe(1);
+	});
+
+	it("does not hold for a manually paused alternative", async () => {
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				account: {
+					paused: true,
+					pause_reason: "manual",
+					auto_pause_on_overage_enabled: true,
+				},
+				pauseMarker: { ...overagePause, pauseReason: "manual" },
+			}),
+		).toBe(1);
+	});
+
+	it("holds for an overage-paused alternative until a post-claim reading", async () => {
+		const account = {
+			paused: true,
+			pause_reason: "overage",
+			auto_pause_on_overage_enabled: true,
+		};
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				account,
+				pauseMarker: overagePause,
+			}),
+		).toBe(0);
+		expect(
+			await dispatches({
+				rows: [restoredRow("other-0")],
+				account,
+				pauseMarker: overagePause,
+				observedAt: NOW - MINUTE,
+			}),
+		).toBe(1);
+	});
+
+	it("holds for first-time and replayed already_used answers alike", async () => {
+		const firstTime = restoredRow("other-0", { status: "already_used" });
+		const replayed = restoredRow("other-0", {
+			status: "already_used",
+			created_at: NOW - 9 * MINUTE,
+			error_message: "Claim response lost",
+		});
+		expect(await dispatches({ rows: [firstTime] })).toBe(0);
+		expect(await dispatches({ rows: [replayed] })).toBe(0);
+	});
+
+	it("keeps an older restoring claim behind a newer non-restoring answer", async () => {
+		const rows = [
+			restoredRow("other-0", {
+				id: "other-0:g1:2",
+				attempt_seq: 2,
+				status: "not_limited",
+				cleared: null,
+				resolved_at: NOW - MINUTE,
+				rearm_at: NOW - MINUTE + BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS,
+			}),
+			restoredRow("other-0"),
+		];
+		expect(await dispatches({ rows })).toBe(0);
+	});
+});
+
+describe("banked-reset claim cascade through the production wiring", () => {
+	const MINUTE = 60_000;
+	const CLEARS: AnthropicBankedResetWindow[] = [
+		"five_hour",
+		"seven_day",
+		"seven_day_overage_included",
+	];
+
+	function reading(sevenDay: number, resetsAt: number): UsageData {
+		return {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(NOW + 5 * 60 * MINUTE).toISOString(),
+			},
+			seven_day: {
+				utilization: sevenDay,
+				resets_at: new Date(resetsAt).toISOString(),
+			},
+		} as UsageData;
+	}
+
+	/**
+	 * a, b and c at their weekly limit with a weekly-clearing grant and both
+	 * toggles on, a resetting latest; d usable but at its limit, toggles off.
+	 * One ledger backs claims, the cooldown anchor and the restoring query.
+	 */
+	function fleet() {
+		let clock = NOW;
+		const members = [
+			{ id: "a", resetsAt: NOW + 6 * DAY, toggles: true },
+			{ id: "b", resetsAt: NOW + 5 * DAY, toggles: true },
+			{ id: "c", resetsAt: NOW + 4 * DAY, toggles: true },
+			{ id: "d", resetsAt: NOW + 3 * DAY, toggles: false },
+		];
+		const accounts = members.map(({ id, toggles }) =>
+			account({
+				id,
+				name: id,
+				anthropic_auto_apply_banked_resets_enabled: toggles,
+				anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: toggles,
+			}),
+		);
+		const usageById = new Map(
+			members.map(({ id, resetsAt }) => [
+				id,
+				{ data: reading(100, resetsAt), observedAtMs: NOW - 2 * MINUTE },
+			]),
+		);
+		const statusById = new Map(
+			members
+				.filter(({ toggles }) => toggles)
+				.map(({ id, resetsAt }) => [
+					id,
+					status({
+						exhausted: ["seven_day"],
+						weeklyResetsAt: resetsAt,
+						grants: [grant({ clears: CLEARS, endsAt: NOW + 30 * DAY })],
+					}),
+				]),
+		);
+		const ledger: AnthropicBankedResetEventRow[] = [];
+		const dispatched: string[] = [];
+		const refreshNow = mock(async (_id: string) => true);
+		const scheduler = createAnthropicBankedResetApplyScheduler({
+			dbOps: {
+				getAllAccounts: async () => accounts,
+				getAccount: async (id: string) =>
+					accounts.find((candidate) => candidate.id === id) ?? null,
+				getActiveApiKeys: async () => [],
+				expireStaleAnthropicBankedResetAttempts: async () => 0,
+				getPendingAnthropicBankedResetAttempts: async (id: string) =>
+					ledger.filter(
+						(row) => row.account_id === id && row.status === "pending",
+					),
+				getAnthropicBankedResetAutoApplyCooldownAnchorAt: async (
+					id: string,
+				) => {
+					const anchors = ledger
+						.filter(
+							(row) =>
+								row.account_id === id &&
+								row.trigger === "auto" &&
+								(row.status === "reset" || row.status === "already_used") &&
+								row.resolved_at !== null,
+						)
+						.map((row) => row.resolved_at ?? 0);
+					return anchors.length > 0 ? Math.max(...anchors) : null;
+				},
+				getAnthropicBankedResetRearmAt: async () => null,
+				getRestoringAnthropicBankedResetEventsSince: async (sinceMs) =>
+					restoringSince(ledger, sinceMs),
+				getAnthropicBankedResetRecoveryPending: async () => [],
+				clearAnthropicBankedResetRecoveryPending: async () => true,
+				getAccountPauseMarker: async () => null,
+				resumeAccountIfOveragePausedAt: async () => false,
+				claimAnthropicBankedResetAutoAttempt: async (input) => {
+					const pending = ledger.find(
+						(row) =>
+							row.account_id === input.accountId && row.status === "pending",
+					);
+					if (pending) {
+						return pending.trigger === "auto" &&
+							pending.grant_id === input.grantId
+							? {
+									id: pending.id,
+									requestId: pending.request_id,
+									attemptSeq: pending.attempt_seq ?? 0,
+									reused: true,
+								}
+							: null;
+					}
+					const attemptSeq =
+						ledger.filter(
+							(row) =>
+								row.account_id === input.accountId &&
+								row.grant_id === input.grantId &&
+								row.trigger === "auto",
+						).length + 1;
+					const row = pendingRow({
+						id: `${input.accountId}:${input.grantId}:${attemptSeq}`,
+						account_id: input.accountId,
+						account_name: input.accountName,
+						grant_id: input.grantId,
+						cause: input.cause,
+						attempt_seq: attemptSeq,
+						request_id: `${input.accountId}-request-${attemptSeq}`,
+						grant_ends_at: input.grantEndsAt,
+						created_at: input.now ?? clock,
+					});
+					ledger.push(row);
+					return {
+						id: row.id,
+						requestId: row.request_id,
+						attemptSeq,
+						reused: false,
+					};
+				},
+			},
+			coordinator: { refreshStatus: async () => ({ success: true }) },
+			usage: {
+				get: (id: string) => usageById.get(id)?.data ?? null,
+				peekWithAge: (id: string) => {
+					const entry = usageById.get(id);
+					return entry ? observation(entry.data, entry.observedAtMs) : null;
+				},
+				refreshNow,
+			},
+			overrides: {
+				getCachedStatus: (id) => statusById.get(id) ?? null,
+				dispatchClaim: async (id, request) => {
+					dispatched.push(id);
+					const row = ledger.find(
+						(candidate) => candidate.id === request.autoApply?.ledgerRowId,
+					);
+					if (row) {
+						row.status = "reset";
+						row.cleared = JSON.stringify(CLEARS);
+						row.resolved_at = clock;
+					}
+					// The post-claim status read: the grant is spent. The usage
+					// refetch stays deferred, so the cache keeps the pre-claim week.
+					const current = statusById.get(id);
+					if (current) statusById.set(id, { ...current, nextGrantId: null });
+					return completedOutcome();
+				},
+				now: () => clock,
+			},
+		});
+		return {
+			scheduler,
+			dispatched,
+			ledger,
+			refreshNow,
+			usageById,
+			advance: (ms: number) => {
+				clock += ms;
+			},
+			now: () => clock,
+		};
+	}
+
+	/** Tick 1 claims for a; ten more one-minute ticks claim nothing. */
+	async function claimOnceThenHold() {
+		const run = fleet();
+		await run.scheduler.tick();
+		expect(run.dispatched).toEqual(["a"]);
+		expect(run.ledger.map((row) => [row.account_id, row.status])).toEqual([
+			["a", "reset"],
+		]);
+		for (let tick = 0; tick < 10; tick++) {
+			run.advance(MINUTE);
+			await run.scheduler.tick();
+		}
+		expect(run.dispatched).toEqual(["a"]);
+		expect(run.refreshNow).not.toHaveBeenCalled();
+		return run;
+	}
+
+	it("spends one grant while the claimed account's reading lags its reset", async () => {
+		await claimOnceThenHold();
+	});
+
+	it("keeps holding once a post-claim reading shows the claimed account's headroom", async () => {
+		const run = await claimOnceThenHold();
+		run.usageById.set("a", {
+			data: reading(0, NOW + 7 * DAY),
+			observedAtMs: run.now(),
+		});
+		for (let tick = 0; tick < 10; tick++) {
+			run.advance(MINUTE);
+			await run.scheduler.tick();
+		}
+		expect(run.dispatched).toEqual(["a"]);
+	});
+
+	it("claims the next account once the hold lapses an hour after the claim without a reading", async () => {
+		const run = await claimOnceThenHold();
+		const resolvedAt = run.ledger[0]?.resolved_at ?? 0;
+		while (
+			run.now() + MINUTE <=
+			resolvedAt + BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS
+		) {
+			run.advance(MINUTE);
+			await run.scheduler.tick();
+		}
+		expect(run.dispatched).toEqual(["a"]);
+		run.advance(MINUTE);
+		await run.scheduler.tick();
+		expect(run.dispatched).toEqual(["a", "b"]);
 	});
 });
 

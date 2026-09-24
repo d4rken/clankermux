@@ -314,21 +314,22 @@ describe("Chat ingress responses", () => {
 		const s = await (await run({ ...input, stream: true })).text();
 		expect(s).not.toContain('"choices":[]');
 	});
-	for (const [label, s] of [
+	for (const [label, s, status] of [
 		[
 			"upstream error",
 			start() +
 				event("error", {
 					error: { type: "overloaded_error", message: "try later" },
 				}),
+			529,
 		],
-		["missing terminal", start()],
-		["missing finish reason", start() + event("message_stop")],
-		["malformed event", `${start()}data: {oops}\n\n`],
-	]) {
+		["missing terminal", start(), 502],
+		["missing finish reason", start() + event("message_stop"), 502],
+		["malformed event", `${start()}data: {oops}\n\n`, 502],
+	] as const) {
 		it(`rejects ${label} in JSON mode`, async () => {
 			const r = await run(input, response(s));
-			expect(r.status).toBe(502);
+			expect(r.status).toBe(status);
 			expect((await r.json()).error.message).toBeTruthy();
 		});
 		it(`terminates ${label} honestly in streaming mode`, async () => {
@@ -339,6 +340,147 @@ describe("Chat ingress responses", () => {
 			expect(b).not.toContain('"finish_reason":"stop"');
 		});
 	}
+	describe("an upstream error event mid-stream", () => {
+		const overflow = {
+			type: "invalid_request_error",
+			message: "prompt is too long: 215012 tokens > 200000 maximum",
+			code: "context_length_exceeded",
+		};
+		const failing = (error: object) =>
+			response(
+				start() +
+					event("content_block_start", {
+						index: 0,
+						content_block: { type: "text", text: "" },
+					}) +
+					event("content_block_delta", {
+						index: 0,
+						delta: { type: "text_delta", text: "partial" },
+					}) +
+					event("error", { error }),
+			);
+		const streamedError = (body: string) =>
+			JSON.parse(
+				body
+					.split("\n")
+					.filter((l) => l.startsWith("data: {"))
+					.at(-1)
+					?.slice(6) ?? "null",
+			);
+
+		it("keeps its type and code, which may differ, in streaming mode", async () => {
+			const r = await run({ ...input, stream: true }, failing(overflow));
+			const body = await r.text();
+			expect(body).toContain("partial");
+			expect(streamedError(body)).toEqual({
+				error: { ...overflow, param: null },
+			});
+			expect(body).not.toContain("[DONE]");
+		});
+
+		it("answers JSON mode with the status its type stands for", async () => {
+			const r = await run(input, failing(overflow));
+			expect(r.status).toBe(400);
+			expect(await r.json()).toEqual({ error: { ...overflow, param: null } });
+		});
+
+		// A 401 or 403 would tell the client its own key is bad; the failure
+		// was the upstream's.
+		for (const [type, status] of [
+			["api_error", 502],
+			["timeout_error", 502],
+			["authentication_error", 502],
+			["permission_error", 502],
+			["billing_error", 502],
+			["not_found_error", 502],
+			["not_an_anthropic_type", 502],
+			["request_too_large", 413],
+			["rate_limit_error", 429],
+			["overloaded_error", 529],
+		] as const)
+			it(`answers ${type} in JSON mode with ${status}`, async () => {
+				const r = await run(input, failing({ type, message: "upstream says" }));
+				expect(r.status).toBe(status);
+				expect((await r.json()).error).toMatchObject({ type, code: type });
+			});
+
+		it("gives a JSON-mode 429 or 529 the default Retry-After, and nothing else one", async () => {
+			for (const [type, retryAfter] of [
+				["rate_limit_error", "30"],
+				["overloaded_error", "30"],
+				["api_error", null],
+				["invalid_request_error", null],
+			] as const) {
+				const r = await run(input, failing({ type, message: "later" }));
+				expect(r.headers.get("retry-after")).toBe(retryAfter);
+			}
+		});
+
+		it("caps the type and code it passes on", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				failing({ type: "t".repeat(500), code: "c".repeat(500), message: "m" }),
+			);
+			const { error } = streamedError(await r.text());
+			expect(error.type).toBe("t".repeat(128));
+			expect(error.code).toBe("c".repeat(128));
+		});
+
+		it("uses its type as the code when it has none", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				failing({ type: "overloaded_error", message: "try later" }),
+			);
+			expect(streamedError(await r.text())).toEqual({
+				error: {
+					type: "overloaded_error",
+					message: "try later",
+					param: null,
+					code: "overloaded_error",
+				},
+			});
+		});
+
+		it("still reports invalid upstream data as such", async () => {
+			const r = await run(
+				{ ...input, stream: true },
+				response(`${start()}data: {oops}\n\n`),
+			);
+			expect(streamedError(await r.text())).toEqual({
+				error: {
+					type: "api_error",
+					message: "Malformed upstream SSE event",
+					param: null,
+					code: "invalid_upstream_response",
+				},
+			});
+		});
+	});
+	it("carries an error's own code before the head", async () => {
+		const r = await run(
+			input,
+			Response.json(
+				{
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: "prompt is too long",
+						code: "context_length_exceeded",
+					},
+				},
+				{ status: 400 },
+			),
+		);
+		expect(r.status).toBe(400);
+		expect(await r.json()).toEqual({
+			error: {
+				type: "invalid_request_error",
+				message: "prompt is too long",
+				param: null,
+				code: "context_length_exceeded",
+			},
+		});
+	});
 	it("re-envelopes routing errors and retains status", async () => {
 		const r = await run(
 			input,

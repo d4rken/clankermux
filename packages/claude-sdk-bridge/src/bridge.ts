@@ -697,6 +697,7 @@ export function createClaudeSdkBridge(
 				ownerApiKeyId: meta.apiKeyId,
 				sessionId: newSessionId,
 				accountId: plan.preferredAccountId,
+				requestedModel: meta.model,
 				historyMode: history.mode,
 				query,
 				prompt,
@@ -838,6 +839,14 @@ export function createClaudeSdkBridge(
 			// Parked state stays as it is unless every awaited call is answered.
 			if (!live.answersAwaiting(toolResultIds(parsed.turn)))
 				return refuse(bridgeErrors.staleToolResults());
+			// findContinuation hands such results to a fresh turn; a caller that
+			// skipped it gets the refusal, and its retry finds the turn gone.
+			if (meta.model !== live.requestedModel) {
+				live.teardown("superseded", bridgeErrors.superseded());
+				return refuse(
+					bridgeErrors.modelChanged(live.requestedModel, meta.model),
+				);
+			}
 			counters.continuations++;
 			const leg = newLeg(
 				meta.legId,
@@ -865,12 +874,24 @@ export function createClaudeSdkBridge(
 
 	function findContinuation(
 		toolUseIds: readonly string[],
+		caller: { apiKeyId: string | null; model: string },
 	): { turnId: string; ownerApiKeyId: string | null } | null {
 		for (const live of lives.values()) {
 			if (live.closed) continue;
 			const awaiting = live.awaitingToolUseIds;
-			if (toolUseIds.some((id) => awaiting.has(id)))
-				return { turnId: live.turnId, ownerApiKeyId: live.ownerApiKeyId };
+			if (!toolUseIds.some((id) => awaiting.has(id))) continue;
+			// The client moved to another model mid tool loop. Its query cannot
+			// serve that model, so the results start a fresh turn instead;
+			// stale or partial results still go on to their own refusal.
+			if (
+				live.ownerApiKeyId === caller.apiKeyId &&
+				live.requestedModel !== caller.model &&
+				live.answersAwaiting(toolUseIds)
+			) {
+				live.teardown("superseded", bridgeErrors.superseded());
+				return null;
+			}
+			return { turnId: live.turnId, ownerApiKeyId: live.ownerApiKeyId };
 		}
 		return null;
 	}

@@ -138,6 +138,7 @@ import {
 } from "./cache-keepalive-snapshot-sampler";
 import {
 	type CapacityRestoredProbeMarker,
+	clearRateLimitOnBankedReset,
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import {
@@ -1166,6 +1167,7 @@ export default async function startServer(options?: {
 		id: "data-retention-cleanup",
 		callback: dataRetentionCleanup,
 		minutes: 60, // every 1 hour
+		maxConcurrent: 1,
 		description: "Periodic data retention cleanup and incremental vacuum",
 	});
 
@@ -1364,8 +1366,18 @@ export default async function startServer(options?: {
 	const codexSpendCoordinator = new CodexSpendCoordinator(proxyContext);
 	// The one authority for Anthropic banked resets: the status read (shared
 	// /oauth/usage bucket) and the claim that spends a reset.
+	const bankedResetLog = new Logger("AnthropicBankedResets");
 	const anthropicBankedResetCoordinator = new AnthropicBankedResetCoordinator(
 		proxyContext,
+		{
+			onWindowsRestored: (accountId, cleared, claimStartedAt) =>
+				clearRateLimitOnBankedReset(
+					proxyContext.dbOps,
+					bankedResetLog,
+					{ accountId, cleared, claimStartedAt },
+					capacityRestoredProbeMarker,
+				),
+		},
 	);
 	stopBankedResetReads = () => anthropicBankedResetCoordinator.stop();
 

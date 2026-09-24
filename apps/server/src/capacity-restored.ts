@@ -6,7 +6,12 @@ import {
 } from "@clankermux/load-balancer";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import type { CapacityProbeReservation } from "@clankermux/proxy";
-import { type Account, isQuotaDerivedRateLimitReason } from "@clankermux/types";
+import {
+	type Account,
+	type AnthropicBankedResetWindow,
+	isQuotaDerivedRateLimitReason,
+	type QuotaDerivedRateLimitReason,
+} from "@clankermux/types";
 
 /** Minimal logger surface the capacity-restored handler needs. */
 export interface CapacityRestoredLogger {
@@ -170,53 +175,16 @@ export async function clearRateLimitOnCapacityRestored(
 		}
 		return;
 	}
-	// Fail CLOSED on a missing write instant: without it the cooldown cannot be
-	// ordered against the evidence, and an unordered clear is exactly the
-	// premature release this guard exists to prevent. Explicit — never let JS
-	// coercion decide (0 is a legitimate, if absurd, timestamp).
-	if (acc.rate_limited_at === null || acc.rate_limited_at === undefined) {
-		logger.debug(
-			`[clankermux] account=${acc.name} capacity_restored_skip missing_rate_limited_at reason=${reason}`,
-		);
-		return;
-	}
-	// Causal boundary: the cooldown must PREDATE the start of the usage request
-	// that produced this reading. A cooldown written while that request was in
-	// flight is temporally ambiguous — the next poll re-reports and re-decides.
-	if (acc.rate_limited_at >= evidence.fetchStartedAt) {
-		logger.debug(
-			`[clankermux] account=${acc.name} capacity_restored_skip cooldown_newer_than_evidence rate_limited_at=${new Date(
-				acc.rate_limited_at,
-			).toISOString()} fetch_started_at=${new Date(evidence.fetchStartedAt).toISOString()}`,
-		);
-		return;
-	}
-	// Atomic compare-and-clear: only clears if the EXACT observed cooldown is
-	// still in place — deadline, write instant AND reason unchanged — and still
-	// predates the evidence, so any cooldown/floor written concurrently between
-	// the read above and this write is preserved (even one reusing the same
-	// deadline — rate_limited_at, the write instant, still differs).
-	//
-	// The single-flight marker is reserved BEFORE the CAS and rolled back if it
-	// fails or throws. An early release makes the account selectable in one step
-	// with `consecutive_rate_limits` still 0 and no deadline left behind, so
-	// nothing else would gate the fan-in; arming only after the await resolves
-	// would leave a window in which the account is unlocked and unmarked.
-	const reservation = marker.markPending(accountId);
-	let cleared: boolean;
-	try {
-		cleared = await dbOps.clearRateLimitOnCapacityRestore(
-			accountId,
-			acc.rate_limited_until,
-			acc.rate_limited_at,
-			reason,
-			evidence.fetchStartedAt,
-		);
-	} catch (err) {
-		marker.rollbackPending(reservation);
-		throw err;
-	}
-	if (cleared) {
+	const released = await releaseQuotaLockPredating(
+		dbOps,
+		logger,
+		marker,
+		acc,
+		{ reason, until: acc.rate_limited_until },
+		{ at: evidence.fetchStartedAt, label: "fetch_started_at" },
+		"capacity_restored_skip",
+	);
+	if (released) {
 		logger.info(
 			`[clankermux] account=${acc.name} capacity_restored_clear reason=${reason} utilization=${evidence.utilization}% extra_usage=${
 				evidence.extraUsageUtilization ?? "none"
@@ -229,10 +197,141 @@ export async function clearRateLimitOnCapacityRestored(
 		// stale, auto-unpause stays shut for the same reason as on the no-lock
 		// path — correct it here too.
 		await stampStaleResetIfStranded(dbOps, logger, acc, evidence);
-	} else {
+	}
+}
+
+/**
+ * Release the exact quota-derived cooldown `lock` read from `acc`, provided it
+ * was written before `boundary`, the start of whatever produced the evidence
+ * that its window is no longer spent. Returns whether a row changed; each
+ * caller logs its own clear line. Refusals log `<skipToken> <why>` at DEBUG.
+ */
+async function releaseQuotaLockPredating(
+	dbOps: Pick<DatabaseOperations, "clearRateLimitOnCapacityRestore">,
+	logger: CapacityRestoredLogger,
+	marker: CapacityRestoredProbeMarker,
+	acc: Account,
+	lock: { reason: QuotaDerivedRateLimitReason; until: number },
+	boundary: { at: number; label: string },
+	skipToken: string,
+): Promise<boolean> {
+	// Fail CLOSED on a missing write instant: without it the cooldown cannot be
+	// ordered against the evidence, and an unordered clear is exactly the
+	// premature release this guard exists to prevent. Explicit — never let JS
+	// coercion decide (0 is a legitimate, if absurd, timestamp).
+	if (acc.rate_limited_at === null || acc.rate_limited_at === undefined) {
+		logger.debug(
+			`[clankermux] account=${acc.name} ${skipToken} missing_rate_limited_at reason=${lock.reason}`,
+		);
+		return false;
+	}
+	// Causal boundary: the cooldown must PREDATE the start of the request that
+	// produced the evidence. A cooldown written while that request was in
+	// flight is temporally ambiguous — the evidence may predate it.
+	if (acc.rate_limited_at >= boundary.at) {
+		logger.debug(
+			`[clankermux] account=${acc.name} ${skipToken} cooldown_newer_than_evidence rate_limited_at=${new Date(
+				acc.rate_limited_at,
+			).toISOString()} ${boundary.label}=${new Date(boundary.at).toISOString()}`,
+		);
+		return false;
+	}
+	// Atomic compare-and-clear: only clears if the EXACT observed cooldown is
+	// still in place — deadline, write instant AND reason unchanged — and still
+	// predates the evidence, so any cooldown/floor written concurrently between
+	// the read above and this write is preserved (even one reusing the same
+	// deadline — rate_limited_at, the write instant, still differs).
+	//
+	// The single-flight marker is reserved BEFORE the CAS and rolled back if it
+	// fails or throws. An early release makes the account selectable in one step
+	// with `consecutive_rate_limits` still 0 and no deadline left behind, so
+	// nothing else would gate the fan-in; arming only after the await resolves
+	// would leave a window in which the account is unlocked and unmarked.
+	const reservation = marker.markPending(acc.id);
+	let cleared: boolean;
+	try {
+		cleared = await dbOps.clearRateLimitOnCapacityRestore(
+			acc.id,
+			lock.until,
+			acc.rate_limited_at,
+			lock.reason,
+			boundary.at,
+		);
+	} catch (err) {
+		marker.rollbackPending(reservation);
+		throw err;
+	}
+	if (!cleared) {
 		marker.rollbackPending(reservation);
 		logger.debug(
-			`[clankermux] account=${acc.name} capacity_restored_skip cas_mismatch (a concurrent write replaced the observed cooldown)`,
+			`[clankermux] account=${acc.name} ${skipToken} cas_mismatch (a concurrent write replaced the observed cooldown)`,
+		);
+	}
+	return cleared;
+}
+
+/**
+ * The windows a banked-reset claim must report cleared before it may lift a
+ * cooldown of each quota-derived reason.
+ */
+const BANKED_RESET_WINDOWS_BY_REASON: Record<
+	QuotaDerivedRateLimitReason,
+	readonly AnthropicBankedResetWindow[]
+> = {
+	weekly_exhausted_429: ["seven_day", "seven_day_overage_included"],
+	session_exhausted_429: ["five_hour"],
+};
+
+/**
+ * Lift the quota cooldown a banked-reset claim just cleared upstream, instead
+ * of waiting for the next usage reading. Only a quota-derived lock whose
+ * window is in `cleared` and that was written before the claim was sent is
+ * released, through the same compare-and-clear as the poller path. Pause
+ * state and `rate_limit_reset` are left to that post-claim reading.
+ */
+export async function clearRateLimitOnBankedReset(
+	dbOps: Pick<
+		DatabaseOperations,
+		"getAccount" | "clearRateLimitOnCapacityRestore"
+	>,
+	logger: CapacityRestoredLogger,
+	claim: {
+		accountId: string;
+		cleared: readonly AnthropicBankedResetWindow[];
+		claimStartedAt: number;
+	},
+	marker: CapacityRestoredProbeMarker,
+	now: number = Date.now(),
+): Promise<void> {
+	const acc = await dbOps.getAccount(claim.accountId);
+	if (!acc?.rate_limited_until || Number(acc.rate_limited_until) <= now) return;
+	const reason = acc.rate_limited_reason;
+	const clearedList = claim.cleared.join(",") || "none";
+	if (
+		!isQuotaDerivedRateLimitReason(reason) ||
+		!BANKED_RESET_WINDOWS_BY_REASON[reason].some((w) =>
+			claim.cleared.includes(w),
+		)
+	) {
+		logger.debug(
+			`[clankermux] account=${acc.name} banked_reset_skip window_not_cleared reason=${reason ?? "null"} cleared=${clearedList}`,
+		);
+		return;
+	}
+	const released = await releaseQuotaLockPredating(
+		dbOps,
+		logger,
+		marker,
+		acc,
+		{ reason, until: acc.rate_limited_until },
+		{ at: claim.claimStartedAt, label: "claim_started_at" },
+		"banked_reset_skip",
+	);
+	if (released) {
+		logger.info(
+			`[clankermux] account=${acc.name} banked_reset_clear reason=${reason} cleared=${clearedList} cooldown_remaining=${Math.round(
+				(Number(acc.rate_limited_until) - now) / 60_000,
+			)}m claim_started_at=${new Date(claim.claimStartedAt).toISOString()}`,
 		);
 	}
 }

@@ -86,10 +86,14 @@ export async function relay(
 }
 
 /** Claude Code ending the turn in error. */
-export function giveUp(query: FakeQuery, text: string): void {
+export function giveUp(
+	query: FakeQuery,
+	text: string,
+	terminalReason?: string,
+): void {
 	query.emit(
 		assistantMessage([{ type: "text", text }], { error: "unknown" }),
-		resultMessage({ isError: true, result: text }),
+		resultMessage({ isError: true, result: text, terminalReason }),
 	);
 }
 

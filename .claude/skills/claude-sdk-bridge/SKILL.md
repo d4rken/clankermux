@@ -118,6 +118,43 @@ made private, never deleted: no pid says whether a process still uses them.
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
 
+## How a failed turn reaches the client
+
+The inner call Claude Code gave up on in the current leg decides
+(`mapInnerOutcome`); an earlier leg's outcome never does. Without one, the
+failure was Claude Code's own (`mapClaudeCodeFailure`), and only a typed
+cause changes its 502. Overflow is recognised in one place,
+`isContextOverflow` in `errors.ts`.
+
+| Source | Client answer |
+| --- | --- |
+| Inner 400 saying "prompt is too long" or "input length and `max_tokens` exceed context limit", or coded `context_length_exceeded` | 400 `invalid_request_error`, `code: context_length_exceeded`; the first wording keeps its token counts, the second its message |
+| Inner 400 while Claude Code's cause is overflow | the same overflow 400 |
+| Other inner 4xx except 401 and 403 (400, 402, 404, 413, 429, …) | same status and type |
+| Inner 403 | 403 `permission_error` |
+| Inner 503, 529 | same status, with Retry-After |
+| Inner 401, other 5xx | 502 `api_error` |
+| A streamed inner `error` event | the status its type stands for (`anthropicErrorStatus`), with its `code`, then as above |
+| `terminal_reason` `prompt_too_long`, `blocking_limit`, `rapid_refill_breaker`; an error assistant message, result text or SDK exception saying "Prompt is too long" | 400 `context_length_exceeded` |
+| `max_output_tokens` assistant error, `error_max_turns`, `error_max_structured_output_retries`, `error_during_execution`, exit without a result | 502 `api_error` |
+
+`blocking_limit` is Claude Code refusing before any model call: with
+`DISABLE_AUTO_COMPACT` it is what an oversized history usually meets, so
+that path has no inner outcome.
+
+The adapters pass `error.code` through (trimmed, 128 characters at most),
+and use the type when there is none. A Chat client that asked for JSON gets
+a mid-stream error's own status only for 400, 413, 429 and 529, the last two
+with Retry-After; anything else answers 502. A 401 or 403 there would tell
+an OpenAI SDK client its own key is bad.
+
+A continuation is compared on the model string the client wrote, never the
+upstream model an alias resolves to. When the caller's own parked turn is
+answered under another model, `findContinuation` tears that turn down and
+answers null, so the same request routes normally and starts a fresh turn on
+the new model (a `dead_continuation` rebuild). Another key's results are
+still refused, and stale or partial ones keep their own 409.
+
 ## Behaviour that looks like a bug and is not
 
 - **System prompt policy is `drop`.** Only the Claude Code preset is sent.

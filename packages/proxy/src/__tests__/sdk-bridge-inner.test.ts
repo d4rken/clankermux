@@ -267,7 +267,11 @@ describe("SDK bridge inner calls", () => {
 				Response.json(
 					{
 						type: "error",
-						error: { type: "invalid_request_error", message: "bad" },
+						error: {
+							type: "invalid_request_error",
+							message: "bad",
+							code: "  context_length_exceeded ",
+						},
 					},
 					{ status: 400 },
 				),
@@ -299,6 +303,7 @@ describe("SDK bridge inner calls", () => {
 		expect(outcomes).toHaveLength(1);
 		expect(outcomes[0].status).toBe(400);
 		expect(outcomes[0].errorType).toBe("invalid_request_error");
+		expect(outcomes[0].errorCode).toBe("context_length_exceeded");
 		expect(outcomes[0].message).toBe("bad");
 		expect(outcomes[0].accountId).toBe(a.id);
 	});
@@ -365,7 +370,10 @@ describe("SDK bridge inner calls", () => {
 				["overloaded_error", 529],
 				["rate_limit_error", 429],
 				["api_error", 500],
-				["invalid_request_error", 502],
+				["invalid_request_error", 400],
+				["billing_error", 402],
+				["request_too_large", 413],
+				["not_an_anthropic_type", 502],
 			] as const) {
 				const { res, outcomes } = await streamed(
 					sse(start, {
@@ -386,6 +394,33 @@ describe("SDK bridge inner calls", () => {
 				// A mid-stream overload trips the provider's breaker; the next
 				// iteration must not wait on it.
 				clearProviderOverloadCooldown();
+			}
+		});
+
+		it("carries the error event's code, when it is a nonblank string", async () => {
+			for (const [code, expected] of [
+				["context_length_exceeded", "context_length_exceeded"],
+				[`  ${"c".repeat(300)}`, "c".repeat(128)],
+				["   ", null],
+				[42, null],
+				[undefined, null],
+			] as const) {
+				const { res, outcomes } = await streamed(
+					sse(start, {
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: "too long",
+							...(code === undefined ? {} : { code }),
+						},
+					}),
+				);
+				await res.text();
+				await Bun.sleep(0);
+				expect(outcomes).toEqual([
+					expect.objectContaining({ status: 400, errorCode: expected }),
+				]);
+				harness?.restore();
 			}
 		});
 

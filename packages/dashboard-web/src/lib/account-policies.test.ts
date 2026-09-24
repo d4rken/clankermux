@@ -300,7 +300,7 @@ describe("describeAccountPolicy — descriptions pinned to the menu copy", () =>
 		expect(
 			describeAccountPolicy("autoApplyWeekly", "anthropic").description,
 		).toBe(
-			"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 12 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
+			"Automatically apply the next banked reset when this account reaches a weekly limit it clears, no other Claude account can serve the same models, and the account's natural weekly reset is at least 72 hours away; or when the banked reset would expire before that limit lifts. An account whose usage is unknown counts as able to serve. Respects API-key account pins. Manual pauses conserve banked resets; an overage pause is lifted by the reset. At most one auto-apply per hour.",
 		);
 	});
 
@@ -380,7 +380,10 @@ it("labels the auto-apply flags identically for Codex and Anthropic", () => {
 });
 
 it("words the auto-apply copy in one vocabulary for both providers", () => {
-	for (const provider of ["codex", "anthropic"]) {
+	for (const [provider, minGain] of [
+		["codex", "at least 12 hours away"],
+		["anthropic", "at least 72 hours away"],
+	] as const) {
 		for (const key of ["autoApplyExpiry", "autoApplyWeekly"] as const) {
 			const { menuLabel, description } = describeAccountPolicy(key, provider);
 			expect(`${menuLabel} ${description}`).not.toMatch(
@@ -388,7 +391,7 @@ it("words the auto-apply copy in one vocabulary for both providers", () => {
 			);
 		}
 		const weekly = describeAccountPolicy("autoApplyWeekly", provider);
-		expect(weekly.description).toContain("at least 12 hours away");
+		expect(weekly.description).toContain(minGain);
 		expect(weekly.description).toContain(
 			"An account whose usage is unknown counts as able to serve.",
 		);

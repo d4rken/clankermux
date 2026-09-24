@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseUpstreamError } from "../upstream-error";
+import { anthropicErrorStatus, parseUpstreamError } from "../upstream-error";
 
 describe("parseUpstreamError", () => {
 	it("extracts type + message from an Anthropic JSON 400 envelope", () => {
@@ -313,5 +313,27 @@ describe("parseUpstreamError", () => {
 			),
 		).toBe("real");
 		expect(parseUpstreamError('{"detail":[{"msg":"   "}]}')).toBeNull();
+	});
+});
+
+describe("anthropicErrorStatus", () => {
+	it.each([
+		["invalid_request_error", 400],
+		["authentication_error", 401],
+		["billing_error", 402],
+		["permission_error", 403],
+		["not_found_error", 404],
+		["request_too_large", 413],
+		["rate_limit_error", 429],
+		["api_error", 500],
+		["timeout_error", 504],
+		["overloaded_error", 529],
+	])("%s is the status Anthropic answers it with, %i", (type, status) => {
+		expect(anthropicErrorStatus(type)).toBe(status);
+	});
+
+	it("knows no status for any other type", () => {
+		expect(anthropicErrorStatus("routing_policy_rejected")).toBeNull();
+		expect(anthropicErrorStatus(null)).toBeNull();
 	});
 });
