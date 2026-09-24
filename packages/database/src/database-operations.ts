@@ -3322,6 +3322,12 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async getRestoringAnthropicBankedResetEventsSince(
+		sinceMs: number,
+	): Promise<AnthropicBankedResetEventRow[]> {
+		return this.anthropicBankedResetEvents.findRestoringSince(sinceMs);
+	}
+
 	async getNextAnthropicBankedResetAttemptSeq(
 		accountId: string,
 		grantId: string,

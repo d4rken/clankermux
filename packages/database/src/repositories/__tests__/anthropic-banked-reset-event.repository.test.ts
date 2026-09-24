@@ -526,6 +526,55 @@ describe("AnthropicBankedResetEventRepository", () => {
 		});
 	});
 
+	describe("findRestoringSince", () => {
+		it("lists reset and already_used rows resolved since the cut-off, every account, newest first", async () => {
+			const rows = [
+				["acc-1", "r-old", "reset", NOW - 1],
+				["acc-1", "r-reset", "reset", NOW],
+				["acc-1", "r-newer-not-limited", "not_limited", NOW + 50],
+				["acc-2", "r-already", "already_used", NOW + 10],
+				["acc-2", "r-failed", "failed", NOW + 20],
+				["acc-3", "r-cooldown", "cooldown", NOW + 30],
+				["acc-3", "r-ineligible", "ineligible", NOW + 40],
+			] as const;
+			for (const [accountId, requestId, status, at] of rows) {
+				const { row } = await repo.beginManualAttempt({
+					...MANUAL,
+					accountId,
+					requestId,
+					now: at,
+				});
+				await repo.resolveAttempt(row.id, { status, now: at });
+			}
+			const auto = await repo.claimAutoAttempt({
+				...AUTO,
+				accountId: "acc-3",
+				now: NOW + 5,
+			});
+			if (!auto) throw new Error("expected a claim");
+			await repo.resolveAttempt(auto.id, { status: "reset", now: NOW + 5 });
+			// Still pending: never listed.
+			await repo.beginManualAttempt({
+				...MANUAL,
+				accountId: "acc-4",
+				requestId: "r-pending",
+				now: NOW + 60,
+			});
+
+			expect(
+				(await repo.findRestoringSince(NOW)).map((r) => [
+					r.account_id,
+					r.status,
+					r.resolved_at,
+				]),
+			).toEqual([
+				["acc-2", "already_used", NOW + 10],
+				["acc-3", "reset", NOW + 5],
+				["acc-1", "reset", NOW],
+			]);
+		});
+	});
+
 	it("lists recent events newest first", async () => {
 		for (const [requestId, at] of [
 			["req-manual-1", NOW],
