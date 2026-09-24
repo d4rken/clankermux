@@ -1,0 +1,25 @@
+{
+	"name": "forced-prompt",
+	"description": "forceSystemPrompt: opaque text with no sections, appended whole.",
+	"input": {
+		"cwd": "/home/user/projects/widget",
+		"toolSnippets": {
+			"read": "Read file contents",
+			"bash": "Execute bash commands (ls, grep, find, etc.)",
+			"edit": "Make precise file edits with exact text replacement",
+			"write": "Create or overwrite files"
+		},
+		"forceSystemPrompt": "You are a commit-message writer. Answer with one line, imperative mood."
+	},
+	"system": "You are a commit-message writer. Answer with one line, imperative mood.",
+	"messages": [
+		"You are a commit-message writer. Answer with one line, imperative mood."
+	],
+	"sections": null,
+	"expect": {
+		"outcome": "projected",
+		"shape": "sectionless",
+		"droppedSections": [],
+		"sectionUpdates": 0
+	}
+}

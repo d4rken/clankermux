@@ -204,6 +204,7 @@ class Conversation {
 						authorization: `Bearer ${gw.apiKey}`,
 						"content-type": "application/json",
 						"user-agent": "pi/0.86.0",
+						"x-clankermux-pi-prompt": "0.87",
 						session_id: this.session,
 					},
 					body: JSON.stringify(body),

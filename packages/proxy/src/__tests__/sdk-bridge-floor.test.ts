@@ -526,6 +526,33 @@ describe("Chat Completions through the SDK bridge", () => {
 		expect(bridge.starts[0].meta.translationGaps).toEqual(gaps);
 	});
 
+	it("tells the bridge the pi prompt layout the client declared, sanitized", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+		const declared = (value: string | null) => {
+			const req = messagesRequest(
+				{},
+				value === null ? {} : { "x-clankermux-pi-prompt": value },
+			);
+			setChatContext(req, {
+				requirements: { fields: [] },
+				defaultMaxTokens: 8192,
+				denyDirectOfficialAnthropic: true,
+			});
+			return req;
+		};
+
+		await run(declared(" 0.87 "), harness.ctx);
+		await run(declared(`0.9\t${"9".repeat(40)}`), harness.ctx);
+		await run(declared(null), harness.ctx);
+
+		expect(bridge.starts.map((s) => s.meta.piPromptVersion)).toEqual([
+			"0.87",
+			`0.9${"9".repeat(29)}`,
+			null,
+		]);
+	});
+
 	it("replays reasoning_content through the bridge", async () => {
 		const bridge = makeFakeBridge();
 		harness = await makeBridgeHarness([claudeA()], { bridge });
