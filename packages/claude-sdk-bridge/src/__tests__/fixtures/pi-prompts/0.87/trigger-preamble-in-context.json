@@ -32,6 +32,6 @@
 		"outcome": "refused",
 		"code": "sdk_bridge_prompt_refused",
 		"reason": "trigger_preamble",
-		"section": "project_context"
+		"section": null
 	}
 }

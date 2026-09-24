@@ -1,6 +1,6 @@
 {
 	"name": "section-update",
-	"description": "A later turn changes the skills and context, drops the addendum and adds an extension section; pi sends the difference as a second system message.",
+	"description": "A later turn changes skills and context, drops the addendum and adds an extension section; every update is forwarded.",
 	"input": {
 		"cwd": "/home/user/projects/widget",
 		"toolSnippets": {
@@ -80,9 +80,9 @@
 		"todo_list": "<todo_list>\n- [ ] deploy\n</todo_list>"
 	},
 	"expect": {
-		"outcome": "projected",
-		"shape": "stock",
-		"droppedSections": ["todo_list"],
-		"sectionUpdates": 4
+		"outcome": "forwarded",
+		"headStripped": true,
+		"forwarded": "<addendum>\nAlways answer in British English.\n</addendum>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>release</name>\n    <description>Cut a release: bump, tag and publish.</description>\n    <location>/home/user/.pi/agent/skills/release/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/home/user/projects/widget\n</cwd>\n\nUpdated system prompt section \"project_context\":\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n\n<project_instructions path=\"/home/user/projects/widget/packages/core/AGENTS.md\">\nCore package: keep exports sorted.\n</project_instructions>\n</project_context>\n\nUpdated system prompt section \"skills\":\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>release</name>\n    <description>Cut a release: bump, tag and publish.</description>\n    <location>/home/user/.pi/agent/skills/release/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>deploy</name>\n    <description>Deploy the widget.</description>\n    <location>/home/user/.pi/agent/skills/deploy/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\nUpdated system prompt section \"todo_list\":\n\n<todo_list>\n- [ ] deploy\n</todo_list>\n\nRemoved system prompt section \"addendum\".",
+		"removedUpdates": 0
 	}
 }

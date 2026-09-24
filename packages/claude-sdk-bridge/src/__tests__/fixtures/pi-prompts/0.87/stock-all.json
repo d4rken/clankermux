@@ -1,6 +1,6 @@
 {
 	"name": "stock-all",
-	"description": "Every optional section, plus tool and prompt guidelines in the dropped rules.",
+	"description": "Every optional section, plus tool and prompt guidelines in the stripped rules.",
 	"input": {
 		"cwd": "/home/user/projects/widget",
 		"toolSnippets": {
@@ -56,9 +56,9 @@
 		"cwd": "<cwd>\n/home/user/projects/widget\n</cwd>"
 	},
 	"expect": {
-		"outcome": "projected",
-		"shape": "stock",
-		"droppedSections": [],
-		"sectionUpdates": 0
+		"outcome": "forwarded",
+		"headStripped": true,
+		"forwarded": "<addendum>\nAlways answer in British English.\n</addendum>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n\n<project_instructions path=\"/home/user/projects/widget/packages/core/AGENTS.md\">\nCore package: keep exports sorted.\n</project_instructions>\n</project_context>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>release</name>\n    <description>Cut a release: bump, tag and publish.</description>\n    <location>/home/user/.pi/agent/skills/release/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
+		"removedUpdates": 0
 	}
 }

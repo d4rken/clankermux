@@ -1,6 +1,6 @@
 {
 	"name": "forced-prompt",
-	"description": "forceSystemPrompt: opaque text with no sections, appended whole.",
+	"description": "forceSystemPrompt with no pi head: forwarded whole.",
 	"input": {
 		"cwd": "/home/user/projects/widget",
 		"toolSnippets": {
@@ -17,9 +17,9 @@
 	],
 	"sections": null,
 	"expect": {
-		"outcome": "projected",
-		"shape": "sectionless",
-		"droppedSections": [],
-		"sectionUpdates": 0
+		"outcome": "forwarded",
+		"headStripped": false,
+		"forwarded": "You are a commit-message writer. Answer with one line, imperative mood.",
+		"removedUpdates": 0
 	}
 }

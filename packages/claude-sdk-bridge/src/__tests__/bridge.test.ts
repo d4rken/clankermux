@@ -43,7 +43,7 @@ import {
 } from "./fixtures/fake-sdk";
 import {
 	expectedAppend,
-	loadPiPromptFixtures,
+	loadPiPromptFixture,
 } from "./fixtures/pi-prompt-fixtures";
 
 type Msg = { role: string; content: unknown };
@@ -1239,11 +1239,7 @@ describe("pi's system prompt", () => {
 		clientUserAgent: "pi (linux 6.12.101+deb13-amd64; x64)",
 		piPromptVersion: "0.87",
 	} as const;
-	const fixture = (name: string) => {
-		const found = loadPiPromptFixtures("0.87").find((f) => f.name === name);
-		if (!found) throw new Error(`no fixture ${name}`);
-		return found;
-	};
+	const fixture = (name: string) => loadPiPromptFixture("0.87", name);
 
 	async function refused(
 		h: Harness,
@@ -1269,7 +1265,7 @@ describe("pi's system prompt", () => {
 		};
 	}
 
-	it("appends pi's projection to the preset and records the policy", async () => {
+	it("appends pi's prompt without its head to the preset and records the policy", async () => {
 		const h = harness();
 		const f = fixture("stock-all");
 		const t = await start(
@@ -1285,20 +1281,28 @@ describe("pi's system prompt", () => {
 		});
 		await waitFor(() => h.repo.turns.has(t.plan.turnId));
 		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
-			systemPromptPolicy: "pi-projection-v1",
+			systemPromptPolicy: "pi-head-v1",
 			systemPromptDetail: {
-				outcome: "projected",
+				outcome: "forwarded",
 				version: "0.87",
-				shape: "stock",
-				droppedSections: [],
-				sectionUpdates: 0,
+				headStripped: true,
+				forwardedLength: (expectedAppend(f) as string).length,
+				removedUpdates: 0,
+				// A diagnostic, so an opener inside a section counts too.
+				sectionsSeen: [
+					"addendum",
+					"project_context",
+					"skills",
+					"available_skills",
+					"cwd",
+				],
 			},
 		});
 	});
 
 	it("sends a system array's text blocks the way pi's messages join", async () => {
 		const h = harness();
-		const f = fixture("section-update");
+		const f = fixture("update-tools-and-skills");
 		const t = await start(
 			h,
 			{
@@ -1329,7 +1333,7 @@ describe("pi's system prompt", () => {
 		],
 		[
 			"that does not parse",
-			fixture("context-closes-skills").system,
+			fixture("context-closes-docs").system,
 			{},
 			"sdk_bridge_prompt_malformed",
 			"duplicate_closing_tag",
@@ -1351,7 +1355,7 @@ describe("pi's system prompt", () => {
 			expect(r.row).toMatchObject({
 				status: "rejected",
 				httpStatus: 400,
-				systemPromptPolicy: "pi-projection-v1",
+				systemPromptPolicy: "pi-head-v1",
 				systemPromptDetail: {
 					outcome: "refused",
 					code,
@@ -1429,7 +1433,7 @@ describe("pi's system prompt", () => {
 			h,
 			t.plan.turnId,
 			{
-				system: fixture("context-closes-cwd").system,
+				system: fixture("context-closes-docs").system,
 				tools: [READ_TOOL],
 				messages: [
 					first,

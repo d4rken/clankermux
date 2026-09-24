@@ -137,7 +137,7 @@ describe("SdkBridgeTurnRepository", () => {
 			startedAt: 1_000,
 			status: "rejected",
 			historyMode: "fresh",
-			systemPromptPolicy: "pi-projection-v1",
+			systemPromptPolicy: "pi-head-v1",
 			systemPromptDetail: detail,
 		});
 		await insertTurn("turn-4");

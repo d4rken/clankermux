@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Regenerates the pi system-prompt fixtures the `pi-projection-v1` policy is
- * tested against, from an installed pi release's own prompt builder:
+ * Regenerates the pi system-prompt fixtures the `pi-head-v1` policy is
+ * tested against, from an installed pi release's own prompt builder and the
+ * pi extensions that rewrite its prompt:
  *
  *   bun packages/claude-sdk-bridge/scripts/generate-pi-prompt-fixtures.ts \
- *     [--pi-root ~/.pi/node_modules/@earendil-works] [--layout 0.87]
+ *     [--pi-home ~/.pi] [--layout 0.87]
  *
  * The installed pi-coding-agent must be a release of the layout it writes.
  * Its absolute install path appears in pi's docs section; it is replaced by
  * {@link DOCS_ROOT} so the fixtures do not depend on where pi is installed.
+ * Each fixture's expected forwarded text is assembled from pi's own sections
+ * and update rendering, never from the policy under test.
  */
 import { createHash } from "node:crypto";
 import {
@@ -23,8 +26,11 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const DOCS_ROOT = "/opt/pi/node_modules/@earendil-works/pi-coding-agent";
+/** pi's harness head, taken off before anything reaches Claude Code. */
+const HEAD_SECTIONS = ["tools", "rules", "docs"];
 
 type Sections = Record<string, string>;
+type Patch = Record<string, string | null>;
 
 interface SystemPromptModule {
 	buildSystemPromptSections(input: Record<string, unknown>): Sections;
@@ -32,7 +38,7 @@ interface SystemPromptModule {
 	diffSystemPromptSections(
 		previous: Sections,
 		current: Sections,
-	): Record<string, string | null> | undefined;
+	): Patch | undefined;
 }
 
 interface TextModule {
@@ -40,14 +46,39 @@ interface TextModule {
 	renderSystemMessageUpdate(message: Record<string, unknown>): string;
 }
 
+interface ClaudeContextModule {
+	composeSystemPromptSupplement(result: {
+		catalog: unknown[];
+		alwaysOn: unknown[];
+	}): string;
+}
+
+interface AdvertisedAgentsModule {
+	buildAdvertisedAgentPrompt(agents: unknown[]): string | undefined;
+	appendAdvertisedAgentPrompt(
+		systemPrompt: string,
+		advertisedPrompt: string | undefined,
+	): string;
+}
+
 /** What the policy must make of a fixture. */
 type Expectation =
 	| {
-			outcome: "projected";
-			shape: "stock" | "replaced" | "sectionless";
-			droppedSections: string[];
-			sectionUpdates: number;
+			outcome: "forwarded";
+			headStripped: boolean;
+			/** The exact append; null when nothing is left. */
+			forwarded: string | null;
+			removedUpdates: number;
 	  }
+	| {
+			outcome: "refused";
+			code: string;
+			reason: string;
+			section: string | null;
+	  };
+
+type Expected =
+	| { outcome: "forwarded" }
 	| {
 			outcome: "refused";
 			code: string;
@@ -62,24 +93,30 @@ interface Case {
 	input: Record<string, unknown>;
 	/** Options of a later turn: pi sends the changed sections as an update. */
 	next?: Record<string, unknown>;
-	expect: Expectation;
+	/** An extension's `before_agent_start` rewrite, which pi sends as a forced prompt. */
+	force?: (rendered: string) => string;
+	expect: Expected;
 }
 
 const { values } = parseArgs({
 	options: {
-		"pi-root": {
+		"pi-home": {
 			type: "string",
-			default:
-				process.env.PI_ROOT ??
-				join(homedir(), ".pi/node_modules/@earendil-works"),
+			default: process.env.PI_HOME ?? join(homedir(), ".pi"),
 		},
 		layout: { type: "string", default: "0.87" },
 	},
 });
-const piRoot = resolve(values["pi-root"] as string);
+const piHome = resolve(values["pi-home"] as string);
 const layout = values.layout as string;
+const piRoot = join(piHome, "node_modules/@earendil-works");
 const agentDir = join(piRoot, "pi-coding-agent");
 const aiDir = join(piRoot, "pi-ai");
+const CLAUDE_CONTEXT = join(piHome, "packages/claude-context/core.mjs");
+const ADVERTISED_AGENTS = join(
+	piHome,
+	"agent/git/github.com/d4rken/pi-subagents/src/agents/advertised-agent-prompt.ts",
+);
 
 const packageVersion = (dir: string): string =>
 	(
@@ -95,6 +132,8 @@ if (!piVersion.startsWith(`${layout}.`)) {
 	process.exit(1);
 }
 
+const sha256 = (path: string) =>
+	createHash("sha256").update(readFileSync(path)).digest("hex");
 const GRAMMAR_FILES = [
 	"pi-coding-agent/package.json",
 	"pi-coding-agent/dist/core/system-prompt.js",
@@ -103,18 +142,17 @@ const GRAMMAR_FILES = [
 	"pi-ai/dist/utils/text.js",
 ];
 const fileHashes = Object.fromEntries(
-	GRAMMAR_FILES.map((file) => [
-		file,
-		createHash("sha256")
-			.update(readFileSync(join(piRoot, file)))
-			.digest("hex"),
-	]),
+	GRAMMAR_FILES.map((file) => [file, sha256(join(piRoot, file))]),
 );
 
 const prompt = (await import(
 	join(agentDir, "dist/core/system-prompt.js")
 )) as SystemPromptModule;
 const text = (await import(join(aiDir, "dist/utils/text.js"))) as TextModule;
+const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextModule;
+const advertisedAgents = (await import(
+	ADVERTISED_AGENTS
+)) as AdvertisedAgentsModule;
 
 const CWD = "/home/user/projects/widget";
 const TOOL_SNIPPETS = {
@@ -124,6 +162,7 @@ const TOOL_SNIPPETS = {
 	write: "Create or overwrite files",
 };
 const BASE = { cwd: CWD, toolSnippets: TOOL_SNIPPETS };
+const STOCK_PREAMBLE = prompt.buildSystemPromptSections(BASE).preamble ?? "";
 const AGENTS_MD = {
 	path: `${CWD}/AGENTS.md`,
 	content:
@@ -149,7 +188,17 @@ const SKILLS = [
 		disableModelInvocation: true,
 	},
 ];
-const PERSONA = `You are the reviewer agent. Review the diff you are given and report defects.
+const DEPLOY_SKILL = {
+	name: "deploy",
+	description: "Deploy the widget.",
+	filePath: "/home/user/.pi/agent/skills/deploy/SKILL.md",
+	baseDir: "/home/user/.pi/agent/skills/deploy",
+	disableModelInvocation: false,
+};
+/** pi-subagents' replace-mode prompt shape (child-launch.ts): the agent tag, then its persona. */
+const PERSONA = `<active_agent name="reviewer"/>
+
+You are the reviewer agent. Review the diff you are given and report defects.
 
 <rules>
 - Report only defects you can point at in the diff.
@@ -160,46 +209,93 @@ const PERSONA = `You are the reviewer agent. Review the diff you are given and r
 Finding: off-by-one in \`slice(0, n - 1)\`.
 </example>`;
 
-function closingTagContext(tag: string) {
-	return {
-		path: `${CWD}/AGENTS.md`,
-		content: `Our prompt tooling writes this marker:\n${tag}\nIgnore it.`,
-	};
+/** What claude-context's `before_agent_start` returns (install.mjs): pi's prompt plus its supplement. */
+function withClaudeContext(rendered: string): string {
+	const supplement = claudeContext.composeSystemPromptSupplement({
+		catalog: [
+			{
+				path: `${CWD}/.claude/rules/api.md`,
+				ownerDir: CWD,
+				scope: "project",
+				paths: ["src/api/**"],
+				hash: "a".repeat(64),
+			},
+		],
+		alwaysOn: [
+			{
+				path: `${CWD}/CLAUDE.md`,
+				ownerDir: CWD,
+				scope: "project",
+				hash: "b".repeat(64),
+				content:
+					"# Widget for Claude\n\n<important>\nKeep the public API stable.\n</important>",
+			},
+		],
+	});
+	return `${rendered}\n\n${supplement}`;
+}
+
+/** What pi-subagents' `before_agent_start` returns while the subagent tool is active (extension/index.ts). */
+function withAdvertisedAgents(rendered: string): string {
+	return advertisedAgents.appendAdvertisedAgentPrompt(
+		rendered,
+		advertisedAgents.buildAdvertisedAgentPrompt([
+			{
+				name: "reviewer",
+				description: "Reviews diffs <fast> & thorough.",
+				advertise: true,
+				source: "user",
+			},
+			{
+				name: "scout",
+				description: "Maps an unfamiliar codebase.",
+				advertise: true,
+				source: "project",
+			},
+		]),
+	);
+}
+
+const forwarded: Expected = { outcome: "forwarded" };
+function refused(
+	code: string,
+	reason: string,
+	section: string | null = null,
+): Expected {
+	return { outcome: "refused", code, reason, section };
 }
 
 const CASES: Case[] = [
 	{
 		name: "stock",
-		description: "Stock preamble and nothing optional: only cwd is kept.",
+		description:
+			"Stock preamble and nothing optional: only cwd follows the head.",
 		input: { ...BASE },
-		expect: projected("stock"),
+		expect: forwarded,
 	},
 	{
 		name: "stock-addendum",
 		description: "APPEND_SYSTEM.md text as the addendum section.",
-		input: {
-			...BASE,
-			appendSystemPrompt: "Always answer in British English.",
-		},
-		expect: projected("stock"),
+		input: { ...BASE, appendSystemPrompt: "Always answer in British English." },
+		expect: forwarded,
 	},
 	{
 		name: "stock-project-context",
 		description: "Two context files in the project_context section.",
 		input: { ...BASE, contextFiles: [AGENTS_MD, NESTED_AGENTS_MD] },
-		expect: projected("stock"),
+		expect: forwarded,
 	},
 	{
 		name: "stock-skills",
 		description:
 			"The skills index; a disable-model-invocation skill is left out by pi.",
 		input: { ...BASE, skills: SKILLS },
-		expect: projected("stock"),
+		expect: forwarded,
 	},
 	{
 		name: "stock-all",
 		description:
-			"Every optional section, plus tool and prompt guidelines in the dropped rules.",
+			"Every optional section, plus tool and prompt guidelines in the stripped rules.",
 		input: {
 			...BASE,
 			appendSystemPrompt: "Always answer in British English.",
@@ -208,7 +304,21 @@ const CASES: Case[] = [
 			toolGuidelines: { bash: ["Prefer rg over grep"] },
 			promptGuidelines: ["Keep answers short"],
 		},
-		expect: projected("stock"),
+		expect: forwarded,
+	},
+	{
+		name: "stock-extension-section",
+		description:
+			"Extension-defined sections after cwd are forwarded like the rest.",
+		input: {
+			...BASE,
+			contextFiles: [AGENTS_MD],
+			sections: {
+				todo_list: "- [ ] write tests",
+				working_directory: "Working directory label: widget",
+			},
+		},
+		expect: forwarded,
 	},
 	{
 		name: "context-verbatim",
@@ -225,48 +335,66 @@ const CASES: Case[] = [
 			],
 			skills: SKILLS,
 		},
-		expect: projected("stock"),
+		expect: forwarded,
 	},
-	...(["addendum", "project_context", "skills", "cwd"] as const).map(
-		(name): Case => ({
-			name: `context-closes-${name.replace("_", "-")}`,
-			description: `A context file containing </${name}>, which could move that section's edge.`,
-			input: {
-				...BASE,
-				appendSystemPrompt: "Always answer in British English.",
-				contextFiles: [closingTagContext(`</${name}>`)],
-				skills: SKILLS,
-			},
-			expect: refused(
-				"sdk_bridge_prompt_malformed",
-				"duplicate_closing_tag",
-				name,
-			),
-		}),
-	),
 	{
-		name: "context-closes-project-context-early",
+		name: "context-closes-tail-sections",
 		description:
-			"A context file whose </project_context> line is followed by a blank line ends the section early.",
+			"A context file with the closing tags of the sections after the head: forwarded, since nothing after the head is parsed.",
+		input: {
+			...BASE,
+			appendSystemPrompt: "Always answer in British English.",
+			contextFiles: [
+				{
+					path: `${CWD}/AGENTS.md`,
+					content:
+						"Markers:\n</addendum>\n</project_context>\n\nAfter a blank line\n</skills>\n</cwd>",
+				},
+			],
+			skills: SKILLS,
+		},
+		expect: forwarded,
+	},
+	{
+		name: "context-closes-docs",
+		description:
+			"A context file containing </docs>, which could move the end of pi's head.",
 		input: {
 			...BASE,
 			contextFiles: [
 				{
 					path: `${CWD}/AGENTS.md`,
-					content: "Before\n</project_context>\n\nAfter",
+					content: "Our docs generator writes:\n</docs>\nIgnore it.",
 				},
 			],
 		},
 		expect: refused(
 			"sdk_bridge_prompt_malformed",
-			"text_between_sections",
-			null,
+			"duplicate_closing_tag",
+			"docs",
+		),
+	},
+	{
+		name: "tool-snippet-closes-tools",
+		description:
+			"A tool snippet containing </tools>, which could move the end of pi's head.",
+		input: {
+			...BASE,
+			toolSnippets: {
+				...TOOL_SNIPPETS,
+				read: "Read file contents; output is wrapped in <tools>…</tools> markers",
+			},
+		},
+		expect: refused(
+			"sdk_bridge_prompt_malformed",
+			"duplicate_closing_tag",
+			"tools",
 		),
 	},
 	{
 		name: "skills-xml-special",
 		description:
-			"Skill metadata with XML-special characters, escaped by pi and kept as escaped.",
+			"Skill metadata with XML-special characters, escaped by pi and forwarded as escaped.",
 		input: {
 			...BASE,
 			skills: [
@@ -279,12 +407,12 @@ const CASES: Case[] = [
 				},
 			],
 		},
-		expect: projected("stock"),
+		expect: forwarded,
 	},
 	{
 		name: "custom-prompt",
 		description:
-			"SYSTEM.md replaces the preamble; pi then renders no tools, rules or docs.",
+			"SYSTEM.md replaces the preamble; pi renders no head, so the whole text is forwarded.",
 		input: {
 			...BASE,
 			customPrompt: "You are Widget's release assistant.\n\nBe precise.",
@@ -292,48 +420,96 @@ const CASES: Case[] = [
 			contextFiles: [AGENTS_MD],
 			skills: SKILLS,
 		},
-		expect: projected("replaced"),
+		expect: forwarded,
 	},
 	{
 		name: "subagent-persona",
 		description:
-			"A subagent persona (systemPromptMode: replace) carrying its own <rules> and <example> blocks.",
-		input: {
-			...BASE,
-			customPrompt: PERSONA,
-			contextFiles: [AGENTS_MD],
-		},
-		expect: projected("replaced"),
+			"A pi-subagents replace-mode persona carrying its own <rules> and <example> blocks.",
+		input: { ...BASE, customPrompt: PERSONA, contextFiles: [AGENTS_MD] },
+		expect: forwarded,
 	},
 	{
 		name: "forced-prompt",
-		description:
-			"forceSystemPrompt: opaque text with no sections, appended whole.",
+		description: "forceSystemPrompt with no pi head: forwarded whole.",
 		input: {
 			...BASE,
 			forceSystemPrompt:
 				"You are a commit-message writer. Answer with one line, imperative mood.",
 		},
-		expect: projected("sectionless"),
+		expect: forwarded,
 	},
 	{
-		name: "extension-section",
+		name: "forced-claude-context",
 		description:
-			"Two extension-defined sections after cwd: dropped, and their names recorded.",
-		input: {
+			"claude-context's rewrite: pi's prompt plus raw supplemental guidance after <cwd>, sent as a forced prompt.",
+		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
+		force: withClaudeContext,
+		expect: forwarded,
+	},
+	{
+		name: "forced-advertised-agents",
+		description:
+			"pi-subagents' rewrite: pi's prompt plus the <advertised_subagents> block, sent as a forced prompt.",
+		input: { ...BASE, contextFiles: [AGENTS_MD] },
+		force: withAdvertisedAgents,
+		expect: forwarded,
+	},
+	{
+		name: "forced-claude-context-and-agents",
+		description:
+			"Both rewrites in pi's handler order: claude-context first, then pi-subagents on its result.",
+		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
+		force: (rendered) => withAdvertisedAgents(withClaudeContext(rendered)),
+		expect: forwarded,
+	},
+	{
+		name: "update-tools",
+		description:
+			"A later turn changes a tool snippet; pi's update to the tools section is removed.",
+		input: { ...BASE, contextFiles: [AGENTS_MD] },
+		next: {
 			...BASE,
 			contextFiles: [AGENTS_MD],
-			sections: {
-				todo_list: "- [ ] write tests",
-				"web-search": "Use web_search for anything after 2025.",
+			toolSnippets: {
+				...TOOL_SNIPPETS,
+				read: "Read file contents (images too)",
 			},
 		},
-		expect: projected("stock", ["todo_list", "web-search"]),
+		expect: forwarded,
+	},
+	{
+		name: "update-extension-section",
+		description:
+			"A later turn changes an extension section; the update is forwarded.",
+		input: { ...BASE, sections: { claude_context: "Guidance v1" } },
+		next: { ...BASE, sections: { claude_context: "Guidance v2" } },
+		expect: forwarded,
+	},
+	{
+		name: "update-tools-and-skills",
+		description:
+			"One update message changing tools and skills: the tools part goes, the skills part stays.",
+		input: { ...BASE, skills: SKILLS.slice(0, 1) },
+		next: {
+			...BASE,
+			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
+			toolSnippets: { ...TOOL_SNIPPETS, bash: "Execute bash commands" },
+		},
+		expect: forwarded,
+	},
+	{
+		name: "update-preamble-to-stock",
+		description:
+			"A session whose replaced preamble goes back to stock: that update and the head sections it adds are removed.",
+		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
+		next: { ...BASE },
+		expect: forwarded,
 	},
 	{
 		name: "section-update",
 		description:
-			"A later turn changes the skills and context, drops the addendum and adds an extension section; pi sends the difference as a second system message.",
+			"A later turn changes skills and context, drops the addendum and adds an extension section; every update is forwarded.",
 		input: {
 			...BASE,
 			appendSystemPrompt: "Always answer in British English.",
@@ -343,19 +519,10 @@ const CASES: Case[] = [
 		next: {
 			...BASE,
 			contextFiles: [AGENTS_MD, NESTED_AGENTS_MD],
-			skills: [
-				...SKILLS.slice(0, 1),
-				{
-					name: "deploy",
-					description: "Deploy the widget.",
-					filePath: "/home/user/.pi/agent/skills/deploy/SKILL.md",
-					baseDir: "/home/user/.pi/agent/skills/deploy",
-					disableModelInvocation: false,
-				},
-			],
+			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
 			sections: { todo_list: "- [ ] deploy" },
 		},
-		expect: projected("stock", ["todo_list"], 4),
+		expect: forwarded,
 	},
 	{
 		name: "trigger-preamble-in-context",
@@ -371,11 +538,7 @@ const CASES: Case[] = [
 				},
 			],
 		},
-		expect: refused(
-			"sdk_bridge_prompt_refused",
-			"trigger_preamble",
-			"project_context",
-		),
+		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
 	},
 	{
 		name: "trigger-docs-pair",
@@ -386,11 +549,7 @@ const CASES: Case[] = [
 			appendSystemPrompt:
 				"See docs/custom-provider.md and docs/packages.md before changing providers.",
 		},
-		expect: refused(
-			"sdk_bridge_prompt_refused",
-			"trigger_docs_pair",
-			"addendum",
-		),
+		expect: refused("sdk_bridge_prompt_refused", "trigger_docs_pair"),
 	},
 	{
 		name: "trigger-persona-embeds-pi",
@@ -401,29 +560,9 @@ const CASES: Case[] = [
 			customPrompt:
 				"You are an expert coding assistant operating inside pi, acting as the reviewer.",
 		},
-		expect: refused(
-			"sdk_bridge_prompt_refused",
-			"trigger_preamble",
-			"preamble",
-		),
+		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
 	},
 ];
-
-function projected(
-	shape: "stock" | "replaced" | "sectionless",
-	droppedSections: string[] = [],
-	sectionUpdates = 0,
-): Expectation {
-	return { outcome: "projected", shape, droppedSections, sectionUpdates };
-}
-
-function refused(
-	code: string,
-	reason: string,
-	section: string | null,
-): Expectation {
-	return { outcome: "refused", code, reason, section };
-}
 
 const portable = (value: string): string =>
 	value.replaceAll(agentDir, DOCS_ROOT);
@@ -432,25 +571,81 @@ const portableSections = (sections: Sections): Sections =>
 		Object.entries(sections).map(([name, value]) => [name, portable(value)]),
 	);
 
-function render(c: Case) {
-	if (c.input.forceSystemPrompt !== undefined) {
-		const system = portable(prompt.buildSystemPrompt(c.input));
-		return { system, messages: [system], sections: null };
+const isStock = (sections: Sections) => sections.preamble === STOCK_PREAMBLE;
+const headOf = (sections: Sections) =>
+	["preamble", ...HEAD_SECTIONS].map((name) => sections[name]).join("\n\n");
+
+/** The leading message without pi's head, from pi's own sections. */
+function tailOf(sections: Sections): string {
+	if (!isStock(sections))
+		return text.getSystemMessageText({ role: "system", content: "", sections });
+	const rest = Object.fromEntries(
+		Object.entries(sections).filter(
+			([name]) => name !== "preamble" && !HEAD_SECTIONS.includes(name),
+		),
+	);
+	return Object.values(rest).join("\n\n");
+}
+
+/** An update message without its head parts, rendered by pi; null when nothing is left. */
+function updateWithoutHead(patch: Patch): {
+	text: string | null;
+	removed: number;
+} {
+	const kept: Patch = {};
+	let removed = 0;
+	for (const [name, value] of Object.entries(patch)) {
+		if (
+			(HEAD_SECTIONS.includes(name) && value !== null) ||
+			(name === "preamble" && value === STOCK_PREAMBLE)
+		)
+			removed++;
+		else kept[name] = value;
 	}
-	const first = prompt.buildSystemPromptSections(c.input);
-	const leading = text.getSystemMessageText({
+	return {
+		text: Object.keys(kept).length
+			? text.renderSystemMessageUpdate({
+					role: "system",
+					content: "",
+					sections: kept,
+				})
+			: null,
+		removed,
+	};
+}
+
+function render(c: Case) {
+	const leading = prompt.buildSystemPromptSections(c.input);
+	if (c.input.forceSystemPrompt !== undefined || c.force) {
+		const rendered = prompt.buildSystemPrompt(c.input);
+		const system = c.force ? c.force(rendered) : rendered;
+		const head =
+			c.input.forceSystemPrompt === undefined ? headOf(leading) : null;
+		const stripped =
+			head !== null && isStock(leading) && system.startsWith(`${head}\n\n`);
+		const after = stripped ? system.slice((head as string).length + 2) : system;
+		return {
+			system: portable(system),
+			messages: [portable(system)],
+			sections: null,
+			expected: { headStripped: stripped, forwarded: after, removedUpdates: 0 },
+		};
+	}
+	const first = text.getSystemMessageText({
 		role: "system",
 		content: "",
-		sections: first,
+		sections: leading,
 		timestamp: 0,
 	});
-	if (leading !== prompt.buildSystemPrompt(c.input))
+	if (first !== prompt.buildSystemPrompt(c.input))
 		throw new Error(`${c.name}: pi renders its prompt differently`);
-	const messages = [leading];
-	let sections = first;
+	const messages = [first];
+	const parts = [tailOf(leading)];
+	let removedUpdates = 0;
+	let sections = leading;
 	if (c.next) {
 		sections = prompt.buildSystemPromptSections(c.next);
-		const patch = prompt.diffSystemPromptSections(first, sections);
+		const patch = prompt.diffSystemPromptSections(leading, sections);
 		if (!patch) throw new Error(`${c.name}: the next turn changes nothing`);
 		messages.push(
 			text.renderSystemMessageUpdate({
@@ -460,12 +655,41 @@ function render(c: Case) {
 				timestamp: 1,
 			}),
 		);
+		const update = updateWithoutHead(patch);
+		if (update.text !== null) parts.push(update.text);
+		removedUpdates += update.removed;
 	}
 	return {
 		// The Responses and Chat adapters join instruction messages this way.
 		system: portable(messages.join("\n\n")),
 		messages: messages.map(portable),
 		sections: portableSections(sections),
+		expected: {
+			headStripped: isStock(leading),
+			forwarded: parts.filter(Boolean).join("\n\n"),
+			removedUpdates,
+		},
+	};
+}
+
+function fixture(c: Case) {
+	const { expected, ...rendered } = render(c);
+	const expect: Expectation =
+		c.expect.outcome === "refused"
+			? c.expect
+			: {
+					outcome: "forwarded",
+					headStripped: expected.headStripped,
+					forwarded: expected.forwarded ? portable(expected.forwarded) : null,
+					removedUpdates: expected.removedUpdates,
+				};
+	return {
+		name: c.name,
+		description: c.description,
+		input: c.input,
+		...(c.next ? { next: c.next } : {}),
+		...rendered,
+		expect,
 	};
 }
 
@@ -480,18 +704,7 @@ for (const file of readdirSync(outDir))
 for (const c of CASES)
 	writeFileSync(
 		join(outDir, `${c.name}.json`),
-		`${JSON.stringify(
-			{
-				name: c.name,
-				description: c.description,
-				input: c.input,
-				...(c.next ? { next: c.next } : {}),
-				...render(c),
-				expect: c.expect,
-			},
-			null,
-			"\t",
-		)}\n`,
+		`${JSON.stringify(fixture(c), null, "\t")}\n`,
 	);
 writeFileSync(
 	join(outDir, "manifest.json"),
@@ -504,6 +717,11 @@ writeFileSync(
 				.update(Object.values(fileHashes).join("\n"))
 				.digest("hex"),
 			files: fileHashes,
+			extensionFiles: {
+				"packages/claude-context/core.mjs": sha256(CLAUDE_CONTEXT),
+				"pi-subagents/src/agents/advertised-agent-prompt.ts":
+					sha256(ADVERTISED_AGENTS),
+			},
 			docsRoot: DOCS_ROOT,
 			generator:
 				"packages/claude-sdk-bridge/scripts/generate-pi-prompt-fixtures.ts",
@@ -516,10 +734,7 @@ writeFileSync(
 // In the repository's own JSON style, so `bun run lint` leaves them as written.
 const formatted = Bun.spawnSync(
 	["bunx", "biome", "format", "--write", outDir],
-	{
-		cwd: join(import.meta.dir, "../../.."),
-		stdout: "ignore",
-	},
+	{ cwd: join(import.meta.dir, "../../.."), stdout: "ignore" },
 );
 if (formatted.exitCode !== 0) {
 	console.error(`biome format failed on ${outDir}`);

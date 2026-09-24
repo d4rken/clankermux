@@ -46,15 +46,17 @@ export type SdkBridgeLegErrorPhase = "pre_head" | "mid_stream";
  */
 export type SdkBridgeSystemPromptDetail =
 	| {
-			outcome: "projected";
+			outcome: "forwarded";
 			/** The prompt-layout version the client declared. */
 			version: string;
-			/** `sectionless`: a forced prompt, appended whole. */
-			shape: "stock" | "replaced" | "sectionless" | "empty";
-			/** Client-defined sections left out, by name. */
-			droppedSections: string[];
-			/** Sections the client updated or removed after its leading system message. */
-			sectionUpdates: number;
+			/** Whether pi's own harness head was taken off the front. */
+			headStripped: boolean;
+			/** Characters appended to Claude Code's preset. */
+			forwardedLength: number;
+			/** Later updates to the head's sections that were taken out. */
+			removedUpdates: number;
+			/** Section openers seen in the forwarded text; a diagnostic only. */
+			sectionsSeen: string[];
 	  }
 	| {
 			outcome: "refused";

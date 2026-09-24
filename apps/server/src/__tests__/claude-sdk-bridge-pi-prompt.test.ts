@@ -4,7 +4,7 @@
  * leading, one per later section update); the Responses and Chat adapters
  * fold them into the Messages `system`, and the bridge projects that. The
  * cases assert the exact `append`, so an adapter that joined or trimmed the
- * messages differently would fail here rather than shift a section edge.
+ * messages differently would fail here rather than shift what is forwarded.
  */
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -169,10 +169,12 @@ for (const endpoint of ["responses", "chat"] as const)
 			"context-verbatim",
 			"subagent-persona",
 			"forced-prompt",
-			"extension-section",
+			"stock-extension-section",
+			"forced-claude-context-and-agents",
 			"section-update",
+			"update-tools-and-skills",
 		])
-			it(`${name}: Claude Code starts with pi's projection appended, byte for byte`, async () => {
+			it(`${name}: Claude Code starts with pi's prompt minus its head appended, byte for byte`, async () => {
 				const h = await harness();
 				const f = byName(name);
 				const pending = send(h.gw, endpoint, f);
@@ -190,9 +192,9 @@ for (const endpoint of ["responses", "chat"] as const)
 				query.end();
 				expect((await pending).status).toBe(200);
 				const row = await turnRow(h.gw);
-				expect(row?.system_prompt_policy).toBe("pi-projection-v1");
+				expect(row?.system_prompt_policy).toBe("pi-head-v1");
 				expect(JSON.parse(row?.system_prompt_detail ?? "null")).toMatchObject({
-					outcome: "projected",
+					outcome: "forwarded",
 					version: "0.87",
 				});
 			});
@@ -214,7 +216,7 @@ for (const endpoint of ["responses", "chat"] as const)
 			const row = await turnRow(h.gw);
 			expect(row).toMatchObject({
 				status: "rejected",
-				system_prompt_policy: "pi-projection-v1",
+				system_prompt_policy: "pi-head-v1",
 			});
 			expect(JSON.parse(row?.system_prompt_detail ?? "null")).toMatchObject({
 				outcome: "refused",
@@ -229,7 +231,7 @@ for (const endpoint of ["responses", "chat"] as const)
 			const response = await send(
 				h.gw,
 				endpoint,
-				byName("context-closes-project-context"),
+				byName("context-closes-docs"),
 			);
 			expect(response.status).toBe(400);
 			expect(

@@ -24,9 +24,9 @@
 		"cwd": "<cwd>\n/home/user/projects/widget\n</cwd>"
 	},
 	"expect": {
-		"outcome": "projected",
-		"shape": "stock",
-		"droppedSections": [],
-		"sectionUpdates": 0
+		"outcome": "forwarded",
+		"headStripped": true,
+		"forwarded": "<addendum>\nAlways answer in British English.\n</addendum>\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
+		"removedUpdates": 0
 	}
 }

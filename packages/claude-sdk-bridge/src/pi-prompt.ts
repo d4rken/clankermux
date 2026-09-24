@@ -1,70 +1,59 @@
 /**
- * pi's system prompt, read by its outer section edges only. pi renders a
- * leading system message as its preamble followed by `<name>\n…\n</name>`
- * sections, all joined by a blank line:
+ * pi's system prompt with pi's own harness text taken out. pi renders that
+ * text as one head at the very start whenever the preamble is its stock one:
  *
- *   You are an expert coding assistant operating inside pi, …   (or a custom prompt)
+ *   You are an expert coding assistant operating inside pi, …
  *
- *   <tools>…</tools>  <rules>…</rules>  <docs>…</docs>          (stock preamble only)
- *   <addendum>…</addendum>  <project_context>…</project_context>
- *   <skills>…</skills>  <cwd>…</cwd>  <extension_name>…</extension_name>
+ *   <tools>
+ *   …
+ *   </tools>
  *
- * A section that changes later in the session arrives as another system
- * message, which the adapters append after a blank line:
+ *   <rules>
+ *   …
+ *   </rules>
  *
- *   Updated system prompt section "skills":
+ *   <docs>
+ *   …
+ *   </docs>
  *
- *   <skills>…</skills>
- *
- *   Removed system prompt section "addendum".
- *
- * Section contents are never looked into: pi does not escape context files,
- * so a record boundary inside `project_context` is indistinguishable from
- * file text.
+ * Everything after the head (pi's own later sections, extension sections,
+ * raw text an extension appended) is the operator's and is forwarded byte
+ * for byte, never parsed. A section pi changes mid-session arrives as a
+ * later system message, `Updated system prompt section "tools":` and the
+ * block; updates to the head's sections are removed with it.
  */
 
-/** One pi release's prompt layout. */
-interface PiPromptLayout {
+/** pi's harness text, identical across the pi releases that share it. */
+interface PiPromptHead {
 	stockPreamble: string;
-	/** Present exactly when the preamble is the stock one. */
-	stockSections: readonly string[];
-	/** Every section pi itself renders, in its order. */
-	order: readonly string[];
-	/** What reaches Claude Code, in this order. */
-	kept: readonly string[];
+	/** The sections that follow a stock preamble, in order. */
+	sections: readonly string[];
 }
 
-const PI_0_87: PiPromptLayout = {
-	stockPreamble:
-		"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
-	stockSections: ["tools", "rules", "docs"],
-	order: [
-		"tools",
-		"rules",
-		"docs",
-		"addendum",
-		"project_context",
-		"skills",
-		"cwd",
-	],
-	kept: ["project_context", "skills", "addendum", "cwd"],
-};
+const HEADS: ReadonlyArray<{ versions: string[]; head: PiPromptHead }> = [
+	{
+		versions: ["0.87"],
+		head: {
+			stockPreamble:
+				"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+			sections: ["tools", "rules", "docs"],
+		},
+	},
+];
 
-const LAYOUTS: ReadonlyMap<string, PiPromptLayout> = new Map([
-	["0.87", PI_0_87],
-]);
+const BY_VERSION: ReadonlyMap<string, PiPromptHead> = new Map(
+	HEADS.flatMap(({ versions, head }) => versions.map((v) => [v, head])),
+);
 
 /** Layout versions with fixtures; a pi release outside these is refused. */
 export const SUPPORTED_PI_PROMPT_VERSIONS: readonly string[] = [
-	...LAYOUTS.keys(),
+	...BY_VERSION.keys(),
 ];
 
-export function piPromptLayout(version: string): PiPromptLayout | null {
-	return LAYOUTS.get(version) ?? null;
+export function piPromptHead(version: string): PiPromptHead | null {
+	return BY_VERSION.get(version) ?? null;
 }
 
-const SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
-const OPENER = /<([a-z][a-z0-9_-]*)>\n/y;
 const UPDATED = 'Updated system prompt section "';
 const REMOVED = 'Removed system prompt section "';
 
@@ -73,26 +62,23 @@ const PI_PREAMBLE_LINE =
 	"You are an expert coding assistant operating inside pi";
 const TRIGGER_PAIR = ["docs/custom-provider.md", "docs/packages.md"] as const;
 
-export type PiPromptMalformedReason =
-	| "text_between_sections"
-	| "unterminated_section"
-	| "duplicate_section"
-	| "section_out_of_order"
-	| "missing_section"
-	| "stock_sections_missing"
-	| "duplicate_closing_tag"
-	| "malformed_section_update";
+const MAX_SECTION_NAMES = 32;
 
+export type PiPromptMalformedReason =
+	| "duplicate_closing_tag"
+	| "incomplete_head";
 export type PiPromptRefusedReason = "trigger_preamble" | "trigger_docs_pair";
 
-export type PiProjection =
+export type PiHeadStrip =
 	| {
 			ok: true;
-			/** Null when there is nothing to append. */
+			/** Null when nothing is left to append. */
 			append: string | null;
-			shape: "stock" | "replaced" | "sectionless" | "empty";
-			droppedSections: string[];
-			sectionUpdates: number;
+			headStripped: boolean;
+			/** Updates to the head's sections taken out. */
+			removedUpdates: number;
+			/** Section openers seen in what is forwarded; a diagnostic, never a filter. */
+			sectionsSeen: string[];
 	  }
 	| {
 			ok: false;
@@ -100,275 +86,144 @@ export type PiProjection =
 			reason: PiPromptMalformedReason;
 			section: string | null;
 	  }
-	| {
-			ok: false;
-			kind: "refused";
-			reason: PiPromptRefusedReason;
-			/** `preamble`, a section name, or `prompt` for sectionless text. */
-			section: string;
-	  };
-
-class Malformed extends Error {
-	constructor(
-		readonly reason: PiPromptMalformedReason,
-		readonly section: string | null = null,
-	) {
-		super(reason);
-	}
-}
-
-/** A name read from the prompt, safe to record and to show. */
-function sectionLabel(name: string): string {
-	return SECTION_NAME.test(name) || name === "preamble"
-		? name.slice(0, 64)
-		: "(invalid)";
-}
-
-interface Block {
-	name: string;
-	text: string;
-	end: number;
-}
-
-/** The section starting at `pos`: `<name>\n`, content, `\n</name>`, then a blank line or the end. */
-function readSection(text: string, pos: number, expected?: string): Block {
-	OPENER.lastIndex = pos;
-	const open = OPENER.exec(text);
-	if (!open?.[1])
-		throw new Malformed(
-			expected ? "malformed_section_update" : "text_between_sections",
-			expected ?? null,
-		);
-	const name = open[1];
-	if (expected !== undefined && name !== expected)
-		throw new Malformed("malformed_section_update", sectionLabel(expected));
-	const close = `\n</${name}>`;
-	let at = text.indexOf(close, pos + open[0].length - 1);
-	while (at !== -1) {
-		const after = at + close.length;
-		if (after === text.length || text.startsWith("\n\n", after))
-			return { name, text: text.slice(pos, after), end: after };
-		at = text.indexOf(close, at + 1);
-	}
-	throw new Malformed("unterminated_section", sectionLabel(name));
-}
-
-/** The quoted name of an update line at `pos`, and where it ends. */
-function readUpdateName(
-	text: string,
-	pos: number,
-	terminator: string,
-): { name: string; end: number } {
-	const close = text.indexOf(terminator, pos);
-	const name = close === -1 ? "" : text.slice(pos, close);
-	if (!SECTION_NAME.test(name) && name !== "preamble")
-		throw new Malformed("malformed_section_update");
-	return { name, end: close + terminator.length };
-}
-
-function nextUpdateAt(text: string, from: number): number {
-	const candidates = [
-		text.indexOf(`\n\n${UPDATED}`, from),
-		text.indexOf(`\n\n${REMOVED}`, from),
-	].filter((i) => i !== -1);
-	return candidates.length ? Math.min(...candidates) : text.length;
-}
+	| { ok: false; kind: "refused"; reason: PiPromptRefusedReason };
 
 function countOf(text: string, needle: string): number {
 	let n = 0;
 	for (
 		let at = text.indexOf(needle);
 		at !== -1;
-		at = text.indexOf(needle, at + 1)
+		at = text.indexOf(needle, at + needle.length)
 	)
 		n++;
 	return n;
 }
 
-interface Sectioned {
-	preamble: string;
-	sections: Map<string, string>;
-	updates: number;
+/** Where the block `<name>\n…\n</name>` starting at `pos` ends, when a blank line or the end follows it. */
+function blockEnd(text: string, pos: number, name: string): number | null {
+	const open = `<${name}>\n`;
+	if (!text.startsWith(open, pos)) return null;
+	const close = `\n</${name}>`;
+	const at = text.indexOf(close, pos + open.length - 1);
+	if (at === -1) return null;
+	const end = at + close.length;
+	return end === text.length || text.startsWith("\n\n", end) ? end : null;
+}
+
+/** The end of pi's head, or null when the stock preamble is not followed by all of it. */
+function headEnd(text: string, head: PiPromptHead): number | null {
+	let pos = head.stockPreamble.length;
+	for (const name of head.sections) {
+		if (!text.startsWith("\n\n", pos)) return null;
+		const end = blockEnd(text, pos + 2, name);
+		if (end === null) return null;
+		pos = end;
+	}
+	return pos;
 }
 
 /**
- * The preamble ends at the first kept-section opener after a blank line. A
- * replaced preamble is operator text and may well carry `<rules>` or
- * `<example>` blocks of its own, so only a section pi appends after a custom
- * prompt can end it.
+ * Removes updates that put back or change the head: its sections, or the
+ * preamble back to stock. Every other update, and every removal, stays.
  */
-function preambleEnd(text: string, layout: PiPromptLayout): number | null {
-	if (
-		text === layout.stockPreamble ||
-		text.startsWith(`${layout.stockPreamble}\n\n`)
-	)
-		return layout.stockPreamble.length;
-	let first: number | null = null;
-	for (const name of layout.kept) {
-		const at = text.indexOf(`\n\n<${name}>\n`);
-		if (at !== -1 && (first === null || at < first)) first = at;
-	}
-	return first;
-}
-
-function parseSectioned(
-	text: string,
-	layout: PiPromptLayout,
-	start: number,
-): Sectioned {
-	let preamble = text.slice(0, start);
-	const sections = new Map<string, string>();
-	const blocks = new Map<string, number>();
-	const note = (name: string) => blocks.set(name, (blocks.get(name) ?? 0) + 1);
-	let rank = -1;
-	let pastBuiltIns = false;
-	let updates = 0;
-	let pos = start;
-
-	while (pos < text.length) {
-		if (!text.startsWith("\n\n", pos))
-			throw new Malformed(
-				updates ? "malformed_section_update" : "text_between_sections",
-			);
-		pos += 2;
-		if (text.startsWith(UPDATED, pos)) {
-			updates++;
-			const { name, end } = readUpdateName(
-				text,
-				pos + UPDATED.length,
-				'":\n\n',
-			);
-			if (name === "preamble") {
-				const valueEnd = nextUpdateAt(text, end);
-				preamble = text.slice(end, valueEnd);
-				pos = valueEnd;
+function removeHeadUpdates(
+	tail: string,
+	head: PiPromptHead,
+): { text: string; removed: number } {
+	// Each update is preceded by a blank line: the one joining it to the text before.
+	let text = `\n\n${tail}`;
+	let removed = 0;
+	for (const name of head.sections) {
+		const marker = `\n\n${UPDATED}${name}":\n\n`;
+		let at = text.indexOf(marker);
+		while (at !== -1) {
+			const end = blockEnd(text, at + marker.length, name);
+			if (end === null) {
+				at = text.indexOf(marker, at + marker.length);
 				continue;
 			}
-			const block = readSection(text, end, name);
-			note(name);
-			sections.set(name, block.text);
-			pos = block.end;
-			continue;
+			text = text.slice(0, at) + text.slice(end);
+			removed++;
+			at = text.indexOf(marker, at);
 		}
-		if (text.startsWith(REMOVED, pos)) {
-			updates++;
-			const { name, end } = readUpdateName(text, pos + REMOVED.length, '".');
-			if (name === "preamble")
-				throw new Malformed("malformed_section_update", name);
-			sections.delete(name);
-			pos = end;
-			continue;
-		}
-		// The leading message's sections; none may follow an update.
-		if (updates) throw new Malformed("malformed_section_update");
-		const block = readSection(text, pos);
-		const label = sectionLabel(block.name);
-		if (sections.has(block.name))
-			throw new Malformed("duplicate_section", label);
-		const at = layout.order.indexOf(block.name);
-		if (at === -1) pastBuiltIns = true;
-		else if (at <= rank || pastBuiltIns)
-			throw new Malformed("section_out_of_order", label);
-		else rank = at;
-		note(block.name);
-		sections.set(block.name, block.text);
-		pos = block.end;
 	}
-
-	// Only the terminators the parse consumed may carry a kept section's
-	// closing tag; one anywhere else could have moved a section edge.
-	for (const name of layout.kept)
-		if (countOf(text, `</${name}>`) > (blocks.get(name) ?? 0))
-			throw new Malformed("duplicate_closing_tag", name);
-	if (preamble === layout.stockPreamble) {
-		const missing = layout.stockSections.find((name) => !sections.has(name));
-		if (missing) throw new Malformed("stock_sections_missing", missing);
+	const stock = `\n\n${UPDATED}preamble":\n\n${head.stockPreamble}`;
+	let at = text.indexOf(stock);
+	while (at !== -1) {
+		const end = at + stock.length;
+		if (
+			end === text.length ||
+			text.startsWith(`\n\n${UPDATED}`, end) ||
+			text.startsWith(`\n\n${REMOVED}`, end)
+		) {
+			text = text.slice(0, at) + text.slice(end);
+			removed++;
+			at = text.indexOf(stock, at);
+		} else at = text.indexOf(stock, end);
 	}
-	if (!sections.has("cwd")) throw new Malformed("missing_section", "cwd");
-	return { preamble, sections, updates };
+	return { text: text.slice(2), removed };
 }
 
-function triggerIn(
-	parts: ReadonlyArray<{ label: string; text: string }>,
-): { reason: PiPromptRefusedReason; section: string } | null {
-	for (const { label, text } of parts) {
-		for (
-			let at = text.indexOf(PI_PREAMBLE_LINE);
-			at !== -1;
-			at = text.indexOf(PI_PREAMBLE_LINE, at + 1)
-		)
-			// Mid-line mentions describe pi's prompt; they are not pi's prompt.
-			if (at === 0 || text[at - 1] === "\n")
-				return { reason: "trigger_preamble", section: label };
-		if (TRIGGER_PAIR.every((t) => text.includes(t)))
-			return { reason: "trigger_docs_pair", section: label };
-	}
-	return null;
+function triggerIn(text: string): PiPromptRefusedReason | null {
+	for (
+		let at = text.indexOf(PI_PREAMBLE_LINE);
+		at !== -1;
+		at = text.indexOf(PI_PREAMBLE_LINE, at + 1)
+	)
+		// Mid-line mentions describe pi's prompt; they are not pi's prompt.
+		if (at === 0 || text[at - 1] === "\n") return "trigger_preamble";
+	return TRIGGER_PAIR.every((t) => text.includes(t))
+		? "trigger_docs_pair"
+		: null;
+}
+
+function sectionsSeen(text: string): string[] {
+	const names = new Set<string>();
+	for (const match of text.matchAll(/(?:^|\n\n)<([a-z][a-z0-9_-]{0,63})>\n/g))
+		if (match[1] && names.size < MAX_SECTION_NAMES) names.add(match[1]);
+	return [...names];
 }
 
 /**
- * What of pi's system prompt reaches Claude Code: with the stock preamble,
- * the project context, skills, addendum and cwd sections byte for byte;
- * with a replaced one, the replaced preamble first and then the same; a
- * forced prompt, which has no sections, whole. pi's tool list, rules and
- * docs pointers never do, and neither do sections extensions add.
+ * What of pi's system prompt reaches Claude Code: the text after pi's head,
+ * or the whole text when it does not start with the stock preamble (a
+ * replaced preamble, or a forced prompt without pi's head).
  */
-export function projectPiPrompt(
-	text: string,
-	layout: PiPromptLayout,
-): PiProjection {
-	if (!text)
-		return {
-			ok: true,
-			append: null,
-			shape: "empty",
-			droppedSections: [],
-			sectionUpdates: 0,
-		};
-	const start = preambleEnd(text, layout);
-	let parts: Array<{ label: string; text: string }>;
-	let shape: "stock" | "replaced" | "sectionless";
-	let droppedSections: string[] = [];
-	let sectionUpdates = 0;
-	if (start === null) {
-		parts = [{ label: "prompt", text }];
-		shape = "sectionless";
-	} else {
-		let parsed: Sectioned;
-		try {
-			parsed = parseSectioned(text, layout, start);
-		} catch (error) {
-			if (!(error instanceof Malformed)) throw error;
+export function stripPiHead(text: string, head: PiPromptHead): PiHeadStrip {
+	const stock = text.startsWith(head.stockPreamble);
+	const updates = (name: string) =>
+		countOf(text, `\n\n${UPDATED}${name}":\n\n<${name}>\n`);
+	// A second closing tag could move the head's end, or an update's.
+	for (const name of head.sections) {
+		const allowed = Math.max(1, (stock ? 1 : 0) + updates(name));
+		if (countOf(text, `</${name}>`) > allowed)
 			return {
 				ok: false,
 				kind: "malformed",
-				reason: error.reason,
-				section: error.section,
+				reason: "duplicate_closing_tag",
+				section: name,
 			};
-		}
-		const stock = parsed.preamble === layout.stockPreamble;
-		parts = [
-			...(stock || !parsed.preamble
-				? []
-				: [{ label: "preamble", text: parsed.preamble }]),
-			...layout.kept.flatMap((name) => {
-				const block = parsed.sections.get(name);
-				return block === undefined ? [] : [{ label: name, text: block }];
-			}),
-		];
-		shape = stock ? "stock" : "replaced";
-		droppedSections = [...parsed.sections.keys()].filter(
-			(name) => !layout.order.includes(name),
-		);
-		sectionUpdates = parsed.updates;
 	}
-	const trigger = triggerIn(parts);
-	if (trigger) return { ok: false, kind: "refused", ...trigger };
+	let tail = text;
+	if (stock) {
+		const end = headEnd(text, head);
+		if (end === null)
+			return {
+				ok: false,
+				kind: "malformed",
+				reason: "incomplete_head",
+				section: null,
+			};
+		tail = text.slice(Math.min(end + 2, text.length));
+	}
+	const { text: forwarded, removed } = removeHeadUpdates(tail, head);
+	const trigger = triggerIn(forwarded);
+	if (trigger) return { ok: false, kind: "refused", reason: trigger };
 	return {
 		ok: true,
-		append: parts.length ? parts.map((p) => p.text).join("\n\n") : null,
-		shape,
-		droppedSections,
-		sectionUpdates,
+		append: forwarded || null,
+		headStripped: stock,
+		removedUpdates: removed,
+		sectionsSeen: sectionsSeen(forwarded),
 	};
 }

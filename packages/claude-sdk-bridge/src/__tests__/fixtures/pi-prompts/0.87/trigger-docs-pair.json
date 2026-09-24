@@ -27,6 +27,6 @@
 		"outcome": "refused",
 		"code": "sdk_bridge_prompt_refused",
 		"reason": "trigger_docs_pair",
-		"section": "addendum"
+		"section": null
 	}
 }

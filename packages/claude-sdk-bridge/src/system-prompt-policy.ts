@@ -5,10 +5,10 @@ import {
 } from "@clankermux/types";
 import type { BridgeError } from "./errors";
 import {
-	type PiProjection,
-	piPromptLayout,
-	projectPiPrompt,
+	type PiHeadStrip,
+	piPromptHead,
 	SUPPORTED_PI_PROMPT_VERSIONS,
+	stripPiHead,
 } from "./pi-prompt";
 
 /** What the client's system prompt becomes on top of Claude Code's own. */
@@ -62,7 +62,7 @@ export const dropSystemPromptPolicy: SystemPromptPolicy = {
 	}),
 };
 
-const PI_POLICY = "pi-projection-v1";
+const PI_POLICY = "pi-head-v1";
 
 function refusal(
 	code: string,
@@ -97,19 +97,18 @@ function refusal(
 }
 
 /**
- * pi's own instructions projected onto the preset (see `projectPiPrompt`),
- * for the prompt layout pi declares in {@link SDK_BRIDGE_PI_PROMPT_HEADER}.
- * An undeclared or unknown layout, a prompt that does not parse as the
- * declared one, and a projection carrying the text subscription accounts
- * reject are each refused, never sent as `drop`: that turn would run
- * without the persona or the project rules the client sent.
+ * pi's prompt minus pi's own harness head (see `stripPiHead`), for the
+ * prompt layout pi declares in {@link SDK_BRIDGE_PI_PROMPT_HEADER}. An
+ * undeclared or unknown layout, a head that cannot be told apart, and
+ * forwarded text subscription accounts reject are each refused, never sent
+ * as `drop`: that turn would run without the instructions the client sent.
  */
-export const piProjectionSystemPromptPolicy: SystemPromptPolicy = {
+export const piHeadSystemPromptPolicy: SystemPromptPolicy = {
 	name: PI_POLICY,
 	decide(clientSystem, turn) {
 		const version = turn.piPromptVersion;
-		const layout = version ? piPromptLayout(version) : null;
-		if (!version || !layout)
+		const head = version ? piPromptHead(version) : null;
+		if (!version || !head)
 			return refusal(
 				"sdk_bridge_prompt_unsupported",
 				`${PI_POLICY} serves pi prompt layout ${SUPPORTED_PI_PROMPT_VERSIONS.join(", ")}; this request ${
@@ -124,56 +123,53 @@ export const piProjectionSystemPromptPolicy: SystemPromptPolicy = {
 					text: clientSystem,
 				},
 			);
-		let projection: PiProjection;
+		let strip: PiHeadStrip;
 		try {
-			projection = projectPiPrompt(clientSystem, layout);
+			strip = stripPiHead(clientSystem, head);
 		} catch {
-			// A defect of the parser, still answered as a refusal rather than a throw.
+			// A defect of the stripper, still answered as a refusal rather than a throw.
 			return refusal(
 				"sdk_bridge_prompt_malformed",
 				`${PI_POLICY}: the system prompt could not be read as pi prompt layout ${version}`,
-				{ version, reason: "unparseable", section: null, text: clientSystem },
+				{ version, reason: "unreadable", section: null, text: clientSystem },
 			);
 		}
-		if (projection.ok)
+		if (strip.ok)
 			return {
 				ok: true,
-				decision: {
-					append: projection.append,
-					excludeDynamicSections: false,
-				},
+				decision: { append: strip.append, excludeDynamicSections: false },
 				detail: {
-					outcome: "projected",
+					outcome: "forwarded",
 					version,
-					shape: projection.shape,
-					droppedSections: projection.droppedSections,
-					sectionUpdates: projection.sectionUpdates,
+					headStripped: strip.headStripped,
+					forwardedLength: strip.append?.length ?? 0,
+					removedUpdates: strip.removedUpdates,
+					sectionsSeen: strip.sectionsSeen,
 				},
 			};
-		const where = projection.section ? ` (${projection.section})` : "";
-		const facts = {
-			version,
-			reason: projection.reason,
-			section: projection.section,
-			text: clientSystem,
-		};
-		if (projection.kind === "refused")
+		if (strip.kind === "refused")
 			return refusal(
 				"sdk_bridge_prompt_refused",
-				`${PI_POLICY}: the projected system prompt carries text subscription accounts reject (${projection.reason}${where}); nothing was sent`,
-				facts,
+				`${PI_POLICY}: the forwarded system prompt carries text subscription accounts reject (${strip.reason}); nothing was sent`,
+				{ version, reason: strip.reason, section: null, text: clientSystem },
 			);
+		const where = strip.section ? ` (</${strip.section}>)` : "";
 		return refusal(
 			"sdk_bridge_prompt_malformed",
-			`${PI_POLICY}: the system prompt does not parse as pi prompt layout ${version} (${projection.reason}${where})`,
-			facts,
+			`${PI_POLICY}: pi's head in the system prompt cannot be told apart under layout ${version} (${strip.reason}${where})`,
+			{
+				version,
+				reason: strip.reason,
+				section: strip.section,
+				text: clientSystem,
+			},
 		);
 	},
 };
 
 const POLICIES: ReadonlyMap<string, SystemPromptPolicy> = new Map([
 	[dropSystemPromptPolicy.name, dropSystemPromptPolicy],
-	[piProjectionSystemPromptPolicy.name, piProjectionSystemPromptPolicy],
+	[piHeadSystemPromptPolicy.name, piHeadSystemPromptPolicy],
 ]);
 
 export function registeredSystemPromptPolicies(): string[] {
@@ -186,11 +182,11 @@ export function getSystemPromptPolicy(name = "drop"): SystemPromptPolicy {
 	return policy;
 }
 
-/** pi's prompt is projected; every other client's is dropped. */
+/** pi's prompt goes without pi's head; every other client's is dropped. */
 export function selectSystemPromptPolicy(
 	clientHarness: string | null,
 ): SystemPromptPolicy {
 	return clientHarness === "pi"
-		? piProjectionSystemPromptPolicy
+		? piHeadSystemPromptPolicy
 		: dropSystemPromptPolicy;
 }

@@ -1,6 +1,6 @@
 {
 	"name": "skills-xml-special",
-	"description": "Skill metadata with XML-special characters, escaped by pi and kept as escaped.",
+	"description": "Skill metadata with XML-special characters, escaped by pi and forwarded as escaped.",
 	"input": {
 		"cwd": "/home/user/projects/widget",
 		"toolSnippets": {
@@ -32,9 +32,9 @@
 		"cwd": "<cwd>\n/home/user/projects/widget\n</cwd>"
 	},
 	"expect": {
-		"outcome": "projected",
-		"shape": "stock",
-		"droppedSections": [],
-		"sectionUpdates": 0
+		"outcome": "forwarded",
+		"headStripped": true,
+		"forwarded": "<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>a&amp;b&lt;c&gt;</name>\n    <description>Handles &quot;quotes&quot;, &apos;apostrophes&apos; &amp; &lt;/skills&gt; &lt;cwd&gt;</description>\n    <location>/home/user/.pi/agent/skills/a&amp;b/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
+		"removedUpdates": 0
 	}
 }

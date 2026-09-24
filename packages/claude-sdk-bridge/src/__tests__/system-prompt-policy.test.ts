@@ -5,19 +5,18 @@ import { join } from "node:path";
 import { SUPPORTED_PI_PROMPT_VERSIONS } from "../pi-prompt";
 import {
 	dropSystemPromptPolicy,
-	piProjectionSystemPromptPolicy,
+	piHeadSystemPromptPolicy,
 	type SystemPromptOutcome,
 	selectSystemPromptPolicy,
 } from "../system-prompt-policy";
 import {
-	expectedAppend,
+	loadPiPromptFixture,
 	loadPiPromptFixtures,
 	PI_PROMPT_FIXTURES,
-	type PiPromptFixture,
 } from "./fixtures/pi-prompt-fixtures";
 
 function decide(system: string, version: string | null = "0.87") {
-	return piProjectionSystemPromptPolicy.decide(system, {
+	return piHeadSystemPromptPolicy.decide(system, {
 		model: "claude-sonnet-5",
 		clientHarness: "pi",
 		piPromptVersion: version,
@@ -35,23 +34,18 @@ function appendOf(outcome: SystemPromptOutcome): string | null {
 	return outcome.decision.append;
 }
 
-const fixture = (version: string, name: string): PiPromptFixture => {
-	const found = loadPiPromptFixtures(version).find((f) => f.name === name);
-	if (!found) throw new Error(`no fixture ${name}`);
-	return found;
-};
+const fixture = (name: string) => loadPiPromptFixture("0.87", name);
 
 describe("policy selection", () => {
-	it("projects pi's prompt and drops every other client's", () => {
-		expect(selectSystemPromptPolicy("pi").name).toBe("pi-projection-v1");
+	it("strips pi's head from pi's prompt and drops every other client's", () => {
+		expect(selectSystemPromptPolicy("pi").name).toBe("pi-head-v1");
 		for (const harness of ["opencode", "codex", "oh-my-pi", null])
 			expect(selectSystemPromptPolicy(harness).name).toBe("drop");
 	});
 
 	it("drop never appends, whatever the text", () => {
-		const system = fixture("0.87", "stock-all").system;
 		expect(
-			dropSystemPromptPolicy.decide(system, {
+			dropSystemPromptPolicy.decide(fixture("stock-all").system, {
 				model: "m",
 				clientHarness: "pi",
 				piPromptVersion: "0.87",
@@ -98,14 +92,14 @@ for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
 		for (const f of loadPiPromptFixtures(version))
 			it(`${f.name}: ${f.description}`, () => {
 				const outcome = decide(f.system, version);
-				if (f.expect.outcome === "projected") {
-					expect(appendOf(outcome)).toBe(expectedAppend(f));
-					expect(outcome.detail).toEqual({
-						outcome: "projected",
+				if (f.expect.outcome === "forwarded") {
+					expect(appendOf(outcome)).toBe(f.expect.forwarded);
+					expect(outcome.detail).toMatchObject({
+						outcome: "forwarded",
 						version,
-						shape: f.expect.shape,
-						droppedSections: f.expect.droppedSections,
-						sectionUpdates: f.expect.sectionUpdates,
+						headStripped: f.expect.headStripped,
+						forwardedLength: f.expect.forwarded?.length ?? 0,
+						removedUpdates: f.expect.removedUpdates,
 					});
 					return;
 				}
@@ -115,7 +109,7 @@ for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
 					type: "invalid_request_error",
 					code: f.expect.code,
 				});
-				expect(refused.error.message).toContain("pi-projection-v1");
+				expect(refused.error.message).toContain("pi-head-v1");
 				expect(refused.detail).toEqual({
 					outcome: "refused",
 					version,
@@ -128,9 +122,10 @@ for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
 			});
 	});
 
-describe("pi 0.87 projection", () => {
-	it("keeps no stock preamble, tools, rules or docs", () => {
-		const append = appendOf(decide(fixture("0.87", "stock-all").system));
+describe("pi 0.87 head strip", () => {
+	it("forwards everything after the head, and nothing of it", () => {
+		const f = fixture("stock-all");
+		const append = appendOf(decide(f.system)) ?? "";
 		for (const text of [
 			"You are an expert coding assistant",
 			"<tools>",
@@ -139,59 +134,67 @@ describe("pi 0.87 projection", () => {
 			"docs/packages.md",
 		])
 			expect(append).not.toContain(text);
-		expect(append).toStartWith("<project_context>\n");
+		expect(f.system.endsWith(append)).toBe(true);
+		expect(append).toStartWith("<addendum>\n");
 		expect(append).toEndWith("<cwd>\n/home/user/projects/widget\n</cwd>");
 	});
 
-	it("keeps pi's order: project context, skills, addendum, cwd", () => {
-		const f = fixture("0.87", "stock-all");
-		const append = appendOf(decide(f.system)) ?? "";
-		const at = ["project_context", "skills", "addendum", "cwd"].map((name) =>
-			append.indexOf(`<${name}>\n`),
-		);
-		expect(at.every((i) => i >= 0)).toBe(true);
-		expect([...at].sort((a, b) => a - b)).toEqual(at);
-	});
-
 	it("delivers a context file byte for byte", () => {
-		const f = fixture("0.87", "context-verbatim");
+		const f = fixture("context-verbatim");
 		const append = appendOf(decide(f.system)) ?? "";
 		const files = f.input.contextFiles as Array<{ content: string }>;
 		for (const file of files) expect(append).toContain(file.content);
 	});
 
-	it("puts a replaced preamble first, verbatim", () => {
-		for (const name of ["custom-prompt", "subagent-persona"]) {
-			const f = fixture("0.87", name);
-			const append = appendOf(decide(f.system)) ?? "";
-			expect(append).toStartWith(`${f.input.customPrompt as string}\n\n<`);
-			expect(append).not.toContain("<tools>");
+	it("forwards a replaced preamble or a forced prompt without a head whole", () => {
+		for (const name of ["custom-prompt", "subagent-persona", "forced-prompt"]) {
+			const f = fixture(name);
+			expect(appendOf(decide(f.system))).toBe(f.system);
 		}
 	});
 
-	it("drops extension sections, recording only their names", () => {
-		const f = fixture("0.87", "extension-section");
-		const outcome = decide(f.system);
-		expect(appendOf(outcome)).not.toContain("write tests");
-		expect(appendOf(outcome)).not.toContain("<todo_list>");
+	it("forwards what extensions append after pi's prompt", () => {
+		const context = appendOf(decide(fixture("forced-claude-context").system));
+		expect(context).toContain("\n\n## Claude supplemental guidance\n");
+		expect(context).toContain("Keep the public API stable.");
+		const agents = appendOf(decide(fixture("forced-advertised-agents").system));
+		expect(agents).toEndWith("</advertised_subagents>");
+		const outcome = decide(fixture("stock-extension-section").system);
+		expect(appendOf(outcome)).toContain("<working_directory>\n");
 		expect(outcome.detail).toMatchObject({
-			droppedSections: ["todo_list", "web-search"],
+			sectionsSeen: [
+				"project_context",
+				"cwd",
+				"todo_list",
+				"working_directory",
+			],
 		});
 	});
 
-	it("applies later section updates before projecting", () => {
-		const f = fixture("0.87", "section-update");
-		const append = appendOf(decide(f.system)) ?? "";
-		expect(append).toContain("<name>deploy</name>");
-		expect(append).toContain("packages/core/AGENTS.md");
-		expect(append).not.toContain("<addendum>");
-		expect(append).not.toContain("Updated system prompt section");
+	it("removes updates to the head and forwards the others", () => {
+		expect(appendOf(decide(fixture("update-tools").system))).not.toContain(
+			"Updated system prompt section",
+		);
+		const mixed = appendOf(decide(fixture("update-tools-and-skills").system));
+		expect(mixed).toContain('Updated system prompt section "skills"');
+		expect(mixed).not.toContain('"tools"');
+		expect(
+			appendOf(decide(fixture("update-extension-section").system)),
+		).toContain(
+			'Updated system prompt section "claude_context":\n\n<claude_context>\nGuidance v2\n</claude_context>',
+		);
+		const back = decide(fixture("update-preamble-to-stock").system);
+		expect(appendOf(back)).not.toContain("Updated system prompt section");
+		expect(back.detail).toMatchObject({ removedUpdates: 4 });
 	});
 
 	it("sends nothing for an empty prompt", () => {
 		const outcome = decide("");
 		expect(appendOf(outcome)).toBeNull();
-		expect(outcome.detail).toMatchObject({ shape: "empty" });
+		expect(outcome.detail).toMatchObject({
+			headStripped: false,
+			forwardedLength: 0,
+		});
 	});
 
 	it("never records or echoes the prompt text", () => {
@@ -205,73 +208,46 @@ describe("pi 0.87 projection", () => {
 	});
 });
 
-describe("pi 0.87 malformed grammar", () => {
-	const stock = fixture("0.87", "stock-all").system;
-	const custom = fixture("0.87", "custom-prompt").system;
-	const block = (text: string, name: string) => {
-		const start = text.indexOf(`\n\n<${name}>\n`);
-		const end = text.indexOf(`\n</${name}>`, start) + `\n</${name}>`.length;
-		return { start, end, text: text.slice(start, end) };
-	};
-	const without = (text: string, name: string) => {
-		const b = block(text, name);
-		return text.slice(0, b.start) + text.slice(b.end);
-	};
+describe("pi 0.87 malformed heads", () => {
+	const stock = fixture("stock").system;
+	const cut = (text: string, from: string, to: string) =>
+		text.slice(0, text.indexOf(from)) + text.slice(text.indexOf(to));
 	const cases: Array<[string, string, string, string | null]> = [
-		[
-			"a stock preamble without its tools",
-			without(stock, "tools"),
-			"stock_sections_missing",
-			"tools",
-		],
 		[
 			"a stock preamble alone",
 			stock.slice(0, stock.indexOf("\n\n")),
-			"stock_sections_missing",
-			"tools",
-		],
-		["no cwd section", without(custom, "cwd"), "missing_section", "cwd"],
-		[
-			"a known section twice",
-			`${stock.slice(0, block(stock, "cwd").start)}${block(stock, "skills").text}${stock.slice(block(stock, "cwd").start)}`,
-			"duplicate_section",
-			"skills",
-		],
-		[
-			"a known section repeated after the others",
-			`${stock}${block(stock, "tools").text}`,
-			"duplicate_section",
-			"tools",
-		],
-		[
-			"sections out of pi's order",
-			`${without(stock, "addendum").replace("\n\n<cwd>", `${block(stock, "addendum").text}\n\n<cwd>`)}`,
-			"section_out_of_order",
-			"addendum",
-		],
-		[
-			"a truncated last section",
-			stock.slice(0, -"\n</cwd>".length),
-			"unterminated_section",
-			"cwd",
-		],
-		[
-			"free text after the sections",
-			`${stock}\n\nPS: be nice`,
-			"text_between_sections",
+			"incomplete_head",
 			null,
 		],
 		[
-			"an update whose section is not the one it names",
-			`${stock}\n\nUpdated system prompt section "skills":\n\n<cwd>\n/x\n</cwd>`,
-			"malformed_section_update",
-			"skills",
+			"a stock preamble without its rules",
+			cut(stock, "\n\n<rules>\n", "\n\n<docs>\n"),
+			"incomplete_head",
+			null,
 		],
 		[
-			"a section after an update",
-			`${stock}\n\nRemoved system prompt section "addendum".\n\n<todo>\nx\n</todo>`,
-			"malformed_section_update",
+			"a stock preamble followed by other text",
+			`${stock.slice(0, stock.indexOf("\n\n"))}\n\nBe brief.`,
+			"incomplete_head",
 			null,
+		],
+		[
+			"a head section left open",
+			stock.replace("\n</rules>", "\n</rulez>"),
+			"incomplete_head",
+			null,
+		],
+		[
+			"a second </rules> in the tail",
+			`${stock}\n\nThe tag </rules> ends pi's rules.`,
+			"duplicate_closing_tag",
+			"rules",
+		],
+		[
+			"two </docs> in a replaced prompt",
+			"Persona.\n\n</docs> and </docs>",
+			"duplicate_closing_tag",
+			"docs",
 		],
 	];
 	for (const [what, system, reason, section] of cases)
@@ -280,10 +256,16 @@ describe("pi 0.87 malformed grammar", () => {
 			expect(refused.error.code).toBe("sdk_bridge_prompt_malformed");
 			expect(refused.detail).toMatchObject({ reason, section });
 		});
+
+	it("allows one head closing tag in a prompt without pi's head", () => {
+		expect(appendOf(decide("Persona mentioning </tools> once."))).toBe(
+			"Persona mentioning </tools> once.",
+		);
+	});
 });
 
 describe("the version gate", () => {
-	const system = fixture("0.87", "stock").system;
+	const system = fixture("stock").system;
 
 	it("refuses a pi turn that declares no layout", () => {
 		const refused = refusalOf(decide(system, null));
@@ -291,7 +273,7 @@ describe("the version gate", () => {
 			status: 400,
 			code: "sdk_bridge_prompt_unsupported",
 		});
-		expect(refused.error.message).toContain("pi-projection-v1");
+		expect(refused.error.message).toContain("pi-head-v1");
 		expect(refused.error.message).toContain("x-clankermux-pi-prompt");
 		expect(refused.detail).toMatchObject({
 			version: null,
