@@ -102,6 +102,70 @@ describe("error mapping", () => {
 		});
 	});
 
+	it("answers an inner 400 coded context_length_exceeded as overflow, whatever its wording", () => {
+		expect(
+			mapInnerOutcome(
+				outcome(400, {
+					errorType: "invalid_request_error",
+					errorCode: "context_length_exceeded",
+					message: null,
+				}),
+			),
+		).toMatchObject({
+			status: 400,
+			code: "context_length_exceeded",
+			message: "prompt is too long",
+		});
+		expect(
+			mapInnerOutcome(
+				outcome(400, {
+					errorType: "invalid_request_error",
+					errorCode: "something_else",
+					message: "bad",
+				}),
+			).code,
+		).toBeUndefined();
+	});
+
+	it("answers Anthropic's input-length overflow as context_length_exceeded, keeping its message", () => {
+		const message =
+			"input length and `max_tokens` exceed context limit: 187254 + 21333 > 200000, decrease input length or `max_tokens` and try again";
+		expect(
+			mapInnerOutcome(
+				outcome(400, { errorType: "invalid_request_error", message }),
+			),
+		).toEqual({
+			status: 400,
+			type: "invalid_request_error",
+			code: "context_length_exceeded",
+			message:
+				"input length and `max_tokens` exceed context limit: 187254 + 21333 > 200000",
+			retryAfter: null,
+		});
+		expect(isContextOverflow({ text: `API Error: 400 ${message}` })).toBe(true);
+	});
+
+	it("answers a decisive 400 as overflow when Claude Code's cause says so, even without a message", () => {
+		expect(
+			mapClaudeCodeFailure(outcome(400, { message: null }), {
+				text: "prompt is too long: 9 tokens > 8 maximum",
+				cause: "context_overflow",
+			}),
+		).toEqual({
+			status: 400,
+			type: "invalid_request_error",
+			code: "context_length_exceeded",
+			message: "prompt is too long: 9 tokens > 8 maximum",
+			retryAfter: null,
+		});
+		expect(
+			mapClaudeCodeFailure(outcome(400, { message: null }), {
+				text: null,
+				cause: null,
+			}).code,
+		).toBeUndefined();
+	});
+
 	it("answers 502 for a Claude Code error with no inner outcome", () => {
 		const mapped = mapClaudeCodeFailure(null, {
 			text: "something broke",
@@ -156,6 +220,7 @@ describe("error mapping", () => {
 			"rapid_refill_breaker",
 		])
 			expect(isContextOverflow({ terminalReason })).toBe(true);
+		expect(isContextOverflow({ code: "context_length_exceeded" })).toBe(true);
 		expect(isContextOverflow({ text: "max_tokens exceeded" })).toBe(false);
 		expect(isContextOverflow({ terminalReason: "model_error" })).toBe(false);
 		expect(isContextOverflow({})).toBe(false);

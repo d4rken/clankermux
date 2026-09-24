@@ -50,6 +50,15 @@ function streamErrorStatus(type: string | null): number {
 	return anthropicErrorStatus(type) ?? 502;
 }
 
+const MAX_ERROR_CODE_CHARS = 128;
+
+/** An error body's `code`: a nonblank string, trimmed and capped. */
+function errorCode(value: unknown): string | null {
+	return typeof value === "string" && value.trim()
+		? value.trim().slice(0, MAX_ERROR_CODE_CHARS)
+		: null;
+}
+
 /** Frames larger than this are skipped, never buffered whole. */
 const MAX_FRAME_CHARS = 1024 * 1024;
 
@@ -61,7 +70,10 @@ const MAX_FRAME_CHARS = 1024 * 1024;
  */
 function reportWhenStreamEnds(
 	response: Response,
-	base: Omit<SdkBridgeInnerOutcome, "status" | "errorType" | "message">,
+	base: Omit<
+		SdkBridgeInnerOutcome,
+		"status" | "errorType" | "errorCode" | "message"
+	>,
 	meta: RequestMeta,
 ): Response {
 	const body = response.body;
@@ -78,15 +90,19 @@ function reportWhenStreamEnds(
 	let buffer = "";
 	let skipping = false;
 	let sawStop = false;
-	let streamError: { status: number; type: string; message: string } | null =
-		null;
+	let streamError: {
+		status: number;
+		type: string;
+		code: string | null;
+		message: string;
+	} | null = null;
 	let reported = false;
 	const inspect = (frame: string) => {
 		const data = sseFrameData(frame);
 		if (!data) return;
 		let event: {
 			type?: unknown;
-			error?: { type?: unknown; message?: unknown };
+			error?: { type?: unknown; code?: unknown; message?: unknown };
 		};
 		try {
 			event = JSON.parse(data);
@@ -100,6 +116,7 @@ function reportWhenStreamEnds(
 			streamError = {
 				status: streamErrorStatus(type),
 				type: type ?? "api_error",
+				code: errorCode(event.error?.code),
 				message:
 					typeof event.error?.message === "string"
 						? event.error.message
@@ -132,6 +149,7 @@ function reportWhenStreamEnds(
 		const error = streamError as {
 			status: number;
 			type: string;
+			code: string | null;
 			message: string;
 		} | null;
 		if (error) {
@@ -139,6 +157,7 @@ function reportWhenStreamEnds(
 				...base,
 				status: error.status,
 				errorType: error.type,
+				errorCode: error.code,
 				message: error.message,
 			});
 			return;
@@ -227,13 +246,16 @@ export function reportSdkBridgeInnerResponse(
 		.clone()
 		.json()
 		.then(
-			(body: { error?: { type?: unknown; message?: unknown } }) => ({
+			(body: {
+				error?: { type?: unknown; code?: unknown; message?: unknown };
+			}) => ({
 				errorType:
 					typeof body?.error?.type === "string" ? body.error.type : null,
+				errorCode: errorCode(body?.error?.code),
 				message:
 					typeof body?.error?.message === "string" ? body.error.message : null,
 			}),
-			() => ({ errorType: null, message: null }),
+			() => ({ errorType: null, errorCode: null, message: null }),
 		)
 		.then((detail) =>
 			deliver(meta, { ...base, status: response.status, ...detail }),

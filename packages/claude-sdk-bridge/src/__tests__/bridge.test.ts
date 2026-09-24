@@ -1570,6 +1570,66 @@ describe("errors", () => {
 			expect(r.errors[0]?.data).toEqual(overflow);
 		});
 
+		it("answers a result that only says so", async () => {
+			const h = harness();
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				resultMessage({ isError: true, result: "Prompt is too long" }),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual(overflow);
+		});
+
+		it("is not masked by an earlier leg's inner failure", async () => {
+			const h = harness();
+			failInner(h, {
+				status: 529,
+				errorType: "overloaded_error",
+				message: "overloaded",
+			});
+			const t = await start(h, {
+				tools: [READ_TOOL],
+				messages: [{ role: "user", content: "TOOL read" }],
+			});
+			// Claude Code recovered from this call and parked on a tool call.
+			await innerCall(t.query);
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{ type: "tool_use", id: "toolu_1", name: "mcp__c__read", input: {} },
+				]),
+			);
+			expect((await reply(t.response)).stop).toBe("tool_use");
+			const call = t.query.callTool("toolu_1", "read");
+			const c = continueTurn(h, t.plan.turnId, {
+				tools: [READ_TOOL],
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_1", content: "x" },
+						],
+					},
+				],
+			});
+			await call;
+			// Its next model request never went out: blocking_limit.
+			t.query.emit(
+				resultMessage({
+					isError: true,
+					result: "Context limit reached",
+					terminalReason: "blocking_limit",
+				}),
+			);
+			const res = await c.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual(overflow);
+		});
+
 		it("leaves Claude Code's other self-endings at 502", async () => {
 			const h = harness();
 			const t = await start(h, {

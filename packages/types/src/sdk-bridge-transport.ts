@@ -202,6 +202,8 @@ export interface SdkBridgeInnerOutcome {
 	requestId: string;
 	status: number;
 	errorType: string | null;
+	/** The error's `code`, when it had one: a nonblank string, capped. */
+	errorCode?: string | null;
 	message: string | null;
 	retryAfter: string | null;
 	accountId: string | null;

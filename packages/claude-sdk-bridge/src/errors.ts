@@ -1,3 +1,4 @@
+import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeInnerOutcome } from "@clankermux/types";
 
 /** An error the bridge answers the client with, as JSON or as an SSE `error`. */
@@ -51,43 +52,64 @@ export function sanitizeMessage(text: string | null | undefined): string {
 	return trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
 }
 
-const OVERFLOW_TEXT = /prompt is too long/i;
-const OVERFLOW_COUNTS = /prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i;
-// Claude Code files all three under its context limit.
-const OVERFLOW_TERMINAL_REASONS = new Set([
+const PROMPT_TOO_LONG = /prompt is too long/i;
+const PROMPT_TOO_LONG_COUNTS =
+	/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i;
+const INPUT_LENGTH_OVERFLOW =
+	/input length and `?max_tokens`? exceed context limit(?::\s*\d+\s*\+\s*\d+\s*>\s*\d+)?/i;
+const OVERFLOW_TERMINAL_REASONS: ReadonlySet<string> = new Set<TerminalReason>([
 	"prompt_too_long",
 	"blocking_limit",
 	"rapid_refill_breaker",
 ]);
+const OVERFLOW_CODE = "context_length_exceeded";
 
 /**
  * Whether a failure is the conversation outgrowing the model's context:
- * Anthropic's or Claude Code's wording, or Claude Code's `terminal_reason`.
+ * Anthropic's or Claude Code's wording, an upstream `context_length_exceeded`
+ * code, or one of the SDK's context-limit terminal reasons.
  */
 export function isContextOverflow(evidence: {
 	text?: string | null;
-	terminalReason?: string | null;
+	code?: string | null;
+	terminalReason?: TerminalReason | (string & {}) | null;
 }): boolean {
+	if (evidence.code === OVERFLOW_CODE) return true;
 	if (
 		evidence.terminalReason &&
 		OVERFLOW_TERMINAL_REASONS.has(evidence.terminalReason)
 	)
 		return true;
-	return !!evidence.text && OVERFLOW_TEXT.test(evidence.text);
+	return (
+		!!evidence.text &&
+		(PROMPT_TOO_LONG.test(evidence.text) ||
+			INPUT_LENGTH_OVERFLOW.test(evidence.text))
+	);
 }
 
-/** A context overflow in Anthropic's wording, with the token counts `text` had. */
-export function contextOverflow(text: string | null): BridgeError {
-	const counts = text ? OVERFLOW_COUNTS.exec(text) : null;
+function overflowError(message: string): BridgeError {
 	return {
 		status: 400,
 		type: "invalid_request_error",
-		code: "context_length_exceeded",
-		message: counts
-			? `prompt is too long: ${counts[1]} tokens > ${counts[2]} maximum`
-			: "prompt is too long",
+		code: OVERFLOW_CODE,
+		message,
 		retryAfter: null,
 	};
+}
+
+/**
+ * A context overflow in Anthropic's wording: its "prompt is too long" with
+ * the token counts `text` had, or its input-length message as it was.
+ */
+export function contextOverflow(text: string | null): BridgeError {
+	const counts = text ? PROMPT_TOO_LONG_COUNTS.exec(text) : null;
+	if (counts)
+		return overflowError(
+			`prompt is too long: ${counts[1]} tokens > ${counts[2]} maximum`,
+		);
+	const inputLength = text ? INPUT_LENGTH_OVERFLOW.exec(text) : null;
+	if (inputLength) return overflowError(sanitizeMessage(inputLength[0]));
+	return overflowError("prompt is too long");
 }
 
 /** Why Claude Code ended a turn by itself, when the bridge can tell. */
@@ -118,7 +140,10 @@ export function mapInnerOutcome(outcome: SdkBridgeInnerOutcome): BridgeError {
 			message,
 			retryAfter,
 		};
-	if (status === 400 && isContextOverflow({ text: outcome.message }))
+	if (
+		status === 400 &&
+		isContextOverflow({ text: outcome.message, code: outcome.errorCode })
+	)
 		return contextOverflow(outcome.message);
 	if (status === 400)
 		return {
@@ -154,6 +179,8 @@ export function mapClaudeCodeFailure(
 	decisive: SdkBridgeInnerOutcome | null,
 	failure: ClaudeCodeFailure,
 ): BridgeError {
+	if (failure.cause === "context_overflow" && decisive?.status === 400)
+		return contextOverflow(decisive.message ?? failure.text);
 	if (decisive) return mapInnerOutcome(decisive);
 	if (failure.cause === "context_overflow")
 		return contextOverflow(failure.text);

@@ -231,6 +231,13 @@ export class LiveQuery {
 	private attach(leg: Leg): void {
 		this.leg = leg;
 		this.toolUsesThisLeg = 0;
+		// A failure answers the leg it happens in; an earlier leg's inner
+		// outcome or wording must not decide it.
+		this.lastOutcome = null;
+		this.decisive = null;
+		this.gaveUp = false;
+		this.claudeCodeErrorText = null;
+		this.claudeCodeCause = null;
 		this.init.composer.attach((event) => leg.response.send(event));
 		this.armIdle();
 	}
@@ -584,7 +591,7 @@ export class LiveQuery {
 				? message.result
 				: (message.errors ?? []).join("; ") || message.subtype;
 		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
-		if (isContextOverflow({ terminalReason: message.terminal_reason }))
+		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
 			this.claudeCodeCause ??= "context_overflow";
 		void this.failAfterGrace();
 	}
