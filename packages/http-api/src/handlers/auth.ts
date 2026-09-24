@@ -10,8 +10,10 @@ import {
 	MAX_PASSWORD_BYTES,
 	type SessionAuthService,
 	sessionCookieHeader,
+	validateNewPassword,
 } from "../services/session-auth-service";
 import { closeStreamsForSession } from "../services/session-stream-registry";
+import type { SetupCodeService } from "../services/setup-code";
 
 const log = new Logger("AuthHandlers");
 
@@ -136,7 +138,7 @@ export function createAuthLoginHandler(
 			return jsonResponse(
 				{
 					error:
-						"No management password is configured. Set one with: bun run auth:password --set",
+						"No management password is configured. Open the dashboard and enter the setup code printed in the server output, or run `clankermux-server auth password --set`.",
 				},
 				409,
 			);
@@ -181,6 +183,93 @@ export function createAuthLoginHandler(
 	};
 }
 
+const PASSWORD_ALREADY_SET = {
+	error: "A management password is already set. Sign in instead.",
+};
+
+/**
+ * `POST /api/auth/setup` — set the FIRST management password with the one-time
+ * setup code the server printed to its output, and sign the caller in.
+ *
+ * Same ordering principle as login: size and shape are settled before the
+ * throttle is claimed, and the throttle before either KDF runs. Once a
+ * password exists the endpoint answers 409 whatever the code, and revokes it.
+ * Password length is judged only after the code matches.
+ */
+export function createAuthSetupHandler(
+	sessionAuth: SessionAuthService,
+	setupCode: SetupCodeService,
+	throttle: LoginThrottle = new LoginThrottle(),
+) {
+	return async (req: Request): Promise<Response> => {
+		const read = await readBoundedJson(req, LOGIN_MAX_BODY_BYTES);
+		if (!read.ok && read.tooLarge) {
+			return jsonResponse(
+				{ error: "Request body too large", limit: LOGIN_MAX_BODY_BYTES },
+				413,
+			);
+		}
+		const code = read.ok ? read.body.code : undefined;
+		const password = read.ok ? read.body.password : undefined;
+		if (
+			typeof code !== "string" ||
+			code.length === 0 ||
+			typeof password !== "string" ||
+			password.length === 0
+		) {
+			return jsonResponse({ error: "Setup code and password required" }, 400);
+		}
+
+		const claim = throttle.tryAcquire();
+		if (!claim.ok) {
+			return jsonResponse({ error: "Too many setup attempts" }, 429, {
+				"Retry-After": String(claim.rejection.retryAfterSeconds),
+			});
+		}
+
+		try {
+			if (await sessionAuth.isConfigured()) {
+				setupCode.revoke();
+				return jsonResponse(PASSWORD_ALREADY_SET, 409);
+			}
+
+			if (!(await setupCode.matches(code))) {
+				log.warn("Management setup attempt with an invalid setup code");
+				return jsonResponse({ error: "Invalid setup code" }, 403);
+			}
+
+			const invalid = validateNewPassword(password);
+			if (invalid) {
+				return jsonResponse({ error: invalid }, 400);
+			}
+
+			const binding = await sessionAuth.claimInitialPassword(password);
+			if (!binding) {
+				// The CLI (or another claim) stored a password while this one was
+				// hashing. The compare-and-set left it untouched.
+				setupCode.revoke();
+				return jsonResponse(PASSWORD_ALREADY_SET, 409);
+			}
+
+			setupCode.consume();
+			const session = await sessionAuth.createSession(binding);
+			if (!session) {
+				log.warn(
+					"The password set via setup code was replaced before a session could be issued",
+				);
+				return jsonResponse(PASSWORD_ALREADY_SET, 409);
+			}
+
+			log.info("Management password set via setup code");
+			return jsonResponse({ authenticated: true }, 200, {
+				"Set-Cookie": sessionCookieHeader(session.token),
+			});
+		} finally {
+			claim.release();
+		}
+	};
+}
+
 /**
  * `POST /api/auth/logout` — drop the session row, clear the cookie, and close
  * the SSE streams that session opened. Without the last part a logged-out tab
@@ -211,10 +300,23 @@ export function createAuthLogoutHandler(sessionAuth: SessionAuthService) {
  * "may this proceed", which for a public route is always yes — routing this
  * endpoint through it would make it report a session on every call, including
  * to a browser that has never logged in.
+ *
+ * With `setupCode`, this is also where a password-less deployment prints its
+ * setup code when startup could not, and where a password set by the CLI
+ * revokes a code that is still active. The generation is read BEFORE the
+ * lookup, so a password set while it runs cannot be answered with a fresh code.
  */
-export function createAuthStatusHandler(sessionAuth: SessionAuthService) {
+export function createAuthStatusHandler(
+	sessionAuth: SessionAuthService,
+	setupCode?: SetupCodeService,
+) {
 	return async (req: Request): Promise<Response> => {
+		const generation = setupCode?.generation;
 		const check = await sessionAuth.checkRequest(req);
+		if (setupCode && generation !== undefined) {
+			if (!check.configured) setupCode.ensureIssued(generation);
+			else setupCode.revoke();
+		}
 		const response: AuthStatusResponse = {
 			configured: check.configured,
 			authenticated: check.authenticated,

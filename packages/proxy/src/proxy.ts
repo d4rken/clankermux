@@ -15,7 +15,11 @@ import {
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	getSdkBridgeInnerMetaContext,
+	type RequestMeta,
+} from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -54,6 +58,10 @@ import {
 	getRateLimitProbeAdmission,
 	holdRateLimitProbeLease,
 } from "./handlers/rate-limit-cooldown";
+import {
+	continueParkedSdkBridgeTurn,
+	isSdkBridgeAttempt,
+} from "./handlers/sdk-bridge-attempt";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
@@ -77,6 +85,11 @@ import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
 } from "./routing-service";
+import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
+import {
+	reportSdkBridgeInnerFailure,
+	reportSdkBridgeInnerResponse,
+} from "./sdk-bridge-inner-outcome";
 import { isIngressRecordable } from "./should-record-request";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 import { resolveZeroAccountsOutcome } from "./zero-accounts-terminal";
@@ -151,6 +164,11 @@ async function attemptThroughProbeGate(
 	attempt: () => Promise<Response | null>,
 	options?: { reprobe?: boolean },
 ): Promise<GatedAttempt> {
+	// A bridged attempt sends nothing to the account itself; its inner calls do,
+	// and each passes this gate on its own. Holding the lease here for the whole
+	// turn would suppress exactly those calls.
+	if (isSdkBridgeAttempt(requestMeta, account))
+		return { response: await attempt(), suppressed: false };
 	const admission = getRateLimitProbeAdmission(account, Date.now(), options);
 	if (admission.decision === "suppressed") {
 		return { response: null, suppressed: true };
@@ -310,7 +328,9 @@ export async function handleProxy(
 			burstHoldTimingOverride,
 		);
 		retractIfNeverStarted(response.status);
-		return withRequestId(response);
+		// A streamed inner reply is reported when its body ends, so Claude Code
+		// must read the response this returns.
+		return reportSdkBridgeInnerResponse(requestMeta, withRequestId(response));
 	} catch (error) {
 		// A later alias stage can reject after an earlier attempt staged a cache body.
 		cacheBodyStore.discardStaged(requestMeta.id);
@@ -365,7 +385,7 @@ export async function handleProxy(
 				apiKeyId,
 				apiKeyName,
 			)(response, error.code);
-			return withRequestId(response);
+			return reportSdkBridgeInnerResponse(requestMeta, withRequestId(response));
 		}
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.
@@ -375,6 +395,7 @@ export async function handleProxy(
 		// error or those rows, which are the ones most worth looking up, answer
 		// without the header every other terminal now carries.
 		attachRequestId(error, requestMeta.id);
+		reportSdkBridgeInnerFailure(requestMeta, error);
 		throw error;
 	}
 }
@@ -411,7 +432,25 @@ async function handleIngestedProxy(
 		canRearmIdleTimeout,
 	} = ingressContext;
 
-	const forcedId = isInternal ? null : getForcedAccount();
+	// A bridge inner call's destinations were fixed when the outer request was
+	// routed, under whatever force applied then; force is not consulted again.
+	const forcedId =
+		isInternal || getSdkBridgeInnerMetaContext(requestMeta)
+			? null
+			: getForcedAccount();
+	// Tool results for a parked bridge turn go back to that turn, unrouted.
+	const continued = await continueParkedSdkBridgeTurn({
+		req,
+		url,
+		ctx,
+		requestMeta,
+		parsedBody: requestBodyContext.getParsedJson(),
+		body: finalBodyBuffer,
+		apiKeyId: apiKeyId ?? null,
+		apiKeyName: apiKeyName ?? null,
+		bumpIdleTimeout,
+	});
+	if (continued) return continued;
 	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null, forcedId);
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
@@ -458,24 +497,25 @@ async function handleIngestedProxy(
 			);
 		}
 
-		// Codex-CLI floor (API-key pin backstop) overrides the global force: a
-		// /v1/responses request carrying excludeOfficialAnthropic must NEVER be
-		// routed to an official Claude account, even under an operator force-route
-		// (ban risk + not a cross-model review). Fail closed. Left UNRECORDED for
-		// the same ordering reason as the forced-missing case above
-		// (recordSyntheticErrorResponse isn't defined this early).
+		// The floor for non-Claude-Code clients overrides the global force: with
+		// the SDK bridge unavailable, such a request must NEVER reach an official
+		// Claude account, even under an operator force-route (ban risk). Fail
+		// closed. With the bridge available the forced account serves it through
+		// the bridge. Left UNRECORDED for the same ordering reason as the
+		// forced-missing case above (recordSyntheticErrorResponse isn't defined
+		// this early).
 		if (
-			requestMeta.excludeOfficialAnthropic &&
+			requestMeta.officialAnthropicExcluded &&
 			isOfficialAnthropicProvider(forcedAccount.provider)
 		) {
 			log.warn(
-				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a deny-official-anthropic (Codex CLI) request`,
+				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a request from a non-Claude-Code client: ${requestMeta.officialAnthropicExcluded}`,
 			);
 			return createPinnedTargetUnavailableResponse(
 				{
 					code: "anthropic_excluded_no_account",
 					message:
-						"Codex CLI traffic may not be routed to a Claude/Anthropic account; the globally forced account is a Claude account.",
+						"This client reaches a Claude/Anthropic account only through the SDK bridge, which is unavailable; the globally forced account is a Claude account.",
 				},
 				retryAfterFromDeadlines([forcedAccount.rate_limited_until], Date.now()),
 			);
@@ -1397,6 +1437,18 @@ async function handleIngestedProxy(
 	// return, which emits no worker end/summary, cannot leak it) and BEFORE the
 	// attempted-accounts computation below (so it covers the needsReauth throw too).
 	if (req.signal.aborted) return createClientAbortResponse();
+
+	// The last candidate tried was the SDK bridge, refused for capacity: its
+	// 529 and Retry-After say when to come back, a generic 503 would not.
+	const bridgeCapacity = sdkBridgeCapacityTerminal(requestMeta);
+	if (bridgeCapacity) {
+		const response = bridgeCapacity.terminalResponse();
+		if (!ctx.requestRecorder.hasRecord(requestMeta.id))
+			await recordSyntheticErrorResponse(response, "sdk_bridge_capacity", {
+				failoverAttempts: upstreamAttempts,
+			});
+		return response;
+	}
 
 	// Check if OAuth token issues are the cause
 	const allAttemptedAccounts = accounts;

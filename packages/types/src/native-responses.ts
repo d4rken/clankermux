@@ -1,4 +1,5 @@
 import type { RequestMeta } from "./api";
+import type { SdkBridgeTranslationGaps } from "./sdk-bridge-transport";
 
 /**
  * Original (decompressed, normalized) OpenAI-Responses request carried
@@ -24,6 +25,13 @@ export interface NativeResponsesContext {
 	reasoningEffort?: string | null;
 	/** `prompt_cache_key` from the ORIGINAL body, null when absent/non-string. */
 	promptCacheKey?: string | null;
+	/**
+	 * The client is not Claude Code, so an official Anthropic account may serve
+	 * it only through the SDK bridge (RequestMeta.officialAnthropicVia).
+	 */
+	denyDirectOfficialAnthropic?: boolean;
+	/** For a turn the SDK bridge serves; see SdkBridgeTranslationGaps. */
+	translationGaps?: SdkBridgeTranslationGaps;
 }
 
 /**

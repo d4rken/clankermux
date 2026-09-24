@@ -75,10 +75,18 @@ Requires [Bun](https://bun.sh) 1.4.0 or newer
 ([why](https://github.com/oven-sh/bun/issues/32111)).
 
 It binds `0.0.0.0` by default; set `CLANKERMUX_HOST=127.0.0.1` for loopback
-only. The management API is fail-open until a dashboard password exists, so set
-one with `bun run auth:password --set`. That password covers management only.
-Agent traffic is gated separately: every request must present a valid client
-key, including on a fresh install where none exists yet.
+only, since the management API stays open until a dashboard password exists.
+On a start with no password the server prints a one-time setup code to its
+output (`journalctl -u clankermux`, `docker logs`, …), and the dashboard asks
+for that code and a new password before showing anything else. Each restart
+prints a new code. From a shell, use
+`bun run auth:password --set|--clear|--status` in a checkout or
+`clankermux-server auth password --set|--clear|--status` with the compiled
+binary; `--db-path <file>` targets a specific database.
+
+That password covers management only. Agent traffic is gated separately: every
+request must present a valid client key, including on a fresh install where
+none exists yet.
 
 Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
@@ -89,6 +97,44 @@ providers, all except selected providers, or one account. For example, excluding
 `anthropic` blocks Anthropic OAuth while allowing other providers, including ones
 you add later. Claude API-key accounts (`claude-console-api`) are a separate
 provider. These restrictions also apply to explicit account requests and fallbacks.
+
+## Claude subscription accounts from pi, Codex and other non-Claude-Code clients
+
+A client on `/wire/openai` (pi, Codex, OpenCode in OpenAI mode) never reaches
+a Claude account (Anthropic OAuth or Claude API key) directly. When routing
+picks one for such a request, ClankerMux runs real Claude Code for that turn
+through the Claude Agent SDK, and Claude Code's model calls go to the account
+through the normal pipeline. The client keeps executing its own tools: each
+tool call is handed back to it, and its results resume the same Claude Code
+run.
+
+There is nothing to configure beyond having the Claude models in the client's
+catalogue, which follows from the client's allowed destinations. To keep a
+client off Claude accounts, exclude the Anthropic providers in its
+destinations.
+
+What differs from a direct request:
+
+* The client's system prompt is not sent; Claude Code's own is. Its
+  instructions and project context (pi's `AGENTS.md`, for example) do not
+  reach the model.
+* `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
+  `tool_choice` that forces or forbids tool use are rejected with a 400 naming
+  the field, unless another destination in the route can serve the request.
+* `max_tokens` applies to each model call, not to the whole reply.
+* Each user turn starts a Claude Code process, which adds 1–3 s. A
+  conversation resumes across turns only when the client sends a session
+  header (pi does); otherwise each turn rebuilds it from the history.
+* Each process uses about 250 MB of memory. At most 8 run at once
+  (`sdk_bridge_max_processes` in `clankermux.json`); requests beyond that get
+  a 529 with Retry-After.
+* A Codex request whose model alias or fallback lands on a Claude account is
+  answered by Claude through this path; that account is not skipped.
+
+Anthropic's legal and compliance terms for Claude Code state that Anthropic
+"does not permit third-party developers to … route requests through Free, Pro,
+or Max plan credentials on behalf of their users". Whether this use of your
+accounts is permitted is for you, as the operator, to judge.
 
 ## Integrations
 

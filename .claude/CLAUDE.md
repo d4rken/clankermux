@@ -27,7 +27,18 @@ claim `POST api.anthropic.com/api/organizations/<org>/reset_rate_limits`.
 The claim spends a grant, so it fires only from a dashboard click or a
 per-account auto-apply toggle that is off by default.
 
-Everything else stays forbidden, including curling either exception's
+A third one, approved 2026-09-23: the Agent SDK bridge
+(`packages/claude-sdk-bridge`). It runs real Claude Code (SDK 0.3.280, CLI
+2.1.280, entrypoint `sdk-ts`, never spoofed) with no credential of its own.
+Its model calls reach ClankerMux only through the bridge's private loopback
+listener and then take the normal Anthropic pipeline on the accounts. It is
+reached only by client turns that route to an official Anthropic account
+under the deny floor (Responses and Chat on `/wire/openai`). Driving it by
+script or by hand against a real account stays forbidden, the spike drivers
+included. Its tests use fake accounts and a mock upstream inside a
+loopback-only network namespace. See the `claude-sdk-bridge` skill.
+
+Everything else stays forbidden, including curling any exception's
 endpoints by hand.
 
 ## This directory builds the deployment; it is not the deployment

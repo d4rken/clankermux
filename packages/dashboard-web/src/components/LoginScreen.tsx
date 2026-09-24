@@ -29,9 +29,10 @@ function messageFor(error: unknown): string {
  * 401.
  *
  * There is no "forgot password" flow and no reset link on purpose. Recovery is
- * `bun run auth:password --clear` on the machine that owns the database —
- * anything reachable over HTTP would be reachable by whoever the password is
- * keeping out.
+ * `clankermux-server auth password --clear` (or `bun run auth:password --clear`
+ * from a source checkout) on the machine that owns the database — anything
+ * reachable over HTTP would be reachable by whoever the password is keeping
+ * out.
  */
 export function LoginScreen() {
 	const [password, setPassword] = useState("");
@@ -83,7 +84,11 @@ export function LoginScreen() {
 
 					<p className="mt-4 text-xs text-muted-foreground">
 						Lost the password? Clear it on the server with{" "}
-						<code className="font-mono">bun run auth:password --clear</code>.
+						<code className="font-mono">
+							clankermux-server auth password --clear
+						</code>{" "}
+						(or <code className="font-mono">bun run auth:password --clear</code>{" "}
+						from a source checkout).
 					</p>
 				</CardContent>
 			</Card>

@@ -1,7 +1,11 @@
 import { isAccountAvailable, isPinActive } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	getSdkBridgeInnerMetaContext,
+	type RequestMeta,
+} from "@clankermux/types";
 import { getResolvedRoute, RoutingPolicyError } from "../resolved-route";
 import { eligibleRouteAccounts } from "../routing-service";
 import type { ProxyContext } from "./proxy-types";
@@ -116,9 +120,42 @@ export async function getOrderedAccounts(
 		getResolvedRoute(meta).upstreamModel?.trim().toLowerCase() || null;
 	const selected = await ctx.strategy.select(accounts, meta);
 	const allowed = new Set(accounts.map((a) => a.id));
-	return selected.filter(
+	const ordered = selected.filter(
 		(a) => allowed.has(a.id) && getResolvedRoute(meta).target(a) !== null,
 	);
+	const inner = getSdkBridgeInnerMetaContext(meta);
+	return inner
+		? preferPlannedAccount(ordered, meta, ctx, inner.plan.preferredAccountId)
+		: ordered;
+}
+
+/** Decisions that mean the conversation already has an account of its own. */
+const ESTABLISHED_AFFINITY = new Set(["affinity_hit", "affinity_hold"]);
+
+/**
+ * Start a bridge turn's inner calls on the account the outer attempt chose.
+ *
+ * Only a conversation without an account of its own moves: an established
+ * Claude Code session pin keeps its account, because its prompt cache is
+ * there. The pin follows the move, so the session's next inner call is an
+ * ordinary affinity hit on the preferred account.
+ */
+function preferPlannedAccount(
+	ordered: Account[],
+	meta: RequestMeta,
+	ctx: ProxyContext,
+	preferredAccountId: string,
+): Account[] {
+	const index = ordered.findIndex((a) => a.id === preferredAccountId);
+	if (index <= 0 || ESTABLISHED_AFFINITY.has(meta.routing?.decision ?? ""))
+		return ordered;
+	const preferred = ordered[index];
+	ctx.strategy.reassignAffinity?.(meta, preferred);
+	if (meta.routing) {
+		meta.routing.decision = "sdk_bridge_preferred";
+		meta.routing.selectedAccountId = preferred.id;
+	}
+	return [preferred, ...ordered.filter((a) => a.id !== preferred.id)];
 }
 export async function selectAccountsForRequest(
 	meta: RequestMeta,
@@ -126,8 +163,13 @@ export async function selectAccountsForRequest(
 	_model?: string,
 ): Promise<Account[]> {
 	const route = getResolvedRoute(meta);
+	// A bridge inner call's destinations are the frozen plan's; a header from
+	// Claude Code cannot narrow them to one account.
 	const singleton =
-		meta.pin?.accountId || meta.headers?.get("x-clankermux-account-id");
+		meta.pin?.accountId ||
+		(getSdkBridgeInnerMetaContext(meta)
+			? null
+			: meta.headers?.get("x-clankermux-account-id"));
 	meta.pinFailure = null;
 	if (!singleton) {
 		const selected = await getOrderedAccounts(meta, ctx);

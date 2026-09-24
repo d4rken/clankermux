@@ -71,7 +71,7 @@ describe("resolved route authority", () => {
 			build({
 				rules: [],
 				pin: { accountId: "a", providers: null },
-				excludeOfficialAnthropic: true,
+				officialAnthropicExclusion: "the SDK bridge is unavailable",
 			}),
 		).toThrow();
 	});
@@ -279,6 +279,111 @@ describe("Chat capability boundary", () => {
 				chatRequirements: { fields: [] },
 			}),
 		).toThrow("Chat Completions");
+	});
+	it("admits Chat on an official Anthropic account only when the SDK bridge serves it", () => {
+		const onA = { rules: [], pin: { accountId: "a", providers: null } };
+		expect(
+			build({
+				...onA,
+				bridgesOfficialAnthropic: true,
+				chatRequirements: { fields: ["reasoning_content"] },
+			}).accountIds(),
+		).toEqual(["a"]);
+		expect(() =>
+			build({
+				...onA,
+				bridgesOfficialAnthropic: false,
+				chatRequirements: { fields: [] },
+			}),
+		).toThrow("supports Chat Completions");
+	});
+	it("leaves the Chat fields of a bridged turn to the bridge's own field policy", () => {
+		const route = build({
+			rules: [],
+			pin: { accountId: "a", providers: null },
+			bridgesOfficialAnthropic: true,
+			chatRequirements: {
+				fields: [
+					"reasoning_content",
+					"max_tokens",
+					"temperature",
+					"top_p",
+					"stop",
+				],
+			},
+		});
+		expect(route.accountIds()).toEqual(["a"]);
+	});
+	it("keeps other providers' Chat capabilities when official Anthropic is bridged", () => {
+		const route = build({
+			rules: [],
+			pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+			bridgesOfficialAnthropic: true,
+			requestedModel: "claude-fable-5-1",
+			chatRequirements: { fields: ["temperature"] },
+		});
+		expect([...route.accountIds()].sort()).toEqual(["a", "o"]);
+	});
+});
+
+describe("fields the SDK bridge refuses", () => {
+	const refusal = {
+		field: "stop_sequences",
+		message: "stop_sequences is not supported through the SDK bridge",
+	} as const;
+	const mixed = {
+		rules: [],
+		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+		chatRequirements: { fields: ["stop"] },
+	};
+
+	it("leave a bridged account out of a route with another candidate", () => {
+		const route = build({
+			...mixed,
+			bridgesOfficialAnthropic: true,
+			sdkBridgeRefusal: refusal,
+		});
+		expect(route.accountIds()).toEqual(["o"]);
+		expect(JSON.parse(route.snapshot).sdkBridgeRefusedField).toBe(
+			"stop_sequences",
+		);
+	});
+
+	it("raise the bridge's 400 when nothing else remains", () => {
+		expect(() =>
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				bridgesOfficialAnthropic: true,
+				sdkBridgeRefusal: refusal,
+			}),
+		).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "invalid_request_error",
+				param: "stop_sequences",
+				message: refusal.message,
+			}),
+		);
+	});
+
+	it("change nothing without a bridge serving the account", () => {
+		expect(
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				sdkBridgeRefusal: refusal,
+			}).accountIds(),
+		).toEqual(["a"]);
+		expect(
+			[
+				...build({
+					...mixed,
+					bridgesOfficialAnthropic: true,
+					sdkBridgeRefusal: null,
+				}).accountIds(),
+			].sort(),
+		).toEqual(["a", "o"]);
 	});
 });
 

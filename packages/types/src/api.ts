@@ -5,6 +5,7 @@ import type {
 	ProjectAttributionSource,
 	ToolCallStat,
 } from "./request";
+import type { SdkBridgeRefusedField } from "./sdk-bridge-field-policy";
 
 export interface RequestMeta {
 	id: string;
@@ -117,13 +118,30 @@ export interface RequestMeta {
 	/** Set when a pin strict-fails account selection; handleProxy returns a terminal pinned_target_unavailable error. */
 	pinFailure?: { code: string; message: string } | null;
 	/**
-	 * Unconditional floor for Codex-CLI traffic: when true, the request may NEVER
-	 * be routed to an official Anthropic/Claude account (ban risk + not a real
-	 * cross-model review). Set by the /v1/responses adapter for ALL Codex CLI
-	 * requests, independent of any API-key pin or auth config. Composes with the
-	 * pin and also disables the (Anthropic-only) burst-hold for the request.
+	 * How this request may reach an official Anthropic account. `"sdk-bridge"`
+	 * is the floor the Responses and Chat adapters set through their in-process
+	 * contexts: such an account may serve the request only through the Claude
+	 * Agent SDK bridge, never by a direct fetch. Absent or `"direct"` is an
+	 * ordinary request. Never derived from a header.
 	 */
-	excludeOfficialAnthropic?: boolean | null;
+	officialAnthropicVia?: "direct" | "sdk-bridge";
+	/**
+	 * Set at route construction when an `"sdk-bridge"` request found the bridge
+	 * unavailable: official Anthropic accounts were excluded, for this reason.
+	 * Null when nothing was excluded on that ground.
+	 */
+	officialAnthropicExcluded?: string | null;
+	/**
+	 * For an `"sdk-bridge"` request, the body field the bridge would refuse.
+	 * Route construction then leaves official Anthropic accounts out, so another
+	 * candidate that can honour the field serves the request.
+	 */
+	sdkBridgeRefusedField?: SdkBridgeRefusedField | null;
+	/**
+	 * The SDK bridge turn this request is an inner model call of. Set only from
+	 * the in-process inner context, never from a header.
+	 */
+	sdkBridgeTurnId?: string | null;
 }
 
 export type RequestAffinityScope =

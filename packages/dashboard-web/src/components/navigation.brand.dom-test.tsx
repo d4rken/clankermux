@@ -17,14 +17,9 @@ let host: HTMLElement | null = null;
 const restores: Array<() => void> = [];
 
 async function mount(): Promise<void> {
-	const authSpy = spyOn(api, "getAuthStatus").mockResolvedValue({
-		configured: true,
-		authenticated: true,
-	});
 	const systemSpy = spyOn(api, "getSystemStatus").mockImplementation(() => {
 		throw new Error("not under test");
 	});
-	restores.push(() => authSpy.mockRestore());
 	restores.push(() => systemSpy.mockRestore());
 
 	const realFetch = globalThis.fetch;

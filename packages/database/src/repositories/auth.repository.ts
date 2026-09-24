@@ -95,6 +95,36 @@ export class AuthRepository extends BaseRepository<AuthSessionRecord> {
 	}
 
 	/**
+	 * Store the verifier ONLY when no password exists yet. Returns whether the row
+	 * was inserted; false means a password was already set and nothing changed —
+	 * neither the verifier nor any session.
+	 *
+	 * The check is the INSERT itself (`ON CONFLICT DO NOTHING`), so two claims
+	 * racing each other, or a claim racing the CLI, cannot both win. A successful
+	 * claim still revokes every session row in the same transaction, like every
+	 * other password write: rows left over from before an earlier clear must not
+	 * come back to life under the new password.
+	 */
+	async setPasswordIfAbsent(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<boolean> {
+		const db = this.adapter.getSQLiteDb();
+		return this.adapter.runTransaction(() => {
+			const inserted = db.run(
+				`INSERT INTO auth_password (id, verifier, params, updated_at)
+				 VALUES (1, ?, ?, ?)
+				 ON CONFLICT(id) DO NOTHING`,
+				[verifier, params, updatedAt],
+			).changes;
+			if (inserted !== 1) return false;
+			db.run(`DELETE FROM auth_sessions`);
+			return true;
+		});
+	}
+
+	/**
 	 * Remove the stored verifier (returning the deployment to fail-open) and
 	 * invalidate every session, atomically. Returns the sessions revoked.
 	 */

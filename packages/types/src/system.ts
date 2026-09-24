@@ -1,4 +1,5 @@
 import type { PricingGap } from "./pricing";
+import type { SdkBridgeStatus } from "./sdk-bridge-transport";
 import type { PoolStatus } from "./stats";
 
 /**
@@ -136,6 +137,13 @@ export interface SystemStatusResponse {
 	 * Empty array when no bucket is live, which is the normal steady state.
 	 */
 	providerOverload: ProviderOverloadStatus[];
+	/**
+	 * The Claude Agent SDK bridge, which serves non-Claude-Code clients on
+	 * official Anthropic accounts. Absent when the handler runs without one
+	 * (bare handler in tests). Not part of the `status` rollup: an unavailable
+	 * bridge only takes those accounts out of those clients' routes.
+	 */
+	sdkBridge?: SdkBridgeStatus;
 	strategy: string;
 	timestamp: string;
 }

@@ -683,7 +683,7 @@ describe("createRecoveryHolds", () => {
 	});
 
 	describe("burstHeldId", () => {
-		it("mirrors routing.heldAccountId, and is null for a Codex-CLI request", () => {
+		it("mirrors routing.heldAccountId, and is null for an SDK bridge request", () => {
 			const account = makeAccount({ id: uniqueId("held") });
 			const routing = {
 				strategy: "session",
@@ -694,12 +694,12 @@ describe("createRecoveryHolds", () => {
 			const mirrored = makeHolds([account], alwaysThrottled, { routing });
 			expect(mirrored.holds.burstHeldId).toBe(account.id);
 
-			// excludeOfficialAnthropic ⇒ the burst hold (OAuth-Anthropic only) must be
-			// disabled outright, or it could serve a Claude account that selection
-			// deliberately excluded.
+			// A non-Claude-Code client reaches a Claude account only through the
+			// SDK bridge, so the burst hold (OAuth-Anthropic only) must be disabled
+			// outright: it would re-probe an account directly.
 			const excluded = makeHolds([account], alwaysThrottled, {
 				routing,
-				excludeOfficialAnthropic: true,
+				officialAnthropicVia: "sdk-bridge",
 			});
 			expect(excluded.holds.burstHeldId).toBeNull();
 		});
@@ -720,7 +720,7 @@ describe("createRecoveryHolds", () => {
 			if (requestMeta.routing) {
 				requestMeta.routing.heldAccountId = "someone-else";
 			}
-			requestMeta.excludeOfficialAnthropic = true;
+			requestMeta.officialAnthropicVia = "sdk-bridge";
 
 			expect(holds.burstHeldId).toBe(account.id);
 		});

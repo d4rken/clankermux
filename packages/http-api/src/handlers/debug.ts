@@ -5,7 +5,8 @@
  *
  * Endpoints:
  *   GET /api/debug/heap       — JSC heap stats (object counts by type)
- *   GET /api/debug/snapshot   — Generate V8-compatible .heapsnapshot
+ *   GET /api/debug/snapshot   — Generate V8-compatible .heapsnapshot (403 until
+ *                               a management password is set)
  *   GET /api/debug/rss        — Current process RSS in MB
  */
 
@@ -52,6 +53,29 @@ export function createHeapSnapshotHandler() {
 				"content-disposition": `attachment; filename="heap-${Date.now()}.heapsnapshot"`,
 			},
 		});
+	};
+}
+
+/**
+ * The snapshot, refused with 403 while no management password is set. A heap
+ * dump can carry the setup code and other secrets, and without a password the
+ * management API admits anyone who can reach the port.
+ */
+export function createGatedHeapSnapshotHandler(
+	isConfigured: () => Promise<boolean>,
+	snapshot: () => Response = createHeapSnapshotHandler(),
+) {
+	return async (): Promise<Response> => {
+		if (!(await isConfigured())) {
+			return Response.json(
+				{
+					error:
+						"Heap snapshots are disabled until a management password is set",
+				},
+				{ status: 403 },
+			);
+		}
+		return snapshot();
 	};
 }
 

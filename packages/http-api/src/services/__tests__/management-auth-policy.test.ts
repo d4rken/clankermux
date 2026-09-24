@@ -18,6 +18,7 @@ describe("public by classification", () => {
 		"/api/auth/login",
 		"/api/auth/logout",
 		"/api/auth/status",
+		"/api/auth/setup",
 	]) {
 		it(`leaves ${path} ungated`, () => {
 			expect(managementAuthRequirement(path)).toBe("public");

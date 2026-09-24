@@ -27,6 +27,7 @@ import type {
 	RetentionGetResponse,
 	RetentionSetRequest,
 	RunwayResponse,
+	SdkBridgeTurnView,
 	StatsWithErrors,
 	StopsHistoryResponse,
 	StorageUsageResponse,
@@ -291,6 +292,20 @@ class API extends HttpClient {
 	 */
 	async login(password: string): Promise<void> {
 		await this.post<{ authenticated: boolean }>("/api/auth/login", {
+			password,
+		});
+	}
+
+	/**
+	 * Claim the first management password with the one-time setup code the
+	 * server printed to its own output.
+	 *
+	 * Signs the browser in on success, the same way {@link login} does: the
+	 * response sets the `HttpOnly` session cookie.
+	 */
+	async setupPassword(code: string, password: string): Promise<void> {
+		await this.post<{ authenticated: boolean }>("/api/auth/setup", {
+			code,
 			password,
 		});
 	}
@@ -1006,6 +1021,23 @@ class API extends HttpClient {
 	async getRequestById(id: string): Promise<RequestSummary | null> {
 		const rows = await this.getRequestsSummary(1, { id });
 		return rows[0] ?? null;
+	}
+
+	/**
+	 * An SDK bridge turn by its id or by one of its legs' request ids, or null
+	 * when neither exists.
+	 */
+	async getSdkBridgeTurn(id: string): Promise<SdkBridgeTurnView | null> {
+		const url = `/api/sdk-bridge-turns/${encodeURIComponent(id)}`;
+		try {
+			return await this.get<SdkBridgeTurnView>(url);
+		} catch (error) {
+			if (error instanceof HttpError && error.status === 404) return null;
+			this.logger.error(`✗ GET ${url} - ERROR`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 	}
 
 	/**

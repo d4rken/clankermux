@@ -102,6 +102,7 @@ export {
 	RoutingConflictError,
 	RoutingRepository,
 } from "./repositories/routing.repository";
+export { SdkBridgeTurnRepository } from "./repositories/sdk-bridge-turn.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";

@@ -403,11 +403,13 @@ export class AnthropicBankedResetCoordinator {
 			this.usage.noteAnthropicUsageRead(accountId);
 		};
 		sent();
+		let markAtReadStart = anthropicBankedResetCache.dueMark(accountId);
 		let read = await this.fetchStatus(accessToken);
 		if (read.httpStatus === 401) {
 			const refreshed = await this.forceTokenRefresh(account, accessToken);
 			if (refreshed) {
 				sent();
+				markAtReadStart = anthropicBankedResetCache.dueMark(accountId);
 				read = await this.fetchStatus(refreshed);
 			}
 		}
@@ -429,7 +431,12 @@ export class AnthropicBankedResetCoordinator {
 		}
 
 		const status = read.status;
-		anthropicBankedResetCache.set(accountId, status, this.now());
+		anthropicBankedResetCache.set(
+			accountId,
+			status,
+			this.now(),
+			markAtReadStart,
+		);
 		log.info(
 			`banked_reset_status account=${account.name} eligible=${status.eligible} ineligible_reason=${status.ineligibleReason ?? "none"} grants=${status.grants.length} resets_left=${bankedResetsLeftTotal(status)} next_grant=${status.nextGrantId ?? "none"}`,
 		);

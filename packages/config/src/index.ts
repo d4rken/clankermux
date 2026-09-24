@@ -87,6 +87,14 @@ export interface ConfigData {
 	cache_warming_risk_factor?: number;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
+	sdk_bridge_max_processes?: number;
+	sdk_bridge_parked_timeout_ms?: number;
+	sdk_bridge_turn_deadline_ms?: number;
+	sdk_bridge_max_history_bytes?: number;
+	sdk_bridge_max_tools?: number;
+	sdk_bridge_max_schema_bytes?: number;
+	sdk_bridge_max_parked_calls_per_turn?: number;
+	sdk_bridge_max_concurrent_rebuilds?: number;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -670,6 +678,94 @@ export class Config extends EventEmitter {
 		this.set("usage_throttling_weekly_enabled", value);
 	}
 
+	/** A whole-number file setting, clamped; the default when absent or not finite. */
+	private boundedInteger(
+		key: keyof ConfigData,
+		fallback: number,
+		min: number,
+		max: number,
+	): number {
+		const fromFile = this.data[key];
+		if (typeof fromFile !== "number" || !Number.isFinite(fromFile))
+			return fallback;
+		return this.clamp(Math.round(fromFile), min, max);
+	}
+
+	// SDK bridge limits. The defaults equal the bridge package's
+	// DEFAULT_SDK_BRIDGE_LIMITS (config must not depend on that package;
+	// claude-sdk-bridge-wiring.test.ts pins the equality).
+
+	/**
+	 * Claude Code processes the SDK bridge keeps alive at once, parked ones
+	 * included. Each measured 220–270 MB RSS.
+	 */
+	getSdkBridgeMaxProcesses(): number {
+		return this.boundedInteger("sdk_bridge_max_processes", 8, 1, 32);
+	}
+
+	/** How long a parked tool call waits for the client's result. */
+	getSdkBridgeParkedTimeoutMs(): number {
+		return this.boundedInteger(
+			"sdk_bridge_parked_timeout_ms",
+			15 * 60_000,
+			30_000,
+			2 * 60 * 60_000,
+		);
+	}
+
+	/** Wall-clock budget of one bridged turn, all its legs together. */
+	getSdkBridgeTurnDeadlineMs(): number {
+		return this.boundedInteger(
+			"sdk_bridge_turn_deadline_ms",
+			60 * 60_000,
+			60_000,
+			6 * 60 * 60_000,
+		);
+	}
+
+	// The safety limits sit orders of magnitude above real sessions; they only
+	// stop runaway requests.
+
+	getSdkBridgeMaxHistoryBytes(): number {
+		return this.boundedInteger(
+			"sdk_bridge_max_history_bytes",
+			64 * 1024 * 1024,
+			1024 * 1024,
+			1024 * 1024 * 1024,
+		);
+	}
+
+	getSdkBridgeMaxTools(): number {
+		return this.boundedInteger("sdk_bridge_max_tools", 1024, 1, 65_536);
+	}
+
+	getSdkBridgeMaxSchemaBytes(): number {
+		return this.boundedInteger(
+			"sdk_bridge_max_schema_bytes",
+			8 * 1024 * 1024,
+			64 * 1024,
+			256 * 1024 * 1024,
+		);
+	}
+
+	getSdkBridgeMaxParkedCallsPerTurn(): number {
+		return this.boundedInteger(
+			"sdk_bridge_max_parked_calls_per_turn",
+			256,
+			1,
+			65_536,
+		);
+	}
+
+	getSdkBridgeMaxConcurrentRebuilds(): number {
+		return this.boundedInteger(
+			"sdk_bridge_max_concurrent_rebuilds",
+			8,
+			1,
+			1024,
+		);
+	}
+
 	/**
 	 * Path-to-project rules (see `ProjectRules`).
 	 *
@@ -755,6 +851,16 @@ export class Config extends EventEmitter {
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
+			sdk_bridge_max_processes: this.getSdkBridgeMaxProcesses(),
+			sdk_bridge_parked_timeout_ms: this.getSdkBridgeParkedTimeoutMs(),
+			sdk_bridge_turn_deadline_ms: this.getSdkBridgeTurnDeadlineMs(),
+			sdk_bridge_max_history_bytes: this.getSdkBridgeMaxHistoryBytes(),
+			sdk_bridge_max_tools: this.getSdkBridgeMaxTools(),
+			sdk_bridge_max_schema_bytes: this.getSdkBridgeMaxSchemaBytes(),
+			sdk_bridge_max_parked_calls_per_turn:
+				this.getSdkBridgeMaxParkedCallsPerTurn(),
+			sdk_bridge_max_concurrent_rebuilds:
+				this.getSdkBridgeMaxConcurrentRebuilds(),
 		};
 	}
 

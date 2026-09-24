@@ -33,7 +33,11 @@ import {
 	mock,
 } from "bun:test";
 import { usageCache } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type Account,
+	type RequestMeta,
+	setNativeResponsesRequestContext,
+} from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
@@ -521,9 +525,9 @@ describe("zero-accounts terminal recorder labels", () => {
 	});
 
 	it("an excluded destination records the routing_policy_rejected label", async () => {
-		// Codex-CLI floor (deny-official-anthropic) with the only account cooled:
-		// selection returns [] BEFORE the floor filter runs, so no pinFailure is set
-		// and no earlier terminal applies — the fixed-label pinned terminal fires.
+		// The floor for non-Claude-Code clients with no SDK bridge configured:
+		// the only account is an official Anthropic one, so route construction
+		// excludes it and the request is refused before selection.
 		const accId = uniqueId("anthropic");
 		const account = makeAccount({
 			id: accId,
@@ -532,10 +536,13 @@ describe("zero-accounts terminal recorder labels", () => {
 		});
 		const { ctx, recordedErrors } = makeContext([account]);
 
+		const req = makeRequest("claude-opus-4-7");
+		setNativeResponsesRequestContext(req, {
+			nativeBody: JSON.stringify({ model: "claude-opus-4-7" }),
+			denyDirectOfficialAnthropic: true,
+		});
 		const res = await callHandleProxy(
-			makeRequest("claude-opus-4-7", {
-				"x-clankermux-deny-official-anthropic": "1",
-			}),
+			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);

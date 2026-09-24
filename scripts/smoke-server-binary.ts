@@ -9,7 +9,11 @@
  * which only `worker.onerror` ever reports. Unit tests run from the checkout,
  * where every one of those paths resolves, so they cannot see any of it. This
  * script exercises the binary itself: the dashboard assets, both handler
- * workers and one database worker.
+ * workers and one database worker, then the first-run setup-code claim over
+ * HTTP and the `auth password --status|--clear` subcommand. Compiled `--set`
+ * is not covered because it needs a TTY; its logic is unit-tested in
+ * packages/http-api/src/cli/auth-password.test.ts, and the HTTP claim runs the
+ * same compiled scrypt path.
  *
  * ISOLATION IS ABSOLUTE, and it has to be. XDG_CONFIG_HOME alone does NOT
  * isolate a run: CLANKERMUX_DB_PATH and CLANKERMUX_CONFIG_PATH are read
@@ -47,6 +51,10 @@ const QUOTA_DRIFT_TIMEOUT_MS = 150_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Grace between SIGTERM and SIGKILL. Doubles as the shutdown assertion. */
 const SIGTERM_GRACE_MS = 30_000;
+/** Ceiling for one `auth password` run; it exits on its own well before this. */
+const CLI_TIMEOUT_MS = 30_000;
+/** How long the announced setup code gets to show up in the server output. */
+const SETUP_CODE_TIMEOUT_MS = 10_000;
 const POLL_INTERVAL_MS = 500;
 
 /**
@@ -88,17 +96,33 @@ function pickEphemeralPort(): number {
 	return port;
 }
 
+/** Where this run's copy of the binary lives inside `dir`. */
+function binaryIn(dir: string): string {
+	return join(dir, basename(BINARY_PATH));
+}
+
+/** This run's database. Every child, server or CLI, targets this file. */
+function dbPathIn(dir: string): string {
+	return join(dir, "clankermux.db");
+}
+
 /**
- * Launch the binary from a copy inside `dir`, with `dir` as its cwd. Running
- * outside the checkout is the point: it proves nothing the binary needs is
- * resolved relative to the repository.
+ * Copy the binary into `dir` and create the directories its environment names.
+ * Running from a copy outside the checkout is the point: it proves nothing the
+ * binary needs is resolved relative to the repository.
  */
-function startServer(dir: string, port: number): Server {
-	const binary = join(dir, basename(BINARY_PATH));
-	copyFileSync(BINARY_PATH, binary);
+function prepareDir(dir: string): void {
+	copyFileSync(BINARY_PATH, binaryIn(dir));
 	mkdirSync(join(dir, "config/clankermux"), { recursive: true });
 	mkdirSync(join(dir, "logs"), { recursive: true });
+}
 
+/**
+ * The inherited environment with every CLANKERMUX_ key dropped and this run's
+ * own paths set, all inside `dir`. Shared by the server and every CLI run, so
+ * none of them can reach the operator's database.
+ */
+function isolatedEnv(dir: string): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (value === undefined) continue;
@@ -110,11 +134,20 @@ function startServer(dir: string, port: number): Server {
 	// path through the security path-validator, which allows only the app's own
 	// directory inside the XDG root.
 	env.CLANKERMUX_CONFIG_PATH = join(dir, "config/clankermux/clankermux.json");
-	env.CLANKERMUX_DB_PATH = join(dir, "clankermux.db");
+	env.CLANKERMUX_DB_PATH = dbPathIn(dir);
 	env.CLANKERMUX_LOG_DIR = join(dir, "logs");
-	env.PORT = String(port);
+	return env;
+}
 
-	const child = spawn(binary, [], {
+/** Launch the binary copy in `dir` (see `prepareDir`), with `dir` as its cwd. */
+function startServer(dir: string, port: number): Server {
+	const env = isolatedEnv(dir);
+	env.PORT = String(port);
+	// The script only ever fetches 127.0.0.1, and a loopback bind must still
+	// print the setup code.
+	env.CLANKERMUX_HOST = "127.0.0.1";
+
+	const child = spawn(binaryIn(dir), [], {
 		cwd: dir,
 		env,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -182,6 +215,82 @@ async function stopServer(server: Server): Promise<ExitStatus> {
  */
 export function isCleanExit(status: ExitStatus): boolean {
 	return status.code === 0 && status.signal === null;
+}
+
+type CliResult = { code: number | null; output: string };
+
+/**
+ * Run `<binary> auth password ...args` in this run's isolated environment,
+ * with no stdin, capturing both streams. Fails the run if it has not exited
+ * within CLI_TIMEOUT_MS. The kill is SIGKILL because the CLI ignores SIGTERM.
+ */
+async function runAuthCli(dir: string, args: string[]): Promise<CliResult> {
+	const child = spawn(binaryIn(dir), ["auth", "password", ...args], {
+		cwd: dir,
+		env: isolatedEnv(dir),
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const { stdout, stderr } = child;
+	if (!stdout || !stderr) {
+		throw new SmokeFailure("expected piped stdout and stderr from the CLI");
+	}
+	const chunks: string[] = [];
+	stdout.setEncoding("utf8");
+	stderr.setEncoding("utf8");
+	stdout.on("data", (chunk: string) => chunks.push(chunk));
+	stderr.on("data", (chunk: string) => chunks.push(chunk));
+
+	let timedOut = false;
+	const killer = setTimeout(() => {
+		timedOut = true;
+		child.kill("SIGKILL");
+	}, CLI_TIMEOUT_MS);
+	try {
+		const code = await new Promise<number | null>((resolve) => {
+			child.on("close", (exitCode) => resolve(exitCode));
+			child.on("error", (error) => {
+				chunks.push(`\n[spawn error] ${error.message}\n`);
+				resolve(null);
+			});
+		});
+		const output = chunks.join("");
+		if (timedOut) {
+			throw new SmokeFailure(
+				`auth password ${args.join(" ")}: no exit within ${CLI_TIMEOUT_MS}ms\n\n--- CLI output ---\n${output}`,
+			);
+		}
+		return { code, output };
+	} finally {
+		clearTimeout(killer);
+	}
+}
+
+/** Run the CLI and require `expectedCode` plus every string in `mustContain`. */
+async function assertAuthCli(
+	dir: string,
+	args: string[],
+	expectedCode: number,
+	mustContain: string[],
+): Promise<CliResult> {
+	const result = await runAuthCli(dir, args);
+	const what = `auth password ${args.join(" ")}`;
+	const quoted = `\n\n--- CLI output ---\n${result.output}`;
+	if (result.code !== expectedCode) {
+		throw new SmokeFailure(
+			`${what}: expected exit ${expectedCode}, got ${result.code}${quoted}`,
+		);
+	}
+	for (const needle of mustContain) {
+		if (!result.output.includes(needle)) {
+			throw new SmokeFailure(
+				`${what}: output lacks ${JSON.stringify(needle)}${quoted}`,
+			);
+		}
+	}
+	log(
+		`${what}: exit ${expectedCode}, output has ${JSON.stringify(mustContain)}`,
+	);
+	return result;
 }
 
 /** Fail the run, quoting everything the server said. */
@@ -366,6 +475,248 @@ async function assertIntegrityCheck(server: Server): Promise<void> {
 	log("/api/storage/integrity/check: quick check ok, via a database worker");
 }
 
+/**
+ * The binary marks both Agent SDKs external, so it cannot run Claude Code. It
+ * must still start, and say so instead of offering official Anthropic
+ * accounts to clients that could only reach them through the bridge.
+ */
+async function assertSdkBridgeUnavailable(server: Server): Promise<void> {
+	const res = await get(server, "/api/system/status");
+	if (res?.status !== 200) {
+		fail(
+			server,
+			`GET /api/system/status: expected 200, got ${res?.status ?? "no response"}`,
+		);
+	}
+	const body = (await res.json()) as {
+		sdkBridge?: { availability?: { state?: string; reason?: string } };
+	};
+	const availability = body.sdkBridge?.availability;
+	if (availability?.state !== "unavailable") {
+		fail(
+			server,
+			`GET /api/system/status: expected the SDK bridge unavailable, got ${JSON.stringify(body.sdkBridge ?? null)}`,
+		);
+	}
+	log(`/api/system/status: SDK bridge unavailable (${availability.reason})`);
+}
+
+const SETUP_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const SETUP_CODE_LINE =
+	/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
+
+/**
+ * The distinct setup codes announced in `output`, in first-seen order. A code
+ * counts only when it is the whole of a trimmed line after a
+ * `One-time setup code:` line and before that block's closing rule, so a
+ * code-shaped fragment elsewhere (the middle of an upper-case UUID, say) is
+ * never picked up:
+ *
+ *   ----------------------------------------------------
+ *   No management password is set. One-time setup code:
+ *
+ *       7K2M-QX9P-4RTV            <- this line
+ *
+ *   Open the dashboard at http://127.0.0.1:4000/dashboard ...
+ *   ----------------------------------------------------
+ */
+export function extractSetupCodes(output: string): string[] {
+	const codes = new Set<string>();
+	let inBlock = false;
+	for (const raw of output.split("\n")) {
+		const line = raw.trim();
+		if (line.includes("One-time setup code:")) {
+			inBlock = true;
+		} else if (inBlock && /^-{8,}$/.test(line)) {
+			inBlock = false;
+		} else if (inBlock && SETUP_CODE_LINE.test(line)) {
+			codes.add(line);
+			inBlock = false;
+		}
+	}
+	return [...codes];
+}
+
+/**
+ * A well-formed code guaranteed to differ from `code`: its first character
+ * moved one place along the alphabet. `7K2M-QX9P-4RTV` becomes `8K2M-QX9P-4RTV`.
+ */
+export function differentSetupCode(code: string): string {
+	const first = SETUP_CODE_ALPHABET.indexOf(code.charAt(0));
+	const next = SETUP_CODE_ALPHABET.charAt(
+		(first + 1) % SETUP_CODE_ALPHABET.length,
+	);
+	return `${next}${code.slice(1)}`;
+}
+
+/** Fail unless `res` answered `expected`; returns it as non-null. */
+function expectStatus(
+	server: Server,
+	what: string,
+	res: Response | null,
+	expected: number,
+): Response {
+	if (res?.status !== expected) {
+		fail(
+			server,
+			`${what}: expected ${expected}, got ${res?.status ?? "no response"}`,
+		);
+	}
+	return res;
+}
+
+async function assertAuthStatus(
+	server: Server,
+	cookie: string | null,
+	expected: { configured: boolean; authenticated: boolean },
+): Promise<void> {
+	const what = `GET /api/auth/status${cookie ? " with the session" : ""}`;
+	const res = expectStatus(
+		server,
+		what,
+		await get(
+			server,
+			"/api/auth/status",
+			cookie ? { headers: { Cookie: cookie } } : {},
+		),
+		200,
+	);
+	const body = (await res.json()) as {
+		configured?: unknown;
+		authenticated?: unknown;
+	};
+	if (
+		body.configured !== expected.configured ||
+		body.authenticated !== expected.authenticated
+	) {
+		fail(
+			server,
+			`${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(body)}`,
+		);
+	}
+	log(`${what}: ${JSON.stringify(expected)}`);
+}
+
+function postSetup(
+	server: Server,
+	code: string,
+	password: string,
+): Promise<Response | null> {
+	return get(server, "/api/auth/setup", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ code, password }),
+	});
+}
+
+/**
+ * Claim the first management password with the code the server printed, and
+ * prove the claim closes the fail-open API. Must run after every assertion
+ * that relies on `/api/*` being open.
+ */
+async function assertSetupCodeFlow(server: Server): Promise<void> {
+	const codes = await poll(
+		server,
+		SETUP_CODE_TIMEOUT_MS,
+		"a setup code in the server output",
+		async () => {
+			const found = extractSetupCodes(server.output());
+			return found.length > 0 ? found : null;
+		},
+	);
+	const [code] = codes;
+	if (codes.length !== 1 || code === undefined) {
+		fail(
+			server,
+			`expected one setup code, the output announced ${codes.length}`,
+		);
+	}
+	log("server output: exactly one setup code announced");
+
+	const history = expectStatus(
+		server,
+		"GET /api/logs/history",
+		await get(server, "/api/logs/history"),
+		200,
+	);
+	const historyBody = await history.text();
+	if (
+		historyBody.includes(code) ||
+		historyBody.includes(code.replaceAll("-", ""))
+	) {
+		fail(
+			server,
+			"GET /api/logs/history: the log history contains the setup code",
+		);
+	}
+	log("/api/logs/history: does not contain the setup code");
+
+	expectStatus(
+		server,
+		"GET /api/debug/snapshot while unconfigured",
+		await get(server, "/api/debug/snapshot"),
+		403,
+	);
+	log("/api/debug/snapshot: 403 while no password is set");
+
+	await assertAuthStatus(server, null, {
+		configured: false,
+		authenticated: false,
+	});
+
+	const password = "smoke-password-1";
+	expectStatus(
+		server,
+		"POST /api/auth/setup with a wrong code",
+		await postSetup(server, differentSetupCode(code), password),
+		403,
+	);
+	log("/api/auth/setup: 403 for a wrong code");
+
+	const claimed = expectStatus(
+		server,
+		"POST /api/auth/setup with the announced code",
+		await postSetup(server, code, password),
+		200,
+	);
+	const setCookie = claimed.headers.get("set-cookie") ?? "";
+	const cookie = setCookie.split(";")[0]?.trim() ?? "";
+	if (!cookie.startsWith("cmx_session=") || cookie === "cmx_session=") {
+		fail(
+			server,
+			`POST /api/auth/setup: expected a cmx_session cookie, got ${JSON.stringify(setCookie)}`,
+		);
+	}
+	log("/api/auth/setup: 200 with a cmx_session cookie");
+
+	await assertAuthStatus(server, cookie, {
+		configured: true,
+		authenticated: true,
+	});
+
+	expectStatus(
+		server,
+		"POST /api/auth/setup once configured",
+		await postSetup(server, code, password),
+		409,
+	);
+	log("/api/auth/setup: 409 once a password exists");
+
+	expectStatus(
+		server,
+		"GET /api/stats without a session",
+		await get(server, "/api/stats"),
+		401,
+	);
+	expectStatus(
+		server,
+		"GET /api/stats with the session",
+		await get(server, "/api/stats", { headers: { Cookie: cookie } }),
+		200,
+	);
+	log("/api/stats: 401 without the session, 200 with it");
+}
+
 /** The catch-all for the silent failure mode: a worker that never loaded. */
 function assertNoModuleErrors(server: Server): void {
 	const output = server.output();
@@ -428,6 +779,29 @@ async function main(): Promise<void> {
 	process.on("SIGTERM", onSignal);
 
 	try {
+		prepareDir(dir);
+		const dbPath = dbPathIn(dir);
+
+		// No server has run yet, so no database exists: the CLI must refuse
+		// rather than create one, and must not boot the server on the way.
+		const missing = await assertAuthCli(
+			dir,
+			["--status", "--db-path", dbPath],
+			1,
+			["No database at that path."],
+		);
+		if (missing.output.includes("ClankerMux Server v")) {
+			throw new SmokeFailure(
+				`auth password --status started the server\n\n--- CLI output ---\n${missing.output}`,
+			);
+		}
+		if (existsSync(dbPath)) {
+			throw new SmokeFailure(
+				`auth password --status created ${dbPath} instead of refusing`,
+			);
+		}
+		log("auth password: missing database refused, not created");
+
 		const server = await startWithRetry(dir, (s) => {
 			started = s;
 		});
@@ -436,8 +810,10 @@ async function main(): Promise<void> {
 		await assertHealth(server);
 		await assertAsset(server, await assertDashboard(server));
 		await assertStats(server);
+		await assertSdkBridgeUnavailable(server);
 		await assertQuotaDrift(server);
 		await assertIntegrityCheck(server);
+		await assertSetupCodeFlow(server);
 
 		// Shutdown is an assertion too: a binary that will not stop on SIGTERM
 		// stalls every restart behind the SIGKILL timeout.
@@ -453,6 +829,14 @@ async function main(): Promise<void> {
 
 		// Both pipes are closed only now, so this sees everything the run wrote.
 		assertNoModuleErrors(server);
+
+		await assertAuthCli(dir, ["--status", "--db-path", dbPath], 0, [
+			"A management password is set",
+		]);
+		await assertAuthCli(dir, ["--clear", "--db-path", dbPath], 0, ["Cleared."]);
+		await assertAuthCli(dir, ["--status", "--db-path", dbPath], 0, [
+			"UNPROTECTED",
+		]);
 		log("PASS");
 	} finally {
 		process.off("SIGINT", onSignal);

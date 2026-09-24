@@ -26,6 +26,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
+	anthropicBankedResetCache,
 	DevinSessionAuthenticationError,
 	devinClient,
 	getDevinRequestProvenance,
@@ -105,6 +106,10 @@ import {
 	isDefinitiveModelError,
 	isModelRouteRestriction,
 } from "../routing-response-audit";
+import {
+	noteAttemptStarted,
+	noteSdkBridgeCapacity,
+} from "../sdk-bridge-capacity";
 import { dispatchObservationSource } from "../should-record-request";
 import { getRoutingAffinity } from "./account-selector";
 import {
@@ -133,12 +138,14 @@ import {
 	completeRateLimitProbe,
 	findRateLimitProbeLease,
 } from "./rate-limit-cooldown";
+import { recordFieldsFromMeta } from "./record-fields";
 import { validateProviderPath } from "./request-handler";
 import {
 	handleProxyError,
 	persistRateLimitStatusMeta,
 	processProxyResponse,
 } from "./response-processor";
+import { isSdkBridgeAttempt, proxyViaSdkBridge } from "./sdk-bridge-attempt";
 import {
 	peekServedModel,
 	SERVED_MODEL_PEEK_TIMEOUT_MS,
@@ -293,6 +300,11 @@ export type ProxyAttemptOutcome =
 	| { kind: "server_error"; status: number }
 	| { kind: "network_error"; beforeDispatch?: boolean }
 	| { kind: "invalid_request" }
+	/**
+	 * The SDK bridge could not run a turn for this attempt (unavailable, or
+	 * shutting down since the route was built). Nothing reached the account.
+	 */
+	| { kind: "sdk_bridge_unavailable" }
 	| { kind: "other" };
 
 /**
@@ -1177,6 +1189,7 @@ export async function proxyWithAccount(
 	).upstreamModel;
 	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
+	noteAttemptStarted(requestMeta);
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
 	// never disagree about whether this attempt is terminal.
@@ -1374,6 +1387,37 @@ export async function proxyWithAccount(
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		bindAnthropicAccountUuid(effectiveBodyContext, account);
 		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
+
+		// A distinct attempt mode, branched before anything below touches the
+		// account: the bridge's own model calls do the staging, token handling
+		// and every health classification, and its answer is final.
+		if (isSdkBridgeAttempt(requestMeta, account)) {
+			const bridged = await proxyViaSdkBridge({
+				req,
+				url,
+				account,
+				requestMeta,
+				ctx,
+				body: effectiveBodyBuffer,
+				apiKeyId: apiKeyId ?? null,
+				apiKeyName: apiKeyName ?? null,
+				audit: attemptAudit,
+				bumpIdleTimeout,
+			});
+			if (bridged.kind === "response") return bridged.response;
+			// Answered by the give-up terminal if no later candidate serves.
+			if (bridged.capacity)
+				noteSdkBridgeCapacity(requestMeta, bridged.capacity);
+			log.info(
+				`SDK bridge cannot serve ${account.name} (${bridged.reason}) — failing over`,
+			);
+			return await fail(
+				{ kind: "sdk_bridge_unavailable" },
+				null,
+				undefined,
+				`${bridged.capacity ? "sdk_bridge_capacity" : "sdk_bridge_unavailable"}: ${bridged.reason}`,
+			);
+		}
 
 		// Stage the original request body + headers for cache keepalive replay.
 		// Preserve the resolved model for a faithful replay to this destination.
@@ -1721,36 +1765,19 @@ export async function proxyWithAccount(
 				options?.onOutcome?.({ kind: "other" });
 				return forwardToClient(
 					{
+						...recordFieldsFromMeta(requestMeta),
 						clientSignal: req.signal,
-						requestId: requestMeta.id,
 						method: req.method,
 						path: url.pathname,
 						account,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
-						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
-						requestedModel: requestMeta.requestedModel,
-						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-						fallbackFromModel: requestMeta.fallbackFromModel,
-						project: requestMeta.project,
-						projectAttributionSource: requestMeta.projectAttributionSource,
-						contextComposition: requestMeta.contextComposition,
-						toolCallStats: requestMeta.toolCallStats,
-						reasoningEffort: requestMeta.reasoningEffort,
-						sessionKey: requestMeta.sessionKey,
-						cachePrefixHashes: requestMeta.cachePrefixHashes,
-						clientUserAgent: requestMeta.clientUserAgent,
-						clientHarness: requestMeta.clientHarness,
-						claudeDeviceId: requestMeta.claudeDeviceId,
 						response,
-						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
 						failoverAttempts,
-						comboName: requestMeta.comboName,
 						apiKeyId,
 						apiKeyName,
-						routing: requestMeta.routing ?? null,
 						upstreamModel: overloadAttributionModel,
 						bumpIdleTimeout,
 					},
@@ -2291,12 +2318,18 @@ export async function proxyWithAccount(
 					// same family, and earned this same 429 — eighteen times in seven
 					// minutes on 2026-08-17. Family-scoped by construction, so it does
 					// not undo the deliberate no-account-wide-cooldown decision below.
-					recordFamilyWeeklyExhausted(
-						account.id,
-						familyExclusion.family,
-						familyExclusion.resetAt,
-						now,
-					);
+					if (
+						recordFamilyWeeklyExhausted(
+							account.id,
+							familyExclusion.family,
+							familyExclusion.resetAt,
+							now,
+						) &&
+						account.provider === "anthropic"
+					) {
+						// A limit just reached is when a banked reset can be claimed.
+						anthropicBankedResetCache.markDue(account.id);
+					}
 					completeRateLimitProbe(
 						account,
 						"abandoned",
@@ -2957,36 +2990,19 @@ export async function proxyWithAccount(
 				);
 				return forwardToClient(
 					{
+						...recordFieldsFromMeta(requestMeta),
 						clientSignal: req.signal,
-						requestId: requestMeta.id,
 						method: req.method,
 						path: url.pathname,
 						account,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
-						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
-						requestedModel: requestMeta.requestedModel,
-						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-						fallbackFromModel: requestMeta.fallbackFromModel,
-						project: requestMeta.project,
-						projectAttributionSource: requestMeta.projectAttributionSource,
-						contextComposition: requestMeta.contextComposition,
-						toolCallStats: requestMeta.toolCallStats,
-						reasoningEffort: requestMeta.reasoningEffort,
-						sessionKey: requestMeta.sessionKey,
-						cachePrefixHashes: requestMeta.cachePrefixHashes,
-						clientUserAgent: requestMeta.clientUserAgent,
-						clientHarness: requestMeta.clientHarness,
-						claudeDeviceId: requestMeta.claudeDeviceId,
 						response,
-						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
 						failoverAttempts,
-						comboName: requestMeta.comboName,
 						apiKeyId,
 						apiKeyName,
-						routing: requestMeta.routing ?? null,
 						upstreamModel: overloadAttributionModel,
 						bumpIdleTimeout,
 					},
@@ -3162,36 +3178,19 @@ export async function proxyWithAccount(
 				settleOverloadProbe("abandoned");
 				return forwardToClient(
 					{
+						...recordFieldsFromMeta(requestMeta),
 						clientSignal: req.signal,
-						requestId: requestMeta.id,
 						method: req.method,
 						path: url.pathname,
 						account,
 						poolCandidates: getPoolHeadroomCandidates(requestMeta),
-						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
-						requestedModel: requestMeta.requestedModel,
-						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-						fallbackFromModel: requestMeta.fallbackFromModel,
-						project: requestMeta.project,
-						projectAttributionSource: requestMeta.projectAttributionSource,
-						contextComposition: requestMeta.contextComposition,
-						toolCallStats: requestMeta.toolCallStats,
-						reasoningEffort: requestMeta.reasoningEffort,
-						sessionKey: requestMeta.sessionKey,
-						cachePrefixHashes: requestMeta.cachePrefixHashes,
-						clientUserAgent: requestMeta.clientUserAgent,
-						clientHarness: requestMeta.clientHarness,
-						claudeDeviceId: requestMeta.claudeDeviceId,
 						response,
-						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
 						failoverAttempts,
-						comboName: requestMeta.comboName,
 						apiKeyId,
 						apiKeyName,
-						routing: requestMeta.routing ?? null,
 						upstreamModel: overloadAttributionModel,
 						bumpIdleTimeout,
 					},
@@ -3288,36 +3287,19 @@ export async function proxyWithAccount(
 		overloadProbeToken = null;
 		return forwardToClient(
 			{
+				...recordFieldsFromMeta(requestMeta),
 				clientSignal: req.signal,
-				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
 				account,
 				poolCandidates: getPoolHeadroomCandidates(requestMeta),
-				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
-				requestedModel: requestMeta.requestedModel,
-				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-				fallbackFromModel: requestMeta.fallbackFromModel,
-				project: requestMeta.project,
-				projectAttributionSource: requestMeta.projectAttributionSource,
-				contextComposition: requestMeta.contextComposition,
-				toolCallStats: requestMeta.toolCallStats,
-				reasoningEffort: requestMeta.reasoningEffort,
-				sessionKey: requestMeta.sessionKey,
-				cachePrefixHashes: requestMeta.cachePrefixHashes,
-				clientUserAgent: requestMeta.clientUserAgent,
-				clientHarness: requestMeta.clientHarness,
-				claudeDeviceId: requestMeta.claudeDeviceId,
 				response,
-				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts,
-				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
-				routing: requestMeta.routing ?? null,
 				upstreamModel: overloadAttributionModel,
 				overloadProbeToken: transferredProbeToken,
 				bumpIdleTimeout,
@@ -3497,35 +3479,18 @@ export async function proxyForcedAccount(
 		);
 		return forwardToClient(
 			{
+				...recordFieldsFromMeta(requestMeta),
 				clientSignal: req.signal,
-				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
 				account,
-				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
-				requestedModel: requestMeta.requestedModel,
-				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-				fallbackFromModel: requestMeta.fallbackFromModel,
-				project: requestMeta.project,
-				projectAttributionSource: requestMeta.projectAttributionSource,
-				contextComposition: requestMeta.contextComposition,
-				toolCallStats: requestMeta.toolCallStats,
-				reasoningEffort: requestMeta.reasoningEffort,
-				sessionKey: requestMeta.sessionKey,
-				cachePrefixHashes: requestMeta.cachePrefixHashes,
-				clientUserAgent: requestMeta.clientUserAgent,
-				clientHarness: requestMeta.clientHarness,
-				claudeDeviceId: requestMeta.claudeDeviceId,
 				response: errorResponse,
-				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts: 0,
-				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
-				routing: requestMeta.routing ?? null,
 				disableCooldown: true,
 			},
 			{ ...ctx, provider },
@@ -3546,6 +3511,48 @@ export async function proxyForcedAccount(
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		bindAnthropicAccountUuid(effectiveBodyContext, account);
 		effectiveBodyBuffer = effectiveBodyContext.getBuffer();
+
+		// Forced onto an official account for a client that reaches it only
+		// through the SDK bridge. Force forbids failover, so a bridge that cannot
+		// run the turn is this request's answer.
+		if (isSdkBridgeAttempt(requestMeta, account)) {
+			const bridged = await proxyViaSdkBridge({
+				req,
+				url,
+				account,
+				requestMeta,
+				ctx,
+				body: effectiveBodyBuffer,
+				apiKeyId: apiKeyId ?? null,
+				apiKeyName: apiKeyName ?? null,
+				audit: attemptAudit,
+			});
+			if (bridged.kind === "response") return bridged.response;
+			await recordLocalRoutingOutcome(
+				attemptAudit,
+				requestMeta,
+				account,
+				ctx,
+				`${bridged.capacity ? "sdk_bridge_capacity" : "sdk_bridge_unavailable"}: ${bridged.reason}`,
+				bridged.capacity?.status ?? 503,
+			).catch((error: unknown) =>
+				log.warn("Could not persist forced routing outcome", error),
+			);
+			if (bridged.capacity)
+				return bridged.capacity.terminalResponse({
+					"x-clankermux-forced-account": account.id,
+				});
+			return Response.json(
+				{
+					type: "error",
+					error: {
+						type: "sdk_bridge_unavailable",
+						message: `Forced account '${account.name}' serves this client only through the SDK bridge, which cannot run the turn: ${bridged.reason}`,
+					},
+				},
+				{ status: 503, headers: { "x-clankermux-forced-account": account.id } },
+			);
+		}
 
 		// Get the provider for this account
 		provider = getProvider(account.provider) || ctx.provider;
@@ -3744,35 +3751,18 @@ export async function proxyForcedAccount(
 		liveForcedUpstream = null;
 		return forwardToClient(
 			{
+				...recordFieldsFromMeta(requestMeta),
 				clientSignal: req.signal,
-				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
 				account,
-				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
-				requestedModel: requestMeta.requestedModel,
-				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-				fallbackFromModel: requestMeta.fallbackFromModel,
-				project: requestMeta.project,
-				projectAttributionSource: requestMeta.projectAttributionSource,
-				contextComposition: requestMeta.contextComposition,
-				toolCallStats: requestMeta.toolCallStats,
-				reasoningEffort: requestMeta.reasoningEffort,
-				sessionKey: requestMeta.sessionKey,
-				cachePrefixHashes: requestMeta.cachePrefixHashes,
-				clientUserAgent: requestMeta.clientUserAgent,
-				clientHarness: requestMeta.clientHarness,
-				claudeDeviceId: requestMeta.claudeDeviceId,
 				response,
-				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
 				failoverAttempts: 0,
-				comboName: requestMeta.comboName,
 				apiKeyId,
 				apiKeyName,
-				routing: requestMeta.routing ?? null,
 				disableCooldown: true,
 			},
 			{ ...ctx, provider },
@@ -3909,8 +3899,9 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * @param estimatedTokens  Conservative token estimate for the request
  * @param excludedBackends Codex backends dropped by the size gate
  * @param requestModel     The Anthropic-side model name from the request
- * @param excludeOfficialAnthropic Whether the Codex-CLI floor barred official
- *   Anthropic accounts from this request. It decides WHY nothing else stepped
+ * @param officialAnthropicExcluded Whether the floor for non-Claude-Code
+ *   clients barred official Anthropic accounts from this request (the SDK
+ *   bridge was unavailable). It decides WHY nothing else stepped
  *   in: with the floor active they were never candidates, so reporting them as
  *   rate-limited or paused describes a condition nobody checked — and is
  *   routinely false, since the floor applies to healthy accounts too. The
@@ -3926,7 +3917,7 @@ export function createContextWindowExceededResponse(
 	estimatedTokens: number,
 	excludedBackends: ContextWindowExcludedBackend[],
 	requestModel: string,
-	excludeOfficialAnthropic = false,
+	officialAnthropicExcluded = false,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
 		const target = model;
@@ -3954,9 +3945,9 @@ export function createContextWindowExceededResponse(
 	// were barred from selection; it does NOT prove any exist, or that one would
 	// have fit — Anthropic's 200k window is SMALLER than gpt-5.6-sol's 272k, so
 	// claiming they are the larger-context option would be false here.
-	const largerContextReason = excludeOfficialAnthropic
-		? `Official Anthropic accounts are never eligible for Codex CLI traffic ` +
-			`and were not considered.`
+	const largerContextReason = officialAnthropicExcluded
+		? `Official Anthropic accounts serve this client only through the SDK ` +
+			`bridge, which is unavailable, so they were not considered.`
 		: `Larger-context accounts are currently unavailable (rate-limited or paused).`;
 
 	const message =

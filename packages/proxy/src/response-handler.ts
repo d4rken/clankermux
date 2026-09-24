@@ -571,6 +571,10 @@ export interface ResponseHandlerOptions {
 	clientUserAgent?: string | null;
 	/** Observed harness family (see RequestMeta.clientHarness). */
 	clientHarness?: string | null;
+	/** See RequestMeta.sdkBridgeTurnId. */
+	sdkBridgeTurnId?: string | null;
+	/** Called once the request's row has begun (`requestRecorder.begin`). */
+	onRecordBegun?: () => void;
 	/** Claude Code device of the request (see RequestMeta.claudeDeviceId). */
 	claudeDeviceId?: string | null;
 	response: Response;
@@ -778,6 +782,7 @@ async function forwardToClientInner(
 		cachePrefixHashes,
 		clientUserAgent,
 		clientHarness,
+		sdkBridgeTurnId,
 		claudeDeviceId,
 		response: responseRaw,
 		timestamp,
@@ -938,6 +943,7 @@ async function forwardToClientInner(
 			cachePrefixHashes: cachePrefixHashes ?? null,
 			clientUserAgent: clientUserAgent ?? null,
 			clientHarness: clientHarness ?? null,
+			sdkBridgeTurnId: sdkBridgeTurnId ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:
@@ -951,6 +957,7 @@ async function forwardToClientInner(
 			failoverAttempts,
 		};
 		ctx.requestRecorder.begin(recordMeta);
+		options.onRecordBegun?.();
 	}
 
 	// Emit request start event for real-time dashboard. `project`,

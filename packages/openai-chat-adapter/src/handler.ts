@@ -343,6 +343,9 @@ async function respondToChatCompletionsRequest(
 		const ctx: ChatIngressContext = {
 			requirements: translated.requirements,
 			defaultMaxTokens,
+			// Not Claude Code: an official Claude account may serve this only
+			// through the SDK bridge (see the Responses adapter).
+			denyDirectOfficialAnthropic: true,
 		};
 		const messagesUrl = new URL(url);
 		messagesUrl.pathname = "/v1/messages";
@@ -352,7 +355,6 @@ async function respondToChatCompletionsRequest(
 		headers.delete("content-encoding");
 		if (!headers.has("anthropic-version"))
 			headers.set("anthropic-version", "2023-06-01");
-		headers.set("x-clankermux-deny-official-anthropic", "1");
 		const synthetic = new Request(messagesUrl, {
 			method: "POST",
 			headers,

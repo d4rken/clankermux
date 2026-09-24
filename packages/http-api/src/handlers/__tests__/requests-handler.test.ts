@@ -119,6 +119,26 @@ describe("createRequestsSummaryHandler", () => {
 		expect(body[0].fallbackFromModel).toBe("claude-fable-5-1");
 	});
 
+	it("carries the SDK bridge turn of an inner call, and nothing for other rows", async () => {
+		const row = {
+			timestamp: 1_700_000_000_000,
+			method: "POST",
+			path: "/v1/messages",
+			account_used: "acc1",
+			status_code: 200,
+			success: 1,
+			error_message: null,
+		};
+		const { db } = mockDb([
+			{ ...row, id: "inner", sdk_bridge_turn_id: "turn-1" },
+			{ ...row, id: "plain", sdk_bridge_turn_id: null },
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<Record<string, unknown>>;
+		expect(body[0].sdkBridgeTurnId).toBe("turn-1");
+		expect(body[1]).not.toHaveProperty("sdkBridgeTurnId");
+	});
+
 	it("omits the refusal and fallback fields for a legacy row with all NULLs", async () => {
 		const { db } = mockDb([
 			{

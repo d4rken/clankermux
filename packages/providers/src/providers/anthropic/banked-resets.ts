@@ -39,7 +39,13 @@ export function anthropicBankedResetHeaders(
 
 const STATUS_TIMEOUT_MS = 5_000;
 const CLAIM_TIMEOUT_MS = 25_000;
-export const ANTHROPIC_BANKED_RESET_REFRESH_MS = 15 * 60 * 1_000;
+/**
+ * An eligible status is re-read after half the time from its read to its
+ * nearest deadline, clamped to these bounds: a grant ending in 50 minutes after 25,
+ * one ending in 20 after 15, one ending in 29 days (or none) after 6 hours.
+ */
+export const ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS = 15 * 60 * 1_000;
+export const ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS = 6 * 60 * 60 * 1_000;
 export const ANTHROPIC_BANKED_RESET_RETRY_MS = 5 * 60 * 1_000;
 export const ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS = 6 * 60 * 60 * 1_000;
 
@@ -373,6 +379,33 @@ export async function claimAnthropicBankedReset(
 	}
 }
 
+/**
+ * The TTL of a status read at `fetchedAt`, from the nearest instant still
+ * ahead then: a grant starting or ending, the claim cooldown lifting, or the
+ * weekly window resetting.
+ */
+function deadlineRefreshMs(
+	status: AnthropicBankedResetStatus,
+	fetchedAt: number,
+): number {
+	let deadline = Number.POSITIVE_INFINITY;
+	const consider = (instant: number | null) => {
+		if (instant !== null && instant > fetchedAt && instant < deadline) {
+			deadline = instant;
+		}
+	};
+	consider(status.cooldownUntil);
+	consider(status.weeklyResetsAt);
+	for (const grant of status.grants) {
+		consider(grant.startsAt);
+		consider(grant.endsAt);
+	}
+	return Math.min(
+		ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS,
+		Math.max(ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS, (deadline - fetchedAt) / 2),
+	);
+}
+
 export interface AnthropicBankedResetCacheEntry {
 	status: AnthropicBankedResetStatus;
 	fetchedAt: number;
@@ -381,18 +414,43 @@ export interface AnthropicBankedResetCacheEntry {
 class AnthropicBankedResetCache {
 	private readonly entries = new Map<string, AnthropicBankedResetCacheEntry>();
 	private readonly lastAttemptAt = new Map<string, number>();
+	/** Per account, the sequence number of its latest unanswered due mark. */
+	private readonly dueMarks = new Map<string, number>();
+	private dueSeq = 0;
 
 	get(accountId: string): AnthropicBankedResetCacheEntry | null {
 		return this.entries.get(accountId) ?? null;
 	}
 
+	/**
+	 * `markAtReadStart` is {@link dueMark} taken when the read producing
+	 * `status` was sent: a mark set after that stays due. Omitted, any mark
+	 * is answered.
+	 */
 	set(
 		accountId: string,
 		status: AnthropicBankedResetStatus,
 		now = Date.now(),
+		markAtReadStart?: number | null,
 	): void {
 		this.entries.set(accountId, { status, fetchedAt: now });
 		this.lastAttemptAt.set(accountId, now);
+		if (
+			markAtReadStart === undefined ||
+			(this.dueMarks.get(accountId) ?? null) === markAtReadStart
+		) {
+			this.dueMarks.delete(accountId);
+		}
+	}
+
+	/** Make the next read due whatever the TTL says; a later read clears it. */
+	markDue(accountId: string): void {
+		this.dueMarks.set(accountId, ++this.dueSeq);
+	}
+
+	/** The account's current due mark, null when none; see {@link set}. */
+	dueMark(accountId: string): number | null {
+		return this.dueMarks.get(accountId) ?? null;
 	}
 
 	/** Record a read that produced no status. */
@@ -410,15 +468,15 @@ class AnthropicBankedResetCache {
 		) {
 			return false;
 		}
-		if (!entry) return true;
+		if (!entry || this.dueMarks.has(accountId)) return true;
 
 		const { status, fetchedAt } = entry;
-		const ttl =
-			!status.eligible &&
-			status.ineligibleReason !== null &&
-			STABLE_INELIGIBLE_REASONS.has(status.ineligibleReason)
+		const ttl = status.eligible
+			? deadlineRefreshMs(status, fetchedAt)
+			: status.ineligibleReason !== null &&
+					STABLE_INELIGIBLE_REASONS.has(status.ineligibleReason)
 				? ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS
-				: ANTHROPIC_BANKED_RESET_REFRESH_MS;
+				: ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS;
 		if (now - fetchedAt >= ttl) return true;
 
 		// Only an instant that was still ahead when the status was read can have
@@ -427,6 +485,7 @@ class AnthropicBankedResetCache {
 			instant !== null && instant > fetchedAt && instant <= now;
 		return (
 			passedSinceRead(status.cooldownUntil) ||
+			passedSinceRead(status.weeklyResetsAt) ||
 			status.grants.some((grant) => passedSinceRead(grant.endsAt))
 		);
 	}
@@ -434,11 +493,13 @@ class AnthropicBankedResetCache {
 	delete(accountId: string): void {
 		this.entries.delete(accountId);
 		this.lastAttemptAt.delete(accountId);
+		this.dueMarks.delete(accountId);
 	}
 
 	clear(): void {
 		this.entries.clear();
 		this.lastAttemptAt.clear();
+		this.dueMarks.clear();
 	}
 }
 
