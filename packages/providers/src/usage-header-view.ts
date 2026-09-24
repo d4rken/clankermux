@@ -55,6 +55,8 @@ export interface UsageView {
 	sevenDay: UsageAxisView;
 	pollWrittenAtMs: number;
 	pollObservedAtMs: number | null;
+	/** The instant freshness bounds measure the poll's own axes from. */
+	pollFreshAtMs: number;
 }
 
 /** The poll reading a view is built on. */
@@ -62,6 +64,11 @@ export interface PollReading {
 	data: AnyUsageData;
 	writtenAtMs: number;
 	observedAtMs: number | null;
+	/**
+	 * The instant freshness bounds measure the poll from; its write time unless
+	 * the cache vouches that it is still current (`UsageCache` idle trust).
+	 */
+	freshAtMs?: number;
 }
 
 /** The latest instant a `Date` can hold; a later reset cannot be formatted. */
@@ -234,10 +241,11 @@ export function buildUsageView(
 	headers: HeaderWindows | null,
 	now: number,
 ): UsageView {
+	const pollFreshAtMs = poll.freshAtMs ?? poll.writtenAtMs;
 	const pollAxis: UsageAxisView = {
 		source: "poll",
 		observedAtMs: poll.observedAtMs,
-		freshAtMs: poll.writtenAtMs,
+		freshAtMs: pollFreshAtMs,
 	};
 	const view: UsageView = {
 		data: poll.data,
@@ -245,6 +253,7 @@ export function buildUsageView(
 		sevenDay: pollAxis,
 		pollWrittenAtMs: poll.writtenAtMs,
 		pollObservedAtMs: poll.observedAtMs,
+		pollFreshAtMs,
 	};
 	if (headers === null) return view;
 
@@ -279,7 +288,7 @@ export function buildUsageView(
 				poll.observedAtMs ?? Number.NEGATIVE_INFINITY,
 				header.observedAtMs,
 			),
-			freshAtMs: Math.max(poll.writtenAtMs, header.observedAtMs),
+			freshAtMs: Math.max(pollFreshAtMs, header.observedAtMs),
 		};
 	}
 	if (copy !== null) view.data = copy;
@@ -325,6 +334,6 @@ export function isUsageViewFresh(
 	if (now - view.fiveHour.freshAtMs > maxAgeMs) return false;
 	if (now - view.sevenDay.freshAtMs > maxAgeMs) return false;
 	return (
-		!reportsPollOnlyAxis(view.data) || now - view.pollWrittenAtMs <= maxAgeMs
+		!reportsPollOnlyAxis(view.data) || now - view.pollFreshAtMs <= maxAgeMs
 	);
 }

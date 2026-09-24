@@ -171,6 +171,8 @@ export const UI_STALE_HORIZON_MS = 30 * 60_000;
  */
 const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
 export const IDLE_REFRESH_LEAD_MS = 60_000;
+/** An upstream send still "in flight" after this long is taken as lost. */
+const QUOTA_USE_IN_FLIGHT_MAX_MS = 60 * 60_000;
 const ACTIVITY_RECENCY_MS = 15 * 60_000;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 
@@ -1235,14 +1237,14 @@ export const ROUTING_USAGE_MAX_AGE_MS = 180_000;
  * entry stays as the next poll's window-roll and limit-reached baseline.
  */
 export function getFreshPollCapacity(
-	cache: Pick<UsageCache, "peek" | "peekAge">,
+	cache: Pick<UsageCache, "peek" | "peekPollFreshAt">,
 	accountId: string,
 	provider: string,
 	now: number,
 	maxAgeMs: number,
 ): CapacitySignal | null {
-	const age = cache.peekAge(accountId);
-	if (age === null || age > maxAgeMs) return null; // age-stale → unknown
+	const freshAt = cache.peekPollFreshAt(accountId, now);
+	if (freshAt === null || now - freshAt > maxAgeMs) return null; // stale → unknown
 	return getAccountCapacitySignal(cache.peek(accountId), provider, now);
 }
 
@@ -1426,6 +1428,14 @@ class UsageCache {
 	private headerWindows = new Map<string, HeaderWindows>();
 	private headerEpochs = new Map<string, number>();
 	private nextHeaderEpoch = 0;
+	// Idle trust (see pollFreshAtMs): upstream sends in flight per account, keyed
+	// by token with their start time, and when one last began or ended. Facts
+	// about the account rather than its poller, so kept across stopPolling.
+	private quotaUseInFlight = new Map<string, Map<symbol, number>>();
+	private lastQuotaUseAt = new Map<string, number>();
+	// The cold-start activity resolver's last answer (the stored last use),
+	// same lifecycle as lastActivityAt.
+	private resolvedLastActivityAt = new Map<string, number>();
 	// Demand-aware polling state (Anthropic only — set when startPolling receives
 	// a PollingPolicy with demandAware:true). See PollingPolicy / noteActivity.
 	private pollingPolicies = new Map<string, PollingPolicy>();
@@ -1570,6 +1580,7 @@ class UsageCache {
 	) {
 		if (this.pollGenerations.get(accountId) !== generation) return;
 		if (this.tokenProviders.get(accountId) !== tokenProvider) return;
+		if (resolved !== null) this.resolvedLastActivityAt.set(accountId, resolved);
 		if (this.pollTimeouts.has(accountId)) return;
 		// Any real-time activity observed during the await wins over the DB value.
 		const observed = this.lastActivityAt.get(accountId);
@@ -1971,6 +1982,7 @@ class UsageCache {
 		// Fresh start: drop any stale activity/schedule bookkeeping from a prior
 		// generation so cadence decisions start from a clean slate.
 		this.lastActivityAt.delete(accountId);
+		this.resolvedLastActivityAt.delete(accountId);
 		this.pollSchedule.delete(accountId);
 
 		// Default to 90s if not provided
@@ -2280,6 +2292,7 @@ class UsageCache {
 			// Demand-aware polling bookkeeping.
 			this.pollingPolicies.delete(accountId);
 			this.lastActivityAt.delete(accountId);
+			this.resolvedLastActivityAt.delete(accountId);
 			this.pollSchedule.delete(accountId);
 			// Drop the generation so any pending async resolver from this poller
 			// bails on the generation guard (and doesn't leak an entry).
@@ -3204,6 +3217,88 @@ class UsageCache {
 	}
 
 	/**
+	 * An upstream request that may consume this account's quota is being sent.
+	 * Call the returned function once it is over (body ended, cancelled or the
+	 * send failed); a second call is a no-op. Until then, and for any poll
+	 * observed before it ended, idle trust is off (see {@link pollFreshAtMs}).
+	 */
+	beginQuotaUse(accountId: string): () => void {
+		const token = Symbol(accountId);
+		const startedAt = Date.now();
+		let flights = this.quotaUseInFlight.get(accountId);
+		if (!flights) {
+			flights = new Map();
+			this.quotaUseInFlight.set(accountId, flights);
+		}
+		flights.set(token, startedAt);
+		this.noteQuotaUseAt(accountId, startedAt);
+		let ended = false;
+		return () => {
+			if (ended) return;
+			ended = true;
+			const current = this.quotaUseInFlight.get(accountId);
+			current?.delete(token);
+			if (current?.size === 0) this.quotaUseInFlight.delete(accountId);
+			this.noteQuotaUseAt(accountId, Date.now());
+		};
+	}
+
+	private noteQuotaUseAt(accountId: string, at: number): void {
+		const previous = this.lastQuotaUseAt.get(accountId);
+		if (previous === undefined || at > previous)
+			this.lastQuotaUseAt.set(accountId, at);
+	}
+
+	/**
+	 * The instant freshness bounds measure a poll entry from.
+	 *
+	 * Normally its write time. An account that has consumed nothing since the
+	 * poll was observed cannot have moved: its windows only rise with use and
+	 * only fall at a reset, which `getAccountCapacitySignal` already reads as
+	 * unknown once the reset passes. Such a poll counts as current (`now`),
+	 * provided all of:
+	 *  - a demand-aware poller is live (Anthropic);
+	 *  - the entry is within {@link USAGE_CACHE_TTL_MS} of its write;
+	 *  - no upstream send is in flight (one older than an hour is taken as lost);
+	 *  - the account's latest known use (noteActivity, beginQuotaUse, or the
+	 *    cold-start resolver's stored last use) is known and at or before the
+	 *    poll's observation time (its write time when that is unknown).
+	 * This trusts that nothing outside this process uses the account.
+	 */
+	private pollFreshAtMs(
+		accountId: string,
+		entry: UsageCacheEntry,
+		now: number,
+	): number {
+		if (!this.pollingPolicies.get(accountId)?.demandAware)
+			return entry.timestamp;
+		if (now - entry.timestamp > USAGE_CACHE_TTL_MS) return entry.timestamp;
+		for (const startedAt of this.quotaUseInFlight.get(accountId)?.values() ??
+			[]) {
+			if (now - startedAt < QUOTA_USE_IN_FLIGHT_MAX_MS) return entry.timestamp;
+		}
+		const known = [
+			this.lastActivityAt.get(accountId),
+			this.lastQuotaUseAt.get(accountId),
+			this.resolvedLastActivityAt.get(accountId),
+		].filter((at): at is number => at !== undefined);
+		if (known.length === 0) return entry.timestamp;
+		const observedAt = entry.observedAtMs ?? entry.timestamp;
+		return Math.max(...known) <= observedAt
+			? Math.max(now, entry.timestamp)
+			: entry.timestamp;
+	}
+
+	/**
+	 * Non-evicting: the instant freshness bounds measure the account's poll
+	 * entry from (see {@link pollFreshAtMs}), or null without an entry.
+	 */
+	peekPollFreshAt(accountId: string, now: number = Date.now()): number | null {
+		const cached = this.cache.get(accountId);
+		return cached ? this.pollFreshAtMs(accountId, cached, now) : null;
+	}
+
+	/**
 	 * The epoch this account's response headers are recorded under. Capture it
 	 * before the request is sent and hand it to {@link recordUsageHeaders} with
 	 * the response. Null without a live poller: poll writes are bound to one, and
@@ -3268,6 +3363,7 @@ class UsageCache {
 				data: cached.data,
 				writtenAtMs: cached.timestamp,
 				observedAtMs: cached.observedAtMs,
+				freshAtMs: this.pollFreshAtMs(accountId, cached, now),
 			},
 			fiveHour || sevenDay ? { fiveHour, sevenDay } : null,
 			now,
@@ -3286,6 +3382,9 @@ class UsageCache {
 		this.fences.clear();
 		this.headerWindows.clear();
 		this.headerEpochs.clear();
+		this.quotaUseInFlight.clear();
+		this.lastQuotaUseAt.clear();
+		this.resolvedLastActivityAt.clear();
 		this.anthropicReadBudget.clear();
 		log.info("Cleared all usage cache and stopped polling");
 	}

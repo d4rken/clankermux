@@ -486,6 +486,52 @@ describe("ensureUsageFreshForSelection", () => {
 		}
 	});
 
+	it("skips an idle account whose poll postdates its last use, refreshes one used since", async () => {
+		peekViewSpy.mockRestore();
+		const ctx = makeUsageCtx();
+		const HOUR = 3_600_000;
+		const reading = {
+			five_hour: { utilization: 10, resets_at: null },
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(Date.now() + 90 * HOUR).toISOString(),
+			},
+		};
+		const seed = (id: string) => {
+			usageCache.startPolling(
+				id,
+				async () => "token",
+				"anthropic",
+				POLL_INTERVAL_MS,
+				null,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ demandAware: true, initialDelayMs: 10 * HOUR },
+			);
+		};
+		const idle = makeAccount({ id: "acc-trust-idle", provider: "anthropic" });
+		const used = makeAccount({ id: "acc-trust-used", provider: "anthropic" });
+		seed(idle.id);
+		seed(used.id);
+		try {
+			usageCache.noteActivity(idle.id, Date.now() - 60 * 60_000);
+			usageCache.setWithAgeForTests(idle.id, reading, 5 * 60_000);
+			usageCache.setWithAgeForTests(used.id, reading, 5 * 60_000);
+			usageCache.noteActivity(used.id, Date.now() - 60_000);
+
+			await ensureUsageFreshForSelection([idle, used], ctx, Date.now());
+
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+			expect(refreshSpy).toHaveBeenCalledWith(used.id);
+		} finally {
+			usageCache.stopPolling(idle.id);
+			usageCache.stopPolling(used.id);
+		}
+	});
+
 	it("does not refresh the same account again within the cooldown window", async () => {
 		const acc = makeAccount({ id: "acc-cool", provider: "anthropic" });
 		const ctx = makeUsageCtx();
