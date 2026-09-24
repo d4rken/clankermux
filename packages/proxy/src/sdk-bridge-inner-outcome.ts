@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import {
+	anthropicErrorStatus,
 	getSdkBridgeInnerMetaContext,
 	type RequestMeta,
 	type SdkBridgeInnerOutcome,
@@ -46,10 +47,7 @@ function deliver(meta: RequestMeta, outcome: SdkBridgeInnerOutcome): void {
 
 /** The status an Anthropic stream `error` event stands for. */
 function streamErrorStatus(type: string | null): number {
-	if (type === "rate_limit_error") return 429;
-	if (type === "overloaded_error") return 529;
-	if (type === "api_error") return 500;
-	return 502;
+	return anthropicErrorStatus(type) ?? 502;
 }
 
 /** Frames larger than this are skipped, never buffered whole. */

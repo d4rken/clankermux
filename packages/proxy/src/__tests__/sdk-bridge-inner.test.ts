@@ -365,7 +365,10 @@ describe("SDK bridge inner calls", () => {
 				["overloaded_error", 529],
 				["rate_limit_error", 429],
 				["api_error", 500],
-				["invalid_request_error", 502],
+				["invalid_request_error", 400],
+				["billing_error", 402],
+				["request_too_large", 413],
+				["not_an_anthropic_type", 502],
 			] as const) {
 				const { res, outcomes } = await streamed(
 					sse(start, {

@@ -239,3 +239,25 @@ export function parseUpstreamError(body: string): string | null {
 
 	return null;
 }
+
+const ANTHROPIC_ERROR_STATUS: Readonly<Record<string, number>> = {
+	invalid_request_error: 400,
+	authentication_error: 401,
+	billing_error: 402,
+	permission_error: 403,
+	not_found_error: 404,
+	request_too_large: 413,
+	rate_limit_error: 429,
+	api_error: 500,
+	timeout_error: 504,
+	overloaded_error: 529,
+};
+
+/**
+ * The HTTP status Anthropic answers an error `type` with, for an error that
+ * arrived as a stream event inside a 200. Null for a type it does not define.
+ */
+export function anthropicErrorStatus(type: string | null): number | null {
+	if (!type || !Object.hasOwn(ANTHROPIC_ERROR_STATUS, type)) return null;
+	return ANTHROPIC_ERROR_STATUS[type] ?? null;
+}
