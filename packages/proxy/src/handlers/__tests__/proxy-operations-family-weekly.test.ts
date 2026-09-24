@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { usageCache } from "@clankermux/providers";
+import { anthropicBankedResetCache, usageCache } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
@@ -273,6 +273,47 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 		expect(familyRow).toBeDefined();
 		expect(familyRow?.resolved_model).toBe("claude-fable-5");
+	});
+
+	it("marks the banked-reset status due once when the 429 newly records the family", async () => {
+		globalThis.fetch = mockFetch(mock(async () => plain429()));
+		seedUsage(0, 83);
+		const { ctx } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const bodyBuffer = makeRequestBody("claude-fable-5");
+		const send = () =>
+			proxyWithAccount(
+				makeRequest(bodyBuffer),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				bodyBuffer,
+				() => undefined,
+				0,
+				ctx,
+			);
+		const fresh = {
+			eligible: true,
+			ineligibleReason: null,
+			atLimit: false,
+			exhausted: [],
+			grants: [],
+			nextGrantId: null,
+			weeklyResetsAt: null,
+			cooldownUntil: null,
+		};
+		try {
+			anthropicBankedResetCache.set(ACCOUNT_ID, fresh);
+			await send();
+			expect(anthropicBankedResetCache.needsRefresh(ACCOUNT_ID)).toBe(true);
+
+			// The memo already holds the family, so a repeat 429 marks nothing.
+			anthropicBankedResetCache.set(ACCOUNT_ID, fresh);
+			await send();
+			expect(anthropicBankedResetCache.needsRefresh(ACCOUNT_ID)).toBe(false);
+		} finally {
+			anthropicBankedResetCache.delete(ACCOUNT_ID);
+		}
 	});
 
 	it("defers to a hard account-level unified status (does NOT skip the cooldown)", async () => {

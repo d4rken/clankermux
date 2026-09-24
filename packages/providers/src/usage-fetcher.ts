@@ -201,6 +201,8 @@ export interface PollingPolicy {
 	onAnthropicUsageObservation?: (
 		observation: AnthropicUsageObservation,
 	) => Promise<void>;
+	/** An Anthropic reading shows a window at its limit that the last one did not. */
+	onAnthropicLimitReached?: (accountId: string) => void;
 }
 
 /**
@@ -972,6 +974,45 @@ function grokSubscriptionCapacity(
  * representative utilization: it caps the web tools, and no account-wide
  * cooldown is ever written from it.
  */
+/**
+ * Utilization per Anthropic window, keyed so a scoped `limits[]` entry
+ * compares only with the same scope in another reading.
+ */
+function anthropicWindowUtilization(
+	data: AnthropicUsageData,
+): Map<string, number> {
+	const out = new Map<string, number>();
+	const add = (key: string, utilization: number | null | undefined) => {
+		if (typeof utilization === "number" && Number.isFinite(utilization)) {
+			out.set(key, utilization);
+		}
+	};
+	add("five_hour", data.five_hour?.utilization);
+	add("seven_day", data.seven_day?.utilization);
+	add("seven_day_oauth_apps", data.seven_day_oauth_apps?.utilization);
+	add("seven_day_opus", data.seven_day_opus?.utilization);
+	add("seven_day_sonnet", data.seven_day_sonnet?.utilization);
+	for (const entry of data.limits ?? []) {
+		add(
+			`limit:${entry.kind}:${entry.group}:${entry.scope?.model?.id ?? ""}:${entry.scope?.surface ?? ""}`,
+			entry.percent,
+		);
+	}
+	return out;
+}
+
+/** True when `next` has a window at 100% or more that `previous` had below it or lacked. */
+export function anthropicReachedNewLimit(
+	previous: AnthropicUsageData,
+	next: AnthropicUsageData,
+): boolean {
+	const before = anthropicWindowUtilization(previous);
+	for (const [key, utilization] of anthropicWindowUtilization(next)) {
+		if (utilization >= 100 && (before.get(key) ?? 0) < 100) return true;
+	}
+	return false;
+}
+
 function collectZaiObservedWindows(usage: ZaiUsageData): ObservedWindow[] {
 	const out: ObservedWindow[] = [];
 	for (const window of [usage.tokens_limit, usage.tokens_limit_weekly]) {
@@ -1230,6 +1271,10 @@ class UsageCache {
 	>();
 	private anthropicObservationTasks = new Map<string, Promise<void>>();
 	private anthropicObservationVersions = new Map<string, number>();
+	private anthropicLimitReachedCallbacks = new Map<
+		string,
+		(accountId: string) => void
+	>();
 	private usagePermissionDeniedCallbacks = new Map<
 		string,
 		(accountId: string) => void
@@ -1653,6 +1698,12 @@ class UsageCache {
 				policy.onAnthropicUsageObservation,
 			);
 		else this.anthropicUsageObservers.delete(accountId);
+		if (policy?.onAnthropicLimitReached)
+			this.anthropicLimitReachedCallbacks.set(
+				accountId,
+				policy.onAnthropicLimitReached,
+			);
+		else this.anthropicLimitReachedCallbacks.delete(accountId);
 		this.anthropicObservationVersions.set(accountId, 0);
 		this.anthropicObservationTasks.delete(accountId);
 
@@ -1934,6 +1985,7 @@ class UsageCache {
 			this.anthropicUsageObservers.delete(accountId);
 			this.anthropicObservationTasks.delete(accountId);
 			this.anthropicObservationVersions.delete(accountId);
+			this.anthropicLimitReachedCallbacks.delete(accountId);
 			this.tokenRefreshFailureHandlers.delete(accountId);
 			this.usagePermissionDeniedAccounts.delete(accountId);
 			this.hasSucceededOnce.delete(accountId);
@@ -2437,6 +2489,20 @@ class UsageCache {
 							"anthropic",
 							callback,
 						);
+					const limitReached =
+						this.anthropicLimitReachedCallbacks.get(accountId);
+					const previous = this.cache.get(accountId);
+					if (
+						limitReached &&
+						(provider ?? "anthropic") === "anthropic" &&
+						previous &&
+						anthropicReachedNewLimit(
+							previous.data as AnthropicUsageData,
+							result.data as AnthropicUsageData,
+						)
+					) {
+						limitReached(accountId);
+					}
 					this.writeFetchedEntry(accountId, result.data);
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,

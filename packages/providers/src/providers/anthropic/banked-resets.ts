@@ -412,6 +412,7 @@ export interface AnthropicBankedResetCacheEntry {
 class AnthropicBankedResetCache {
 	private readonly entries = new Map<string, AnthropicBankedResetCacheEntry>();
 	private readonly lastAttemptAt = new Map<string, number>();
+	private readonly due = new Set<string>();
 
 	get(accountId: string): AnthropicBankedResetCacheEntry | null {
 		return this.entries.get(accountId) ?? null;
@@ -424,6 +425,12 @@ class AnthropicBankedResetCache {
 	): void {
 		this.entries.set(accountId, { status, fetchedAt: now });
 		this.lastAttemptAt.set(accountId, now);
+		this.due.delete(accountId);
+	}
+
+	/** Make the next read due whatever the TTL says; a stored status clears it. */
+	markDue(accountId: string): void {
+		this.due.add(accountId);
 	}
 
 	/** Record a read that produced no status. */
@@ -441,7 +448,7 @@ class AnthropicBankedResetCache {
 		) {
 			return false;
 		}
-		if (!entry) return true;
+		if (!entry || this.due.has(accountId)) return true;
 
 		const { status, fetchedAt } = entry;
 		const ttl = status.eligible
@@ -465,11 +472,13 @@ class AnthropicBankedResetCache {
 	delete(accountId: string): void {
 		this.entries.delete(accountId);
 		this.lastAttemptAt.delete(accountId);
+		this.due.delete(accountId);
 	}
 
 	clear(): void {
 		this.entries.clear();
 		this.lastAttemptAt.clear();
+		this.due.clear();
 	}
 }
 

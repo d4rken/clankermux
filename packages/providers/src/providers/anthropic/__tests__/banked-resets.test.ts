@@ -756,6 +756,41 @@ describe("anthropicBankedResetCache", () => {
 		}
 	});
 
+	it("markDue makes a fresh status due for exactly one read", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(false);
+		anthropicBankedResetCache.markDue(ID);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(true);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 2)).toBe(true);
+		anthropicBankedResetCache.set(ID, status(), NOW + 3);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 4)).toBe(false);
+	});
+
+	it("keeps a due mark through a failed read, behind the retry interval", () => {
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.markAttempt(ID, NOW + 1);
+		expect(
+			anthropicBankedResetCache.needsRefresh(
+				ID,
+				NOW + ANTHROPIC_BANKED_RESET_RETRY_MS,
+			),
+		).toBe(false);
+		expect(
+			anthropicBankedResetCache.needsRefresh(
+				ID,
+				NOW + 1 + ANTHROPIC_BANKED_RESET_RETRY_MS,
+			),
+		).toBe(true);
+	});
+
+	it("drops a due mark on delete", () => {
+		anthropicBankedResetCache.markDue(ID);
+		anthropicBankedResetCache.delete(ID);
+		anthropicBankedResetCache.set(ID, status(), NOW);
+		expect(anthropicBankedResetCache.needsRefresh(ID, NOW + 1)).toBe(false);
+	});
+
 	it("forgets an account on delete", () => {
 		anthropicBankedResetCache.set(ID, status(), NOW);
 		anthropicBankedResetCache.delete(ID);
