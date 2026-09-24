@@ -738,17 +738,21 @@ describe("anthropicBankedResetCache", () => {
 		expect(ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS).toBe(6 * 60 * 60_000);
 	});
 
-	it("scales the TTL to the nearest deadline for other ineligible reasons", () => {
+	it("keeps the 15-minute TTL for other ineligible reasons, whatever their deadlines", () => {
 		for (const reason of ["cli_version", "unavailable", "unknown"] as const) {
+			expect(
+				readDueAfter(status({ eligible: false, ineligibleReason: reason })),
+			).toBe(ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS);
 			expect(
 				readDueAfter(
 					status({
 						eligible: false,
 						ineligibleReason: reason,
+						grants: [parsedGrant({ endsAt: NOW + 29 * DAY })],
 						cooldownUntil: NOW + 2 * HOUR,
 					}),
 				),
-			).toBe(1 * HOUR);
+			).toBe(15 * MINUTE);
 		}
 	});
 

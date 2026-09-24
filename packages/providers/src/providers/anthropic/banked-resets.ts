@@ -40,8 +40,8 @@ export function anthropicBankedResetHeaders(
 const STATUS_TIMEOUT_MS = 5_000;
 const CLAIM_TIMEOUT_MS = 25_000;
 /**
- * A status is re-read after half the time from its read to its nearest
- * deadline, clamped to these bounds: a grant ending in 50 minutes after 25,
+ * An eligible status is re-read after half the time from its read to its
+ * nearest deadline, clamped to these bounds: a grant ending in 50 minutes after 25,
  * one ending in 20 after 15, one ending in 29 days (or none) after 6 hours.
  */
 export const ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS = 15 * 60 * 1_000;
@@ -444,12 +444,12 @@ class AnthropicBankedResetCache {
 		if (!entry) return true;
 
 		const { status, fetchedAt } = entry;
-		const ttl =
-			!status.eligible &&
-			status.ineligibleReason !== null &&
-			STABLE_INELIGIBLE_REASONS.has(status.ineligibleReason)
+		const ttl = status.eligible
+			? deadlineRefreshMs(status, fetchedAt)
+			: status.ineligibleReason !== null &&
+					STABLE_INELIGIBLE_REASONS.has(status.ineligibleReason)
 				? ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS
-				: deadlineRefreshMs(status, fetchedAt);
+				: ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS;
 		if (now - fetchedAt >= ttl) return true;
 
 		// Only an instant that was still ahead when the status was read can have
