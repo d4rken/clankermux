@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 /**
  * A poll generation that has been replaced (reauth → stopPolling + startPolling)

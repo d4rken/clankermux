@@ -8,7 +8,6 @@ import type { BunSqlAdapter } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import {
 	type CodexCreditsInfo,
-	fetchUsageData,
 	getProvider,
 	isCodexOnCredits,
 	toEpochMs,
@@ -30,7 +29,6 @@ import {
 	captureGrokSubscription,
 	GROK_SUBSCRIPTION_CHECK_INTERVAL_MS,
 } from "./grok-subscription-capture";
-import { getValidAccessToken } from "./handlers";
 import { refreshProactiveAccountToken } from "./proactive-token-refresh";
 import { isOfficialAnthropicProvider } from "./provider-overload-cooldown";
 import type { ProxyContext } from "./proxy";
@@ -1079,29 +1077,24 @@ export class AutoRefreshScheduler {
 				}
 
 				if (accountRow.provider === "anthropic") {
-					// Fetch usage data from the OAuth usage endpoint to get 5h window info
-					// Get the access token for this account
-					const accessToken = await getValidAccessToken(
-						account,
-						this.proxyContext,
-					);
-					if (accessToken) {
-						const { data: usageData } = await fetchUsageData(accessToken);
-						if (usageData) {
-							// Read via the total helper so a `limits[]`-only payload (no flat
-							// five_hour/seven_day keys) doesn't throw here — an exception would
-							// be caught below and falsely recorded as an auto-refresh FAILURE
-							// even though the probe succeeded.
-							const { fiveH, sevenD } =
-								summarizeAnthropicUsageForLog(usageData);
-							log.info(
-								`Fetched usage data for ${accountRow.name}: 5h=${fiveH}%, 7d=${sevenD}%`,
-							);
-						} else {
-							log.warn(
-								`Failed to fetch usage data for ${accountRow.name} after auto-refresh`,
-							);
-						}
+					// Re-read through the poller, so the read keeps to the account's
+					// usage read gap and lands in the cache routing reads.
+					const usageData = (await usageCache.refreshNow(accountRow.id))
+						? usageCache.get(accountRow.id)
+						: null;
+					if (usageData) {
+						// Read via the total helper so a `limits[]`-only payload (no flat
+						// five_hour/seven_day keys) doesn't throw here — an exception would
+						// be caught below and falsely recorded as an auto-refresh FAILURE
+						// even though the probe succeeded.
+						const { fiveH, sevenD } = summarizeAnthropicUsageForLog(usageData);
+						log.info(
+							`Fetched usage data for ${accountRow.name}: 5h=${fiveH}%, 7d=${sevenD}%`,
+						);
+					} else {
+						log.info(
+							`Usage for ${accountRow.name} not re-read after auto-refresh: the read failed, is rate-limited or is inside its read gap`,
+						);
 					}
 				}
 

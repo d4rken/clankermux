@@ -76,7 +76,7 @@ breaker, context-window fit, and API-key account/class pinning.
 
 | Loop | Cadence | Behaviour with a LOCKED account |
 |---|---|---|
-| Usage poller | 90s active / ~10min idle (demand-aware) | **keeps polling** — the only observation channel |
+| Usage poller | 90s active / ~10min idle (demand-aware), held to the account's 150s read gap | **keeps polling** — the only observation channel |
 | Auto-refresh scheduler | scheduled | **skips locked accounts** by SQL |
 | Usage snapshots | 2 min | Limits-tab history |
 | Integrity | quick 6h / full 24h | — |
@@ -113,6 +113,17 @@ breaker, context-window fit, and API-key account/class pinning.
     `rate_limit_reset`, and a NULL there permanently disqualifies a paused
     account from auto-unpause. `delete()` alone is not a fence either: an
     in-flight pre-claim poll re-stores the exhausted reading.
+12. Every Anthropic `/api/oauth/usage` request counts against the account's
+    read gap (`ANTHROPIC_USAGE_READ_MIN_GAP_MS`, `usage-read-budget.ts`).
+    Anthropic rate-limits that endpoint per account: on 2026-09-23, once reads
+    carried Claude Code's own headers, 5 reads in 10 min drew 429s on 8% of
+    polls and 7 on 29%, against 1–2% at 3–4. A deferrable
+    read takes a slot through `usageCache.tryAcquireAnthropicUsageRead`; a
+    read that must not wait (the banked-reset status read) goes out and calls
+    `noteAnthropicUsageRead`. A new caller of `fetchUsageData` that does
+    neither brings the 429s back. The last read and reading are persisted
+    (`anthropic_usage_reads`) and restored at boot, so a restart neither
+    re-reads early nor starts routing cold.
 
 ## References
 

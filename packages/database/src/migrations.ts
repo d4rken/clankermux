@@ -1069,6 +1069,19 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
+	// Each Anthropic account's last /api/oauth/usage request and last usage
+	// reading, so a restart neither re-reads an account inside its per-account
+	// gap nor starts routing with no reading at all. `reading` is the response
+	// body as JSON.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS anthropic_usage_reads (
+			account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+			last_read_at INTEGER,
+			reading TEXT,
+			reading_observed_at INTEGER
+		)
+	`);
+
 	// Performance indexes (covering/partial indexes for hot query paths)
 	// Routing policy is additive: retired combo/mapping storage remains inert.
 	db.run(`CREATE TABLE IF NOT EXISTS model_aliases (

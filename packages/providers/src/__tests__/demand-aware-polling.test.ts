@@ -18,6 +18,9 @@ import {
 	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const ACTIVE = 90_000; // configured active cadence (getUsagePollIntervalMs default)
 const RECENCY = 15 * 60_000; // ACTIVITY_RECENCY_MS

@@ -124,6 +124,7 @@ import {
 	type AnthropicSubscriptionRefreshDeps,
 	observeAnthropicUsage,
 } from "./anthropic-subscription-refresh";
+import { restoreAnthropicUsageReads } from "./anthropic-usage-reads";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -1263,6 +1264,10 @@ export default async function startServer(options?: {
 	affinityPinPersistence = affinityPins;
 	await affinityPins.restore(strategy);
 	affinityPins.start();
+
+	// Before the first Anthropic usage read, whether a poll, a banked-reset
+	// status read or the auto-refresher's.
+	await restoreAnthropicUsageReads(dbOps, usageCache, log);
 
 	// Proxy context. Usage is computed inline on the main thread (no worker):
 	// forwardToClient feeds the per-request UsageState and finalizes it after

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { classifyUsageFetchFailure, usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 const EXPIRED_BODY = JSON.stringify({
 	type: "error",

@@ -7,6 +7,9 @@ import {
 	supportsUsageTracking,
 } from "@clankermux/types";
 import { usageCache } from "../usage-fetcher";
+import { openUsageReadGapForEachTest } from "./open-usage-read-gap";
+
+openUsageReadGapForEachTest();
 
 /**
  * `supportsUsagePolling` decides which providers the account lifecycle may

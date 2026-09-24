@@ -2817,27 +2817,31 @@ export function createAccountForceResetRateLimitHandler(
 			// other providers (e.g. Zai) use different endpoints handled by their own fetchers.
 			// This bypasses token refresh, but is acceptable since this path only runs when
 			// no active polling exists and the token is likely fresh from recent proxy requests.
-			// refreshNow also answers false while the shared /oauth/usage deadline
-			// stands, and that deadline holds this read too.
+			// This read keeps to the usage 429 deadline and the account's read gap,
+			// like the poll.
 			if (
 				!usagePollTriggered &&
 				provider === "anthropic" &&
 				account.access_token &&
 				usageCache.getRateLimitedUntil(accountId) === null
 			) {
-				const {
-					data: usageData,
-					rateLimited,
-					retryAfterMs,
-				} = await fetchUsageData(account.access_token);
-				if (usageData) {
-					usageCache.set(account.id, usageData);
-					usagePollTriggered = true;
-				} else if (rateLimited) {
-					usageCache.noteRateLimited(
-						accountId,
-						Date.now() + (retryAfterMs ?? USAGE_RATE_LIMITED_DEFAULT_MS),
-					);
+				const grant = usageCache.tryAcquireAnthropicUsageRead(accountId);
+				if ("slot" in grant) {
+					grant.slot.commit();
+					const {
+						data: usageData,
+						rateLimited,
+						retryAfterMs,
+					} = await fetchUsageData(account.access_token);
+					if (usageData) {
+						usageCache.setAnthropicReading(account.id, usageData);
+						usagePollTriggered = true;
+					} else if (rateLimited) {
+						usageCache.noteRateLimited(
+							accountId,
+							Date.now() + (retryAfterMs ?? USAGE_RATE_LIMITED_DEFAULT_MS),
+						);
+					}
 				}
 			}
 
@@ -2957,6 +2961,26 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 					cacheRefreshed: false,
 					usageRateLimitedUntil,
 				});
+			}
+
+			// Inside the account's read gap the restart below would drop the cached
+			// reading and then be unable to replace it, so keep the reading and say
+			// when the next read is due.
+			if (account.provider === "anthropic") {
+				const nextReadInMs = usageCache.anthropicUsageReadWaitMs(accountId);
+				if (nextReadInMs > 0) {
+					const retryInSeconds = Math.ceil(nextReadInMs / 1000);
+					log.info(
+						`Usage refresh deferred for account '${account.name}': next usage read due in ${retryInSeconds}s`,
+					);
+					return jsonResponse({
+						success: false,
+						message: `Usage for account '${account.name}' was read moments ago; the next read is due in ${retryInSeconds}s. Polling reads it on its own.`,
+						pollingRestarted: false,
+						cacheRefreshed: false,
+						nextUsageReadAt: Date.now() + nextReadInMs,
+					});
+				}
 			}
 
 			if (account.provider === "devin" && account.api_key)

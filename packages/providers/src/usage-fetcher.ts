@@ -40,6 +40,11 @@ import {
 	DevinSessionAuthenticationError,
 	devinClient,
 } from "./providers/devin/client";
+import {
+	ANTHROPIC_USAGE_READ_MIN_GAP_MS,
+	UsageReadBudget,
+	type UsageReadGrant,
+} from "./usage-read-budget";
 import { isGenuineWindowRoll } from "./window-reset";
 import {
 	fetchZaiUsage,
@@ -1183,6 +1188,12 @@ interface UsageCacheEntry {
 	observedAtMs: number | null;
 }
 
+/** Where Anthropic usage reads outlive the process. Must not throw. */
+export interface AnthropicUsageReadStore {
+	recordReadAt(accountId: string, at: number): void;
+	recordReading(accountId: string, data: UsageData, observedAt: number): void;
+}
+
 /**
  * In-memory cache for usage data per account
  */
@@ -1282,6 +1293,14 @@ class UsageCache {
 		string,
 		{ wakeAt: number; isIdle: boolean; activeBaseMs: number }
 	>();
+	private anthropicReadStore: AnthropicUsageReadStore | null = null;
+	// Kept across stopPolling: restarting an account's poller must not reopen
+	// its read gap.
+	private readonly anthropicReadBudget = new UsageReadBudget({
+		gapMs: ANTHROPIC_USAGE_READ_MIN_GAP_MS,
+		onRead: (accountId, at) =>
+			this.anthropicReadStore?.recordReadAt(accountId, at),
+	});
 
 	/**
 	 * Write a reading that was just FETCHED from the provider.
@@ -1292,9 +1311,10 @@ class UsageCache {
 	 * NOT come through here are reconstructions with no trustworthy observation
 	 * time — see {@link UsageCache.setUntimed}.
 	 */
-	private writeFetchedEntry(accountId: string, data: AnyUsageData): void {
+	private writeFetchedEntry(accountId: string, data: AnyUsageData): number {
 		const observedAtMs = Date.now();
 		this.cache.set(accountId, { data, timestamp: observedAtMs, observedAtMs });
+		return observedAtMs;
 	}
 
 	/**
@@ -1798,7 +1818,8 @@ class UsageCache {
 	/**
 	 * Trigger an immediate usage fetch for an account that already has polling configured.
 	 * Returns false when no polling/token provider is configured, when the fetch
-	 * fails, and without a request while the usage rate-limit deadline stands.
+	 * fails, and without a request while the usage rate-limit deadline stands or
+	 * an Anthropic account is inside its read gap.
 	 *
 	 * On success the failure streak is cleared and a backed-off poll loop is
 	 * re-armed to the healthy cadence — see {@link rearmAfterOnDemandSuccess}.
@@ -1859,6 +1880,79 @@ class UsageCache {
 				recordedAt: Date.now(),
 			});
 		}
+	}
+
+	/** Persist every Anthropic usage read and reading from now on. */
+	setAnthropicUsageReadStore(store: AnthropicUsageReadStore | null): void {
+		this.anthropicReadStore = store;
+	}
+
+	/**
+	 * A slot for one `/api/oauth/usage` request outside the poll, or the time
+	 * until the account's next one. Commit it just before sending.
+	 */
+	tryAcquireAnthropicUsageRead(accountId: string): UsageReadGrant {
+		return this.anthropicReadBudget.tryAcquire(accountId);
+	}
+
+	/**
+	 * A `/api/oauth/usage` request that did not wait for a slot is going out now;
+	 * the account's next admitted read waits a full gap after it.
+	 */
+	noteAnthropicUsageRead(accountId: string): void {
+		this.anthropicReadBudget.recordRead(accountId);
+	}
+
+	/** Time until the account's next admitted usage read, without taking it. */
+	anthropicUsageReadWaitMs(accountId: string): number {
+		return this.anthropicReadBudget.waitMs(accountId);
+	}
+
+	/**
+	 * Take back what the last process knew: its last read starts the account's
+	 * gap, and its last reading is cached at its observation time, so it ages
+	 * out of routing exactly as it would have without the restart. A reading is
+	 * never written over one this process already holds, and one stamped in the
+	 * future is dropped: it would pass for evidence newer than anything since.
+	 */
+	restoreAnthropicUsageRead(
+		accountId: string,
+		restored: {
+			lastReadAt: number | null;
+			reading: UsageData | null;
+			readingObservedAt: number | null;
+		},
+	): void {
+		const observedAt =
+			restored.readingObservedAt !== null &&
+			restored.readingObservedAt <= Date.now()
+				? restored.readingObservedAt
+				: null;
+		// The two are persisted separately, so a reading can outlive the write
+		// of the read that fetched it.
+		const lastRead = Math.max(
+			restored.lastReadAt ?? Number.NEGATIVE_INFINITY,
+			observedAt ?? Number.NEGATIVE_INFINITY,
+		);
+		if (Number.isFinite(lastRead))
+			this.anthropicReadBudget.seed(accountId, lastRead);
+		if (restored.reading === null || observedAt === null) return;
+		if (this.cache.has(accountId)) return;
+		this.cache.set(accountId, {
+			data: restored.reading,
+			timestamp: observedAt,
+			observedAtMs: observedAt,
+		});
+	}
+
+	/** Cache and persist an Anthropic reading fetched outside the poll. */
+	setAnthropicReading(accountId: string, data: UsageData): void {
+		this.set(accountId, data);
+		this.anthropicReadStore?.recordReading(
+			accountId,
+			data,
+			this.peekWrittenAt(accountId) ?? Date.now(),
+		);
 	}
 
 	/**
@@ -2374,6 +2468,18 @@ class UsageCache {
 						deferred: true,
 					};
 				}
+				const grant = this.tryAcquireAnthropicUsageRead(accountId);
+				if (!("slot" in grant)) {
+					log.debug(
+						`Usage read for account ${accountId} deferred ${Math.round(grant.waitMs / 1000)}s by the per-account read gap`,
+					);
+					return {
+						success: false,
+						retryAfterMs: grant.waitMs,
+						deferred: true,
+					};
+				}
+				grant.slot.commit();
 				const fetchStartedAt = Date.now();
 				const result = await fetchUsageData(token);
 				if (!isCurrent()) return superseded;
@@ -2437,7 +2543,12 @@ class UsageCache {
 							"anthropic",
 							callback,
 						);
-					this.writeFetchedEntry(accountId, result.data);
+					const observedAt = this.writeFetchedEntry(accountId, result.data);
+					this.anthropicReadStore?.recordReading(
+						accountId,
+						result.data as UsageData,
+						observedAt,
+					);
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,
 					);
@@ -2846,6 +2957,7 @@ class UsageCache {
 		this.cache.clear();
 		this.usageRateLimitedUntil.clear();
 		this.fences.clear();
+		this.anthropicReadBudget.clear();
 		log.info("Cleared all usage cache and stopped polling");
 	}
 }
