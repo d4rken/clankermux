@@ -468,23 +468,6 @@ export class AnthropicBankedResetCoordinator {
 		if (target.kind === "settled")
 			return this.settledOutcome(account, target.row);
 
-		// A replayed row may already have spent its grant, so only a new
-		// manual claim is checked against a fresh status.
-		if (target.createdHere) {
-			const stale = await this.staleManualGrant(account, request);
-			if (stale) {
-				await this.writeLedger(account.name, target.rowId, (id) =>
-					this.ctx.dbOps.resolveAnthropicBankedResetAttempt(id, {
-						status: "failed",
-						reason: BANKED_RESET_NOT_SENT_REASON,
-						errorMessage: `Not sent: ${stale.message}`,
-						now: this.now(),
-					}),
-				);
-				return stale;
-			}
-		}
-
 		// The overage pause standing when the claim is sent, if any: the one a
 		// restoring reset owes a verdict. Unreadable, the obligation could not
 		// be recorded, so nothing is sent.
@@ -1011,50 +994,6 @@ export class AnthropicBankedResetCoordinator {
 			}
 		}
 		return { account };
-	}
-
-	/**
-	 * Null when a forced status read still names the claimed grant as the
-	 * next, usable one.
-	 */
-	private async staleManualGrant(
-		account: Account,
-		request: AnthropicBankedResetClaimRequest,
-	): Promise<Extract<
-		AnthropicBankedResetClaimDispatchOutcome,
-		{ status: "failed" }
-	> | null> {
-		const read = await this.refreshStatus(account.id, true);
-		if (!read.success) {
-			// A read refused because the account became unusable says so.
-			const gate = await this.claimableAccount(account.id, request);
-			if ("message" in gate) return gate;
-			return {
-				status: "failed",
-				code: "error",
-				message: read.message,
-			};
-		}
-		const status = anthropicBankedResetCache.get(account.id)?.status;
-		const grant = status?.grants.find(
-			(candidate) => candidate.id === status.nextGrantId,
-		);
-		const now = this.now();
-		if (
-			!status?.eligible ||
-			grant?.id !== request.grantId ||
-			!grant.usableNow ||
-			grant.paused ||
-			grant.resetsLeft <= 0 ||
-			(grant.endsAt !== null && grant.endsAt <= now)
-		) {
-			return {
-				status: "failed",
-				code: "stale_grant",
-				message: `Banked reset ${request.grantId} is no longer the next usable grant of '${account.name}'`,
-			};
-		}
-		return null;
 	}
 
 	/**
