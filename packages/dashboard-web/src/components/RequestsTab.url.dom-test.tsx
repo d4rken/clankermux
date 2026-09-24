@@ -353,6 +353,7 @@ describe("RequestsTab — SDK bridge turns", () => {
 			historyMode: "rebuild_transcript",
 			rebuildReason: "account_change",
 			systemPromptPolicy: "drop",
+			systemPromptDetail: null,
 			stopReason: "end_turn",
 			legCount: 1,
 			toolRoundCount: 0,

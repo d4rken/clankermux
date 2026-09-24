@@ -33,6 +33,7 @@ beforeEach(async () => {
 		historyMode: "rebuild_transcript",
 		rebuildReason: "edit",
 		systemPromptPolicy: "drop",
+		systemPromptDetail: null,
 		accountId: "acct-a",
 		ignoredFields: ["temperature"],
 	});
@@ -76,6 +77,7 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 			historyMode: "rebuild_transcript",
 			rebuildReason: "edit",
 			systemPromptPolicy: "drop",
+			systemPromptDetail: null,
 			ignoredFields: ["temperature"],
 		});
 		expect(view.accountName).toBe("Claude A");

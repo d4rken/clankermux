@@ -7,6 +7,7 @@ import type {
 	SdkBridgeLegInsert,
 	SdkBridgeLegKind,
 	SdkBridgeRebuildReason,
+	SdkBridgeSystemPromptDetail,
 	SdkBridgeTurn,
 	SdkBridgeTurnCounterDelta,
 	SdkBridgeTurnDetail,
@@ -37,6 +38,7 @@ interface TurnRow {
 	history_mode: string;
 	rebuild_reason: string | null;
 	system_prompt_policy: string;
+	system_prompt_detail: string | null;
 	stop_reason: string | null;
 	leg_count: number;
 	tool_round_count: number;
@@ -112,6 +114,10 @@ function toTurn(row: TurnRow): SdkBridgeTurn {
 		historyMode: row.history_mode as SdkBridgeHistoryMode,
 		rebuildReason: row.rebuild_reason as SdkBridgeRebuildReason | null,
 		systemPromptPolicy: row.system_prompt_policy,
+		systemPromptDetail:
+			row.system_prompt_detail === null
+				? null
+				: (JSON.parse(row.system_prompt_detail) as SdkBridgeSystemPromptDetail),
 		stopReason: row.stop_reason,
 		legCount: row.leg_count,
 		toolRoundCount: row.tool_round_count,
@@ -163,9 +169,9 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				id, started_at, status, api_key_id, api_key_name, account_id, model,
 				client_harness, client_user_agent, project, conversation_key_hash,
 				cc_session_id, history_mode, rebuild_reason, system_prompt_policy,
-				ignored_fields,
+				system_prompt_detail, ignored_fields,
 				leg_count, tool_round_count, inner_call_count, inner_error_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
 			[
 				turn.id,
 				turn.startedAt,
@@ -182,6 +188,9 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				turn.historyMode,
 				turn.rebuildReason ?? null,
 				turn.systemPromptPolicy,
+				turn.systemPromptDetail
+					? JSON.stringify(turn.systemPromptDetail)
+					: null,
 				turn.ignoredFields?.length ? JSON.stringify(turn.ignoredFields) : null,
 			],
 		);

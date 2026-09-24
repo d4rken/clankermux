@@ -25,6 +25,7 @@ function view(over: Partial<SdkBridgeTurnView> = {}): SdkBridgeTurnView {
 			historyMode: "resume",
 			rebuildReason: null,
 			systemPromptPolicy: "drop",
+			systemPromptDetail: null,
 			stopReason: null,
 			legCount: 2,
 			toolRoundCount: 1,

@@ -40,6 +40,35 @@ export type SdkBridgeLegKind = "start" | "continue";
 /** Whether a failed leg had already committed its response head. */
 export type SdkBridgeLegErrorPhase = "pre_head" | "mid_stream";
 
+/**
+ * What the turn's system-prompt policy made of the client's system prompt.
+ * Never the prompt's text: a refusal keeps its length and SHA-256 instead.
+ */
+export type SdkBridgeSystemPromptDetail =
+	| {
+			outcome: "projected";
+			/** The prompt-layout version the client declared. */
+			version: string;
+			/** `sectionless`: a forced prompt, appended whole. */
+			shape: "stock" | "replaced" | "sectionless" | "empty";
+			/** Client-defined sections left out, by name. */
+			droppedSections: string[];
+			/** Sections the client updated or removed after its leading system message. */
+			sectionUpdates: number;
+	  }
+	| {
+			outcome: "refused";
+			/** Null when the client declared none. */
+			version: string | null;
+			/** The `error.code` the client got. */
+			code: string;
+			reason: string;
+			/** The section the reason is about, when it names one. */
+			section: string | null;
+			promptLength: number;
+			promptSha256: string;
+	  };
+
 export interface SdkBridgeTurn {
 	id: string;
 	startedAt: number;
@@ -61,6 +90,8 @@ export interface SdkBridgeTurn {
 	historyMode: SdkBridgeHistoryMode;
 	rebuildReason: SdkBridgeRebuildReason | null;
 	systemPromptPolicy: string;
+	/** Null for `drop`, and for a turn refused before its policy ran. */
+	systemPromptDetail: SdkBridgeSystemPromptDetail | null;
 	stopReason: string | null;
 	legCount: number;
 	toolRoundCount: number;
@@ -107,6 +138,7 @@ export type SdkBridgeTurnInsert = Pick<
 			| "ccSessionId"
 			| "rebuildReason"
 			| "ignoredFields"
+			| "systemPromptDetail"
 		>
 	>;
 
