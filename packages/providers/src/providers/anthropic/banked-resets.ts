@@ -39,7 +39,13 @@ export function anthropicBankedResetHeaders(
 
 const STATUS_TIMEOUT_MS = 5_000;
 const CLAIM_TIMEOUT_MS = 25_000;
-export const ANTHROPIC_BANKED_RESET_REFRESH_MS = 15 * 60 * 1_000;
+/**
+ * A status is re-read after half the time from its read to its nearest
+ * deadline, clamped to these bounds: a grant ending in 50 minutes after 25,
+ * one ending in 20 after 15, one ending in 29 days (or none) after 6 hours.
+ */
+export const ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS = 15 * 60 * 1_000;
+export const ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS = 6 * 60 * 60 * 1_000;
 export const ANTHROPIC_BANKED_RESET_RETRY_MS = 5 * 60 * 1_000;
 export const ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS = 6 * 60 * 60 * 1_000;
 
@@ -373,6 +379,31 @@ export async function claimAnthropicBankedReset(
 	}
 }
 
+/**
+ * The TTL of a status read at `fetchedAt`, from the nearest instant still
+ * ahead then: a grant starting or ending, or the claim cooldown lifting.
+ */
+function deadlineRefreshMs(
+	status: AnthropicBankedResetStatus,
+	fetchedAt: number,
+): number {
+	let deadline = Number.POSITIVE_INFINITY;
+	const consider = (instant: number | null) => {
+		if (instant !== null && instant > fetchedAt && instant < deadline) {
+			deadline = instant;
+		}
+	};
+	consider(status.cooldownUntil);
+	for (const grant of status.grants) {
+		consider(grant.startsAt);
+		consider(grant.endsAt);
+	}
+	return Math.min(
+		ANTHROPIC_BANKED_RESET_MAX_REFRESH_MS,
+		Math.max(ANTHROPIC_BANKED_RESET_MIN_REFRESH_MS, (deadline - fetchedAt) / 2),
+	);
+}
+
 export interface AnthropicBankedResetCacheEntry {
 	status: AnthropicBankedResetStatus;
 	fetchedAt: number;
@@ -418,7 +449,7 @@ class AnthropicBankedResetCache {
 			status.ineligibleReason !== null &&
 			STABLE_INELIGIBLE_REASONS.has(status.ineligibleReason)
 				? ANTHROPIC_BANKED_RESET_INELIGIBLE_REFRESH_MS
-				: ANTHROPIC_BANKED_RESET_REFRESH_MS;
+				: deadlineRefreshMs(status, fetchedAt);
 		if (now - fetchedAt >= ttl) return true;
 
 		// Only an instant that was still ahead when the status was read can have
