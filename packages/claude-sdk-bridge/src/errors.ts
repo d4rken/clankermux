@@ -1,3 +1,4 @@
+import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeInnerOutcome } from "@clankermux/types";
 
 /** An error the bridge answers the client with, as JSON or as an SSE `error`. */
@@ -6,6 +7,8 @@ export interface BridgeError {
 	type: string;
 	message: string;
 	retryAfter: string | null;
+	/** OpenAI-style `error.code`, for a condition clients branch on. */
+	code?: string;
 }
 
 /** Retry-After for a 429/503/529 whose cause named none. */
@@ -49,6 +52,74 @@ export function sanitizeMessage(text: string | null | undefined): string {
 	return trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
 }
 
+const PROMPT_TOO_LONG = /prompt is too long/i;
+const PROMPT_TOO_LONG_COUNTS =
+	/prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)/i;
+const INPUT_LENGTH_OVERFLOW =
+	/input length and `?max_tokens`? exceed context limit(?::\s*\d+\s*\+\s*\d+\s*>\s*\d+)?/i;
+const OVERFLOW_TERMINAL_REASONS: ReadonlySet<string> = new Set<TerminalReason>([
+	"prompt_too_long",
+	"blocking_limit",
+	"rapid_refill_breaker",
+]);
+const OVERFLOW_CODE = "context_length_exceeded";
+
+/**
+ * Whether a failure is the conversation outgrowing the model's context:
+ * Anthropic's or Claude Code's wording, an upstream `context_length_exceeded`
+ * code, or one of the SDK's context-limit terminal reasons.
+ */
+export function isContextOverflow(evidence: {
+	text?: string | null;
+	code?: string | null;
+	terminalReason?: TerminalReason | (string & {}) | null;
+}): boolean {
+	if (evidence.code === OVERFLOW_CODE) return true;
+	if (
+		evidence.terminalReason &&
+		OVERFLOW_TERMINAL_REASONS.has(evidence.terminalReason)
+	)
+		return true;
+	return (
+		!!evidence.text &&
+		(PROMPT_TOO_LONG.test(evidence.text) ||
+			INPUT_LENGTH_OVERFLOW.test(evidence.text))
+	);
+}
+
+function overflowError(message: string): BridgeError {
+	return {
+		status: 400,
+		type: "invalid_request_error",
+		code: OVERFLOW_CODE,
+		message,
+		retryAfter: null,
+	};
+}
+
+/**
+ * A context overflow in Anthropic's wording: its "prompt is too long" with
+ * the token counts `text` had, or its input-length message as it was.
+ */
+export function contextOverflow(text: string | null): BridgeError {
+	const counts = text ? PROMPT_TOO_LONG_COUNTS.exec(text) : null;
+	if (counts)
+		return overflowError(
+			`prompt is too long: ${counts[1]} tokens > ${counts[2]} maximum`,
+		);
+	const inputLength = text ? INPUT_LENGTH_OVERFLOW.exec(text) : null;
+	if (inputLength) return overflowError(sanitizeMessage(inputLength[0]));
+	return overflowError("prompt is too long");
+}
+
+/** Why Claude Code ended a turn by itself, when the bridge can tell. */
+export type ClaudeCodeFailureCause = "context_overflow";
+
+export interface ClaudeCodeFailure {
+	text: string | null;
+	cause: ClaudeCodeFailureCause | null;
+}
+
 function knownType(type: string | null, fallback: string): string {
 	return type && ANTHROPIC_ERROR_TYPES.has(type) ? type : fallback;
 }
@@ -69,6 +140,11 @@ export function mapInnerOutcome(outcome: SdkBridgeInnerOutcome): BridgeError {
 			message,
 			retryAfter,
 		};
+	if (
+		status === 400 &&
+		isContextOverflow({ text: outcome.message, code: outcome.errorCode })
+	)
+		return contextOverflow(outcome.message);
 	if (status === 400)
 		return {
 			status,
@@ -101,13 +177,21 @@ export function mapInnerOutcome(outcome: SdkBridgeInnerOutcome): BridgeError {
  */
 export function mapClaudeCodeFailure(
 	decisive: SdkBridgeInnerOutcome | null,
-	claudeCodeText: string | null,
+	failure: ClaudeCodeFailure,
 ): BridgeError {
+	if (failure.cause === "context_overflow" && decisive?.status === 400)
+		return contextOverflow(
+			isContextOverflow({ text: decisive.message })
+				? decisive.message
+				: failure.text,
+		);
 	if (decisive) return mapInnerOutcome(decisive);
+	if (failure.cause === "context_overflow")
+		return contextOverflow(failure.text);
 	return {
 		status: 502,
 		type: "api_error",
-		message: `Claude Code ended the turn with an error: ${sanitizeMessage(claudeCodeText)}`,
+		message: `Claude Code ended the turn with an error: ${sanitizeMessage(failure.text)}`,
 		retryAfter: null,
 	};
 }
@@ -180,6 +264,14 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	modelChanged(started: string, requested: string): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			message: `This turn started on model "${started}"; its tool results cannot continue it on "${requested}"`,
+			retryAfter: null,
+		};
+	},
 	superseded(): BridgeError {
 		return {
 			status: 409,
@@ -246,7 +338,11 @@ export const bridgeErrors = {
 export function errorBody(error: BridgeError) {
 	return {
 		type: "error" as const,
-		error: { type: error.type, message: error.message },
+		error: {
+			type: error.type,
+			message: error.message,
+			...(error.code ? { code: error.code } : {}),
+		},
 	};
 }
 

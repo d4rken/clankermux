@@ -40,6 +40,7 @@ export interface FakeBridge extends SdkBridgeTransport {
 	respond: (plan: SdkBridgeRoutePlan) => Response | Promise<Response>;
 	continuation: { turnId: string; ownerApiKeyId: string | null } | null;
 	lookups: string[][];
+	lookupCallers: Array<{ apiKeyId: string | null; model: string }>;
 }
 
 export function makeFakeBridge(
@@ -61,6 +62,7 @@ export function makeFakeBridge(
 		respond,
 		continuation: null,
 		lookups: [],
+		lookupCallers: [],
 		availability: () => bridge.state,
 		async startTurn({ request, plan, meta }) {
 			bridge.starts.push({
@@ -71,8 +73,9 @@ export function makeFakeBridge(
 			});
 			return bridge.respond(plan);
 		},
-		findContinuation(ids) {
+		findContinuation(ids, caller) {
 			bridge.lookups.push([...ids]);
+			bridge.lookupCallers.push(caller);
 			return bridge.continuation;
 		},
 		async continueTurn({ turnId, request, meta }) {

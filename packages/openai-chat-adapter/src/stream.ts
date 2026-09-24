@@ -1,5 +1,5 @@
 import type { ChatIngressContext } from "@clankermux/types";
-import { upstreamFailure } from "./errors";
+import { upstreamFailure, upstreamStreamError } from "./errors";
 
 export interface ChatToolDelta {
 	index: number;
@@ -103,12 +103,7 @@ export async function* chatChunks(
 					.find((l) => l.startsWith("event:"))
 					?.slice(6)
 					.trim();
-		if (type === "error" || e.error)
-			throw upstreamFailure(
-				typeof record(e.error).message === "string"
-					? String(record(e.error).message).slice(0, 512)
-					: "Upstream stream failed",
-			);
+		if (type === "error" || e.error) throw upstreamStreamError(e.error);
 		if (type === "ping") return [null];
 		if (type === "message_start") {
 			if (started) throw upstreamFailure("Duplicate upstream message_start");

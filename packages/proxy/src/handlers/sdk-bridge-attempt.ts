@@ -277,7 +277,10 @@ export async function continueParkedSdkBridgeTurn(input: {
 	if (requestMeta.officialAnthropicVia !== "sdk-bridge" || !bridge) return null;
 	const ids = lastUserToolResultIds(input.parsedBody);
 	if (!ids.length) return null;
-	const parked = bridge.findContinuation(ids);
+	const parked = bridge.findContinuation(ids, {
+		apiKeyId: input.apiKeyId,
+		model: requestMeta.requestedModel ?? "",
+	});
 	if (!parked) return null;
 	// The bridge refuses another key's continuation itself, recording the leg.
 	try {

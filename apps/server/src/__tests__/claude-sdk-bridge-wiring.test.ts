@@ -162,7 +162,12 @@ describe("installSdkBridge", () => {
 			expect(
 				availability?.state === "unavailable" ? availability.reason : "",
 			).toContain("@modelcontextprotocol/sdk");
-			expect(proxyContext.sdkBridge?.findContinuation(["toolu_1"])).toBeNull();
+			expect(
+				proxyContext.sdkBridge?.findContinuation(["toolu_1"], {
+					apiKeyId: null,
+					model: "",
+				}),
+			).toBeNull();
 			await expect(
 				proxyContext.sdkBridge?.startTurn({
 					request: new Request("http://x/v1/messages"),

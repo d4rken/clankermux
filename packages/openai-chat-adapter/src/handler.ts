@@ -183,7 +183,15 @@ function streamResponse(
 				if (!closed) {
 					controller.enqueue(
 						encoder.encode(
-							`data: ${JSON.stringify(errorEnvelope(e instanceof ChatError ? e.message : "Upstream stream failed", "api_error", "invalid_upstream_response"))}\n\n`,
+							`data: ${JSON.stringify(
+								e instanceof ChatError
+									? errorEnvelope(e.message, e.type ?? "api_error", e.code)
+									: errorEnvelope(
+											"Upstream stream failed",
+											"api_error",
+											"invalid_upstream_response",
+										),
+							)}\n\n`,
 						),
 					);
 					closed = true;

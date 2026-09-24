@@ -9,6 +9,8 @@ import type { ConversationClaim } from "./conversation-store";
 import {
 	type BridgeError,
 	bridgeErrors,
+	type ClaudeCodeFailureCause,
+	isContextOverflow,
 	mapClaudeCodeFailure,
 	sanitizeMessage,
 } from "./errors";
@@ -71,6 +73,8 @@ export interface LiveQueryInit {
 	ownerApiKeyId: string | null;
 	sessionId: string;
 	accountId: string;
+	/** The model the client asked for, as it named it. */
+	requestedModel: string;
 	historyMode: SdkBridgeHistoryMode;
 	query: BridgeQuery;
 	prompt: PromptStream;
@@ -120,6 +124,7 @@ export class LiveQuery {
 	readonly sessionId: string;
 	readonly startedAt: number;
 	readonly conversationKey: string | null;
+	readonly requestedModel: string;
 	private leg: Leg | null = null;
 	/** The tool calls the client must answer now: the last ended leg's. */
 	private awaiting: ReadonlySet<string> = new Set();
@@ -135,6 +140,7 @@ export class LiveQuery {
 	private decisive: SdkBridgeInnerOutcome | null = null;
 	private gaveUp = false;
 	private claudeCodeErrorText: string | null = null;
+	private claudeCodeCause: ClaudeCodeFailureCause | null = null;
 	private resultSeen = false;
 	private resultOk = false;
 	private registered = false;
@@ -172,6 +178,7 @@ export class LiveQuery {
 		this.sessionId = init.sessionId;
 		this.startedAt = init.startedAt;
 		this.conversationKey = init.conversationKey;
+		this.requestedModel = init.requestedModel;
 		this.clientMessages = init.clientMessages;
 		let settled = false;
 		this.done = new Promise((resolve) => {
@@ -224,6 +231,13 @@ export class LiveQuery {
 	private attach(leg: Leg): void {
 		this.leg = leg;
 		this.toolUsesThisLeg = 0;
+		// A failure answers the leg it happens in; an earlier leg's inner
+		// outcome or wording must not decide it.
+		this.lastOutcome = null;
+		this.decisive = null;
+		this.gaveUp = false;
+		this.claudeCodeErrorText = null;
+		this.claudeCodeCause = null;
 		this.init.composer.attach((event) => leg.response.send(event));
 		this.armIdle();
 	}
@@ -489,8 +503,10 @@ export class LiveQuery {
 					`SDK bridge turn ${this.turnId}: query failed`,
 					error,
 				);
-				this.claudeCodeErrorText ??=
-					error instanceof Error ? error.message : String(error);
+				const text = error instanceof Error ? error.message : String(error);
+				this.claudeCodeErrorText ??= text;
+				if (isContextOverflow({ text }))
+					this.claudeCodeCause ??= "context_overflow";
 			}
 		}
 		await this.afterPump();
@@ -528,9 +544,10 @@ export class LiveQuery {
 				if (message.parent_tool_use_id !== null) return;
 				if (message.error) {
 					this.noteGiveUp();
-					this.claudeCodeErrorText = textOf(
-						message.message.content as unknown as Block[],
-					);
+					const text = textOf(message.message.content as unknown as Block[]);
+					this.claudeCodeErrorText = text;
+					if (isContextOverflow({ text }))
+						this.claudeCodeCause ??= "context_overflow";
 					return;
 				}
 				if (message.message.model === "<synthetic>" || message.aborted) return;
@@ -574,6 +591,8 @@ export class LiveQuery {
 				? message.result
 				: (message.errors ?? []).join("; ") || message.subtype;
 		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
+		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
+			this.claudeCodeCause ??= "context_overflow";
 		void this.failAfterGrace();
 	}
 
@@ -589,9 +608,14 @@ export class LiveQuery {
 			if (this.lastOutcome && this.lastOutcome.status >= 400)
 				this.decisive = this.lastOutcome;
 		}
-		this.failTurn(
-			mapClaudeCodeFailure(this.decisive, this.claudeCodeErrorText),
-		);
+		this.failTurn(this.claudeCodeFailure());
+	}
+
+	private claudeCodeFailure(fallbackText: string | null = null): BridgeError {
+		return mapClaudeCodeFailure(this.decisive, {
+			text: this.claudeCodeErrorText ?? fallbackText,
+			cause: this.claudeCodeCause,
+		});
 	}
 
 	private failTurn(error: BridgeError): void {
@@ -662,19 +686,13 @@ export class LiveQuery {
 		if (!this.resultSeen) {
 			this.noteGiveUp();
 			this.failTurn(
-				mapClaudeCodeFailure(
-					this.decisive,
-					this.claudeCodeErrorText ?? "Claude Code exited without a result",
-				),
+				this.claudeCodeFailure("Claude Code exited without a result"),
 			);
 		} else if (!this.resultOk) {
 			// failAfterGrace may still be waiting on the proxy's report.
 			const until = Date.now() + OUTCOME_GRACE_MS + 50;
 			while (this.leg && Date.now() < until) await Bun.sleep(10);
-			if (this.leg)
-				this.failTurn(
-					mapClaudeCodeFailure(this.decisive, this.claudeCodeErrorText),
-				);
+			if (this.leg) this.failTurn(this.claudeCodeFailure());
 		}
 		this.samplePeakRss();
 		this.close(this.resultOk ? "completed" : "failed", this.resultOk);
