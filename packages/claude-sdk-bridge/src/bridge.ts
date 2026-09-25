@@ -901,6 +901,12 @@ export function createClaudeSdkBridge(
 			parkedTimeoutMs: current.parkedTimeoutMs,
 			turnDeadlineMs: current.turnDeadlineMs,
 			priorActiveMs: resumed?.park.activeMs ?? 0,
+			// Ended before its first model call, a resume leaves its park (and the
+			// turn) as they were: the results can resume it again.
+			// A spent active-time budget ends the turn all the same.
+			keepTurnOpen: resumed
+				? (status) => !resumed.consumed && status !== "timed_out"
+				: undefined,
 			parkReleaseMs:
 				sideRequest || !deps.parkRepo ? null : current.parkReleaseMs,
 			onReleaseDue: (parked) => void releaseLive(parked),
@@ -928,15 +934,28 @@ export function createClaudeSdkBridge(
 				turnToolIds.delete(closed.turnId);
 				// The turn lives on in its released park.
 				if (closed.released) return;
-				const spent = resumedFrom.get(closed.turnId);
-				if (spent && parks) {
+				const resumed = resumedFrom.get(closed.turnId);
+				if (resumed && parks) {
 					resumedFrom.delete(closed.turnId);
-					void parks.forget(spent).catch((error) => {
-						log.error(
-							`SDK bridge turn ${closed.turnId}: could not delete its spent released park`,
-							error,
-						);
-					});
+					if (!closed.keptOpen)
+						void parks.forget(resumed).catch((error) => {
+							log.error(
+								`SDK bridge turn ${closed.turnId}: could not delete its spent released park`,
+								error,
+							);
+						});
+					else
+						void parks
+							.unclaim(resumed)
+							.catch((error) => {
+								log.error(
+									`SDK bridge turn ${closed.turnId}: could not give its claim back`,
+									error,
+								);
+							})
+							.finally(() => {
+								resumed.state = "released";
+							});
 				}
 				void closed.done.then((ok) => {
 					if (ok) counters.turnsCompleted++;
@@ -1165,11 +1184,19 @@ export function createClaudeSdkBridge(
 		// Released parks of the conversation go the same way, once a release
 		// still in flight has stored its park.
 		if (convKey && parks) {
-			if (superseded?.releasing)
+			if (superseded?.releasing) {
 				await releases.get(superseded.turnId)?.catch(() => {});
-			for (const entry of parks.byConversation(convKey))
+				// A release that fell back to parked left a live query behind.
+				const still = liveByConversation.get(convKey);
+				if (still?.awaitingClient)
+					still.teardown("superseded", bridgeErrors.superseded());
+			}
+			for (const entry of parks.byConversation(convKey)) {
 				if (entry.state === "released")
 					void closePark(entry, bridgeErrors.superseded(), "aborted");
+				// Claimed and not yet launched: the resume ends it before launching.
+				else if (!resumedFrom.has(entry.park.turnId)) entry.superseded = true;
+			}
 		}
 		const claim = convKey
 			? await conversations.claim(convKey, timing.settleWaitMs)
@@ -1522,6 +1549,20 @@ export function createClaudeSdkBridge(
 				);
 			// The body was read asynchronously; the query may have ended meanwhile.
 			if (shuttingDown) return refuse(bridgeErrors.shutdown());
+			// Its release timer may have fired while the body arrived: once the
+			// release is over, a stored park resumes with this body.
+			if (live.releasing || live.released) {
+				await releases.get(input.turnId)?.catch(() => {});
+				const entry = parks?.get(input.turnId);
+				if (entry)
+					return await resumeReleased(
+						entry,
+						input,
+						startedAt,
+						body,
+						parsed.turn,
+					);
+			}
 			if (live.closed || !live.awaitingClient)
 				return refuse(bridgeErrors.deadTurn());
 			// Parked state stays as it is unless every awaited call is answered.
@@ -1618,10 +1659,8 @@ export function createClaudeSdkBridge(
 		startedAt: number,
 	): Promise<Response> {
 		const { meta } = input;
-		const turnId = entry.park.turnId;
 		const refuse = (error: BridgeError) =>
-			refuseContinuation(turnId, meta, startedAt, error);
-		const store = parks as ReleasedParkStore;
+			refuseContinuation(entry.park.turnId, meta, startedAt, error);
 		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
 			return refuse(bridgeErrors.otherOwner());
 		if (entry.state === "released" && entry.park.expiresAt <= now()) {
@@ -1641,11 +1680,40 @@ export function createClaudeSdkBridge(
 			return refuse(
 				bridgeErrors.invalid("A continuation must carry tool_result blocks"),
 			);
+		return resumeReleased(entry, input, startedAt, body, parsed.turn);
+	}
+
+	/**
+	 * Resume a released park with the client's tool results: claim it, copy
+	 * its session under a new id and run Claude Code from the entry that made
+	 * the calls, with the final user message as one prompt. The turn keeps
+	 * its id, its frozen plan and the settings it started with.
+	 *
+	 * Everything between the claim and the launch is one sequence with one
+	 * rollback (conversation, copy, claim), and the last checks (shutdown,
+	 * client gone, supersession, process cap) run with no await before the
+	 * launch. A stored session that no longer holds the calls ends the park
+	 * and starts a flattened dead continuation instead.
+	 */
+	async function resumeReleased(
+		entry: ReleasedEntry,
+		input: Parameters<SdkBridgeTransport["continueTurn"]>[0],
+		startedAt: number,
+		body: { raw: ArrayBuffer },
+		turn: TurnRequest,
+	): Promise<Response> {
+		const { meta } = input;
+		const turnId = entry.park.turnId;
+		const refuse = (error: BridgeError) =>
+			refuseContinuation(turnId, meta, startedAt, error);
+		const store = parks as ReleasedParkStore;
+		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
+			return refuse(bridgeErrors.otherOwner());
 		if (shuttingDown) return refuse(bridgeErrors.shutdown());
 		if (
 			!answersExactly(
 				new Set(entry.park.awaitedToolUseIds),
-				toolResultIds(parsed.turn),
+				toolResultIds(turn),
 			)
 		)
 			return refuse(bridgeErrors.staleToolResults());
@@ -1658,74 +1726,110 @@ export function createClaudeSdkBridge(
 		}
 		// Synchronous from the state check on: the first claimant takes it.
 		if (!store.takeLocal(entry)) return refuse(bridgeErrors.staleToolResults());
+		// A fast path; the launch checks the cap again after the awaits.
 		if (lives.size >= limits().maxProcesses) {
 			entry.state = "released";
 			return refuse(bridgeErrors.processCap(limits().maxProcesses));
 		}
-		try {
-			if (!(await store.claim(entry)))
-				return refuse(bridgeErrors.staleToolResults());
-		} catch (error) {
-			log.error(
-				`SDK bridge turn ${turnId}: could not claim its released park`,
-				error,
-			);
-			return refuse(bridgeErrors.parkStoreUnavailable());
-		}
+
 		const descriptor = entry.descriptor;
 		const convKey = entry.park.conversationKeyHash;
-		const claim = convKey
-			? await conversations.claim(convKey, timing.settleWaitMs)
-			: null;
-		const sessionId = randomId();
-		const copied =
-			isUuid(sessionId) &&
-			forkVerifiedTranscript(
-				entry.path,
-				sessionStore().pathOf(sessionId),
-				entry.park.sessionId,
-				sessionId,
-				entry.park.resumeAt,
-				entry.park.awaitedToolUseIds,
-			);
-		if (!copied) {
-			claim?.release();
-			discardSession(sessionId);
-			log.warn(
-				`SDK bridge turn ${turnId}: its released session is gone; rebuilding from the client's history`,
-			);
-			await closePark(
-				entry,
-				bridgeErrors.releaseFailed("its stored session is gone"),
-				"failed",
-			);
-			return startTurn({
-				request: new Request(input.request.url, {
-					method: "POST",
-					headers: input.request.headers,
-					body: body.raw,
-				}),
-				plan: { ...descriptor.plan, turnId: randomId() },
-				meta,
-				signal: input.signal,
-				bumpIdleTimeout: input.bumpIdleTimeout,
-			});
-		}
-
-		const { query: run, mcp } = await loadSdks();
-		const target =
-			descriptor.plan.candidates.find(
-				(c) => c.accountId === descriptor.plan.preferredAccountId,
-			) ?? descriptor.plan.candidates[0];
 		const taken = launching();
-		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
+		let claim: ConversationClaim | null = null;
+		let sessionId: string | null = null;
+		let dbClaimed = false;
+		/** Give back everything the resume took; the park stays resumable. */
+		const rollback = async () => {
+			claim?.release();
+			claim = null;
+			abandonLaunch(taken, sessionId);
+			if (dbClaimed)
+				await store.unclaim(entry).catch((error) => {
+					log.error(
+						`SDK bridge turn ${turnId}: could not give its claim back`,
+						error,
+					);
+				});
+			// Whatever the database says, it is resumable (or expirable) here.
+			entry.state = "released";
+		};
 		let live: LiveQuery;
 		try {
+			try {
+				dbClaimed = await store.claim(entry);
+			} catch (error) {
+				entry.state = "released";
+				log.error(
+					`SDK bridge turn ${turnId}: could not claim its released park`,
+					error,
+				);
+				return refuse(bridgeErrors.parkStoreUnavailable());
+			}
+			if (!dbClaimed) return refuse(bridgeErrors.staleToolResults());
+			claim = convKey
+				? await conversations.claim(convKey, timing.settleWaitMs)
+				: null;
+			const { query: run, mcp } = await loadSdks();
+			// No await from here to the launch.
+			if (entry.superseded) {
+				claim?.release();
+				claim = null;
+				await closePark(entry, bridgeErrors.superseded(), "aborted");
+				return refuse(bridgeErrors.superseded());
+			}
+			if (shuttingDown) {
+				await rollback();
+				return refuse(bridgeErrors.shutdown());
+			}
+			if (input.signal.aborted) {
+				await rollback();
+				return refuse(bridgeErrors.clientGone());
+			}
+			if (lives.size >= limits().maxProcesses) {
+				await rollback();
+				return refuse(bridgeErrors.processCap(limits().maxProcesses));
+			}
+			const target =
+				descriptor.plan.candidates.find(
+					(c) => c.accountId === descriptor.plan.preferredAccountId,
+				) ?? descriptor.plan.candidates[0];
 			if (!target) throw new Error("its route plan has no candidate");
-			const toolNames = new ToolNames(descriptor.tools.map((t) => t.name));
-			const promptContent = normalizeHistory([parsed.turn.last]).flatMap(
-				(m) => m.content,
-			);
+			const newSessionId = randomId();
+			if (!isUuid(newSessionId))
+				throw new Error("randomId must produce UUIDs for session ids");
+			sessionId = newSessionId;
+			if (
+				!forkVerifiedTranscript(
+					entry.path,
+					sessionStore().pathOf(newSessionId),
+					entry.park.sessionId,
+					newSessionId,
+					entry.park.resumeAt,
+					entry.park.awaitedToolUseIds,
+				)
+			) {
+				claim?.release();
+				claim = null;
+				log.warn(
+					`SDK bridge turn ${turnId}: its released session no longer holds the calls; rebuilding from the client's history`,
+				);
+				await closePark(
+					entry,
+					bridgeErrors.releaseFailed("its stored session is gone"),
+					"failed",
+				);
+				return startTurn({
+					request: new Request(input.request.url, {
+						method: "POST",
+						headers: input.request.headers,
+						body: body.raw,
+					}),
+					plan: { ...descriptor.plan, turnId: randomId() },
+					meta,
+					signal: input.signal,
+					bumpIdleTimeout: input.bumpIdleTimeout,
+				});
+			}
 			live = launchQuery(taken, {
 				start: {
 					request: input.request,
@@ -1744,34 +1848,27 @@ export function createClaudeSdkBridge(
 				run,
 				mcp,
 				turn: {
-					...parsed.turn,
+					...turn,
 					tools: descriptor.tools,
 					effort: descriptor.effort,
 					maxOutputTokens: descriptor.maxOutputTokens,
 				},
 				target,
-				toolNames,
+				toolNames: new ToolNames(descriptor.tools.map((t) => t.name)),
 				systemPrompt: descriptor.systemPrompt,
-				sessionId,
+				sessionId: newSessionId,
 				historyMode: "resume",
-				promptContent,
+				promptContent: normalizeHistory([turn.last]).flatMap((m) => m.content),
 				claim,
 				convKey,
 				sideRequest: false,
-				recorder,
+				recorder: new TurnRecorder(deps.turnRepo, log, turnId),
 				startedAt: descriptor.turnStartedAt,
 				descriptor,
 				resume: { entry },
 			});
 		} catch (error) {
-			claim?.release();
-			abandonLaunch(taken, sessionId);
-			await store.unclaim(entry).catch((e) => {
-				log.error(
-					`SDK bridge turn ${turnId}: could not give its claim back`,
-					e,
-				);
-			});
+			await rollback();
 			log.warn(`SDK bridge turn ${turnId}: could not resume`, error);
 			return refuse({
 				status: 503,
@@ -1790,12 +1887,13 @@ export function createClaudeSdkBridge(
 		turnToolIds.set(turnId, ids);
 		counters.continuations++;
 		counters.releasedResumes++;
+		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
 		void recorder.insertLeg(meta.legId, "continue", startedAt);
 		void recorder.bump({ toolRounds: 1 });
 		const leg = newLeg(
 			meta.legId,
 			"continue",
-			parsed.turn.stream,
+			turn.stream,
 			input.signal,
 			input.bumpIdleTimeout,
 			(l) => live.onClientGone(l),

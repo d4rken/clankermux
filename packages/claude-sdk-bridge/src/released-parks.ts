@@ -49,6 +49,8 @@ export interface ReleasedEntry {
 	state: "released" | "claimed";
 	/** The resumed query made its first model call: the park is spent. */
 	consumed: boolean;
+	/** A new turn of the conversation arrived while it was being claimed. */
+	superseded?: boolean;
 	path: string;
 }
 

@@ -520,13 +520,21 @@ export function memoryParkRepo(
 ): SdkBridgeParkRepo & {
 	parks: Map<string, SdkBridgeReleasedPark>;
 	failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>>;
+	/** The next call of a method waits for this promise first. */
+	hold: Partial<Record<keyof SdkBridgeParkRepo, Promise<void>>>;
 	calls: string[];
 } {
 	const parks = new Map<string, SdkBridgeReleasedPark>();
 	const failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>> = {};
+	const hold: Partial<Record<keyof SdkBridgeParkRepo, Promise<void>>> = {};
 	const calls: string[] = [];
-	const check = (name: keyof SdkBridgeParkRepo) => {
+	const check = async (name: keyof SdkBridgeParkRepo) => {
 		calls.push(name);
+		const wait = hold[name];
+		if (wait) {
+			delete hold[name];
+			await wait;
+		}
 		const error = failNext[name];
 		if (error) {
 			delete failNext[name];
@@ -540,9 +548,10 @@ export function memoryParkRepo(
 	return {
 		parks,
 		failNext,
+		hold,
 		calls,
 		async insertPreparing(park) {
-			check("insertPreparing");
+			await check("insertPreparing");
 			if (parks.has(park.turnId)) throw new Error("UNIQUE: park");
 			parks.set(park.turnId, {
 				...park,
@@ -552,11 +561,11 @@ export function memoryParkRepo(
 			});
 		},
 		async list() {
-			check("list");
+			await check("list");
 			return [...parks.values()].map((p) => ({ ...p }));
 		},
 		async markReleased(turnId, file) {
-			check("markReleased");
+			await check("markReleased");
 			const park = parks.get(turnId);
 			if (park?.state !== "preparing") return false;
 			Object.assign(park, file, { state: "released" });
@@ -564,7 +573,7 @@ export function memoryParkRepo(
 			return true;
 		},
 		async claim(turnId, owner, at) {
-			check("claim");
+			await check("claim");
 			const park = parks.get(turnId);
 			if (park?.state !== "released") return false;
 			Object.assign(park, {
@@ -576,7 +585,7 @@ export function memoryParkRepo(
 			return true;
 		},
 		async unclaim(turnId, owner) {
-			check("unclaim");
+			await check("unclaim");
 			const park = parks.get(turnId);
 			if (park?.state !== "claimed") return false;
 			if (owner !== null && park.claimOwner !== owner) return false;
@@ -589,24 +598,24 @@ export function memoryParkRepo(
 			return true;
 		},
 		async markConsumed(turnId, owner) {
-			check("markConsumed");
+			await check("markConsumed");
 			const park = parks.get(turnId);
 			if (park?.state !== "claimed" || park.claimOwner !== owner) return false;
 			park.state = "consumed";
 			return true;
 		},
 		async delete(turnId) {
-			check("delete");
+			await check("delete");
 			parks.delete(turnId);
 		},
 		async closeTurn(turnId, finish) {
-			check("closeTurn");
+			await check("closeTurn");
 			parks.delete(turnId);
 			const turn = turns.get(turnId);
 			if (turn) Object.assign(turn, finish);
 		},
 		async closeOpenTurnsWithoutPark(before, finish) {
-			check("closeOpenTurnsWithoutPark");
+			await check("closeOpenTurnsWithoutPark");
 			let n = 0;
 			for (const turn of turns.values())
 				if (

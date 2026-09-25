@@ -9,6 +9,7 @@
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -957,12 +958,10 @@ describe("faults", () => {
 		const call = await innerCall(q2);
 		expect(call.status).toBe(503);
 		expect(h.inner.calls.length).toBe(0);
-		q2.emit(
-			initMessage(),
-			resultMessage({ isError: true, subtype: "error_during_execution" }),
-		);
-		q2.end();
-		expect((await reply(response)).status).toBeGreaterThanOrEqual(500);
+		// The failed mark is not cached: the next call tries again.
+		expect((await innerCall(q2)).status).toBe(200);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("consumed");
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
 	});
 
 	it("a launch that throws answers 503 and gives the claim back", async () => {
@@ -989,5 +988,224 @@ describe("disposing during a release", () => {
 		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
 		expect(parkFiles(h).length).toBe(1);
 		rmSync(h.workRoot, { recursive: true, force: true });
+	});
+});
+
+describe("the resume sequence", () => {
+	it("a copy that cannot be written rolls the claim back: park, conversation and retry intact", async () => {
+		const h = await releaseHarness();
+		const header = {
+			affinityScope: "client_session",
+			affinityKey: "conv-fork-fail",
+		} as const;
+		const p = await parkTurn(h, { meta: header });
+		await released(h, p);
+		const gen = readdirSync(h.workRoot).find((n) => n.startsWith("gen-"));
+		const sessions = join(h.workRoot, String(gen), "sessions");
+		chmodSync(sessions, 0o500);
+		let r: Awaited<ReturnType<typeof reply>>;
+		try {
+			r = await reply(answer(h, p, results(p), header));
+		} finally {
+			chmodSync(sessions, 0o700);
+		}
+		expect(r.status).toBe(503);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+		expect(h.sdk.queries.length).toBe(1);
+		// The conversation is free and the park resumes on the retry.
+		const response = answer(h, p, results(p), header);
+		const q2 = await h.sdk.next();
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+	});
+
+	it("rechecks the process cap right before the launch", async () => {
+		const limits = { maxProcesses: 2 };
+		const h = await releaseHarness({ limits });
+		const one = await parkTurn(h);
+		const two = await parkTurn(h);
+		await released(h, one);
+		await released(h, two);
+		limits.maxProcesses = 1;
+		// Both pass the early check; only one may launch.
+		// Whichever claims first waits; both pass the early check.
+		h.parkRepo.hold.claim = Bun.sleep(50);
+		const r1 = reply(answer(h, one, results(one)));
+		const r2 = reply(answer(h, two, results(two)));
+		const q = await h.sdk.next();
+		await innerCall(q);
+		q.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "done" }]),
+			resultMessage(),
+		);
+		const [a, b] = await Promise.all([r1, r2]);
+		expect([a.status, b.status].sort()).toEqual([200, 529]);
+		const refused = a.status === 529 ? one : two;
+		expect(h.parkRepo.parks.get(refused.turnId)?.state).toBe("released");
+		expect(h.repo.turns.get(refused.turnId)?.status).toBe("released");
+		expect(h.sdk.queries.length).toBe(3);
+	});
+
+	it("launches nothing for a client that left or a bridge that began shutting down while it claimed", async () => {
+		const h = await releaseHarness({ keep: true });
+		const p = await parkTurn(h);
+		await released(h, p);
+		const abort = new AbortController();
+		let letGo!: () => void;
+		h.parkRepo.hold.claim = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const gone = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta: makeMeta(),
+			signal: abort.signal,
+		});
+		await waitFor(() => h.parkRepo.calls.includes("claim"));
+		abort.abort();
+		letGo();
+		expect((await gone).status).toBe(499);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+
+		h.parkRepo.hold.claim = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const late = answer(h, p, results(p));
+		await waitFor(
+			() => h.parkRepo.calls.filter((c) => c === "claim").length === 2,
+		);
+		h.bridge.beginShutdown();
+		letGo();
+		expect((await late).status).toBe(503);
+		expect(h.sdk.queries.length).toBe(1);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		await h.bridge.dispose();
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+	});
+
+	it("gives the park back when the resumed query ends before its first model call", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		q2.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		q2.end();
+		expect((await reply(response)).status).toBe(502);
+		await waitFor(() => h.parkRepo.parks.get(p.turnId)?.state === "released");
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+		expect(h.repo.turns.get(p.turnId)?.finishedAt).toBeUndefined();
+		expect(parkFiles(h).length).toBe(1);
+		// The results resume it again.
+		const retry = answer(h, p, results(p));
+		const q3 = await h.sdk.next();
+		expect((await finishResumed(h, q3, retry)).status).toBe(200);
+		await waitFor(() => !h.parkRepo.parks.has(p.turnId));
+	});
+});
+
+describe("results racing the release", () => {
+	it("a continuation whose body arrives after the release resumes the stored park", async () => {
+		const h = await releaseHarness({ limits: { parkReleaseMs: 150 } });
+		const p = await parkTurn(h);
+		const body = JSON.stringify({
+			model: MODEL,
+			max_tokens: 1024,
+			stream: true,
+			tools: [READ_TOOL],
+			messages: results(p),
+		});
+		// The body is held back until the release has stored the park.
+		const stream = new ReadableStream<Uint8Array>({
+			async start(controller) {
+				await waitFor(
+					() => h.repo.turns.get(p.turnId)?.status === "released",
+					5_000,
+				);
+				controller.enqueue(new TextEncoder().encode(body));
+				controller.close();
+			},
+		});
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: stream,
+				duplex: "half",
+			} as RequestInit),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		expect(q2.options.resumeSessionAt).toBe(
+			h.parkRepo.parks.get(p.turnId)?.resumeAt,
+		);
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+	});
+});
+
+describe("supersession around a release", () => {
+	const header = {
+		affinityScope: "client_session",
+		affinityKey: "conv-race",
+	} as const;
+	const next = (h: Harness) =>
+		h.bridge.startTurn({
+			request: messagesRequest({
+				tools: [READ_TOOL],
+				messages: [first, { role: "assistant", content: "no" }, first],
+			}),
+			plan: makePlan(),
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+
+	it("tears down a query whose release fell back to parked", async () => {
+		const h = await releaseHarness({ limits: { parkReleaseMs: 30 } });
+		// No envelopes: the release waits for them, then gives up.
+		const p = await parkTurn(h, { meta: header, envelopes: false });
+		await waitFor(() => h.bridge.status().parked === 0);
+		const t = next(h);
+		const q2 = await h.sdk.next();
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "aborted");
+		expect(h.bridge.status().live).toBe(1);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		expect((await reply(t)).status).toBe(200);
+	});
+
+	it("ends a park claimed mid-resume before the resume launches", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { meta: header });
+		await released(h, p);
+		let letGo!: () => void;
+		h.parkRepo.hold.claim = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const resume = answer(h, p, results(p), header);
+		await waitFor(() => h.parkRepo.calls.includes("claim"));
+		const t = next(h);
+		const q2 = await h.sdk.next();
+		letGo();
+		const r = await reply(resume);
+		expect(r.status).toBe(409);
+		expect(JSON.stringify(r.body)).toContain("A new turn of this conversation");
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "aborted");
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(h.sdk.queries.length).toBe(2);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		expect((await reply(t)).status).toBe(200);
 	});
 });

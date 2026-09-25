@@ -272,6 +272,8 @@ export class InnerListener {
 			try {
 				await entry.gate;
 			} catch (error) {
+				// Not cached: the next call runs the hook again.
+				entry.gate = null;
 				this.opts.log.warn("SDK bridge: a model call was held back", error);
 				const message =
 					"The SDK bridge could not record this turn's resume; nothing was sent";

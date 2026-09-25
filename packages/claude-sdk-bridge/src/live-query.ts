@@ -149,6 +149,11 @@ export interface LiveQueryInit {
 	onReleaseDue?: (live: LiveQuery) => void;
 	/** Whether a query parking now could be released rather than torn down. */
 	canRelease?: () => boolean;
+	/**
+	 * At close, leave the turn row open (no finish written): a resumed
+	 * release that ended before its first model call, whose park goes back.
+	 */
+	keepTurnOpen?: (status: SdkBridgeTurnStatus) => boolean;
 	maxParkedCalls: number;
 	startedAt: number;
 	now: () => number;
@@ -207,6 +212,8 @@ export class LiveQuery {
 	private stopping = false;
 	/** Set once a release has stored the session: the turn lives on without this query. */
 	released = false;
+	/** Closed without finishing the turn row ({@link LiveQueryInit.keepTurnOpen}). */
+	keptOpen = false;
 	private clientMessages: ClientMessage[];
 	private lastOutcome: SdkBridgeInnerOutcome | null = null;
 	private outcomeSeq = 0;
@@ -1080,6 +1087,11 @@ export class LiveQuery {
 			this.init.discardSession(this.sessionId);
 		}
 		this.discardClaudeCodeTranscripts();
+		if (this.init.keepTurnOpen?.(status)) {
+			this.keptOpen = true;
+			this.init.onClosed(this);
+			return;
+		}
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
 		void this.init.recorder.finishTurn({
