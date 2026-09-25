@@ -35,11 +35,12 @@ import {
 	ParkedCalls,
 	ToolNames,
 } from "../../tool-server";
-import type { SdkBridgeLimits } from "../../types";
+import type { SdkBridgeLimits, SdkBridgeParkRepo } from "../../types";
 import { ensurePrivateDir } from "../../work-dirs";
 import {
 	foldReply,
 	MODEL,
+	memoryParkRepo,
 	memoryTurnRepo,
 	parseSse,
 	READ_TOOL,
@@ -134,8 +135,10 @@ writeFileSync(
 function makeBridge(
 	limits: Partial<SdkBridgeLimits>,
 	root: string = workRoot,
+	parkRepo?: SdkBridgeParkRepo,
 ): ClaudeSdkBridge {
 	return createClaudeSdkBridge({
+		...(parkRepo ? { parkRepo } : {}),
 		dispatchInner: async (req, ctx) => {
 			const requestId = crypto.randomUUID();
 			// As the proxy does: the row begins, then the call ends.
@@ -1010,6 +1013,157 @@ await scenario("releasedParkResume", async () => {
 	} finally {
 		spawner.killAll("SIGKILL");
 		front.stop(true);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("releaseThenResume", async () => {
+	// Released parks live under their own work root: one owner per directory.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const releaseLimits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const whenReleased = async (turnId: string) => {
+		const until = Date.now() + 20_000;
+		while (repo.turns.get(turnId)?.status !== "released" && Date.now() < until)
+			await Bun.sleep(50);
+		return repo.turns.get(turnId)?.status;
+	};
+	const shape = (q: (typeof mock.requests)[number] | undefined) => {
+		const messages = (q?.body as { messages?: Msg[] } | undefined)?.messages;
+		return {
+			cacheRead: q?.cache?.read ?? null,
+			text: JSON.stringify(messages ?? []),
+			tail: (messages ?? []).slice(-2).map((m) => ({
+				role: m.role,
+				blocks: (typeof m.content === "string"
+					? [{ type: "text" }]
+					: m.content
+				).map((b) => [
+					b.type,
+					b.tool_use_id ?? b.id ?? null,
+					Array.isArray(b.content)
+						? (b.content as Block[]).map((c) => c.type)
+						: typeof b.signature === "string",
+				]),
+			})),
+		};
+	};
+	let a: ClaudeSdkBridge | null = makeBridge(releaseLimits, root, parkRepo);
+	let b: ClaudeSdkBridge | null = null;
+	try {
+		await a.ready();
+		// In process: released after the park, resumed by the results.
+		const h1: Msg[] = [{ role: "user", content: "TOOL read released.txt" }];
+		const first = calls().length;
+		const r1 = await turn(h1, {}, undefined, a);
+		const firstCall = calls()[first];
+		const tu = (r1.content ?? []).find((x) => x.type === "tool_use");
+		const statusAfterPark = await whenReleased(r1.turnId);
+		const childrenWhileReleased = childPids().length;
+		h1.push(
+			{ role: "assistant", content: r1.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(tu?.id),
+						content: "RELEASED-RESULT",
+					},
+				],
+			},
+		);
+		const from = calls().length;
+		const r2 = await answer(r1.turnId, h1, a);
+		await settled(a);
+		const inProcess = {
+			r1Stop: r1.stop,
+			statusAfterPark,
+			childrenWhileReleased,
+			r2,
+			turnStatus: repo.turns.get(r1.turnId)?.status,
+			firstCacheCreation: firstCall?.cache?.creation ?? null,
+			resumed: shape(calls().slice(from).at(0)),
+		};
+
+		// Across a restart: released, the bridge disposed, a new one on the
+		// same work root and repositories resumes it.
+		const h2: Msg[] = [{ role: "user", content: "THINK PARALLEL read both" }];
+		const second = calls().length;
+		const p = await turn(h2, {}, undefined, a);
+		const secondCall = calls()[second];
+		const uses = (p.content ?? []).filter((x) => x.type === "tool_use");
+		const statusBeforeRestart = await whenReleased(p.turnId);
+		await a.dispose();
+		a = null;
+		b = makeBridge(releaseLimits, root, parkRepo);
+		await b.ready();
+		const recovered = b.status().releasedParks;
+		const found = b.findContinuation(
+			uses.map((u) => String(u.id)),
+			{ apiKeyId: "key-1", model: MODEL },
+		);
+		h2.push(
+			{ role: "assistant", content: p.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(uses[0]?.id),
+						content: [
+							{ type: "text", text: "RESTART-A" },
+							{
+								type: "image",
+								source: {
+									type: "base64",
+									media_type: "image/png",
+									data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+								},
+							},
+						],
+					},
+					{
+						type: "tool_result",
+						tool_use_id: String(uses[1]?.id),
+						content: "RESTART-B",
+					},
+					{ type: "text", text: "TYPED-AFTER-RESTART" },
+				],
+			},
+		);
+		const from2 = calls().length;
+		const r3 = await answer(p.turnId, h2, b);
+		await settled(b);
+		return {
+			inProcess,
+			restart: {
+				stop: p.stop,
+				toolUses: uses.length,
+				statusBeforeRestart,
+				recovered,
+				found,
+				r3,
+				turnStatus: repo.turns.get(p.turnId)?.status,
+				firstCacheCreation: secondCall?.cache?.creation ?? null,
+				resumed: shape(calls().slice(from2).at(0)),
+				parksLeft: parkRepo.parks.size,
+				filesLeft: filesUnder(join(root, "released-parks")).filter((f) =>
+					f.endsWith(".jsonl"),
+				),
+			},
+		};
+	} finally {
+		await a?.dispose();
+		await b?.dispose();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

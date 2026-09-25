@@ -472,6 +472,76 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"releases a parked turn and resumes it, in process and after a restart",
+			async () => {
+				const s = scenario(await results(), "releaseThenResume");
+				type Shape = {
+					cacheRead: number;
+					text: string;
+					tail: Array<{ role: string; blocks: unknown[] }>;
+				};
+				const inProcess = s.inProcess as Record<string, unknown> & {
+					resumed: Shape;
+				};
+				expect(inProcess).toMatchObject({
+					r1Stop: "tool_use",
+					statusAfterPark: "released",
+					childrenWhileReleased: 0,
+					turnStatus: "completed",
+					r2: {
+						status: 200,
+						stop: "end_turn",
+						content: [{ type: "text", text: "done: RELEASED-RESULT" }],
+					},
+				});
+				// The whole prefix the first call wrote is read back.
+				expect(inProcess.resumed.cacheRead).toBe(
+					inProcess.firstCacheCreation as number,
+				);
+				expect(inProcess.resumed.text).not.toContain("interrupted");
+				expect(inProcess.resumed.text).not.toContain("No response requested");
+
+				const restart = s.restart as Record<string, unknown> & {
+					resumed: Shape;
+				};
+				expect(restart).toMatchObject({
+					stop: "tool_use",
+					toolUses: 2,
+					statusBeforeRestart: "released",
+					recovered: 1,
+					turnStatus: "completed",
+					parksLeft: 0,
+					filesLeft: [],
+					r3: {
+						status: 200,
+						content: [{ type: "text", text: "done: RESTART-A" }],
+					},
+				});
+				expect(restart.resumed.cacheRead).toBeGreaterThan(0);
+				const [assistant, user] = restart.resumed.tail as [
+					{ role: string; blocks: unknown[][] },
+					{ role: string; blocks: unknown[][] },
+				];
+				expect(assistant.role).toBe("assistant");
+				expect(assistant.blocks.map((b) => b[0])).toEqual([
+					"thinking",
+					"tool_use",
+					"tool_use",
+				]);
+				expect(assistant.blocks[0]?.[2]).toBe(true);
+				const [, a, b] = assistant.blocks.map((x) => x[1]);
+				expect(user.blocks).toEqual([
+					["tool_result", a, ["text", "image"]],
+					["tool_result", b, false],
+					["text", null, false],
+				]);
+				expect(restart.resumed.text).toContain("TYPED-AFTER-RESTART");
+				expect(restart.resumed.text).not.toContain("interrupted");
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {
 				const s = scenario(await results(), "oversizedInnerBody");
