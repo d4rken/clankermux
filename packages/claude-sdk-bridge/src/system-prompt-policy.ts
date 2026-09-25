@@ -2,14 +2,10 @@ import { createHash } from "node:crypto";
 import {
 	SDK_BRIDGE_PI_PROMPT_HEADER,
 	type SdkBridgeSystemPromptDetail,
+	SUPPORTED_PI_PROMPT_VERSIONS,
 } from "@clankermux/types";
 import type { BridgeError } from "./errors";
-import {
-	type PiHeadStrip,
-	piPromptHead,
-	SUPPORTED_PI_PROMPT_VERSIONS,
-	stripPiHead,
-} from "./pi-prompt";
+import { piPromptHead, stripPiHead } from "./pi-prompt";
 
 /** What the client's system prompt becomes on top of Claude Code's own. */
 export interface SystemPromptDecision {
@@ -123,17 +119,7 @@ export const piHeadSystemPromptPolicy: SystemPromptPolicy = {
 					text: clientSystem,
 				},
 			);
-		let strip: PiHeadStrip;
-		try {
-			strip = stripPiHead(clientSystem, head);
-		} catch {
-			// A defect of the stripper, still answered as a refusal rather than a throw.
-			return refusal(
-				"sdk_bridge_prompt_malformed",
-				`${PI_POLICY}: the system prompt could not be read as pi prompt layout ${version}`,
-				{ version, reason: "unreadable", section: null, text: clientSystem },
-			);
-		}
+		const strip = stripPiHead(clientSystem, head);
 		if (strip.ok)
 			return {
 				ok: true,
