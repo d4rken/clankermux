@@ -138,8 +138,9 @@ the conversation claim, so it supersedes no parked turn and leaves a
 It strips rather than selects because pi's extensions append to the
 prompt: claude-context returns pi's prompt plus raw guidance after `<cwd>`,
 pi-subagents appends `<advertised_subagents>`, both as forced prompts. The
-head is the only part that draws the subscription 400, and pi always
-renders it first.
+head is the only part that draws the subscription 400. pi's stock
+construction renders it first; a collapsed custom→stock session and the herdr
+child path do not, and are refused.
 
 pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 `SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
@@ -148,8 +149,9 @@ entry. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
-prompt. Only a pi release that changes the head
-needs new fixtures. Discovery lists the versions at
+prompt. Regenerate and review the fixtures when a pi release changes the
+head, pi-ai's system-message collapse, or the rendering of the extensions
+above. Discovery lists the versions at
 `clankermux.piPromptVersions` in the OpenAI-shape
 `/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
 is refused.

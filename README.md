@@ -129,7 +129,7 @@ What differs from a direct request:
   (`sdk_bridge_prompt_unsupported`), when `</tools>`, `</rules>` or
   `</docs>` appears more than once or pi's opening lacks the sections that
   follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
-  contains pi's opening line or both `docs/custom-provider.md` and
+  contains pi's opening line at the start of a line, or both `docs/custom-provider.md` and
   `docs/packages.md`, which subscription accounts answer with a 400
   (`sdk_bridge_prompt_refused`). Other clients' system prompts are not sent.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
