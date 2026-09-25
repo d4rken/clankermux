@@ -4,13 +4,13 @@ import {
 	getNativeResponsesMetaContext,
 	type RequestMeta,
 	SDK_BRIDGE_PI_PROMPT_HEADER,
-	SDK_BRIDGE_SIDE_REQUEST_HEADER,
 	SdkBridgeCapacityError,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
 	sdkBridgeHeaderToken,
+	sdkBridgeSideRequestMode,
 } from "@clankermux/types";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
@@ -116,7 +116,7 @@ export function sdkBridgeTurnMeta(
 		translationGaps:
 			getNativeResponsesMetaContext(meta)?.translationGaps ?? null,
 		piPromptVersion: sdkBridgeHeaderToken(headers, SDK_BRIDGE_PI_PROMPT_HEADER),
-		sideRequest: sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER),
+		sideRequest: sdkBridgeSideRequestMode(headers),
 	};
 }
 
@@ -288,7 +288,7 @@ export async function continueParkedSdkBridgeTurn(input: {
 	if (requestMeta.officialAnthropicVia !== "sdk-bridge" || !bridge) return null;
 	// A side request never answers the conversation's parked turn; the bridge
 	// refuses tool results on it.
-	if (req.headers.has(SDK_BRIDGE_SIDE_REQUEST_HEADER)) return null;
+	if (sdkBridgeSideRequestMode(req.headers) !== null) return null;
 	const ids = lastUserToolResultIds(input.parsedBody);
 	if (!ids.length) return null;
 	const parked = bridge.findContinuation(ids, {

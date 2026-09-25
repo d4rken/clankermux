@@ -7,7 +7,6 @@ export interface SdkBridgeRefusedField {
 }
 
 const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
-/** A side request runs with no tools at all, which is what "none" asks for. */
 const SIDE_REQUEST_FORCING_TOOL_CHOICES = new Set(["any", "tool"]);
 
 /**

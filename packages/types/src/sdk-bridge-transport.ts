@@ -117,7 +117,7 @@ export interface SdkBridgeTurnMeta {
 	readonly translationGaps: SdkBridgeTranslationGaps | null;
 	/** The client's {@link SDK_BRIDGE_PI_PROMPT_HEADER}, sanitized; null when absent. */
 	readonly piPromptVersion: string | null;
-	/** The client's {@link SDK_BRIDGE_SIDE_REQUEST_HEADER}, sanitized; null when absent. */
+	/** {@link sdkBridgeSideRequestMode}: null when absent, "" when blank. */
 	readonly sideRequest: string | null;
 }
 
@@ -161,12 +161,14 @@ export function sdkBridgeHeaderToken(
 	return value || null;
 }
 
-/** Whether the request declares the side-request mode the bridge serves. */
-export function isSdkBridgeSideRequestFork(headers: Headers): boolean {
-	return (
-		sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER) ===
-		SDK_BRIDGE_SIDE_REQUEST_FORK
-	);
+/**
+ * The side-request mode a request declares, sanitized like
+ * {@link sdkBridgeHeaderToken}: null without the header, "" when it is
+ * blank, which is a declaration the bridge refuses rather than none.
+ */
+export function sdkBridgeSideRequestMode(headers: Headers): string | null {
+	if (!headers.has(SDK_BRIDGE_SIDE_REQUEST_HEADER)) return null;
+	return sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER) ?? "";
 }
 
 export interface SdkBridgeTransport {
