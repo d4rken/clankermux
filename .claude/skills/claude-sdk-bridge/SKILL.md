@@ -164,10 +164,18 @@ All refusals are `400 invalid_request_error`:
 | `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more often than the head and its updates account for (at least once is always allowed), or the stock preamble not followed by the full head |
 | `sdk_bridge_prompt_refused` | the forwarded text carries pi's preamble line at a line start, or both `docs/custom-provider.md` and `docs/packages.md`; subscription accounts answer those with a 400. A persona embedding its parent's pi prompt lands here too |
 
-The Responses adapter folds every instruction message into `system`, so
-pi's later section updates arrive after the leading prompt. The Chat
-adapter refuses instruction messages after the first non-instruction one,
-so there only leading ones arrive.
+pi's clankermux provider (openai-responses, no `compat`) sends one leading
+system message: pi-ai's `resolveTranscript` collapses every later system
+message into it, patching sections in place and appending new ones at the
+end. A mid-session tools change therefore stays inside the head and is
+stripped with it. A session whose replaced preamble goes back to stock
+comes out as the stock preamble with `tools`, `rules` and `docs` after
+everything else, which is refused as `incomplete_head`. Separate
+`Updated system prompt section` messages only arrive from a model with
+`supportsMidConvoSystemMessages`; the Responses adapter folds them into
+`system`, the Chat adapter refuses instruction messages after the first
+non-instruction one. Fixtures carry a `transport` saying which shape they
+are.
 
 Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code
