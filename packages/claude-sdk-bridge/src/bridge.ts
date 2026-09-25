@@ -76,7 +76,9 @@ import {
 import {
 	type Block,
 	blocksOf,
+	parseTurnBody,
 	parseTurnRequest,
+	type TurnBody,
 	type TurnRequest,
 } from "./turn-request";
 import {
@@ -495,7 +497,7 @@ export function createClaudeSdkBridge(
 			start: StartInput;
 			run: QueryFn;
 			mcp: McpSdk;
-			turn: TurnRequest;
+			turn: TurnBody;
 			target: SdkBridgeRouteCandidate;
 			toolNames: ToolNames;
 			systemPrompt: SystemPromptDecision;
@@ -646,7 +648,7 @@ export function createClaudeSdkBridge(
 		live: LiveQuery,
 		recorder: TurnRecorder,
 		row: Omit<SdkBridgeTurnInsert, "id">,
-		turn: TurnRequest,
+		turn: TurnBody,
 		start: StartInput,
 	): Promise<Response> {
 		const { plan, meta } = start;
@@ -717,12 +719,90 @@ export function createClaudeSdkBridge(
 			);
 		const body = await readBody(input.request);
 		if ("error" in body) return refuse(body.error, body.error.reason);
+		/** What every start needs once its body is read: target, tools, prompt, conversation. */
+		const prepare = (
+			turn: TurnBody,
+		):
+			| Response
+			| {
+					target: SdkBridgeRouteCandidate;
+					toolNames: ToolNames;
+					systemPrompt: SystemPromptDecision;
+					convKey: string | null;
+			  } => {
+			const target =
+				plan.candidates.find((c) => c.accountId === plan.preferredAccountId) ??
+				plan.candidates[0];
+			if (!target)
+				return refuse(bridgeErrors.noEligibleAccount(), "no_eligible_account");
+			let toolNames: ToolNames;
+			try {
+				toolNames = new ToolNames(turn.tools.map((t) => t.name));
+			} catch (error) {
+				return refuse(bridgeErrors.invalid(errorSummary(error)), "invalid");
+			}
+
+			// Before the conversation claim: a refused prompt supersedes nothing.
+			const decided = policy.decide(turn.systemText, {
+				model: target.upstreamModel,
+				clientHarness: meta.clientHarness,
+				piPromptVersion: meta.piPromptVersion,
+			});
+			promptRecord.detail = decided.detail;
+			if (!decided.ok) return refuse(decided.error, decided.reason);
+			let convKey: string | null = null;
+			try {
+				convKey = conversationKey({
+					apiKeyId: meta.apiKeyId,
+					affinityScope: meta.affinityScope,
+					affinityKey: meta.affinityKey,
+					firstUserDigest: firstUserDigest(turn.messages),
+				});
+			} catch (error) {
+				// Without a key the turn is a fresh session, rebuilt from its history.
+				log.warn(
+					`SDK bridge turn ${plan.turnId}: no conversation key (${errorSummary(error)})`,
+				);
+			}
+			return {
+				target,
+				toolNames,
+				systemPrompt: decided.decision,
+				convKey,
+			};
+		};
+
+		if (kind === "side_request") {
+			// Its messages are compared with the stored conversation before
+			// anything requires them to end in a user message.
+			const parsed = parseTurnBody(
+				body.json,
+				meta.reasoningEffort,
+				body.bytes,
+				meta.translationGaps,
+				"side_request",
+			);
+			if (!parsed.ok) return refuse(parsed.error, "invalid");
+			const prepared = prepare(parsed.body);
+			if (prepared instanceof Response) return prepared;
+			return startSideRequest({
+				start: input,
+				run,
+				mcp,
+				turn: parsed.body,
+				...prepared,
+				recorder,
+				startedAt,
+				promptRecord,
+				refuse,
+			});
+		}
+
 		const parsed = parseTurnRequest(
 			body.json,
 			meta.reasoningEffort,
 			body.bytes,
 			meta.translationGaps,
-			kind,
 		);
 		if (!parsed.ok) return refuse(parsed.error, "invalid");
 		const turn = parsed.turn;
@@ -731,11 +811,6 @@ export function createClaudeSdkBridge(
 		// an earlier round are a stale replay of that query; otherwise the query
 		// is gone, and the history up to its tool calls rebuilds it.
 		const resultIds = toolResultIds(turn);
-		if (kind === "side_request" && resultIds.length)
-			return refuse(
-				bridgeErrors.invalid("A side request cannot carry tool results"),
-				"invalid",
-			);
 		const deadContinuation = resultIds.length > 0;
 		if (deadContinuation) {
 			const issuer = liveIssuing(resultIds);
@@ -749,56 +824,9 @@ export function createClaudeSdkBridge(
 			if (!answersFinalToolCalls(normalizeHistory(turn.history), resultIds))
 				return refuse(bridgeErrors.deadTurn(), "dead_turn");
 		}
-		const target =
-			plan.candidates.find((c) => c.accountId === plan.preferredAccountId) ??
-			plan.candidates[0];
-		if (!target)
-			return refuse(bridgeErrors.noEligibleAccount(), "no_eligible_account");
-		let toolNames: ToolNames;
-		try {
-			toolNames = new ToolNames(turn.tools.map((t) => t.name));
-		} catch (error) {
-			return refuse(bridgeErrors.invalid(errorSummary(error)), "invalid");
-		}
-
-		// Before the conversation claim: a refused prompt supersedes nothing.
-		const decided = policy.decide(turn.systemText, {
-			model: target.upstreamModel,
-			clientHarness: meta.clientHarness,
-			piPromptVersion: meta.piPromptVersion,
-		});
-		promptRecord.detail = decided.detail;
-		if (!decided.ok) return refuse(decided.error, decided.reason);
-		const systemPrompt = decided.decision;
-		let convKey: string | null = null;
-		try {
-			convKey = conversationKey({
-				apiKeyId: meta.apiKeyId,
-				affinityScope: meta.affinityScope,
-				affinityKey: meta.affinityKey,
-				firstUserDigest: firstUserDigest(turn.messages),
-			});
-		} catch (error) {
-			// Without a key the turn is a fresh session, rebuilt from its history.
-			log.warn(
-				`SDK bridge turn ${plan.turnId}: no conversation key (${errorSummary(error)})`,
-			);
-		}
-		if (kind === "side_request")
-			return startSideRequest({
-				start: input,
-				run,
-				mcp,
-				turn,
-				target,
-				toolNames,
-				systemPrompt,
-				convKey,
-				recorder,
-				startedAt,
-				promptRecord,
-				refuse,
-			});
+		const prepared = prepare(turn);
+		if (prepared instanceof Response) return prepared;
+		const { target, toolNames, systemPrompt, convKey } = prepared;
 		// A new turn replaces one of its conversation still waiting on tool
 		// results; the old one could only ever be answered out of order now.
 		// Synchronous, so a continuation for it arriving meanwhile finds it closed.
@@ -981,7 +1009,7 @@ export function createClaudeSdkBridge(
 		start: StartInput;
 		run: QueryFn;
 		mcp: McpSdk;
-		turn: TurnRequest;
+		turn: TurnBody;
 		target: SdkBridgeRouteCandidate;
 		toolNames: ToolNames;
 		systemPrompt: SystemPromptDecision;
@@ -1017,6 +1045,11 @@ export function createClaudeSdkBridge(
 		if (tail.length > 1)
 			return mismatch(
 				`${tail.length} messages follow the stored history, not one user message`,
+			);
+		if (next.content.some((b) => b.type === "tool_result"))
+			return refuse(
+				bridgeErrors.invalid("A side request cannot carry tool results"),
+				"invalid",
 			);
 
 		// From the copy until the query is live, a failed start deletes the copy.

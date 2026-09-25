@@ -142,12 +142,14 @@ What differs from a direct request:
   refused (`tool_choice: "none"` is accepted here), so the conversation's
   next turn resumes as if they never happened. If the model still calls a
   tool, the text before the call is the answer; a call with no text is a 502
-  `sdk_bridge_side_request_tool_call`. Nothing is rebuilt for them: a conversation with no stored session
-  gets a 409 `sdk_bridge_side_request_no_session`, and a history that is not
-  the stored one plus one user message a 409
-  `sdk_bridge_side_request_prefix_mismatch`. Another header value is a 400
-  (`sdk_bridge_side_request_unknown`). On a route that is not served this way
-  the header does nothing.
+  `sdk_bridge_side_request_tool_call`. The answer is one model call's: a
+  reply cut off at the output limit ends there, with stop reason
+  `max_tokens`. Nothing is rebuilt for them: a conversation with no stored
+  session gets a 409 `sdk_bridge_side_request_no_session`, and a history
+  that is not the stored one plus one user message a 409
+  `sdk_bridge_side_request_prefix_mismatch`. Another header value, a blank
+  one included, is a 400 (`sdk_bridge_side_request_unknown`). On a route
+  that is not served this way the header does nothing.
 * `max_tokens` applies to each model call, not to the whole reply.
 * Each user turn starts a Claude Code process, which adds 1–3 s. A
   conversation resumes across turns only when the client sends a session

@@ -1,6 +1,6 @@
 import type { SdkBridgeRoutePlan } from "@clankermux/types";
 import { type BridgeError, bridgeErrors } from "./errors";
-import type { TurnRequest } from "./turn-request";
+import type { TurnBody } from "./turn-request";
 import type { SdkBridgeLimits } from "./types";
 
 export type AdmissionRejection = BridgeError & { reason: string };
@@ -28,7 +28,7 @@ export function checkBodySize(
  * sessions, so they only stop runaway requests.
  */
 export function checkAdmission(input: {
-	turn: TurnRequest;
+	turn: TurnBody;
 	plan: SdkBridgeRoutePlan;
 	limits: SdkBridgeLimits;
 	/** Claude Code processes alive now, parked ones included. */

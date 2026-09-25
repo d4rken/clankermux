@@ -169,20 +169,11 @@ export function messageDigests(messages: readonly ClientMessage[]): string[] {
 	});
 }
 
-/**
- * The normalized messages after the ones `stored` digests, or null when the
- * messages do not start with that conversation. Messages that digest empty
- * are skipped, up to the first one after it, as {@link messageDigests} skips
- * them.
- *
- *   stored [u1, a1], messages [u1, a1, u2] → [u2]
- *   stored [u1, a1], messages [u1, a1']    → null
- */
-export function messagesAfter(
-	messages: readonly ClientMessage[],
+/** The normalized messages after the ones `stored` digests, or null. */
+function normalizedAfter(
+	normalized: readonly ApiMessage[],
 	stored: readonly string[],
 ): ApiMessage[] | null {
-	const normalized = normalizeHistory(messages);
 	let matched = 0;
 	let index = 0;
 	for (; index < normalized.length && matched < stored.length; index++) {
@@ -198,6 +189,39 @@ export function messagesAfter(
 	)
 		index++;
 	return normalized.slice(index);
+}
+
+/**
+ * The normalized messages after the ones `stored` digests, or null when the
+ * messages do not start with that conversation. Messages that digest empty
+ * are skipped, up to the first one after it, as {@link messageDigests} skips
+ * them.
+ *
+ *   stored [u1, a1], messages [u1, a1, u2] → [u2]
+ *   stored [u1, a1], messages [u1, a1']    → null
+ *
+ * An empty reply is stored as nothing, and replayed as an assistant message
+ * that normalizes away and would merge the next user message into the one
+ * before it. It still ends the stored conversation:
+ *
+ *   stored [u1], messages [u1, a(empty), u2] → [u2]
+ */
+export function messagesAfter(
+	messages: readonly ClientMessage[],
+	stored: readonly string[],
+): ApiMessage[] | null {
+	const direct = normalizedAfter(normalizeHistory(messages), stored);
+	if (direct) return direct;
+	const reply = messages.findLastIndex((m) => m.role === "assistant");
+	const replayed = messages[reply];
+	if (!replayed || normalizeHistory([replayed]).length) return null;
+	const before = normalizedAfter(
+		normalizeHistory(messages.slice(0, reply)),
+		stored,
+	);
+	return before?.length === 0
+		? normalizeHistory(messages.slice(reply + 1))
+		: null;
 }
 
 export function firstUserDigest(messages: readonly ClientMessage[]): string {

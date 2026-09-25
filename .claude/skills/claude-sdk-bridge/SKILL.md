@@ -189,14 +189,21 @@ its reply and one new prompt, `tool_choice: "none"`, a capped output) that
 must not become the conversation's next turn. Only a bridged attempt acts
 on it; on any other route the header does nothing.
 
-- **Proxy.** The value reaches the bridge as `SdkBridgeTurnMeta.sideRequest`.
-  Routing lets `tool_choice: none` through only for the exact value
-  (`sdkBridgeRefusedField(body, { sideRequest })`), and a request carrying
-  the header never takes the continuation shortcut.
+- **Proxy.** One reading of the header, `sdkBridgeSideRequestMode`: null
+  when absent, `""` when blank, which is a declaration and never an
+  ordinary turn. It reaches the bridge as `SdkBridgeTurnMeta.sideRequest`,
+  and a request carrying it never takes the continuation shortcut. Routing
+  lets `tool_choice: none` through only for the exact value
+  (`sdkBridgeRefusedField(body, { sideRequest })`), and skips the field
+  refusal for any other value, so the bridge answers it with its own code.
 - **Verification.** `ConversationStore.peek` reads `current` without the
   busy lock and changes nothing; it waits only for a session already
-  settling, at most `settleWaitMs`. The body must be `current`'s messages
-  plus exactly one user message (`messagesAfter`). Nothing is rebuilt.
+  settling, at most `settleWaitMs`. The body (`parseTurnBody`, which unlike
+  a turn's parse requires no final user message) must be `current`'s
+  messages plus exactly one user message (`messagesAfter`). A stored empty
+  reply is nothing in the digests, and its replay an assistant message that
+  normalizes away; it still ends the stored conversation. Nothing is
+  rebuilt.
 - **Run.** The `side_request` parse admits `tool_choice: none`. The query
   resumes a copy of `current` (`FileSessionStore.fork`) with the new message
   as its prompt and the replayed tools exactly as a turn would get them
@@ -211,8 +218,12 @@ on it; on any other route the header does nothing.
   once ("Tools are disabled in a side request"); nothing parks and no
   `tool_use` reaches the client. A model message ending in a call settles
   the reply: its text is the answer (`end_turn`), and a call with no text
-  is a 502 `sdk_bridge_side_request_tool_call`. Claude Code's
-  `error_max_turns` result after that is the expected end, not a failure.
+  is a 502 `sdk_bridge_side_request_tool_call`.
+- **One model call.** A `max_tokens` stop settles the reply too, truncated,
+  with `max_tokens` as its stop reason. Once the reply is settled the turn
+  token is revoked, so a recovery call is refused before it spends output
+  past the client's cap, and whatever Claude Code reports afterwards
+  (`error_max_turns`, a failed call) leaves the turn as it was.
 - **Accounting.** It counts against `maxProcesses`. Its row has
   `sdk_bridge_turns.kind = side_request` (`turn` otherwise), and the
   `sideRequests` counter counts it next to `turnsStarted`.
@@ -220,8 +231,8 @@ on it; on any other route the header does nothing.
 | Answer | When |
 | --- | --- |
 | 409 `sdk_bridge_side_request_no_session` | no session header, no completed turn stored, or its files gone |
-| 409 `sdk_bridge_side_request_prefix_mismatch` | the history differs from the stored one, or anything other than one user message follows it (an unregistered main turn in between included) |
-| 400 `sdk_bridge_side_request_unknown` | any other header value |
+| 409 `sdk_bridge_side_request_prefix_mismatch` | the history differs from the stored one, or anything other than one user message follows it: nothing, an assistant message, an unregistered main turn |
+| 400 `sdk_bridge_side_request_unknown` | any other header value, a blank one included |
 | 400 `invalid_request_error` | tool results in the new message |
 | 502 `sdk_bridge_side_request_tool_call` | the model answered with a tool call and no text |
 

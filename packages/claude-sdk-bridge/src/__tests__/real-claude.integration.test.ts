@@ -246,6 +246,7 @@ describe.skipIf(reason !== null)(
 				const toolNext = s.toolNext as Run;
 				const textThenCall = s.textThenCall as Run;
 				const onlyCall = s.onlyCall as Run;
+				const cutOff = s.cutOff as Run;
 				console.log(
 					`[claude-sdk-bridge] side request cache reads: fork of a tool-free session ${side.upstream.map((c) => c.cacheRead)}, its next main turn ${next.upstream.map((c) => c.cacheRead)}; fork of a session with client tools ${toolSide.upstream.map((c) => c.cacheRead)}, its next main turn ${toolNext.upstream.map((c) => c.cacheRead)}`,
 				);
@@ -300,6 +301,13 @@ describe.skipIf(reason !== null)(
 				);
 				expect(onlyCall.upstream).toHaveLength(1);
 				expect(onlyCall.row).toMatchObject({ status: "failed" });
+				expect(cutOff.reply).toMatchObject({
+					status: 200,
+					stop: "max_tokens",
+					content: [{ type: "text", text: "echo: MAXTOK recap" }],
+				});
+				expect(cutOff.upstream).toHaveLength(1);
+				expect(cutOff.row).toMatchObject({ status: "completed" });
 				expect(s.forksLeft).toEqual([]);
 			},
 			TIMEOUT,

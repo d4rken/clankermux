@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mapEffort, parseTurnRequest } from "../turn-request";
+import { parseTurnBody, parseTurnRequest } from "../turn-request";
 
 const base = {
 	model: "claude-sonnet-5",
@@ -234,15 +234,19 @@ describe("field policy", () => {
 	});
 });
 
-describe("a side request", () => {
+describe("a side request's body", () => {
 	const side = (patch: Record<string, unknown>) =>
-		parseTurnRequest({ ...base, ...patch }, null, 1, null, "side_request");
+		parseTurnBody({ ...base, ...patch }, null, 1, null, "side_request");
 
 	it("takes tool_choice none, and still refuses one that forces a tool", () => {
 		expect(side({ tool_choice: { type: "none" } }).ok).toBe(true);
 		for (const tool_choice of [{ type: "any" }, { type: "tool", name: "read" }])
 			expect(side({ tool_choice }).ok).toBe(false);
 		expect(side({ stop_sequences: ["END"] }).ok).toBe(false);
+		// An ordinary turn keeps the refusal.
+		expect(
+			parseTurnBody({ ...base, tool_choice: { type: "none" } }, null, 1).ok,
+		).toBe(false);
 	});
 
 	it("keeps the tools the replayed body declares", () => {
@@ -256,11 +260,11 @@ describe("a side request", () => {
 			tool_choice: { type: "none" },
 		});
 		if (!parsed.ok) throw new Error(parsed.error.message);
-		expect(parsed.turn.tools.map((t) => t.name)).toEqual(["read"]);
+		expect(parsed.body.tools.map((t) => t.name)).toEqual(["read"]);
 	});
 
 	it("keeps the output cap and the effort", () => {
-		const parsed = parseTurnRequest(
+		const parsed = parseTurnBody(
 			{ ...base, max_tokens: 128, tool_choice: { type: "none" } },
 			"high",
 			1,
@@ -268,29 +272,18 @@ describe("a side request", () => {
 			"side_request",
 		);
 		if (!parsed.ok) throw new Error(parsed.error.message);
-		expect(parsed.turn.maxOutputTokens).toBe(128);
-		expect(parsed.turn.effort).toBe("high");
-	});
-});
-
-describe("mapEffort", () => {
-	it("maps the client vocabulary onto the SDK's", () => {
-		expect(mapEffort("minimal")).toBe("low");
-		expect(mapEffort("low")).toBe("low");
-		expect(mapEffort("xhigh")).toBe("xhigh");
-		expect(mapEffort("max")).toBe("max");
+		expect(parsed.body.maxOutputTokens).toBe(128);
+		expect(parsed.body.effort).toBe("high");
 	});
 
-	it("leaves thinking budgets and unknown names to Claude Code's default", () => {
-		expect(mapEffort("thinking:4096")).toBeNull();
-		expect(mapEffort("thinking")).toBeNull();
-		expect(mapEffort("turbo")).toBeNull();
-		expect(mapEffort(null)).toBeNull();
-	});
-
-	it("falls back to output_config.effort in the body", () => {
-		expect(mapEffort(null, { output_config: { effort: "medium" } })).toBe(
-			"medium",
-		);
+	it("does not require a final user message", () => {
+		expect(
+			side({
+				messages: [
+					{ role: "user", content: "a" },
+					{ role: "assistant", content: "b" },
+				],
+			}).ok,
+		).toBe(true);
 	});
 });

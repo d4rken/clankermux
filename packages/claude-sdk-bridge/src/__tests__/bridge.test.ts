@@ -1933,6 +1933,62 @@ describe("side requests", () => {
 		await expectMainResumes(h, r, mainSession);
 	});
 
+	it("refuses a replay with no new user message with 409", async () => {
+		const h = harness();
+		const { r, mainSession } = await mainTurn(h);
+		const replay = recap(r);
+		const unchanged = { ...replay, messages: replay.messages.slice(0, 2) };
+		const assistantAppended = {
+			...replay,
+			messages: [
+				...replay.messages.slice(0, 2),
+				{ role: "assistant", content: "an answer nobody asked for" },
+			],
+		};
+		for (const body of [unchanged, assistantAppended]) {
+			const res = await sideRequest(h, body).response;
+			expect(res.status).toBe(409);
+			expect(
+				((await res.json()) as { error: { code: string } }).error.code,
+			).toBe("sdk_bridge_side_request_prefix_mismatch");
+		}
+		expect(h.sdk.queries).toHaveLength(1);
+		await expectMainResumes(h, r, mainSession);
+	});
+
+	it("runs after a main turn whose reply was empty", async () => {
+		const h = harness();
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }], tools: [READ_TOOL] },
+			{ meta: header },
+		);
+		await mirror(t.query, [
+			{ uuid: "u1", message: { role: "user", content: "hello" } },
+		]);
+		t.query.emit(initMessage(), ...streamedMessage([]), resultMessage());
+		const r = await reply(t.response);
+		expect(r.content).toEqual([]);
+		await settled(h);
+		const s = sideRequest(h, recap(r));
+		const query = await h.sdk.next();
+		expect(query.options.resume).toBeTruthy();
+		expect(query.prompts[0]?.message.content).toEqual([
+			{ type: "text", text: "RECAP the session" },
+		]);
+		query.emit(
+			...streamedMessage([{ type: "text", text: "Nothing yet." }]),
+			resultMessage(),
+		);
+		expect((await reply(s.response)).status).toBe(200);
+		// A reply that was not empty still has to match.
+		const res = await sideRequest(
+			h,
+			recap({ content: [{ type: "text", text: "a reply never given" }] }),
+		).response;
+		expect(res.status).toBe(409);
+	});
+
 	it("refuses with 409 when the conversation has no stored session", async () => {
 		const h = harness();
 		const body = recap({ content: [{ type: "text", text: "echo: hello" }] });
@@ -1950,19 +2006,22 @@ describe("side requests", () => {
 		expect(h.sdk.queries).toHaveLength(0);
 	});
 
-	it("refuses an unknown side-request mode with 400", async () => {
+	it("refuses an unknown or blank side-request mode with 400, leaving the conversation", async () => {
 		const h = harness();
-		const { r } = await mainTurn(h);
-		const s = sideRequest(h, recap(r), { ...header, sideRequest: "fork-v9" });
-		const res = await s.response;
-		expect(res.status).toBe(400);
-		const { error } = (await res.json()) as {
-			error: { code: string; message: string };
-		};
-		expect(error.code).toBe("sdk_bridge_side_request_unknown");
-		expect(error.message).toContain("fork-v9");
+		const { r, mainSession } = await mainTurn(h);
+		for (const mode of ["fork-v9", ""]) {
+			const s = sideRequest(h, recap(r), { ...header, sideRequest: mode });
+			const res = await s.response;
+			expect(res.status).toBe(400);
+			const { error } = (await res.json()) as {
+				error: { code: string; message: string };
+			};
+			expect(error.code).toBe("sdk_bridge_side_request_unknown");
+			expect(error.message).toContain(`"${mode}"`);
+			expect(h.repo.turns.get(s.plan.turnId)?.kind).toBe("side_request");
+		}
 		expect(h.sdk.queries).toHaveLength(1);
-		expect(h.repo.turns.get(s.plan.turnId)?.kind).toBe("side_request");
+		await expectMainResumes(h, r, mainSession);
 	});
 
 	it("refuses tool results with 400", async () => {
@@ -2099,6 +2158,41 @@ describe("side requests", () => {
 			});
 			await expectMainResumes(h, r, mainSession);
 		});
+	});
+
+	it("ends the reply at a max_tokens stop, and Claude Code makes no further call", async () => {
+		const h = harness();
+		const { r, mainSession } = await mainTurn(h);
+		const s = sideRequest(h, recap(r));
+		const query = await h.sdk.next();
+		query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "A recap cut" }], {
+				stopReason: "max_tokens",
+			}),
+		);
+		expect(await reply(s.response)).toMatchObject({
+			status: 200,
+			stop: "max_tokens",
+			content: [{ type: "text", text: "A recap cut" }],
+			errors: [],
+		});
+		// Its recovery call would spend output past the client's cap.
+		expect((await innerCall(query)).status).toBe(401);
+		query.emit(
+			...streamedMessage([{ type: "text", text: " short." }]),
+			resultMessage({ isError: true, subtype: "error_max_turns" }),
+		);
+		query.end();
+		await settled(h);
+		await waitFor(
+			() => h.repo.turns.get(s.plan.turnId)?.status === "completed",
+		);
+		expect(h.repo.turns.get(s.plan.turnId)?.legs[0]).toMatchObject({
+			httpStatus: 200,
+			stopReason: "max_tokens",
+		});
+		await expectMainResumes(h, r, mainSession);
 	});
 
 	describe("deletes its copy and leaves the conversation's session", () => {

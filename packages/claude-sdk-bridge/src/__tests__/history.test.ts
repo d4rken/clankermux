@@ -174,6 +174,37 @@ describe("messagesAfter", () => {
 		expect(messagesAfter(conversation.slice(0, 3), stored)).toBeNull();
 	});
 
+	it("takes an empty replayed reply for an empty stored one", () => {
+		// An empty reply is stored as nothing; replayed, it would merge the
+		// prompt into the user message before it.
+		const asked: ClientMessage[] = [{ role: "user", content: "a" }];
+		const digests = messageDigests([
+			...asked,
+			{ role: "assistant", content: [] },
+		]);
+		expect(
+			messagesAfter(
+				[
+					...asked,
+					{ role: "assistant", content: [] },
+					{ role: "user", content: "recap" },
+				],
+				digests,
+			),
+		).toEqual([{ role: "user", content: [{ type: "text", text: "recap" }] }]);
+		// A reply that was not empty is not the stored one: it stays in the tail.
+		expect(
+			messagesAfter(
+				[
+					...asked,
+					{ role: "assistant", content: "not empty" },
+					{ role: "user", content: "recap" },
+				],
+				digests,
+			)?.map((m) => m.role),
+		).toEqual(["assistant", "user"]);
+	});
+
 	it("skips a message that digests empty, as the digests do", () => {
 		const withThinkingOnly: ClientMessage[] = [
 			{ role: "user", content: "a" },

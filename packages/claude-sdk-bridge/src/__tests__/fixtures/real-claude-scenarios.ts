@@ -609,12 +609,19 @@ await scenario("sideRequestFork", async () => {
 		{ ...toolHeader, sideRequest: "session-fork-v1" },
 		recapFields,
 	);
+	// A max_tokens stop ends the copy's reply; no recovery call goes out.
+	const cutOff = await start(
+		[...toolHistory, { role: "user", content: "MAXTOK recap" }],
+		[READ_TOOL],
+		{ ...toolHeader, sideRequest: "session-fork-v1" },
+		recapFields,
+	);
 	toolHistory.push({ role: "user", content: "third main turn" });
 	const toolNext = await start(toolHistory, [READ_TOOL], toolHeader);
 
 	await Bun.sleep(3_000);
 	const onDisk = transcriptsOnDisk();
-	const forks = [side, toolSide, textThenCall, onlyCall].map((t) =>
+	const forks = [side, toolSide, textThenCall, onlyCall, cutOff].map((t) =>
 		String(t.row.ccSessionId),
 	);
 	return {
@@ -625,6 +632,7 @@ await scenario("sideRequestFork", async () => {
 		toolSide,
 		textThenCall,
 		onlyCall,
+		cutOff,
 		toolNext,
 		forksLeft: onDisk.filter((f) => forks.some((id) => f.includes(id))),
 	};

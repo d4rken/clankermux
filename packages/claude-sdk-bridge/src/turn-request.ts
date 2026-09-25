@@ -18,20 +18,14 @@ export interface ClientTool {
 	input_schema: Record<string, unknown>;
 }
 
-/** An outer Anthropic Messages request, as the bridge needs it. */
-export interface TurnRequest {
+/** An outer Anthropic Messages request body, as the bridge needs it. */
+export interface TurnBody {
 	model: string;
 	stream: boolean;
 	/** The client's own system prompt text, for the system-prompt policy. */
 	systemText: string;
 	/** Every message the client sent, in order. */
 	messages: ClientMessage[];
-	/** The conversation before the final user message. */
-	history: ClientMessage[];
-	/** The final user message: the trailing user messages, merged. */
-	last: ClientMessage & { role: "user" };
-	/** tool_result blocks of the final user message: a continuation when non-empty. */
-	toolResults: Block[];
 	tools: ClientTool[];
 	effort: EffortLevel | null;
 	/** The client's output limit; null when it set none. */
@@ -41,6 +35,16 @@ export interface TurnRequest {
 	/** Size of the whole request body. */
 	bodyBytes: number;
 	schemaBytes: number;
+}
+
+/** A body read as a user turn: the conversation so far and its final user message. */
+export interface TurnRequest extends TurnBody {
+	/** The conversation before the final user message. */
+	history: ClientMessage[];
+	/** The final user message: the trailing user messages, merged. */
+	last: ClientMessage & { role: "user" };
+	/** tool_result blocks of the final user message: a continuation when non-empty. */
+	toolResults: Block[];
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,128}$/;
@@ -177,13 +181,13 @@ function applyFieldPolicy(
 /** `side_request` parses a side request, where `tool_choice: none` passes. */
 export type TurnRequestMode = "turn" | "side_request";
 
-export function parseTurnRequest(
-	body: unknown,
-	reasoningEffort: string | null,
-	bodyBytes: number,
-	gaps: SdkBridgeTranslationGaps | null = null,
-	mode: TurnRequestMode = "turn",
-): { ok: true; turn: TurnRequest } | { ok: false; error: BridgeError } {
+type Parsed<T> = { ok: true; value: T } | { ok: false; error: BridgeError };
+
+function parseMessages(body: unknown): Parsed<{
+	body: Record<string, unknown>;
+	model: string;
+	messages: ClientMessage[];
+}> {
 	const fail = (error: BridgeError) => ({ ok: false as const, error });
 	if (!isRecord(body))
 		return fail(bridgeErrors.invalid("Body must be a JSON object"));
@@ -202,15 +206,22 @@ export function parseTurnRequest(
 			);
 		messages.push(message);
 	}
+	return { ok: true, value: { body, model: body.model, messages } };
+}
+
+function splitFinal(
+	messages: ClientMessage[],
+): Parsed<Pick<TurnRequest, "history" | "last" | "toolResults">> {
 	// Clients such as pi put system-role messages (effort changes, notes) into
 	// the history; the turn's own final message is the last non-system one.
 	let lastIndex = messages.length - 1;
 	while (lastIndex >= 0 && messages[lastIndex]?.role === "system") lastIndex--;
 	const final = messages[lastIndex];
 	if (!final || final.role !== "user")
-		return fail(
-			bridgeErrors.invalid("The last message must be a user message"),
-		);
+		return {
+			ok: false,
+			error: bridgeErrors.invalid("The last message must be a user message"),
+		};
 	// Consecutive user messages are one message to the Messages API, and Chat
 	// sends text typed with tool results as a user message after them.
 	let firstIndex = lastIndex;
@@ -224,21 +235,39 @@ export function parseTurnRequest(
 		.filter((m) => m.role === "user");
 	const last: ClientMessage =
 		run.length === 1 ? final : { role: "user", content: run.flatMap(blocksOf) };
-	const tools = parseTools(body.tools);
-	if ("status" in tools) return fail(tools);
-	const fields = applyFieldPolicy(body, gaps, mode);
-	if ("status" in fields) return fail(fields);
-	const toolResults = blocksOf(last).filter((b) => b.type === "tool_result");
 	return {
 		ok: true,
-		turn: {
-			model: body.model,
-			stream: body.stream === true,
-			systemText: systemTextOf(body.system),
-			messages,
+		value: {
 			history: messages.slice(0, firstIndex),
 			last: last as ClientMessage & { role: "user" },
-			toolResults,
+			toolResults: blocksOf(last).filter((b) => b.type === "tool_result"),
+		},
+	};
+}
+
+function parseFields(
+	read: {
+		body: Record<string, unknown>;
+		model: string;
+		messages: ClientMessage[];
+	},
+	reasoningEffort: string | null,
+	bodyBytes: number,
+	gaps: SdkBridgeTranslationGaps | null,
+	mode: TurnRequestMode,
+): Parsed<TurnBody> {
+	const { body } = read;
+	const tools = parseTools(body.tools);
+	if ("status" in tools) return { ok: false, error: tools };
+	const fields = applyFieldPolicy(body, gaps, mode);
+	if ("status" in fields) return { ok: false, error: fields };
+	return {
+		ok: true,
+		value: {
+			model: read.model,
+			stream: body.stream === true,
+			systemText: systemTextOf(body.system),
+			messages: read.messages,
 			tools: tools.tools,
 			effort: mapEffort(reasoningEffort, body),
 			maxOutputTokens: fields.maxOutputTokens,
@@ -247,4 +276,49 @@ export function parseTurnRequest(
 			schemaBytes: tools.schemaBytes,
 		},
 	};
+}
+
+/**
+ * The body alone, its messages not yet read as a turn: a side request
+ * compares them with the stored conversation before anything requires a
+ * final user message.
+ */
+export function parseTurnBody(
+	body: unknown,
+	reasoningEffort: string | null,
+	bodyBytes: number,
+	gaps: SdkBridgeTranslationGaps | null = null,
+	mode: TurnRequestMode = "turn",
+): { ok: true; body: TurnBody } | { ok: false; error: BridgeError } {
+	const read = parseMessages(body);
+	if (!read.ok) return read;
+	const parsed = parseFields(
+		read.value,
+		reasoningEffort,
+		bodyBytes,
+		gaps,
+		mode,
+	);
+	return parsed.ok ? { ok: true, body: parsed.value } : parsed;
+}
+
+export function parseTurnRequest(
+	body: unknown,
+	reasoningEffort: string | null,
+	bodyBytes: number,
+	gaps: SdkBridgeTranslationGaps | null = null,
+): { ok: true; turn: TurnRequest } | { ok: false; error: BridgeError } {
+	const read = parseMessages(body);
+	if (!read.ok) return read;
+	const split = splitFinal(read.value.messages);
+	if (!split.ok) return split;
+	const parsed = parseFields(
+		read.value,
+		reasoningEffort,
+		bodyBytes,
+		gaps,
+		"turn",
+	);
+	if (!parsed.ok) return parsed;
+	return { ok: true, turn: { ...parsed.value, ...split.value } };
 }
