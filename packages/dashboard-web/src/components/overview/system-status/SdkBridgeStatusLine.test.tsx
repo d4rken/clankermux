@@ -18,8 +18,16 @@ function status(over: Partial<SdkBridgeStatus> = {}): SdkBridgeStatus {
 			resumes: 0,
 			rebuilds: 0,
 			sideRequests: 0,
+			released: 0,
+			releaseFailures: 0,
+			releasesRefused: 0,
+			releasedResumes: 0,
+			releasedExpired: 0,
 		},
 		peakRssBytes: 262_144_000,
+		releasedParks: 0,
+		sessionBytes: null,
+		releaseBlocked: null,
 		...over,
 	};
 }
@@ -36,6 +44,21 @@ describe("SdkBridgeStatusLine", () => {
 		expect(line).toContain("Agent SDK bridge");
 		expect(line).toContain("Available");
 		expect(line).toContain("2 live · 1 parked · cap 8 · peak 250");
+	});
+
+	it("counts released parks, and says when parked turns are not released", () => {
+		const line = text(
+			status({
+				releasedParks: 3,
+				releaseBlocked:
+					"session files have reached sdk_bridge_session_bytes_ceiling",
+			}),
+		);
+		expect(line).toContain("2 live · 1 parked · 3 released · cap 8");
+		expect(line).toContain(
+			"Not releasing parked turns: session files have reached sdk_bridge_session_bytes_ceiling",
+		);
+		expect(text(status())).not.toContain("released");
 	});
 
 	it("leaves out peak RSS where it cannot be measured", () => {

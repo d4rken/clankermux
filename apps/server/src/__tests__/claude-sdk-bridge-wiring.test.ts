@@ -42,7 +42,7 @@ const turnRepo = {
 };
 
 /** A bridge module whose factory records the dependencies it was built with. */
-function fakeModule() {
+function fakeModule(ready: Promise<void> = Promise.resolve()) {
 	const built: ClaudeSdkBridgeDeps[] = [];
 	let disposals = 0;
 	let shutdowns = 0;
@@ -50,6 +50,7 @@ function fakeModule() {
 		createClaudeSdkBridge(deps: ClaudeSdkBridgeDeps) {
 			built.push(deps);
 			return {
+				ready: () => ready,
 				availability: () => ({ state: "available" as const }),
 				startTurn: async () => new Response("turn"),
 				continueTurn: async () => new Response("continue"),
@@ -143,6 +144,34 @@ describe("installSdkBridge", () => {
 			expect(fake.built[0]?.workRoot).toBe("/tmp/cmx-work");
 			expect(fake.built[0]?.turnRepo).toBe(turnRepo);
 			expect(wiring.status().cap).toBe(8);
+		});
+	});
+
+	it("exposes the transport only once released parks are recovered, and hands the bridge the park repository", async () => {
+		await withConfig(null, async (config) => {
+			let recovered!: () => void;
+			const fake = fakeModule(
+				new Promise<void>((resolve) => {
+					recovered = resolve;
+				}),
+			);
+			const proxyContext = {} as ProxyContext;
+			const parkRepo = {} as never;
+			const installing = installSdkBridge({
+				proxyContext,
+				config,
+				turnRepo,
+				parkRepo,
+				workRoot: "/tmp/cmx-work",
+				load: fake.load,
+			});
+			await Bun.sleep(20);
+			expect(fake.built).toHaveLength(1);
+			expect(fake.built[0]?.parkRepo).toBe(parkRepo);
+			expect(proxyContext.sdkBridge).toBeUndefined();
+			recovered();
+			const wiring = await installing;
+			expect(proxyContext.sdkBridge).toBe(wiring.transport);
 		});
 	});
 

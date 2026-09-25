@@ -87,6 +87,8 @@ export interface QueryOptionsInput {
 	sessionId: string;
 	/** Resume `sessionId` from the session store instead of starting it. */
 	resume: boolean;
+	/** With `resume`: continue from this transcript entry (a released park's calls). */
+	resumeSessionAt?: string | null;
 	/** Model turns before Claude Code stops; null leaves its own limit. */
 	maxTurns?: number | null;
 	sessionStore: SessionStore;
@@ -131,7 +133,12 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 		sessionStore: input.sessionStore,
 		sessionStoreFlush: "eager",
 		...(input.resume
-			? { resume: input.sessionId }
+			? {
+					resume: input.sessionId,
+					...(input.resumeSessionAt
+						? { resumeSessionAt: input.resumeSessionAt }
+						: {}),
+				}
 			: { sessionId: input.sessionId }),
 		env: childEnv(input),
 		pathToClaudeCodeExecutable: input.executablePath,

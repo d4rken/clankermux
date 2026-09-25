@@ -8,11 +8,13 @@ import type {
 	Options,
 	SDKMessage,
 	SDKUserMessage,
+	SessionStore,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
+	SdkBridgeReleasedPark,
 	SdkBridgeRoutePlan,
 	SdkBridgeTurnCounterDelta,
 	SdkBridgeTurnFinish,
@@ -28,6 +30,7 @@ import type {
 	BridgeQuery,
 	ClaudeSdkBridgeDeps,
 	QueryFn,
+	SdkBridgeParkRepo,
 	SdkBridgeTurnRepo,
 } from "../../types";
 
@@ -44,13 +47,33 @@ export class FakeQuery implements BridgeQuery {
 	private client: Promise<Client> | null = null;
 	private promptWaiters: Array<() => void> = [];
 
+	/** The session this query writes, as the SDK mirrors it into the store. */
+	readonly sessionId: string;
+	private lastUuid: string | null = null;
+	/** The child standing in for Claude Code, when the harness gives it one. */
+	pid: number | null = null;
+	/** Mirror transcript entries into the session store, as the real SDK does. */
+	mirrors = false;
+
 	constructor(
 		readonly options: Options,
 		prompt: AsyncIterable<SDKUserMessage>,
 	) {
+		this.sessionId = String(options.resume ?? options.sessionId ?? "");
+		if (options.resume) {
+			const entries = (
+				options.sessionStore as { read?: (id: string) => unknown[] | null }
+			)?.read?.(this.sessionId);
+			this.lastUuid =
+				options.resumeSessionAt ??
+				((entries ?? []) as Array<{ uuid?: string }>).findLast((e) => e.uuid)
+					?.uuid ??
+				null;
+		}
 		void (async () => {
 			for await (const message of prompt) {
 				this.prompts.push(message);
+				this.mirror("user", message.message);
 				for (const w of this.promptWaiters.splice(0)) w();
 			}
 			this.promptEnded = true;
@@ -65,8 +88,42 @@ export class FakeQuery implements BridgeQuery {
 		await new Promise<void>((resolve) => this.promptWaiters.push(resolve));
 	}
 
+	/** What the SDK appends to the session store for a transcript entry. */
+	private mirror(type: "user" | "assistant", message: unknown, uuid?: string) {
+		const store = this.options.sessionStore as SessionStore | undefined;
+		if (!this.mirrors || !store || !this.sessionId) return;
+		const entry = {
+			type,
+			uuid: uuid ?? crypto.randomUUID(),
+			parentUuid: this.lastUuid,
+			sessionId: this.sessionId,
+			message,
+		};
+		this.lastUuid = entry.uuid;
+		void store.append({ projectKey: "p", sessionId: this.sessionId }, [
+			entry as never,
+		]);
+	}
+
+	/** The stand-in process died: the SDK's stream ends with it. */
+	processExited(): void {
+		this.end();
+	}
+
 	emit(...messages: SDKMessage[]): void {
 		for (const message of messages) {
+			const m = message as {
+				type: string;
+				uuid?: string;
+				parent_tool_use_id?: string | null;
+				message?: { model?: string };
+			};
+			if (
+				m.type === "assistant" &&
+				m.parent_tool_use_id === null &&
+				m.message?.model !== "<synthetic>"
+			)
+				this.mirror("assistant", m.message, m.uuid);
 			const waiter = this.waiter;
 			if (waiter) {
 				this.waiter = null;
@@ -139,18 +196,49 @@ export class FakeQuery implements BridgeQuery {
 	}
 }
 
-export function fakeQueryFn(): {
+/**
+ * `process`: give each query a real child in its own process group, the way
+ * the bridge spawns Claude Code, whose exit ends the query's stream.
+ * `ignore-term` ignores SIGTERM, so only the SIGKILL ends it.
+ */
+export function fakeQueryFn(
+	opts: { process?: "normal" | "ignore-term" } = {},
+): {
 	fn: QueryFn;
 	queries: FakeQuery[];
 	next(): Promise<FakeQuery>;
+	/** Thrown by the next query() call, as a spawn failure would be. */
+	throwNext: Error | null;
 } {
 	const queries: FakeQuery[] = [];
 	const waiters: Array<(q: FakeQuery) => void> = [];
 	let taken = 0;
-	return {
+	const api = {
+		throwNext: null as Error | null,
 		queries,
-		fn: ({ prompt, options }) => {
+		fn: (({ prompt, options }) => {
+			if (api.throwNext) {
+				const error = api.throwNext;
+				api.throwNext = null;
+				throw error;
+			}
 			const query = new FakeQuery(options, prompt);
+			query.mirrors = opts.process !== undefined;
+			if (opts.process && options.spawnClaudeCodeProcess) {
+				const script =
+					opts.process === "ignore-term"
+						? "trap '' TERM; /bin/sleep 600"
+						: "exec /bin/sleep 600";
+				const child = options.spawnClaudeCodeProcess({
+					command: "/bin/sh",
+					args: ["-c", script],
+					cwd: options.cwd,
+					env: {},
+					signal: new AbortController().signal,
+				}) as unknown as import("node:child_process").ChildProcess;
+				query.pid = child.pid ?? null;
+				child.once("exit", () => query.processExited());
+			}
 			queries.push(query);
 			const waiter = waiters.shift();
 			if (waiter) {
@@ -158,13 +246,14 @@ export function fakeQueryFn(): {
 				waiter(query);
 			}
 			return query;
-		},
-		next() {
+		}) as QueryFn,
+		next(): Promise<FakeQuery> {
 			if (queries.length > taken)
 				return Promise.resolve(queries[taken++] as FakeQuery);
 			return new Promise((resolve) => waiters.push(resolve));
 		},
 	};
+	return api;
 }
 
 // ── SDK message builders ────────────────────────────────────────────────
@@ -422,6 +511,118 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 	};
 }
 
+/**
+ * `sdk_bridge_released_parks` in memory, moving the turn rows' status the way
+ * the repository's transactions do. `failNext` makes one method throw once.
+ */
+export function memoryParkRepo(
+	turns: Map<string, TurnRow>,
+): SdkBridgeParkRepo & {
+	parks: Map<string, SdkBridgeReleasedPark>;
+	failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>>;
+	calls: string[];
+} {
+	const parks = new Map<string, SdkBridgeReleasedPark>();
+	const failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>> = {};
+	const calls: string[] = [];
+	const check = (name: keyof SdkBridgeParkRepo) => {
+		calls.push(name);
+		const error = failNext[name];
+		if (error) {
+			delete failNext[name];
+			throw error;
+		}
+	};
+	const setStatus = (id: string, status: string) => {
+		const turn = turns.get(id);
+		if (turn) turn.status = status;
+	};
+	return {
+		parks,
+		failNext,
+		calls,
+		async insertPreparing(park) {
+			check("insertPreparing");
+			if (parks.has(park.turnId)) throw new Error("UNIQUE: park");
+			parks.set(park.turnId, {
+				...park,
+				state: "preparing",
+				claimOwner: null,
+				claimedAt: null,
+			});
+		},
+		async list() {
+			check("list");
+			return [...parks.values()].map((p) => ({ ...p }));
+		},
+		async markReleased(turnId, file) {
+			check("markReleased");
+			const park = parks.get(turnId);
+			if (park?.state !== "preparing") return false;
+			Object.assign(park, file, { state: "released" });
+			setStatus(turnId, "released");
+			return true;
+		},
+		async claim(turnId, owner, at) {
+			check("claim");
+			const park = parks.get(turnId);
+			if (park?.state !== "released") return false;
+			Object.assign(park, {
+				state: "claimed",
+				claimOwner: owner,
+				claimedAt: at,
+			});
+			setStatus(turnId, "running");
+			return true;
+		},
+		async unclaim(turnId, owner) {
+			check("unclaim");
+			const park = parks.get(turnId);
+			if (park?.state !== "claimed") return false;
+			if (owner !== null && park.claimOwner !== owner) return false;
+			Object.assign(park, {
+				state: "released",
+				claimOwner: null,
+				claimedAt: null,
+			});
+			setStatus(turnId, "released");
+			return true;
+		},
+		async markConsumed(turnId, owner) {
+			check("markConsumed");
+			const park = parks.get(turnId);
+			if (park?.state !== "claimed" || park.claimOwner !== owner) return false;
+			park.state = "consumed";
+			return true;
+		},
+		async delete(turnId) {
+			check("delete");
+			parks.delete(turnId);
+		},
+		async closeTurn(turnId, finish) {
+			check("closeTurn");
+			parks.delete(turnId);
+			const turn = turns.get(turnId);
+			if (turn) Object.assign(turn, finish);
+		},
+		async closeOpenTurnsWithoutPark(before, finish) {
+			check("closeOpenTurnsWithoutPark");
+			let n = 0;
+			for (const turn of turns.values())
+				if (
+					(turn.status === "running" || turn.status === "released") &&
+					!turn.finishedAt &&
+					Number(turn.startedAt) < before &&
+					!parks.has(turn.id)
+				) {
+					Object.assign(turn, finish);
+					n++;
+				}
+			return n;
+		},
+	};
+}
+
 // ── bridge, plan and request helpers ────────────────────────────────────
 
 export const silentLog: BridgeLog = {
@@ -534,11 +735,17 @@ export interface Harness {
 
 export function makeHarness(
 	overrides: Partial<ClaudeSdkBridgeDeps> = {},
+	opts: {
+		process?: "normal" | "ignore-term";
+		repo?: ReturnType<typeof memoryTurnRepo>;
+		workRoot?: string;
+	} = {},
 ): Harness {
-	const sdk = fakeQueryFn();
-	const repo = memoryTurnRepo();
+	const sdk = fakeQueryFn({ process: opts.process });
+	const repo = opts.repo ?? memoryTurnRepo();
 	const inner = fakeInner();
-	const workRoot = mkdtempSync(join(tmpdir(), "sdk-bridge-unit-"));
+	const workRoot =
+		opts.workRoot ?? mkdtempSync(join(tmpdir(), "sdk-bridge-unit-"));
 	const bridge = createClaudeSdkBridge({
 		queryFn: sdk.fn,
 		dispatchInner: inner.dispatch,

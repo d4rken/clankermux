@@ -10,12 +10,28 @@ interface TokenEntry {
 	context: SdkBridgeInnerContext;
 	models: ReadonlySet<string>;
 	revoked: boolean;
+	/** Settles once `beforeFirstDispatch` has run; its rejection refuses every call. */
+	gate: Promise<void> | null;
+	beforeFirstDispatch: (() => Promise<void>) | null;
 }
 
 export interface InnerRegistration {
 	/** The per-turn credential Claude Code sends as its auth token. */
 	token: string;
 	revoke(): void;
+	/**
+	 * Move the inner deadline (the turn's active-time budget resumed after a
+	 * park). Only `deadlineAt` changes; the route context stays as frozen.
+	 */
+	setDeadline(deadlineAt: number): void;
+}
+
+export interface InnerRegistrationHooks {
+	/**
+	 * Runs, and must succeed, before the first model call is dispatched: a
+	 * resumed release records that it is consumed before anything goes out.
+	 */
+	beforeFirstDispatch?: () => Promise<void>;
 }
 
 const MESSAGES_PATHS = new Set(["/v1/messages", "/v1/messages/count_tokens"]);
@@ -126,7 +142,10 @@ export class InnerListener {
 		return `http://127.0.0.1:${this.server.port}`;
 	}
 
-	register(context: SdkBridgeInnerContext): InnerRegistration {
+	register(
+		context: SdkBridgeInnerContext,
+		hooks: InnerRegistrationHooks = {},
+	): InnerRegistration {
 		const token = `cmxsdk_${this.instanceId}_${randomBytes(32).toString("base64url")}`;
 		const key = hash(token);
 		const entry: TokenEntry = {
@@ -140,6 +159,8 @@ export class InnerListener {
 				]),
 			),
 			revoked: false,
+			gate: null,
+			beforeFirstDispatch: hooks.beforeFirstDispatch ?? null,
 		};
 		this.tokens.set(key, entry);
 		return {
@@ -147,6 +168,9 @@ export class InnerListener {
 			revoke: () => {
 				entry.revoked = true;
 				this.tokens.delete(key);
+			},
+			setDeadline: (deadlineAt) => {
+				entry.context = Object.freeze({ ...entry.context, deadlineAt });
 			},
 		};
 	}
@@ -243,6 +267,28 @@ export class InnerListener {
 			body,
 			signal: req.signal,
 		});
+		if (entry.beforeFirstDispatch) {
+			entry.gate ??= entry.beforeFirstDispatch();
+			try {
+				await entry.gate;
+			} catch (error) {
+				this.opts.log.warn("SDK bridge: a model call was held back", error);
+				const message =
+					"The SDK bridge could not record this turn's resume; nothing was sent";
+				this.report(entry, {
+					requestId: "",
+					status: 503,
+					errorType: "api_error",
+					message,
+					retryAfter: null,
+					accountId: null,
+				});
+				return jsonError(503, "api_error", message);
+			}
+			// The turn may have ended while the gate ran.
+			if (entry.revoked || this.tokens.get(key) !== entry)
+				return unauthorized();
+		}
 		let response: Response;
 		try {
 			response = await this.opts.dispatchInner(inner, entry.context);

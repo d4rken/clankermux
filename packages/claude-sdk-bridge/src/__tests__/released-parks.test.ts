@@ -1,0 +1,993 @@
+/**
+ * Release-then-resume on the fake SDK: a parked query's process stops and
+ * its session waits in the released-parks directory; the client's results
+ * resume it at the parked calls, in this process or a later one.
+ *
+ * Each fake query gets a real child in its own process group (a sleep), so
+ * SIGTERM and SIGKILL are real, and the fake mirrors transcript entries
+ * into the session store the way the SDK does.
+ */
+import { afterEach, describe, expect, it } from "bun:test";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import {
+	assistantMessage,
+	type FakeQuery,
+	foldReply,
+	type Harness,
+	initMessage,
+	MODEL,
+	makeHarness,
+	makeMeta,
+	makePlan,
+	memoryParkRepo,
+	memoryTurnRepo,
+	messagesRequest,
+	parseSse,
+	READ_TOOL,
+	resultMessage,
+	streamedMessage,
+	waitFor,
+} from "./fixtures/fake-sdk";
+
+type Block = { type: string; [key: string]: unknown };
+type Msg = { role: string; content: unknown };
+
+interface ReleaseHarness extends Harness {
+	parkRepo: ReturnType<typeof memoryParkRepo>;
+}
+
+const cleanups: Array<() => Promise<void> | void> = [];
+afterEach(async () => {
+	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+function tempRoot(): string {
+	const dir = mkdtempSync(join(tmpdir(), "sdk-bridge-release-"));
+	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+	return dir;
+}
+
+async function releaseHarness(
+	opts: {
+		limits?: Record<string, number>;
+		timing?: Record<string, number>;
+		process?: "normal" | "ignore-term";
+		workRoot?: string;
+		repo?: ReturnType<typeof memoryTurnRepo>;
+		parkRepo?: ReturnType<typeof memoryParkRepo>;
+		keep?: boolean;
+	} = {},
+): Promise<ReleaseHarness> {
+	const repo = opts.repo ?? memoryTurnRepo();
+	const parkRepo = opts.parkRepo ?? memoryParkRepo(repo.turns);
+	const h = makeHarness(
+		{
+			parkRepo,
+			limits: () => ({
+				parkReleaseMs: 60,
+				releasedParkTtlMs: 60_000,
+				parkedTimeoutMs: 60_000,
+				...opts.limits,
+			}),
+			timing: {
+				headHoldMs: 1_000,
+				pingIntervalMs: 100,
+				settleWaitMs: 500,
+				idleTimeoutMs: 5_000,
+				exitGraceMs: 50,
+				maintenanceIntervalMs: 60_000,
+				releaseDrainMs: 8_000,
+				...opts.timing,
+			},
+		},
+		{
+			process: opts.process ?? "normal",
+			repo,
+			workRoot: opts.workRoot ?? tempRoot(),
+		},
+	);
+	if (!opts.keep) cleanups.push(() => h.bridge.dispose());
+	await h.bridge.ready();
+	return { ...h, parkRepo };
+}
+
+const first: Msg = { role: "user", content: "TOOL read" };
+
+function alive(pid: number | null): boolean {
+	if (pid === null) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function reply(response: Promise<Response>) {
+	const res = await response;
+	const text = await res.text();
+	const events = res.headers.get("content-type")?.includes("event-stream")
+		? parseSse(text)
+		: [];
+	return {
+		status: res.status,
+		body: events.length ? null : (JSON.parse(text || "null") as unknown),
+		...foldReply(events),
+	};
+}
+
+interface Parked {
+	turnId: string;
+	meta: SdkBridgeTurnMeta;
+	query: FakeQuery;
+	content: Block[];
+	ids: string[];
+	/** The MCP call Claude Code made for the first id; settles on cleanup only. */
+	call: Promise<unknown>;
+	answeredWhileAlive: () => boolean | null;
+}
+
+/**
+ * A turn parked on `ids`: the streamed message ends the leg, and Claude
+ * Code's envelopes (one per block) arrive after `message_stop`, as they do.
+ */
+async function parkTurn(
+	h: Harness,
+	opts: {
+		ids?: string[];
+		meta?: Partial<SdkBridgeTurnMeta>;
+		envelopes?: boolean;
+	} = {},
+): Promise<Parked> {
+	const ids = opts.ids ?? [`toolu_${crypto.randomUUID().slice(0, 8)}`];
+	const plan = makePlan();
+	const meta = makeMeta(opts.meta);
+	const response = h.bridge.startTurn({
+		request: messagesRequest({ tools: [READ_TOOL], messages: [first] }),
+		plan,
+		meta,
+		signal: new AbortController().signal,
+	});
+	const query = await h.sdk.next();
+	const msgId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+	const blocks: Block[] = [
+		{ type: "thinking", text: "hm" },
+		...ids.map((id) => ({
+			type: "tool_use",
+			id,
+			name: "mcp__c__read",
+			input: { path: id },
+		})),
+	];
+	query.emit(initMessage(), ...streamedMessage(blocks as never, { id: msgId }));
+	const r = await reply(response);
+	expect(r.stop).toBe("tool_use");
+	if (opts.envelopes !== false)
+		for (const block of blocks)
+			query.emit(
+				assistantMessage(
+					[
+						block.type === "thinking"
+							? { type: "thinking", thinking: "hm", signature: "sig" }
+							: block,
+					],
+					{ id: msgId, stopReason: "tool_use" },
+				),
+			);
+	let answeredAlive: boolean | null = null;
+	// Claude Code runs MCP calls one at a time: only the first one parks.
+	const call = query.callTool(ids[0] as string, "read").then((result) => {
+		answeredAlive = alive(query.pid);
+		return result;
+	});
+	await waitFor(() => h.bridge.status().parked === 1);
+	return {
+		turnId: plan.turnId,
+		meta,
+		query,
+		content: r.content,
+		ids,
+		call,
+		answeredWhileAlive: () => answeredAlive,
+	};
+}
+
+function results(p: Parked, ids: string[] = p.ids, extra: Block[] = []): Msg[] {
+	return [
+		first,
+		{ role: "assistant", content: p.content },
+		{
+			role: "user",
+			content: [
+				...ids.map((id) => ({
+					type: "tool_result",
+					tool_use_id: id,
+					content: `R-${id}`,
+				})),
+				...extra,
+			],
+		},
+	];
+}
+
+function answer(
+	h: Harness,
+	p: Parked,
+	messages: Msg[],
+	meta: Partial<SdkBridgeTurnMeta> = {},
+) {
+	return h.bridge.continueTurn({
+		turnId: p.turnId,
+		request: messagesRequest({ tools: [READ_TOOL], messages }),
+		meta: makeMeta(meta),
+		signal: new AbortController().signal,
+	});
+}
+
+async function released(h: ReleaseHarness, p: Parked) {
+	await waitFor(() => h.repo.turns.get(p.turnId)?.status === "released", 8_000);
+}
+
+function parkDir(h: Harness): string {
+	return join(h.workRoot, "released-parks");
+}
+
+function parkFiles(h: Harness): string[] {
+	return readdirSync(parkDir(h)).filter((n) => n.endsWith(".jsonl"));
+}
+
+/** Claude Code making a model call through the bridge's inner listener. */
+function innerCall(query: FakeQuery): Promise<Response> {
+	const env = query.options.env ?? {};
+	return fetch(`${env.ANTHROPIC_BASE_URL}/v1/messages?beta=true`, {
+		method: "POST",
+		headers: {
+			authorization: `Bearer ${env.ANTHROPIC_AUTH_TOKEN}`,
+			"content-type": "application/json",
+		},
+		body: JSON.stringify({ model: MODEL, messages: [], stream: true }),
+	});
+}
+
+/** A resumed query answering and finishing the turn. */
+async function finishResumed(
+	h: Harness,
+	query: FakeQuery,
+	response: Promise<Response>,
+) {
+	await innerCall(query);
+	query.emit(
+		initMessage(),
+		...streamedMessage([{ type: "text", text: "done" }]),
+		resultMessage(),
+	);
+	const r = await reply(response);
+	await waitFor(() => h.bridge.status().live === 0);
+	return r;
+}
+
+describe("releasing a parked query", () => {
+	it("stops the process without answering the call, stores the session and keeps the turn open", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		const pid = p.query.pid;
+		expect(alive(pid)).toBe(true);
+		const token = p.query.options.env?.ANTHROPIC_AUTH_TOKEN;
+		await released(h, p);
+
+		expect(alive(pid)).toBe(false);
+		// Nothing was interrupted, and the parked call was answered only once
+		// the process was gone: no synthetic result reached the transcript.
+		expect(p.query.interrupted).toBe(false);
+		await p.call;
+		expect(p.answeredWhileAlive()).toBe(false);
+		// The token went with it.
+		const late = await fetch(
+			`${p.query.options.env?.ANTHROPIC_BASE_URL}/v1/messages`,
+			{
+				method: "POST",
+				headers: { authorization: `Bearer ${token}` },
+				body: "{}",
+			},
+		);
+		expect(late.status).toBe(401);
+
+		const park = h.parkRepo.parks.get(p.turnId);
+		expect(park).toMatchObject({
+			state: "released",
+			ownerApiKeyId: "key-1",
+			awaitedToolUseIds: p.ids,
+			requestedModel: MODEL,
+		});
+		const descriptor = JSON.parse(String(park?.descriptor));
+		expect(descriptor).toMatchObject({
+			v: 1,
+			tools: [READ_TOOL],
+			systemPrompt: { append: null, excludeDynamicSections: false },
+			plan: { turnId: p.turnId, preferredAccountId: "acct-a" },
+			clientHarness: "opencode",
+			project: "proj",
+		});
+		// The file is in the released-parks directory, the generation's copy gone.
+		expect(parkFiles(h)).toEqual([String(park?.sessionFile)]);
+		expect(
+			readFileSync(join(parkDir(h), String(park?.sessionFile)), "utf8"),
+		).toContain(`"uuid":"${park?.resumeAt}"`);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+		expect(h.repo.turns.get(p.turnId)?.finishedAt).toBeUndefined();
+		expect(h.bridge.status()).toMatchObject({
+			live: 0,
+			parked: 0,
+			releasedParks: 1,
+			releaseBlocked: null,
+		});
+		expect(h.bridge.status().counters.released).toBe(1);
+		expect(
+			h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
+		).toEqual({
+			turnId: p.turnId,
+			ownerApiKeyId: "key-1",
+		});
+	});
+
+	it("resumes at the envelope that made the calls, even when it arrived after message_stop", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { ids: ["toolu_a", "toolu_b"] });
+		await released(h, p);
+		const park = h.parkRepo.parks.get(p.turnId);
+		const file = readFileSync(
+			join(parkDir(h), String(park?.sessionFile)),
+			"utf8",
+		)
+			.trim()
+			.split("\n")
+			.map((l) => JSON.parse(l));
+		// The last envelope of the message, the one carrying toolu_b.
+		const at = file.find((e) => e.uuid === park?.resumeAt);
+		expect(at.message.content[0].id).toBe("toolu_b");
+	});
+
+	it("does not release a query with no envelope for its calls; the parked timeout ends it", async () => {
+		const h = await releaseHarness({ limits: { parkedTimeoutMs: 300 } });
+		const p = await parkTurn(h, { envelopes: false });
+		await waitFor(
+			() => h.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(h.bridge.status().counters.releasesRefused).toBe(1);
+	});
+
+	it("escalates to SIGKILL when the process ignores SIGTERM", async () => {
+		const h = await releaseHarness({ process: "ignore-term" });
+		const p = await parkTurn(h);
+		const t0 = Date.now();
+		await released(h, p);
+		expect(Date.now() - t0).toBeGreaterThanOrEqual(1_900);
+		expect(alive(p.query.pid)).toBe(false);
+	});
+});
+
+describe("resuming a released park", () => {
+	it("resumes the stored session at the calls, with the results and the text as one prompt", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { ids: ["toolu_a", "toolu_b"] });
+		await released(h, p);
+		const park = h.parkRepo.parks.get(p.turnId);
+		let stateAtFirstCall: string | undefined;
+		h.inner.respond = () => {
+			stateAtFirstCall = h.parkRepo.parks.get(p.turnId)?.state;
+			return new Response("ok");
+		};
+
+		const response = answer(
+			h,
+			p,
+			results(p, ["toolu_a", "toolu_b"], [{ type: "text", text: "and also" }]),
+		);
+		const q2 = await h.sdk.next();
+		expect(q2.options.resume).toBeString();
+		expect(q2.options.resume).not.toBe(park?.sessionId);
+		expect(q2.options.resumeSessionAt).toBe(park?.resumeAt);
+		// The resume runs with the turn's own tools, from its descriptor.
+		expect(q2.options.allowedTools).toEqual(["mcp__c__read"]);
+		await waitFor(() => q2.prompts.length === 1);
+		expect(q2.prompts[0]?.message.content).toEqual([
+			{ type: "tool_result", tool_use_id: "toolu_a", content: "R-toolu_a" },
+			{ type: "tool_result", tool_use_id: "toolu_b", content: "R-toolu_b" },
+			{ type: "text", text: "and also" },
+		]);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("claimed");
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("running");
+
+		const r = await finishResumed(h, q2, response);
+		expect(stateAtFirstCall).toBe("consumed");
+		expect(r.content).toEqual([{ type: "text", text: "done" }]);
+		const turn = h.repo.turns.get(p.turnId);
+		expect(turn?.status).toBe("completed");
+		expect(turn?.legs.map((l) => [l.kind, l.httpStatus])).toEqual([
+			["start", 200],
+			["continue", 200],
+		]);
+		expect(turn?.counters.toolRounds).toBe(1);
+		await waitFor(() => !h.parkRepo.parks.has(p.turnId));
+		expect(parkFiles(h)).toEqual([]);
+		expect(h.bridge.status().counters.releasedResumes).toBe(1);
+		// Replaying the answered results is stale now.
+		expect(
+			h.bridge.findContinuation(["toolu_a"], {
+				apiKeyId: "key-1",
+				model: MODEL,
+			}),
+		).toBeNull();
+	});
+
+	it("holds results that arrive during the release until it is stored, then resumes", async () => {
+		const h = await releaseHarness({ process: "ignore-term" });
+		const p = await parkTurn(h);
+		await waitFor(() => h.bridge.status().parked === 0, 2_000);
+		// Mid release: the query is still found, and the results wait for it.
+		expect(
+			h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL })
+				?.turnId,
+		).toBe(p.turnId);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		await waitFor(() => h.repo.turns.get(p.turnId)?.legs.length === 2);
+		expect(q2.options.resumeSessionAt).toBe(
+			h.parkRepo.parks.get(p.turnId)?.resumeAt,
+		);
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+	});
+
+	it("gives a second claimant 409 stale while the first resumes", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		const one = answer(h, p, results(p));
+		const two = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		const second = await reply(two);
+		expect(second.status).toBe(409);
+		expect(JSON.stringify(second.body)).toContain("stale tool results");
+		expect((await finishResumed(h, q2, one)).status).toBe(200);
+		expect(h.sdk.queries.length).toBe(2);
+	});
+
+	it("refuses results that are partial, repeated or name another call with 409, and keeps the park", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { ids: ["toolu_a", "toolu_b"] });
+		await released(h, p);
+		for (const ids of [
+			["toolu_a"],
+			["toolu_a", "toolu_b", "toolu_b"],
+			["toolu_a", "toolu_b", "toolu_c"],
+		]) {
+			const r = await reply(answer(h, p, results(p, ids)));
+			expect(r.status).toBe(409);
+		}
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(h.sdk.queries.length).toBe(1);
+	});
+
+	it("refuses another key's results and leaves the park", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		const r = await reply(answer(h, p, results(p), { apiKeyId: "key-2" }));
+		expect(r.status).toBe(409);
+		expect(JSON.stringify(r.body)).toContain("another API key");
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+	});
+
+	it("ends the park when the caller's own results name another model, so they start a fresh turn", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		expect(
+			h.bridge.findContinuation(p.ids, {
+				apiKeyId: "key-1",
+				model: "claude-opus-5-5",
+			}),
+		).toBeNull();
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "aborted");
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(parkFiles(h)).toEqual([]);
+	});
+
+	it("falls back to a flattened dead continuation when the stored session is gone", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		for (const name of parkFiles(h)) rmSync(join(parkDir(h), name));
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		expect(q2.options.resume).toBeUndefined();
+		await waitFor(() => q2.prompts.length === 1);
+		expect(JSON.stringify(q2.prompts[0]?.message.content)).toContain(
+			"earlier_conversation",
+		);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "rebuilt" }]),
+			resultMessage(),
+		);
+		expect((await reply(response)).content).toEqual([
+			{ type: "text", text: "rebuilt" },
+		]);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("failed");
+		const fresh = [...h.repo.turns.values()].find((t) => t.id !== p.turnId);
+		expect(fresh).toMatchObject({
+			historyMode: "rebuild_flattened",
+			rebuildReason: "dead_continuation",
+		});
+	});
+
+	it("releases a resumed turn that parks again, replacing its spent park", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		const msgId = "msg_again";
+		const block = {
+			type: "tool_use",
+			id: "toolu_again",
+			name: "mcp__c__read",
+			input: {},
+		};
+		q2.emit(initMessage(), ...streamedMessage([block as never], { id: msgId }));
+		expect((await reply(response)).stop).toBe("tool_use");
+		q2.emit(assistantMessage([block], { id: msgId, stopReason: "tool_use" }));
+		void q2.callTool("toolu_again", "read");
+		await waitFor(
+			() =>
+				h.parkRepo.parks.get(p.turnId)?.awaitedToolUseIds[0] ===
+					"toolu_again" && h.parkRepo.parks.get(p.turnId)?.state === "released",
+			8_000,
+		);
+		expect(parkFiles(h).length).toBe(1);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+	});
+});
+
+describe("released parks and their conversation", () => {
+	it("a new turn of the conversation supersedes its released park", async () => {
+		const h = await releaseHarness();
+		const header = {
+			affinityScope: "client_session",
+			affinityKey: "conv-sup",
+		} as const;
+		const p = await parkTurn(h, { meta: header });
+		await released(h, p);
+		const next = h.bridge.startTurn({
+			request: messagesRequest({
+				tools: [READ_TOOL],
+				messages: [first, { role: "assistant", content: "never mind" }, first],
+			}),
+			plan: makePlan(),
+			meta: makeMeta(header),
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "aborted");
+		expect(String(h.repo.turns.get(p.turnId)?.errorMessage)).toContain(
+			"A new turn of this conversation",
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(parkFiles(h)).toEqual([]);
+		const late = await reply(answer(h, p, results(p)));
+		expect(late.status).toBe(409);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		expect((await reply(next)).status).toBe(200);
+	});
+});
+
+describe("expiry", () => {
+	it("ends a released park whose results never came, turn timed out and file gone", async () => {
+		const h = await releaseHarness({
+			limits: { releasedParkTtlMs: 200 },
+			timing: { maintenanceIntervalMs: 50 },
+		});
+		const p = await parkTurn(h);
+		await released(h, p);
+		await waitFor(
+			() => h.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(parkFiles(h)).toEqual([]);
+		expect(h.bridge.status().counters.releasedExpired).toBe(1);
+		expect(
+			h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
+		).toBeNull();
+	});
+});
+
+describe("the active-time budget", () => {
+	it("does not count parked time, and moves the inner deadline on resume", async () => {
+		const h = await releaseHarness({
+			limits: { turnDeadlineMs: 400, parkReleaseMs: 60_000 },
+		});
+		const p = await parkTurn(h);
+		// Parked for longer than the whole budget.
+		await Bun.sleep(700);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("running");
+		let deadlineAt = 0;
+		h.inner.respond = (_req, ctx) => {
+			deadlineAt = ctx.deadlineAt;
+			return new Response("ok");
+		};
+		const response = answer(h, p, results(p));
+		const t0 = Date.now();
+		await innerCall(p.query);
+		const t1 = Date.now();
+		// The budget left is at most what the turn had, counted from its resume.
+		expect(deadlineAt).toBeGreaterThan(t0);
+		expect(deadlineAt).toBeLessThanOrEqual(t1 + 400);
+		p.query.emit(
+			...streamedMessage([{ type: "text", text: "done" }]),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+	});
+
+	it("carries the budget across a release: a resume gets only what is left", async () => {
+		const h = await releaseHarness({ limits: { turnDeadlineMs: 300 } });
+		const p = await parkTurn(h);
+		await released(h, p);
+		const active = Number(h.parkRepo.parks.get(p.turnId)?.activeMs);
+		expect(active).toBeGreaterThanOrEqual(0);
+		expect(active).toBeLessThan(300);
+		const response = answer(h, p, results(p));
+		await h.sdk.next();
+		// Nothing more happens: the rest of the budget runs out.
+		const r = await reply(response);
+		expect(r.status).toBe(504);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "timed_out");
+	});
+});
+
+describe("the session byte ceiling", () => {
+	it("stops releasing when active sessions alone exceed it; the parked timeout applies", async () => {
+		const h = await releaseHarness({
+			limits: {
+				sessionBytesCeiling: 1,
+				parkReleaseMs: 150,
+				parkedTimeoutMs: 600,
+			},
+			timing: { maintenanceIntervalMs: 40 },
+		});
+		const p = await parkTurn(h);
+		await waitFor(() => h.bridge.status().releaseBlocked !== null);
+		expect(h.bridge.status().releaseBlocked).toContain("ceiling");
+		await waitFor(
+			() => h.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(h.bridge.status().counters.releasesRefused).toBe(1);
+		// New turns are never refused for it.
+		const t = h.bridge.startTurn({
+			request: messagesRequest({ messages: [{ role: "user", content: "hi" }] }),
+			plan: makePlan(),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		const q = await h.sdk.next();
+		q.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "hi" }]),
+			resultMessage(),
+		);
+		expect((await reply(t)).status).toBe(200);
+	});
+
+	it("evicts idle conversations, least recently used first, before refusing", async () => {
+		const limits = { sessionBytesCeiling: 1024 * 1024 * 1024 };
+		const h = await releaseHarness({
+			limits,
+			timing: { maintenanceIntervalMs: 40 },
+		});
+		const header = (key: string) =>
+			({ affinityScope: "client_session", affinityKey: key }) as const;
+		const sessionIds: string[] = [];
+		for (const key of ["old", "new"]) {
+			const t = h.bridge.startTurn({
+				request: messagesRequest({
+					messages: [{ role: "user", content: `hello ${key}` }],
+				}),
+				plan: makePlan(),
+				meta: makeMeta(header(key)),
+				signal: new AbortController().signal,
+			});
+			const q = await h.sdk.next();
+			sessionIds.push(q.sessionId);
+			const text = { type: "text", text: "x".repeat(4_000) };
+			q.emit(
+				initMessage(),
+				...streamedMessage([text as never], { id: `msg_${key}` }),
+				assistantMessage([text], { id: `msg_${key}`, stopReason: "end_turn" }),
+				resultMessage(),
+			);
+			await reply(t);
+			await waitFor(() => h.bridge.status().live === 0);
+			await Bun.sleep(30);
+		}
+		const gen = readdirSync(h.workRoot).find((n) => n.startsWith("gen-"));
+		const file = (id: string) =>
+			join(h.workRoot, String(gen), "sessions", `${id}.jsonl`);
+		const [oldId, newId] = sessionIds as [string, string];
+		expect(existsSync(file(oldId))).toBe(true);
+		// Room for one of the two.
+		limits.sessionBytesCeiling = readFileSync(file(newId)).length + 100;
+		await waitFor(() => !existsSync(file(oldId)), 2_000);
+		expect(existsSync(file(newId))).toBe(true);
+		expect(h.bridge.status().releaseBlocked).toBeNull();
+	});
+});
+
+describe("shutdown", () => {
+	it("releases parked turns at shutdown, and ones that park during the drain; dispose waits for them", async () => {
+		const h = await releaseHarness({
+			limits: { parkReleaseMs: 60_000 },
+			keep: true,
+		});
+		const p = await parkTurn(h);
+		const running = h.bridge.startTurn({
+			request: messagesRequest({ tools: [READ_TOOL], messages: [first] }),
+			plan: makePlan(),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		const q = await h.sdk.next();
+		q.emit(initMessage());
+		h.bridge.beginShutdown();
+		// It parks during the drain: its call reaches the client.
+		const block = {
+			type: "tool_use",
+			id: "toolu_drain",
+			name: "mcp__c__read",
+			input: {},
+		};
+		q.emit(...streamedMessage([block as never], { id: "msg_drain" }));
+		q.emit(
+			assistantMessage([block], { id: "msg_drain", stopReason: "tool_use" }),
+		);
+		const r = await reply(running);
+		expect(r.stop).toBe("tool_use");
+		await h.bridge.dispose();
+		expect(h.parkRepo.parks.size).toBe(2);
+		expect([...h.parkRepo.parks.values()].map((park) => park.state)).toEqual([
+			"released",
+			"released",
+		]);
+		expect(parkFiles(h).length).toBe(2);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+		rmSync(h.workRoot, { recursive: true, force: true });
+	});
+});
+
+describe("across a restart", () => {
+	it("a new bridge on the same work root and database resumes the park", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(1);
+		const found = b.bridge.findContinuation(p.ids, {
+			apiKeyId: "key-1",
+			model: MODEL,
+		});
+		expect(found?.turnId).toBe(p.turnId);
+		const response = answer(b, p, results(p));
+		const q2 = await b.sdk.next();
+		expect(q2.options.resumeSessionAt).toBe(
+			parkRepo.parks.get(p.turnId)?.resumeAt,
+		);
+		expect((await finishResumed(b, q2, response)).status).toBe(200);
+		expect(repo.turns.get(p.turnId)?.status).toBe("completed");
+	});
+
+	it("recovers every record state and leaves only resumable parks", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const kept = await parkTurn(a);
+		await released(a, kept);
+		const staleClaim = await parkTurn(a);
+		await released(a, staleClaim);
+		const missing = await parkTurn(a);
+		await released(a, missing);
+		await a.bridge.dispose();
+
+		const dir = join(workRoot, "released-parks");
+		const base = parkRepo.parks.get(kept.turnId);
+		// A claim a dead process held, with no model call after it.
+		await parkRepo.claim(staleClaim.turnId, "dead-owner", 1);
+		// A record whose file is gone.
+		rmSync(join(dir, String(parkRepo.parks.get(missing.turnId)?.sessionFile)));
+		// A release and a resume the old process never finished.
+		for (const [id, state] of [
+			["preparing-turn", "preparing"],
+			["consumed-turn", "consumed"],
+		] as const) {
+			const sid = crypto.randomUUID();
+			writeFileSync(join(dir, `${sid}.jsonl`), "{}\n");
+			await repo.insertTurn({
+				id,
+				startedAt: 1,
+				historyMode: "fresh",
+				systemPromptPolicy: "drop",
+			});
+			parkRepo.parks.set(id, {
+				...(base as NonNullable<typeof base>),
+				turnId: id,
+				sessionId: sid,
+				sessionFile: `${sid}.jsonl`,
+				state,
+			});
+		}
+		// A file no record names, a temp file, and a turn left running.
+		writeFileSync(join(dir, `${crypto.randomUUID()}.jsonl`), "{}\n");
+		writeFileSync(join(dir, ".tmp-deadbeef"), "partial");
+		await repo.insertTurn({
+			id: "orphan-turn",
+			startedAt: 1,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+		});
+
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(2);
+		expect([...parkRepo.parks.keys()].sort()).toEqual(
+			[kept.turnId, staleClaim.turnId].sort(),
+		);
+		expect(parkRepo.parks.get(staleClaim.turnId)?.state).toBe("released");
+		expect(repo.turns.get(missing.turnId)?.status).toBe("failed");
+		expect(repo.turns.get("preparing-turn")?.status).toBe("failed");
+		expect(repo.turns.get("consumed-turn")?.status).toBe("failed");
+		expect(repo.turns.get("orphan-turn")?.status).toBe("failed");
+		expect(readdirSync(dir).sort()).toEqual(
+			[
+				"owner.lock",
+				String(parkRepo.parks.get(kept.turnId)?.sessionFile),
+				String(parkRepo.parks.get(staleClaim.turnId)?.sessionFile),
+			].sort(),
+		);
+	});
+
+	it("a second bridge on a work root another live one owns releases nothing", async () => {
+		const workRoot = tempRoot();
+		const a = await releaseHarness({ workRoot });
+		const b = await releaseHarness({
+			workRoot,
+			limits: { parkedTimeoutMs: 300 },
+		});
+		expect(a.bridge.status().releaseBlocked).toBeNull();
+		expect(b.bridge.status().releaseBlocked).toContain(
+			"another running process",
+		);
+		const p = await parkTurn(b);
+		await waitFor(
+			() => b.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(b.parkRepo.parks.size).toBe(0);
+	});
+});
+
+describe("faults", () => {
+	it("a failed publish ends the turn and leaves no record or file behind", async () => {
+		const h = await releaseHarness();
+		h.parkRepo.failNext.markReleased = new Error("disk I/O error");
+		const p = await parkTurn(h);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 8_000);
+		expect(String(h.repo.turns.get(p.turnId)?.errorMessage)).toContain(
+			"could not be kept",
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(parkFiles(h)).toEqual([]);
+		expect(h.bridge.status().counters.releaseFailures).toBe(1);
+	});
+
+	it("a session file that cannot be published ends the turn and drops its record", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		// A directory where the file should go.
+		const sid = p.query.sessionId;
+		mkdirSync(join(parkDir(h), `${sid}.jsonl`));
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 8_000);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(
+			readdirSync(parkDir(h)).filter((n) => n.startsWith(".tmp-")),
+		).toEqual([]);
+	});
+
+	it("a failed preparing insert ends the turn the same way", async () => {
+		const h = await releaseHarness();
+		h.parkRepo.failNext.insertPreparing = new Error("SQLITE_BUSY");
+		const p = await parkTurn(h);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 8_000);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(parkFiles(h)).toEqual([]);
+	});
+
+	it("a failed claim answers 503 and keeps the park for a retry", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		h.parkRepo.failNext.claim = new Error("SQLITE_BUSY");
+		expect((await reply(answer(h, p, results(p)))).status).toBe(503);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+	});
+
+	it("a consumed mark that fails holds the model call back", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		h.parkRepo.failNext.markConsumed = new Error("SQLITE_BUSY");
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		const call = await innerCall(q2);
+		expect(call.status).toBe(503);
+		expect(h.inner.calls.length).toBe(0);
+		q2.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		q2.end();
+		expect((await reply(response)).status).toBeGreaterThanOrEqual(500);
+	});
+
+	it("a launch that throws answers 503 and gives the claim back", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		h.sdk.throwNext = new Error("spawn EAGAIN");
+		const r = await reply(answer(h, p, results(p)));
+		expect(r.status).toBe(503);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+	});
+});
+
+describe("disposing during a release", () => {
+	it("waits for the release to finish before removing the generation", async () => {
+		const h = await releaseHarness({ process: "ignore-term", keep: true });
+		const p = await parkTurn(h);
+		await waitFor(() => h.bridge.status().parked === 0, 2_000);
+		await h.bridge.dispose();
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(parkFiles(h).length).toBe(1);
+		rmSync(h.workRoot, { recursive: true, force: true });
+	});
+});

@@ -17,6 +17,7 @@ export {
 	DEFAULT_SDK_BRIDGE_TIMING,
 	type QueryFn,
 	type SdkBridgeLimits,
+	type SdkBridgeParkRepo,
 	type SdkBridgeTiming,
 	type SdkBridgeTurnRepo,
 } from "./types";

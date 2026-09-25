@@ -60,6 +60,50 @@ const OUTCOME_GRACE_MS = 250;
 const KILL_GRACE_MS = 2_000;
 /** From a prompt message's read to the tool results that must follow it. */
 const PROMPT_WRITE_MS = 20;
+/** How long a release waits for the envelopes of the message that parked. */
+const ENVELOPE_WAIT_MS = 2_000;
+/** After the SIGKILL, how long a release waits for the child and the pump to end. */
+const RELEASE_EXIT_WAIT_MS = 3_000;
+
+/**
+ * Whether `ids` answer exactly the calls in `awaiting`: each one once, and
+ * nothing else. A missing, repeated or unknown id is a stale replay.
+ *
+ *   awaiting {a, b}: [a, b] → true; [a] → false; [a, b, b] → false; [a, b, c] → false
+ */
+export function answersExactly(
+	awaiting: ReadonlySet<string>,
+	ids: readonly string[],
+): boolean {
+	if (!awaiting.size || ids.length !== awaiting.size) return false;
+	const seen = new Set<string>();
+	for (const id of ids) {
+		if (!awaiting.has(id) || seen.has(id)) return false;
+		seen.add(id);
+	}
+	return true;
+}
+
+/** A parked query stopped for release: what the bridge needs to store it. */
+export type ReleaseStop =
+	| {
+			ok: true;
+			sessionId: string;
+			/** Uuid of the transcript entry a resume continues from. */
+			resumeAt: string;
+			awaitedToolUseIds: string[];
+			/** Active time used so far, the parked time excluded. */
+			activeMs: number;
+			parkedSince: number;
+	  }
+	| { ok: false; reason: string; stopped: boolean };
+
+/** One top-level assistant message envelope Claude Code reported. */
+interface AssistantEnvelope {
+	uuid: string;
+	messageId: string | null;
+	toolUseIds: string[];
+}
 
 export interface Leg {
 	id: string;
@@ -92,7 +136,19 @@ export interface LiveQueryInit {
 	clientMessages: ClientMessage[];
 	timing: SdkBridgeTiming;
 	parkedTimeoutMs: number;
+	/** Active-time budget of the whole turn; parked and released time is not counted. */
 	turnDeadlineMs: number;
+	/** Active time the turn used before this query: a resumed release's. */
+	priorActiveMs?: number;
+	/**
+	 * Parked this long, the query asks to be released ({@link onReleaseDue});
+	 * null parks it until the parked timeout instead.
+	 */
+	parkReleaseMs?: number | null;
+	/** Time to release this parked query: its timer fired, or the bridge is shutting down. */
+	onReleaseDue?: (live: LiveQuery) => void;
+	/** Whether a query parking now could be released rather than torn down. */
+	canRelease?: () => boolean;
 	maxParkedCalls: number;
 	startedAt: number;
 	now: () => number;
@@ -123,7 +179,8 @@ export interface LiveQueryInit {
  * `finishing` (the reply ended; waiting for Claude Code's `result`), `closed`.
  */
 export class LiveQuery {
-	state: "running" | "awaiting_client" | "finishing" | "closed" = "running";
+	state: "running" | "awaiting_client" | "releasing" | "finishing" | "closed" =
+		"running";
 	readonly turnId: string;
 	readonly ownerApiKeyId: string | null;
 	readonly sessionId: string;
@@ -139,6 +196,17 @@ export class LiveQuery {
 	private parkedTimer: ReturnType<typeof setTimeout> | null = null;
 	private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 	private exitTimer: ReturnType<typeof setTimeout> | null = null;
+	private releaseTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Active time used, excluding the stretch running since `activeSince`. */
+	private activeMs: number;
+	private activeSince: number | null = null;
+	private parkedAt = 0;
+	private readonly envelopes: AssistantEnvelope[] = [];
+	private pumpFinished = false;
+	/** A release is stopping the process: what it still reports is ignored. */
+	private stopping = false;
+	/** Set once a release has stored the session: the turn lives on without this query. */
+	released = false;
 	private clientMessages: ClientMessage[];
 	private lastOutcome: SdkBridgeInnerOutcome | null = null;
 	private outcomeSeq = 0;
@@ -187,6 +255,7 @@ export class LiveQuery {
 		this.conversationKey = init.conversationKey;
 		this.requestedModel = init.requestedModel;
 		this.clientMessages = init.clientMessages;
+		this.activeMs = init.priorActiveMs ?? 0;
 		let settled = false;
 		this.done = new Promise((resolve) => {
 			this.resolveDone = (ok) => {
@@ -205,16 +274,62 @@ export class LiveQuery {
 		return this.state === "awaiting_client";
 	}
 
-	/** Ids of the tool calls the client must answer now; empty unless parked. */
-	get awaitingToolUseIds(): ReadonlySet<string> {
-		return this.state === "awaiting_client" ? this.awaiting : new Set();
+	get releasing(): boolean {
+		return this.state === "releasing";
 	}
 
-	/** Whether `ids` answer every call the query waits on now. */
+	/**
+	 * Ids of the tool calls the client must answer now; empty unless parked.
+	 * A query being released still names them: its results wait for the
+	 * release and then resume the stored session.
+	 */
+	get awaitingToolUseIds(): ReadonlySet<string> {
+		return this.state === "awaiting_client" || this.state === "releasing"
+			? this.awaiting
+			: new Set();
+	}
+
+	/** Whether `ids` answer every call the query waits on now, each exactly once. */
 	answersAwaiting(ids: readonly string[]): boolean {
-		const given = new Set(ids);
-		const awaiting = this.awaitingToolUseIds;
-		return awaiting.size > 0 && [...awaiting].every((id) => given.has(id));
+		return answersExactly(this.awaitingToolUseIds, ids);
+	}
+
+	/** Active time used so far; parked and released time is not counted. */
+	activeTime(): number {
+		return (
+			this.activeMs +
+			(this.activeSince === null ? 0 : this.init.now() - this.activeSince)
+		);
+	}
+
+	/** What is left of the turn's active-time budget. */
+	remainingBudget(): number {
+		return Math.max(0, this.init.turnDeadlineMs - this.activeTime());
+	}
+
+	private resumeActive(): void {
+		if (this.activeSince !== null) return;
+		const now = this.init.now();
+		this.activeSince = now;
+		const remaining = this.remainingBudget();
+		this.init.registration.setDeadline(now + remaining);
+		if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+		this.deadlineTimer = setTimeout(
+			() =>
+				this.teardown(
+					"deadline",
+					bridgeErrors.deadline(this.init.turnDeadlineMs),
+				),
+			remaining,
+		);
+	}
+
+	private pauseActive(): void {
+		if (this.activeSince !== null)
+			this.activeMs += this.init.now() - this.activeSince;
+		this.activeSince = null;
+		if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+		this.deadlineTimer = null;
 	}
 
 	get historyMode(): SdkBridgeHistoryMode {
@@ -224,14 +339,7 @@ export class LiveQuery {
 	/** Start the query with its first leg's response already created. */
 	start(leg: Leg): void {
 		this.attach(leg);
-		this.deadlineTimer = setTimeout(
-			() =>
-				this.teardown(
-					"deadline",
-					bridgeErrors.deadline(this.init.turnDeadlineMs),
-				),
-			Math.max(0, this.startedAt + this.init.turnDeadlineMs - this.init.now()),
-		);
+		this.resumeActive();
 		void this.pump();
 	}
 
@@ -252,7 +360,12 @@ export class LiveQuery {
 	private armIdle(): void {
 		if (this.idleTimer) clearTimeout(this.idleTimer);
 		this.idleTimer = null;
-		if (this.state === "closed" || this.state === "awaiting_client") return;
+		if (
+			this.state === "closed" ||
+			this.state === "awaiting_client" ||
+			this.state === "releasing"
+		)
+			return;
 		const waitingOnClient = this.init.parked.size > 0;
 		const ms = waitingOnClient
 			? this.init.parkedTimeoutMs
@@ -353,9 +466,12 @@ export class LiveQuery {
 	): void {
 		if (this.parkedTimer) clearTimeout(this.parkedTimer);
 		this.parkedTimer = null;
+		if (this.releaseTimer) clearTimeout(this.releaseTimer);
+		this.releaseTimer = null;
 		const awaiting = this.awaiting;
 		this.awaiting = new Set();
 		this.state = "running";
+		this.resumeActive();
 		this.clientMessages = clientMessages;
 		void this.init.recorder.insertLeg(leg.id, leg.kind, leg.startedAt);
 		this.attach(leg);
@@ -422,7 +538,13 @@ export class LiveQuery {
 		// Tool calls handed out now could never be answered: the query dies
 		// with the bridge. The leg fails instead, with the shutdown 503 while
 		// nothing went out, or a closing SSE error once the stream is open.
-		if (parks && this.init.isShuttingDown()) {
+		// Unless the query can be released: then the calls go out, and their
+		// results resume the stored session after the restart.
+		if (
+			parks &&
+			this.init.isShuttingDown() &&
+			!(this.init.canRelease?.() ?? false)
+		) {
 			this.teardown("shutdown", bridgeErrors.shutdown());
 			return;
 		}
@@ -438,20 +560,164 @@ export class LiveQuery {
 		if (parks) {
 			this.state = "awaiting_client";
 			this.awaiting = new Set(toolUseIds);
+			this.parkedAt = this.init.now();
+			this.pauseActive();
 			if (this.idleTimer) clearTimeout(this.idleTimer);
 			this.idleTimer = null;
-			this.parkedTimer = setTimeout(
-				() =>
-					this.teardown(
-						"parked_timeout",
-						bridgeErrors.parkedTimeout(this.init.parkedTimeoutMs),
-					),
-				this.init.parkedTimeoutMs,
-			);
+			const release = this.init.onReleaseDue;
+			if (this.init.parkReleaseMs != null && release)
+				this.releaseTimer = setTimeout(
+					() => release(this),
+					this.init.parkReleaseMs,
+				);
+			else this.armParkedTimeout();
+			if (this.init.isShuttingDown() && release)
+				queueMicrotask(() => release(this));
 			return;
 		}
 		this.state = "finishing";
 		this.register([...this.clientMessages, { role: "assistant", content }]);
+	}
+
+	private armParkedTimeout(): void {
+		if (this.parkedTimer || this.state !== "awaiting_client") return;
+		const parkedFor = this.init.now() - this.parkedAt;
+		this.parkedTimer = setTimeout(
+			() =>
+				this.teardown(
+					"parked_timeout",
+					bridgeErrors.parkedTimeout(this.init.parkedTimeoutMs),
+				),
+			Math.max(0, this.init.parkedTimeoutMs - parkedFor),
+		);
+	}
+
+	/**
+	 * The bridge will not release this query (at its byte ceiling, without
+	 * ownership of the released-parks directory): it stays parked, and the
+	 * parked timeout, counted from when it parked, ends it.
+	 */
+	keepParked(): void {
+		if (this.releaseTimer) clearTimeout(this.releaseTimer);
+		this.releaseTimer = null;
+		this.armParkedTimeout();
+	}
+
+	/**
+	 * Where a resume continues: the last envelope of the upstream message that
+	 * made the awaited calls. Claude Code reports one envelope per content
+	 * block, sometimes after the leg's `message_stop`.
+	 */
+	private resumePoint(): string | null {
+		const awaited = this.awaiting;
+		const issuing = this.envelopes.findLast((e) =>
+			e.toolUseIds.some((id) => awaited.has(id)),
+		);
+		if (!issuing) return null;
+		if (issuing.messageId === null) return issuing.uuid;
+		return (
+			this.envelopes.findLast((e) => e.messageId === issuing.messageId)?.uuid ??
+			null
+		);
+	}
+
+	/**
+	 * Stop a parked query so its session can be stored and resumed later.
+	 * Not the teardown path: the parked MCP calls are never answered and
+	 * nothing is interrupted or closed while the child lives, since either
+	 * writes a synthetic result into the transcript that poisons later
+	 * resumes. The token goes first, then SIGTERM (SIGKILL after the grace);
+	 * only once the child has exited are the parked handlers cleaned up.
+	 *
+	 * The query then waits in `releasing` for the bridge to store the session
+	 * and call {@link completeRelease} or {@link failRelease}. With no resume
+	 * point it refuses and stays parked (`stopped: false`).
+	 */
+	async release(): Promise<ReleaseStop> {
+		if (this.state !== "awaiting_client")
+			return { ok: false, reason: "the query is not parked", stopped: false };
+		// From here continuations and teardowns wait for the release's outcome.
+		this.state = "releasing";
+		for (const timer of [
+			this.idleTimer,
+			this.parkedTimer,
+			this.releaseTimer,
+			this.deadlineTimer,
+			this.exitTimer,
+		])
+			if (timer) clearTimeout(timer);
+		this.idleTimer = null;
+		this.parkedTimer = null;
+		this.releaseTimer = null;
+		this.deadlineTimer = null;
+		this.exitTimer = null;
+		// Claude Code reports a message's envelopes after its message_stop,
+		// so a query released as it parks (at shutdown) may not have them yet.
+		let resumeAt = this.resumePoint();
+		const envelopesBy = Date.now() + ENVELOPE_WAIT_MS;
+		while (!resumeAt && Date.now() < envelopesBy) {
+			await Bun.sleep(20);
+			resumeAt = this.resumePoint();
+		}
+		if (!resumeAt) {
+			// Still whole: it stays parked, or the caller tears it down.
+			this.state = "awaiting_client";
+			return {
+				ok: false,
+				reason: "Claude Code reported no message for the parked calls",
+				stopped: false,
+			};
+		}
+		this.stopping = true;
+		this.init.registration.revoke();
+		this.killProcesses();
+		const until = Date.now() + KILL_GRACE_MS + RELEASE_EXIT_WAIT_MS;
+		while (
+			(!this.pumpFinished ||
+				[...this.init.pids].some((pid) => this.init.isAlive(pid))) &&
+			Date.now() < until
+		)
+			await Bun.sleep(20);
+		const stopped = ![...this.init.pids].some((pid) => this.init.isAlive(pid));
+		try {
+			this.init.query.close();
+		} catch {}
+		this.init.parked.close("released");
+		this.prompt().end();
+		this.init.composer.detach();
+		if (!stopped)
+			return {
+				ok: false,
+				reason: "Claude Code did not exit",
+				stopped: true,
+			};
+		return {
+			ok: true,
+			sessionId: this.sessionId,
+			resumeAt,
+			awaitedToolUseIds: [...this.awaiting],
+			activeMs: this.activeTime(),
+			parkedSince: this.parkedAt,
+		};
+	}
+
+	/** The session is stored: the turn lives on in its released park, not here. */
+	completeRelease(): void {
+		if (this.state !== "releasing") return;
+		this.released = true;
+		this.state = "closed";
+		this.resolveDone(false);
+		this.init.claim?.release();
+		this.init.discardSession(this.sessionId);
+		this.discardClaudeCodeTranscripts();
+		this.init.onClosed(this);
+	}
+
+	/** The release could not be completed: the turn ends here. */
+	failRelease(error: BridgeError): void {
+		if (this.state !== "releasing") return;
+		this.finalError = error;
+		this.close("failed", false);
 	}
 
 	/**
@@ -519,6 +785,8 @@ export class LiveQuery {
 			for await (const message of this.init
 				.query as AsyncIterable<SDKMessage>) {
 				if (this.state === "closed") break;
+				// A query being stopped for release is left to exit on its signal.
+				if (this.stopping) continue;
 				this.armIdle();
 				this.onMessage(message);
 				if (this.pendingTeardown) {
@@ -532,7 +800,7 @@ export class LiveQuery {
 				}
 			}
 		} catch (error) {
-			if (this.state !== "closed") {
+			if (this.state !== "closed" && this.state !== "releasing") {
 				this.init.log.warn(
 					`SDK bridge turn ${this.turnId}: query failed`,
 					error,
@@ -576,6 +844,24 @@ export class LiveQuery {
 			}
 			case "assistant": {
 				if (message.parent_tool_use_id !== null) return;
+				if (
+					!message.error &&
+					message.message.model !== "<synthetic>" &&
+					!message.aborted
+				)
+					this.envelopes.push({
+						uuid: message.uuid,
+						messageId:
+							typeof message.message.id === "string"
+								? message.message.id
+								: null,
+						toolUseIds: (Array.isArray(message.message.content)
+							? (message.message.content as unknown as Block[])
+							: []
+						)
+							.filter((b) => b.type === "tool_use")
+							.map((b) => String(b.id)),
+					});
 				if (message.error) {
 					this.noteGiveUp();
 					const text = textOf(message.message.content as unknown as Block[]);
@@ -720,9 +1006,11 @@ export class LiveQuery {
 	}
 
 	private async afterPump(): Promise<void> {
+		this.pumpFinished = true;
 		if (this.exitTimer) clearTimeout(this.exitTimer);
 		this.exitTimer = null;
-		if (this.state === "closed") return;
+		// A released query's exit without a result is the release, not a failure.
+		if (this.state === "closed" || this.state === "releasing") return;
 		if (this.sideSettled) {
 			this.samplePeakRss();
 			this.close(this.finalError ? "failed" : "completed", !this.finalError);
@@ -745,7 +1033,8 @@ export class LiveQuery {
 
 	/** Tear the query down. The token goes first, so an orphaned child's calls fail. */
 	teardown(reason: TeardownReason, error: BridgeError): void {
-		if (this.state === "closed") return;
+		// A release in progress ends through completeRelease or failRelease.
+		if (this.state === "closed" || this.state === "releasing") return;
 		this.init.registration.revoke();
 		this.init.parked.close(reason);
 		this.prompt().end();
@@ -777,6 +1066,7 @@ export class LiveQuery {
 			this.parkedTimer,
 			this.deadlineTimer,
 			this.exitTimer,
+			this.releaseTimer,
 		])
 			if (timer) clearTimeout(timer);
 		this.init.registration.revoke();

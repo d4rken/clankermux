@@ -22,6 +22,16 @@ export interface SdkBridgeCounters {
 	rebuilds: number;
 	/** Side requests started; each also counts in `turnsStarted`. */
 	sideRequests: number;
+	/** Parked queries whose process stopped and whose session was stored. */
+	released: number;
+	/** Releases begun that could not store the session; their turns failed. */
+	releaseFailures: number;
+	/** Parked queries kept parked instead (ceiling, no directory ownership). */
+	releasesRefused: number;
+	/** Released parks resumed by their client's results. */
+	releasedResumes: number;
+	/** Released parks whose results never came. */
+	releasedExpired: number;
 }
 
 /** The bridge's live state, as `/api/system/status` reports it. */
@@ -35,6 +45,12 @@ export interface SdkBridgeStatus {
 	counters: SdkBridgeCounters;
 	/** Highest per-process peak RSS observed (VmHWM); null where unmeasurable. */
 	peakRssBytes: number | null;
+	/** Released parks waiting for their client, with no process. */
+	releasedParks: number;
+	/** Session files on disk at the last maintenance pass; null before one. */
+	sessionBytes: number | null;
+	/** Why parked queries are not being released now; null while they are. */
+	releaseBlocked: string | null;
 }
 
 export interface SdkBridgeRouteCandidate {

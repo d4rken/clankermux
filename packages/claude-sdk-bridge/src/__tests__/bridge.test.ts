@@ -1081,6 +1081,35 @@ describe("parked tool calls", () => {
 			expect(h.bridge.status().parked).toBe(1);
 		});
 
+		it("results that repeat an awaited id or add one it does not wait on get 409", async () => {
+			const h = harness();
+			const { t, round1, r2 } = await parkedTwice(h);
+			for (const ids of [
+				["r2-a", "r2-b", "r2-b"],
+				["r2-a", "r2-b", "r2-c"],
+			]) {
+				const c = continueTurn(h, t.plan.turnId, {
+					tools,
+					messages: [
+						...round1,
+						{ role: "assistant", content: r2.content },
+						{
+							role: "user",
+							content: ids.map((id) => ({
+								type: "tool_result",
+								tool_use_id: id,
+								content: id,
+							})),
+						},
+					],
+				});
+				const res = await c.response;
+				expect(res.status).toBe(409);
+				expect(await res.text()).toContain("stale tool results");
+			}
+			expect(h.bridge.status().parked).toBe(1);
+		});
+
 		it("answering only some of the awaited calls gets 409 and delivers nothing", async () => {
 			const h = harness();
 			const { t, round1, r2 } = await parkedTwice(h);

@@ -4,11 +4,13 @@ import {
 	constants,
 	fchmodSync,
 	fstatSync,
+	fsyncSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmdirSync,
 	type Stats,
 	unlinkSync,
@@ -185,8 +187,11 @@ function ownerAlive(owner: GenerationOwner): boolean {
 }
 
 function readOwner(dir: string): GenerationOwner | null {
+	return readOwnerFile(join(dir, OWNER_FILE));
+}
+
+function readOwnerFile(path: string): GenerationOwner | null {
 	try {
-		const path = join(dir, OWNER_FILE);
 		if (!lstatSync(path).isFile()) return null;
 		const parsed = JSON.parse(
 			readFileSync(path, "utf8"),
@@ -251,4 +256,102 @@ export function sweepGenerations(
 		removed.push(name);
 	}
 	return removed;
+}
+
+/**
+ * Take the lock file at `path` for this process, marked with `token` so only
+ * its taker releases it. A lock whose owner is gone (or unreadable) is taken
+ * over; one held by a live process, this one included, is not.
+ */
+export function acquireOwnerLock(path: string, token: string): boolean {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const fd = openSync(
+				path,
+				constants.O_WRONLY |
+					constants.O_CREAT |
+					constants.O_EXCL |
+					constants.O_NOFOLLOW,
+				PRIVATE_FILE_MODE,
+			);
+			try {
+				writeAll(
+					fd,
+					JSON.stringify({
+						pid: process.pid,
+						startTime: processStartTime(process.pid),
+						token,
+					}),
+				);
+			} finally {
+				closeSync(fd);
+			}
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		const owner = readOwnerFile(path);
+		if (owner && ownerAlive(owner)) return false;
+		try {
+			unlinkSync(path);
+		} catch {}
+	}
+	return false;
+}
+
+/** Give up a lock this `token` took; anyone else's is left alone. */
+export function releaseOwnerLock(path: string, token: string): void {
+	try {
+		if (!lstatSync(path).isFile()) return;
+		const held = JSON.parse(readFileSync(path, "utf8")) as { token?: unknown };
+		if (held.token === token) unlinkSync(path);
+	} catch {}
+}
+
+/**
+ * Write `bytes` to `dir/name` so that a crash leaves either nothing or the
+ * whole file: a private temp file in the same directory, synced, then
+ * renamed over the name. Returns the bytes written.
+ */
+export function publishFileAtomically(
+	dir: string,
+	name: string,
+	bytes: Uint8Array,
+	tempName: string,
+): number {
+	const temp = join(dir, tempName);
+	const fd = openSync(
+		temp,
+		constants.O_WRONLY |
+			constants.O_CREAT |
+			constants.O_EXCL |
+			constants.O_NOFOLLOW,
+		PRIVATE_FILE_MODE,
+	);
+	try {
+		let offset = 0;
+		while (offset < bytes.length)
+			offset += writeSync(fd, bytes, offset, bytes.length - offset);
+		fsyncSync(fd);
+	} catch (error) {
+		closeSync(fd);
+		removeTree(temp);
+		throw error;
+	}
+	closeSync(fd);
+	try {
+		renameSync(temp, join(dir, name));
+	} catch (error) {
+		removeTree(temp);
+		throw error;
+	}
+	try {
+		const dirFd = openSync(dir, constants.O_RDONLY);
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+	} catch {}
+	return bytes.length;
 }

@@ -4,6 +4,7 @@ import type {
 	ClaudeSdkBridge,
 	ClaudeSdkBridgeDeps,
 	SdkBridgeLimits,
+	SdkBridgeParkRepo,
 	SdkBridgeTurnRepo,
 } from "@clankermux/claude-sdk-bridge";
 import type { Config } from "@clankermux/config";
@@ -25,6 +26,9 @@ export type SdkBridgeLimitConfig = Pick<
 	Config,
 	| "getSdkBridgeMaxProcesses"
 	| "getSdkBridgeParkedTimeoutMs"
+	| "getSdkBridgeParkReleaseMs"
+	| "getSdkBridgeReleasedParkTtlMs"
+	| "getSdkBridgeSessionBytesCeiling"
 	| "getSdkBridgeTurnDeadlineMs"
 	| "getSdkBridgeMaxHistoryBytes"
 	| "getSdkBridgeMaxTools"
@@ -52,6 +56,9 @@ export function sdkBridgeLimitsFromConfig(
 	return {
 		maxProcesses: config.getSdkBridgeMaxProcesses(),
 		parkedTimeoutMs: config.getSdkBridgeParkedTimeoutMs(),
+		parkReleaseMs: config.getSdkBridgeParkReleaseMs(),
+		releasedParkTtlMs: config.getSdkBridgeReleasedParkTtlMs(),
+		sessionBytesCeiling: config.getSdkBridgeSessionBytesCeiling(),
 		turnDeadlineMs: config.getSdkBridgeTurnDeadlineMs(),
 		maxHistoryBytes: config.getSdkBridgeMaxHistoryBytes(),
 		maxTools: config.getSdkBridgeMaxTools(),
@@ -64,7 +71,7 @@ export function sdkBridgeLimitsFromConfig(
 export interface SdkBridgeWiring {
 	readonly transport: SdkBridgeTransport;
 	status(): SdkBridgeStatus;
-	/** Refuse new turns and end parked ones. Idempotent. */
+	/** Refuse new turns and release (or end) parked ones. Idempotent. */
 	beginShutdown(): void;
 	/** End every turn and every Claude Code process. Idempotent. */
 	dispose(): Promise<void>;
@@ -109,8 +116,16 @@ function unavailableWiring(
 				resumes: 0,
 				rebuilds: 0,
 				sideRequests: 0,
+				released: 0,
+				releaseFailures: 0,
+				releasesRefused: 0,
+				releasedResumes: 0,
+				releasedExpired: 0,
 			},
 			peakRssBytes: null,
+			releasedParks: 0,
+			sessionBytes: null,
+			releaseBlocked: reason,
 		}),
 		beginShutdown: () => {
 			shuttingDown = true;
@@ -134,6 +149,8 @@ export async function installSdkBridge(input: {
 	proxyContext: ProxyContext;
 	config: SdkBridgeLimitConfig;
 	turnRepo: SdkBridgeTurnRepo;
+	/** Released parks' records; without it parked turns are never released. */
+	parkRepo?: SdkBridgeParkRepo;
 	workRoot?: string;
 	/** Test seam: how the bridge package is loaded. */
 	load?: () => Promise<BridgeModule>;
@@ -149,6 +166,7 @@ export async function installSdkBridge(input: {
 		const bridge: ClaudeSdkBridge = bridgeModule.createClaudeSdkBridge({
 			workRoot: input.workRoot ?? sdkBridgeWorkRoot(),
 			turnRepo: input.turnRepo,
+			...(input.parkRepo ? { parkRepo: input.parkRepo } : {}),
 			limits: () => sdkBridgeLimitsFromConfig(config),
 			dispatchInner: (req, ctx) => {
 				setSdkBridgeInnerRequestContext(req, ctx);
@@ -162,6 +180,9 @@ export async function installSdkBridge(input: {
 			},
 			...input.overrides,
 		});
+		// Released parks an earlier process left are recovered before any
+		// request can reach the transport, so their results find them.
+		await bridge.ready();
 		let disposed: Promise<void> | null = null;
 		wiring = {
 			transport: bridge,

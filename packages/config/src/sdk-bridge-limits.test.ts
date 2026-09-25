@@ -23,6 +23,11 @@ describe("SDK bridge limits", () => {
 		withConfig(null, (config) => {
 			expect(config.getSdkBridgeMaxProcesses()).toBe(8);
 			expect(config.getSdkBridgeParkedTimeoutMs()).toBe(15 * 60_000);
+			expect(config.getSdkBridgeParkReleaseMs()).toBe(2 * 60_000);
+			expect(config.getSdkBridgeReleasedParkTtlMs()).toBe(24 * 60 * 60_000);
+			expect(config.getSdkBridgeSessionBytesCeiling()).toBe(
+				2 * 1024 * 1024 * 1024,
+			);
 			expect(config.getSdkBridgeTurnDeadlineMs()).toBe(60 * 60_000);
 			expect(config.getSdkBridgeMaxHistoryBytes()).toBe(64 * 1024 * 1024);
 			expect(config.getSdkBridgeMaxTools()).toBe(1024);
@@ -49,6 +54,18 @@ describe("SDK bridge limits", () => {
 				expect(config.getSdkBridgeMaxConcurrentRebuilds()).toBe(3);
 			},
 		);
+		withConfig(
+			{
+				sdk_bridge_park_release_ms: 1,
+				sdk_bridge_released_park_ttl_ms: 1,
+				sdk_bridge_session_bytes_ceiling: 1,
+			},
+			(config) => {
+				expect(config.getSdkBridgeParkReleaseMs()).toBe(5_000);
+				expect(config.getSdkBridgeReleasedParkTtlMs()).toBe(10 * 60_000);
+				expect(config.getSdkBridgeSessionBytesCeiling()).toBe(64 * 1024 * 1024);
+			},
+		);
 		withConfig({ sdk_bridge_max_processes: 0 }, (config) =>
 			expect(config.getSdkBridgeMaxProcesses()).toBe(1),
 		);
@@ -68,6 +85,9 @@ describe("SDK bridge limits", () => {
 			const all = config.getAllSettings();
 			expect(all.sdk_bridge_max_processes).toBe(3);
 			expect(all.sdk_bridge_parked_timeout_ms).toBe(15 * 60_000);
+			expect(all.sdk_bridge_park_release_ms).toBe(2 * 60_000);
+			expect(all.sdk_bridge_released_park_ttl_ms).toBe(24 * 60 * 60_000);
+			expect(all.sdk_bridge_session_bytes_ceiling).toBe(2 * 1024 * 1024 * 1024);
 			expect(all.sdk_bridge_turn_deadline_ms).toBe(60 * 60_000);
 			expect(all.sdk_bridge_max_history_bytes).toBe(64 * 1024 * 1024);
 			expect(all.sdk_bridge_max_tools).toBe(1024);

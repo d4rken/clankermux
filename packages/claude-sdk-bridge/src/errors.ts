@@ -301,6 +301,38 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	releasedParkExpired(ms: number): BridgeError {
+		return {
+			status: 504,
+			type: "timeout_error",
+			message: `No tool result arrived within ${Math.round(ms / 60_000)} min of the turn being released`,
+			retryAfter: null,
+		};
+	},
+	parkStoreUnavailable(): BridgeError {
+		return {
+			status: 503,
+			type: "api_error",
+			message: "The SDK bridge could not claim this turn's stored session",
+			retryAfter: DEFAULT_RETRY_AFTER_SECONDS,
+		};
+	},
+	releaseFailed(why: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			message: `The parked turn could not be kept for its tool results: ${why}`,
+			retryAfter: null,
+		};
+	},
+	bridgeRestarted(what: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			message: `The SDK bridge stopped ${what}`,
+			retryAfter: null,
+		};
+	},
 	idle(ms: number): BridgeError {
 		return {
 			status: 502,
