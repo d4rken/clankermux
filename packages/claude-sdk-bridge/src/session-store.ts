@@ -15,9 +15,10 @@ import {
 
 /**
  * A transcript's bytes with every `"sessionId":"<from>"` rewritten to `to`,
- * and nothing else touched: no JSON parse, so a large session copies at disk
- * speed and its entries stay exactly as Claude Code wrote them. Latin-1 maps
- * each byte to one character and back, so multi-byte text survives as is.
+ * and nothing else touched: no JSON parse and no decoding, so a large
+ * session copies at disk speed and its entries stay exactly as Claude Code
+ * wrote them. Both ids are UUIDs of one length, so the rewrite is in place:
+ * `bytes` itself is changed and returned.
  */
 export function rewriteSessionId(
 	bytes: Buffer,
@@ -27,12 +28,14 @@ export function rewriteSessionId(
 	assertSessionId(fromId);
 	assertSessionId(toId);
 	if (fromId === toId) return bytes;
-	return Buffer.from(
-		bytes
-			.toString("latin1")
-			.replaceAll(`"sessionId":"${fromId}"`, `"sessionId":"${toId}"`),
-		"latin1",
-	);
+	const needle = Buffer.from(`"sessionId":"${fromId}"`);
+	const idOffset = '"sessionId":"'.length;
+	let at = bytes.indexOf(needle);
+	while (at !== -1) {
+		bytes.write(toId, at + idOffset, "latin1");
+		at = bytes.indexOf(needle, at + needle.length);
+	}
+	return bytes;
 }
 
 /** Copy the transcript at `from` to `to` under a new session id; false when unreadable. */

@@ -10,6 +10,7 @@ import type {
 	SdkBridgeTurnFinish,
 } from "@clankermux/types";
 import { type BridgeError, errorSummary } from "./errors";
+import { rewriteSessionId } from "./session-store";
 import type { SystemPromptDecision } from "./system-prompt-policy";
 import type { ClientTool } from "./turn-request";
 import type { BridgeLog, SdkBridgeParkRepo } from "./types";
@@ -19,6 +20,7 @@ import {
 	publishFileAtomically,
 	releaseOwnerLock,
 	removeTree,
+	writePrivateBytes,
 } from "./work-dirs";
 
 /**
@@ -54,49 +56,51 @@ const LOCK_FILE = "owner.lock";
 const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 
 /**
- * Whether the transcript at `path` has an entry `resumeAt` whose chain
- * (walking parentUuid back from it) carries every awaited tool_use id.
- * Parses the whole file: for a release and for startup recovery, never on a
- * request's path.
+ * Whether a transcript (JSONL bytes) has an entry `resumeAt` whose chain,
+ * walking parentUuid back from it, carries every awaited tool_use id. Each
+ * line is decoded on its own; an unparsable line fails the check.
  */
-export function transcriptHoldsCalls(
-	path: string,
+function chainHoldsCalls(
+	bytes: Buffer,
 	resumeAt: string,
 	awaited: readonly string[],
 ): boolean {
-	let text: string;
-	try {
-		if (!lstatSync(path).isFile()) return false;
-		text = readFileSync(path, "utf8");
-	} catch {
-		return false;
-	}
 	const byUuid = new Map<string, { parent: string | null; calls: string[] }>();
-	for (const line of text.split("\n")) {
-		if (!line) continue;
-		let entry: Record<string, unknown>;
-		try {
-			entry = JSON.parse(line) as Record<string, unknown>;
-		} catch {
-			return false;
+	let start = 0;
+	while (start < bytes.length) {
+		let end = bytes.indexOf(0x0a, start);
+		if (end === -1) end = bytes.length;
+		if (end > start) {
+			let entry: Record<string, unknown>;
+			try {
+				entry = JSON.parse(bytes.toString("utf8", start, end)) as Record<
+					string,
+					unknown
+				>;
+			} catch {
+				return false;
+			}
+			if (typeof entry.uuid === "string") {
+				const content = (entry.message as { content?: unknown } | undefined)
+					?.content;
+				byUuid.set(entry.uuid, {
+					parent:
+						typeof entry.parentUuid === "string" ? entry.parentUuid : null,
+					calls:
+						entry.type === "assistant" && Array.isArray(content)
+							? (content as Array<{ type?: unknown; id?: unknown }>)
+									.filter((b) => b?.type === "tool_use")
+									.map((b) => String(b.id))
+							: [],
+				});
+			}
 		}
-		if (typeof entry.uuid !== "string") continue;
-		const content = (entry.message as { content?: unknown } | undefined)
-			?.content;
-		byUuid.set(entry.uuid, {
-			parent: typeof entry.parentUuid === "string" ? entry.parentUuid : null,
-			calls:
-				entry.type === "assistant" && Array.isArray(content)
-					? (content as Array<{ type?: unknown; id?: unknown }>)
-							.filter((b) => b?.type === "tool_use")
-							.map((b) => String(b.id))
-					: [],
-		});
+		start = end + 1;
 	}
+	if (!byUuid.has(resumeAt)) return false;
 	const found = new Set<string>();
 	const seen = new Set<string>();
 	let at: string | null = resumeAt;
-	if (!byUuid.has(resumeAt)) return false;
 	while (at && !seen.has(at)) {
 		seen.add(at);
 		const entry = byUuid.get(at);
@@ -105,6 +109,49 @@ export function transcriptHoldsCalls(
 		at = entry.parent;
 	}
 	return awaited.every((id) => found.has(id));
+}
+
+function readFileOrNull(path: string): Buffer | null {
+	try {
+		if (!lstatSync(path).isFile()) return null;
+		return readFileSync(path);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether the transcript at `path` holds the parked calls on the chain
+ * ending at `resumeAt`. Parses the whole file: for a release, which checks
+ * what Claude Code stored before publishing it.
+ */
+export function transcriptHoldsCalls(
+	path: string,
+	resumeAt: string,
+	awaited: readonly string[],
+): boolean {
+	const bytes = readFileOrNull(path);
+	return bytes !== null && chainHoldsCalls(bytes, resumeAt, awaited);
+}
+
+/**
+ * A resume's copy of a released session: read once, the chain checked,
+ * then written under the new id with only `"sessionId":"<from>"` rewritten.
+ * False, writing nothing, when the file is gone or does not hold the calls.
+ * Synchronous: the claimed park is copied with no await in between.
+ */
+export function forkVerifiedTranscript(
+	from: string,
+	to: string,
+	fromId: string,
+	toId: string,
+	resumeAt: string,
+	awaited: readonly string[],
+): boolean {
+	const bytes = readFileOrNull(from);
+	if (!bytes || !chainHoldsCalls(bytes, resumeAt, awaited)) return false;
+	writePrivateBytes(to, rewriteSessionId(bytes, fromId, toId));
+	return true;
 }
 
 /**
@@ -431,17 +478,5 @@ export class ReleasedParkStore {
 			if (name !== LOCK_FILE && !kept.has(name))
 				removeTree(join(this.dir, name));
 		return kept.size;
-	}
-
-	/** Whether the file still holds the resume point: a cheap check before a resume. */
-	fileHolds(entry: ReleasedEntry): boolean {
-		try {
-			if (!lstatSync(entry.path).isFile()) return false;
-			return readFileSync(entry.path, "latin1").includes(
-				`"uuid":"${entry.park.resumeAt}"`,
-			);
-		} catch {
-			return false;
-		}
 	}
 }

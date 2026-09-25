@@ -56,17 +56,14 @@ import { buildQueryOptions, type WorkPaths, workPaths } from "./options";
 import { PromptStream } from "./prompt-stream";
 import { TurnRecorder } from "./recorder";
 import {
+	forkVerifiedTranscript,
 	type ReleasedEntry,
 	ReleasedParkStore,
 	type ResumeDescriptor,
 	transcriptHoldsCalls,
 } from "./released-parks";
 import { ReplyComposer } from "./reply-composer";
-import {
-	FileSessionStore,
-	forkTranscriptFile,
-	removeClaudeCodeTranscripts,
-} from "./session-store";
+import { FileSessionStore, removeClaudeCodeTranscripts } from "./session-store";
 import {
 	ProcessGroupSpawner,
 	readPeakRssBytes,
@@ -1683,12 +1680,13 @@ export function createClaudeSdkBridge(
 		const sessionId = randomId();
 		const copied =
 			isUuid(sessionId) &&
-			store.fileHolds(entry) &&
-			forkTranscriptFile(
+			forkVerifiedTranscript(
 				entry.path,
 				sessionStore().pathOf(sessionId),
 				entry.park.sessionId,
 				sessionId,
+				entry.park.resumeAt,
+				entry.park.awaitedToolUseIds,
 			);
 		if (!copied) {
 			claim?.release();
