@@ -838,11 +838,11 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 	// One free usage read per unknown alternative per tick, shared by
 	// discovery, confirmation and every candidate.
 	const usageRefreshAttempts = new Map<string, number>();
+	let warnedPendingAttempt: string | null = null;
 	const nowMs = overrides?.now ?? Date.now;
-	const usable = (account: Account, now: number) =>
+	const reachable = (account: Account, now: number) =>
 		account.provider === "codex" &&
 		!account.disabled &&
-		!account.paused &&
 		!cooldownRulesOutAlternative(account, now) &&
 		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
 		Boolean(
@@ -850,6 +850,8 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 				(account.access_token &&
 					(!account.expires_at || account.expires_at > now)),
 		);
+	const usable = (account: Account, now: number) =>
+		reachable(account, now) && !account.paused;
 	return new CodexResetCreditApplyScheduler({
 		listCandidateAccounts: async () =>
 			(await dbOps.getAllAccounts())
@@ -902,7 +904,23 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 			}
 			const unknown: Account[] = [];
 			for (const account of accounts) {
-				if (account.id === accountId || !usable(account, now)) continue;
+				if (account.id === accountId || !reachable(account, now)) continue;
+				// An expiry claim or a claim whose toggle was disabled may already
+				// have landed. Age alone never settles that uncertainty: keep weekly
+				// spending held until the attempt resolves, without blocking expiry.
+				const pending = weeklyResetCanLiftPause(account)
+					? await dbOps.getPendingCodexResetCreditAttempt(account.id)
+					: null;
+				if (pending) {
+					if (warnedPendingAttempt !== pending.id) {
+						log.warn(
+							`Weekly banked-reset auto-apply held: '${account.name}' (${account.id}) has unresolved reset attempt ${pending.id} (cause: ${pending.cause ?? "unknown"}). Reconcile that attempt before spending another account's credit; elapsed time does not release this hold.`,
+						);
+						warnedPendingAttempt = pending.id;
+					}
+					return true;
+				}
+				if (!usable(account, now)) continue;
 				// Check both included-quota windows, irrespective of reset toggles.
 				const capacity = getAccountCapacitySignal(
 					usageCache.get(account.id),
@@ -935,6 +953,7 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 				// read (a 429, say) says nothing about the account's headroom.
 				if (!capacity || capacity.minHeadroom > 0) return true;
 			}
+			warnedPendingAttempt = null;
 			return false;
 		},
 		getAutoApplyCooldownAnchorAt: (accountId) =>

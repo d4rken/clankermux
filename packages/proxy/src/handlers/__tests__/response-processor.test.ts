@@ -101,7 +101,8 @@ function makeCtx(opts: {
 				},
 				// The Codex usage-snapshot persist is credential-CAS'd and reads the
 				// changed-row count. This double has no rows: report a match.
-				runWithChanges: async () => 1,
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({ run: () => ({ changes: 1 }) }),
 			}),
 			updateRequestUsage: async () => {},
 		},
@@ -181,7 +182,8 @@ function makeCtxWithReason(opts: {
 			getAdapter: () => ({
 				get: async () => ({ rate_limited_until: null }),
 				run: async () => {},
-				runWithChanges: async () => 1,
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({ run: () => ({ changes: 1 }) }),
 			}),
 			updateRequestUsage: async () => {},
 		},
@@ -627,10 +629,13 @@ function makeCodexCtx() {
 				},
 				// The Codex usage-snapshot persist is credential-CAS'd and reads the
 				// changed-row count. This double has no rows: report a match.
-				runWithChanges: async (sql: string, params: unknown[]) => {
-					calls.runSql.push({ sql, params });
-					return 1;
-				},
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({
+					run: (sql: string, params: unknown[]) => {
+						calls.runSql.push({ sql, params });
+						return { changes: 1 };
+					},
+				}),
 			}),
 			updateRequestUsage: async () => {},
 		},

@@ -507,7 +507,9 @@ export interface BankedResetApplyDeps {
 	 * {@link BANKED_RESET_WEEKLY_LIMIT_COOLDOWN_MS}, for each window the claim
 	 * cleared (every window when `cleared` is unknown), until a usage reading
 	 * observed after the claim decides instead; an overage pause does not
-	 * exclude it.
+	 * exclude it. Unresolved claims also hold the windows their grant clears,
+	 * irrespective of trigger or replay eligibility; missing grant metadata
+	 * conservatively holds every window until the claim is settled or expired.
 	 */
 	hasOtherAvailableAccount(
 		accountId: string,
@@ -1146,6 +1148,10 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		reachable(account, now) && !account.paused;
 	const readUsage = (accountId: string) =>
 		usage.get(accountId) as UsageData | null;
+	const readStatus =
+		overrides?.getCachedStatus ??
+		((accountId: string) =>
+			anthropicBankedResetCache.get(accountId)?.status ?? null);
 
 	return new AnthropicBankedResetApplyScheduler({
 		listCandidateAccounts: async () =>
@@ -1176,8 +1182,7 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 		// refreshNow sends nothing while the shared usage deadline stands.
 		refreshUsage: (accountId) => usage.refreshNow(accountId),
 		getAccount: (accountId) => dbOps.getAccount(accountId),
-		getCachedStatus: (accountId) =>
-			anthropicBankedResetCache.get(accountId)?.status ?? null,
+		getCachedStatus: readStatus,
 		refreshStatus: async (accountId, force) =>
 			(await coordinator.refreshStatus(accountId, force)).success,
 		getPendingAttempts: (accountId) =>
@@ -1229,6 +1234,14 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 				const observedAt = usage.peekWithAge(id)?.observedAtMs ?? null;
 				return windows.filter((window) =>
 					rows.some((row) => {
+						if (row.status === "pending") {
+							// A lost answer may already have restored capacity. A later
+							// usage timestamp cannot settle a POST still in flight.
+							const grant = readStatus(id)?.grants.find(
+								(grant) => grant.id === row.grant_id,
+							);
+							return !grant || grant.clears.includes(window);
+						}
 						if (row.resolved_at === null) return false;
 						if (observedAt !== null && observedAt > row.resolved_at) {
 							return false;
@@ -1269,7 +1282,18 @@ export function createAnthropicBankedResetApplyScheduler(wiring: {
 				return anyUnknown;
 			};
 			for (const account of accounts) {
-				if (account.id === accountId) continue;
+				if (account.id === accountId || !reachable(account, now)) continue;
+				// Replay eligibility is not evidence that nothing was spent. Include
+				// manual, expiry and disabled-toggle claims in weekly conservation.
+				const pending = await dbOps.getPendingAnthropicBankedResetAttempts(
+					account.id,
+				);
+				if (pending.length > 0) {
+					restoring.set(account.id, [
+						...(restoring.get(account.id) ?? []),
+						...pending,
+					]);
+				}
 				if (usable(account, now)) {
 					if (restoring.has(account.id)) holders.push(account.id);
 					if (note(account, now, false)) unknown.push(account);
