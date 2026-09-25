@@ -32,5 +32,8 @@
 				}
 			}
 		}
-	]
+	],
+	"clankermux": {
+		"piPromptVersions": ["0.87"]
+	}
 }

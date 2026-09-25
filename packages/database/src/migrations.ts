@@ -1135,7 +1135,8 @@ export function ensureSchema(db: Database): void {
 			sdk_output_tokens INTEGER,
 			sdk_cache_read_input_tokens INTEGER,
 			sdk_cache_creation_input_tokens INTEGER,
-			ignored_fields TEXT
+			ignored_fields TEXT,
+			system_prompt_detail TEXT
 		)
 	`);
 	db.run(
@@ -2008,6 +2009,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "sdk_bridge_turns",
 		column: "ignored_fields",
 		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN ignored_fields TEXT",
+	},
+	// JSON SdkBridgeSystemPromptDetail: what the turn's system-prompt policy
+	// made of the client's prompt, never its text. NULL under `drop`.
+	{
+		table: "sdk_bridge_turns",
+		column: "system_prompt_detail",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN system_prompt_detail TEXT",
 	},
 ];
 

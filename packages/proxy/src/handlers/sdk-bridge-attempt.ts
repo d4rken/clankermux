@@ -3,6 +3,7 @@ import {
 	type Account,
 	getNativeResponsesMetaContext,
 	type RequestMeta,
+	SDK_BRIDGE_PI_PROMPT_HEADER,
 	SdkBridgeCapacityError,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
@@ -92,8 +93,22 @@ export function buildSdkBridgeRoutePlan(
 	});
 }
 
+/**
+ * The declared pi prompt layout, as the bridge may echo it in a refusal and
+ * record it: printable ASCII, at most 32 characters.
+ */
+function piPromptVersion(headers: Headers): string | null {
+	const raw = headers.get(SDK_BRIDGE_PI_PROMPT_HEADER);
+	const value = raw
+		?.replace(/[^\x20-\x7e]/g, "")
+		.trim()
+		.slice(0, 32);
+	return value || null;
+}
+
 export function sdkBridgeTurnMeta(
 	meta: RequestMeta,
+	headers: Headers,
 	apiKeyId: string | null,
 	apiKeyName: string | null,
 ): SdkBridgeTurnMeta {
@@ -111,6 +126,7 @@ export function sdkBridgeTurnMeta(
 		reasoningEffort: meta.reasoningEffort ?? null,
 		translationGaps:
 			getNativeResponsesMetaContext(meta)?.translationGaps ?? null,
+		piPromptVersion: piPromptVersion(headers),
 	};
 }
 
@@ -182,7 +198,12 @@ export async function proxyViaSdkBridge(input: {
 		input.apiKeyId,
 		input.apiKeyName,
 	);
-	const meta = sdkBridgeTurnMeta(requestMeta, input.apiKeyId, input.apiKeyName);
+	const meta = sdkBridgeTurnMeta(
+		requestMeta,
+		req.headers,
+		input.apiKeyId,
+		input.apiKeyName,
+	);
 	try {
 		const response = await sendAuthorizedRequest(
 			sdkBridgeRequest(req, input.url, input.body),
@@ -287,7 +308,12 @@ export async function continueParkedSdkBridgeTurn(input: {
 		return await bridge.continueTurn({
 			turnId: parked.turnId,
 			request: sdkBridgeRequest(req, input.url, input.body),
-			meta: sdkBridgeTurnMeta(requestMeta, input.apiKeyId, input.apiKeyName),
+			meta: sdkBridgeTurnMeta(
+				requestMeta,
+				req.headers,
+				input.apiKeyId,
+				input.apiKeyName,
+			),
 			signal: req.signal,
 			bumpIdleTimeout: input.bumpIdleTimeout,
 		});

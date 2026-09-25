@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { resolveClientModelMetadata } from "@clankermux/core";
-import type {
-	ClientCatalogue,
-	ClientModelMetadataMap,
+import {
+	type ClientCatalogue,
+	type ClientModelMetadataMap,
+	SUPPORTED_PI_PROMPT_VERSIONS,
 } from "@clankermux/types";
 import { aliasCodexMetadata, renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
@@ -130,6 +131,11 @@ describe("client catalogue serving", () => {
 			expect(rows).toHaveLength(1);
 			expect(rows[0].clankermux).toEqual(metadata.friendly);
 			delete rows[0].clankermux;
+			// The OpenAI shape, pi's, also names the pi prompt layouts the SDK bridge serves.
+			expect(enriched.clankermux).toEqual(
+				format === "openai" ? { piPromptVersions: ["0.87"] } : undefined,
+			);
+			delete enriched.clankermux;
 			expect(enriched).toEqual(original);
 			expect(response.headers.get("cache-control")).toBe("private, no-store");
 			expect(JSON.stringify(enriched)).not.toContain("accountIds");
@@ -188,6 +194,7 @@ describe("client catalogue serving", () => {
 				expect(JSON.stringify(body)).not.toContain(`"${key}"`);
 			}
 			delete rows[0].clankermux;
+			delete body.clankermux;
 			expect(body).toEqual(
 				await renderClientCatalogue(catalogue, format).json(),
 			);
@@ -195,6 +202,17 @@ describe("client catalogue serving", () => {
 		expect(await renderClientCatalogue(catalogue, "openai", {}).json()).toEqual(
 			emptyRetentionFixture,
 		);
+	});
+
+	it("publishes the pi prompt layouts where pi's discovery reads them", async () => {
+		const body = await renderClientCatalogue(catalogue, "openai", {}).json();
+		expect(body.clankermux).toEqual({
+			piPromptVersions: [...SUPPORTED_PI_PROMPT_VERSIONS],
+		});
+		expect(body.data.map((m: { id: string }) => m.id)).toEqual(["friendly"]);
+		expect(
+			await renderClientCatalogue(catalogue, "openai").json(),
+		).not.toHaveProperty("clankermux");
 	});
 
 	it("opts in only for clankermux_metadata=1", async () => {

@@ -122,6 +122,33 @@ describe("SdkBridgeTurnRepository", () => {
 		).toEqual({ ignored_fields: '["temperature","top_p"]' });
 	});
 
+	it("stores the system prompt detail as JSON, null when the policy gave none", async () => {
+		const detail = {
+			outcome: "refused" as const,
+			version: "0.87",
+			code: "sdk_bridge_prompt_malformed",
+			reason: "duplicate_closing_tag",
+			section: "docs",
+			promptLength: 42,
+			promptSha256: "ab".repeat(32),
+		};
+		await repo.insertTurn({
+			id: "turn-3",
+			startedAt: 1_000,
+			status: "rejected",
+			historyMode: "fresh",
+			systemPromptPolicy: "pi-head-v1",
+			systemPromptDetail: detail,
+		});
+		await insertTurn("turn-4");
+		expect(
+			(await repo.getTurnWithLegs("turn-3"))?.turn.systemPromptDetail,
+		).toEqual(detail);
+		expect(
+			(await repo.getTurnWithLegs("turn-4"))?.turn.systemPromptDetail,
+		).toBeNull();
+	});
+
 	it("returns null for an unknown turn", async () => {
 		expect(await repo.getTurnWithLegs("missing")).toBeNull();
 	});

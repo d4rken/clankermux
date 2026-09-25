@@ -8,6 +8,7 @@ import {
 	type SdkBridgeInnerContext,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeStatus,
+	type SdkBridgeSystemPromptDetail,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
@@ -54,7 +55,7 @@ import {
 	resolveClaudeExecutable,
 } from "./spawn";
 import { LegResponse } from "./sse";
-import { getSystemPromptPolicy } from "./system-prompt-policy";
+import { selectSystemPromptPolicy } from "./system-prompt-policy";
 import {
 	createToolServer,
 	loadMcpSdk,
@@ -85,7 +86,6 @@ import {
 
 /** Claude Code version the bundled binary reports; written into rebuilt transcripts. */
 const CLAUDE_CODE_VERSION = "2.1.280";
-const SYSTEM_PROMPT_POLICY = "drop";
 
 export type { SdkBridgeCounters, SdkBridgeStatus };
 
@@ -276,6 +276,10 @@ export function createClaudeSdkBridge(
 		meta: SdkBridgeTurnMeta,
 		plan: SdkBridgeRoutePlan | null,
 		startedAt: number,
+		prompt: {
+			policy: string;
+			detail: SdkBridgeSystemPromptDetail | null;
+		},
 		error: BridgeError,
 		reason: string,
 	): Response {
@@ -284,7 +288,8 @@ export function createClaudeSdkBridge(
 			startedAt,
 			status: "rejected",
 			historyMode: "fresh",
-			systemPromptPolicy: SYSTEM_PROMPT_POLICY,
+			systemPromptPolicy: prompt.policy,
+			systemPromptDetail: prompt.detail,
 			apiKeyId: meta.apiKeyId,
 			apiKeyName: meta.apiKeyName,
 			accountId: plan?.preferredAccountId ?? null,
@@ -444,8 +449,13 @@ export function createClaudeSdkBridge(
 		const { plan, meta } = input;
 		const startedAt = now();
 		const recorder = new TurnRecorder(deps.turnRepo, log, plan.turnId);
+		const policy = selectSystemPromptPolicy(meta.clientHarness);
+		const promptRecord: {
+			policy: string;
+			detail: SdkBridgeSystemPromptDetail | null;
+		} = { policy: policy.name, detail: null };
 		const refuse = (error: BridgeError, reason: string) =>
-			reject(recorder, meta, plan, startedAt, error, reason);
+			reject(recorder, meta, plan, startedAt, promptRecord, error, reason);
 		const body = await readBody(input.request);
 		if ("error" in body) return refuse(body.error, body.error.reason);
 		const parsed = parseTurnRequest(
@@ -486,11 +496,15 @@ export function createClaudeSdkBridge(
 			return refuse(bridgeErrors.invalid(errorSummary(error)), "invalid");
 		}
 
-		const policy = getSystemPromptPolicy(SYSTEM_PROMPT_POLICY);
-		const systemPrompt = policy.decide(turn.systemText, {
+		// Before the conversation claim: a refused prompt supersedes nothing.
+		const decided = policy.decide(turn.systemText, {
 			model: target.upstreamModel,
 			clientHarness: meta.clientHarness,
+			piPromptVersion: meta.piPromptVersion,
 		});
+		promptRecord.detail = decided.detail;
+		if (!decided.ok) return refuse(decided.error, decided.reason);
+		const systemPrompt = decided.decision;
 		let convKey: string | null = null;
 		try {
 			convKey = conversationKey({
@@ -771,6 +785,7 @@ export function createClaudeSdkBridge(
 			startedAt,
 			historyMode: history.mode,
 			systemPromptPolicy: policy.name,
+			systemPromptDetail: promptRecord.detail,
 			apiKeyId: meta.apiKeyId,
 			apiKeyName: meta.apiKeyName,
 			accountId: plan.preferredAccountId,

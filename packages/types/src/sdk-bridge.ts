@@ -40,6 +40,35 @@ export type SdkBridgeLegKind = "start" | "continue";
 /** Whether a failed leg had already committed its response head. */
 export type SdkBridgeLegErrorPhase = "pre_head" | "mid_stream";
 
+/**
+ * What the turn's system-prompt policy made of the client's system prompt.
+ * Never the prompt's text: a refusal keeps its length and SHA-256 instead.
+ */
+export type SdkBridgeSystemPromptDetail =
+	| {
+			outcome: "forwarded";
+			/** The prompt-layout version the client declared. */
+			version: string;
+			/** Whether pi's own harness head was taken off the front. */
+			headStripped: boolean;
+			/** Characters appended to Claude Code's preset. */
+			forwardedLength: number;
+			/** Section openers seen in the forwarded text; a diagnostic only. */
+			sectionsSeen: string[];
+	  }
+	| {
+			outcome: "refused";
+			/** Null when the client declared none. */
+			version: string | null;
+			/** The `error.code` the client got. */
+			code: string;
+			reason: string;
+			/** The section the reason is about, when it names one. */
+			section: string | null;
+			promptLength: number;
+			promptSha256: string;
+	  };
+
 export interface SdkBridgeTurn {
 	id: string;
 	startedAt: number;
@@ -61,6 +90,8 @@ export interface SdkBridgeTurn {
 	historyMode: SdkBridgeHistoryMode;
 	rebuildReason: SdkBridgeRebuildReason | null;
 	systemPromptPolicy: string;
+	/** Null for `drop`, and for a turn refused before its policy ran. */
+	systemPromptDetail: SdkBridgeSystemPromptDetail | null;
 	stopReason: string | null;
 	legCount: number;
 	toolRoundCount: number;
@@ -107,6 +138,7 @@ export type SdkBridgeTurnInsert = Pick<
 			| "ccSessionId"
 			| "rebuildReason"
 			| "ignoredFields"
+			| "systemPromptDetail"
 		>
 	>;
 
