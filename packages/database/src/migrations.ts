@@ -1170,6 +1170,36 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
 	);
 
+	// A bridged turn parked on the client's tool calls whose Claude Code process
+	// was stopped: its session file lives in the bridge's released-parks
+	// directory and the client's results resume it, across restarts. One row
+	// per turn; `descriptor` is the bridge's immutable resume descriptor (JSON)
+	// and `awaited_tool_use_ids` a JSON array. Not a foreign key: the cleanup
+	// worker keeps a turn while its park exists, and a park outlives nothing
+	// but its own file.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_released_parks (
+			turn_id TEXT PRIMARY KEY,
+			state TEXT NOT NULL
+				CHECK (state IN ('preparing','released','claimed','consumed')),
+			owner_api_key_id TEXT,
+			conversation_key_hash TEXT,
+			session_id TEXT NOT NULL,
+			session_file TEXT NOT NULL,
+			resume_at TEXT NOT NULL,
+			awaited_tool_use_ids TEXT NOT NULL,
+			requested_model TEXT NOT NULL,
+			descriptor TEXT NOT NULL,
+			active_ms INTEGER NOT NULL,
+			parked_since INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			file_bytes INTEGER NOT NULL,
+			claim_owner TEXT,
+			claimed_at INTEGER,
+			created_at INTEGER NOT NULL
+		)
+	`);
+
 	// Performance indexes (covering/partial indexes for hot query paths)
 	// Routing policy is additive: retired combo/mapping storage remains inert.
 	db.run(`CREATE TABLE IF NOT EXISTS model_aliases (

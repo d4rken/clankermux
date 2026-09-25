@@ -26,8 +26,13 @@ export function createStatsResetHandler(dbOps: DatabaseOperations) {
 		const adapter = dbOps.getAdapter();
 		// Clear request history
 		await adapter.run("DELETE FROM requests");
-		// SDK bridge turns are request history too; their legs cascade.
-		await adapter.run("DELETE FROM sdk_bridge_turns");
+		// SDK bridge turns are request history too; their legs cascade. Open
+		// turns and those a released park owns are live state, not history.
+		await adapter.run(
+			`DELETE FROM sdk_bridge_turns WHERE status NOT IN ('running','released')
+			AND NOT EXISTS (SELECT 1 FROM sdk_bridge_released_parks p
+				WHERE p.turn_id = sdk_bridge_turns.id)`,
+		);
 		// Reset account statistics
 		await adapter.run(
 			"UPDATE accounts SET request_count = 0, session_request_count = 0",
