@@ -130,6 +130,7 @@ function send(
 			authorization: `Bearer ${gw.apiKey}`,
 			"content-type": "application/json",
 			"user-agent": "pi/0.86.0",
+			"x-clankermux-pi-prompt": "0.87",
 			session_id: `errors-${crypto.randomUUID()}`,
 		},
 		body: JSON.stringify(body),
@@ -584,6 +585,7 @@ for (const endpoint of ["responses", "chat"] as const) {
 					authorization: `Bearer ${gw.apiKey}`,
 					"content-type": "application/json",
 					"user-agent": "pi/0.86.0",
+					"x-clankermux-pi-prompt": "0.87",
 				},
 				body: JSON.stringify({
 					model,

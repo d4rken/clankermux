@@ -118,6 +118,69 @@ made private, never deleted: no pid says whether a process still uses them.
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
 
+## System prompt policies
+
+`system-prompt-policy.ts` picks the policy by harness, once per start turn,
+and records it as `sdk_bridge_turns.system_prompt_policy` with
+`system_prompt_detail` (JSON, never the prompt text). A policy returns a
+typed outcome and never throws; a refusal goes through `reject()` before
+the conversation claim, so it supersedes no parked turn and leaves a
+`rejected` row with its `pre_head` leg.
+
+- `drop` (every harness but `pi`): the `claude_code` preset alone.
+- `pi-head-v1` (`clientHarness === "pi"`, `pi-prompt.ts`): when the text
+  starts with pi's stock preamble followed by `<tools>`, `<rules>` and
+  `<docs>`, that head and the blank line after it are removed; everything
+  after it is appended to the preset byte for byte and never parsed. Any
+  other text (a replaced preamble, a forced prompt without the head) is
+  appended whole.
+
+It strips rather than selects because pi's extensions append to the
+prompt: claude-context returns pi's prompt plus raw guidance after `<cwd>`,
+pi-subagents appends `<advertised_subagents>`, both as forced prompts. The
+head is the only part that draws the subscription 400. pi's stock
+construction renders it first; a collapsed custom→stock session and the herdr
+child path do not, and are refused.
+
+pi declares its layout in `x-clankermux-pi-prompt` (threaded as
+`SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
+(`HEADS` in `pi-prompt.ts`); releases with a byte-identical head share an
+entry. A version is supported only while it has fixtures under
+`__tests__/fixtures/pi-prompts/<version>/`, written by
+`scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
+own builder and the claude-context and pi-subagents code that rewrites the
+prompt. Regenerate and review the fixtures when a pi release changes the
+head, pi-ai's system-message collapse, or the rendering of the extensions
+above. Discovery lists the versions at
+`clankermux.piPromptVersions` in the OpenAI-shape
+`/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
+is refused.
+
+All refusals are `400 invalid_request_error`:
+
+| `error.code` | When |
+| --- | --- |
+| `sdk_bridge_prompt_unsupported` | header missing, or a version without fixtures |
+| `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more than once anywhere, or the stock preamble not followed by the full head |
+| `sdk_bridge_prompt_refused` | the forwarded text carries pi's preamble line at a line start, or both `docs/custom-provider.md` and `docs/packages.md`; subscription accounts answer those with a 400. A persona embedding its parent's pi prompt lands here too |
+
+The single leading system message is the layout's contract. pi's
+clankermux provider (openai-responses, no `compat`) sends only that:
+pi-ai's `resolveTranscript` collapses every later system message into it,
+patching sections in place and appending new ones at the end. A
+mid-session tools change stays inside the head and is stripped with it. A
+session whose replaced preamble goes back to stock comes out as the stock
+preamble with `tools`, `rules` and `docs` after everything else; that is
+refused as `incomplete_head`, as agreed with the pi side (none of its
+extensions does it). If pi ever sends mid-conversation system messages to
+ClankerMux, that comes with a new `x-clankermux-pi-prompt` value. A
+pi-subagents child placed through herdr today puts its boundary text before
+pi's head and is refused by the trigger check until the pi side moves it.
+
+Continuations never run the policy: the live query keeps its prompt. A
+resume or rebuild runs it again, and `snapshot: false` makes Claude Code
+render that prompt rather than the stored one.
+
 ## How a failed turn reaches the client
 
 The inner call Claude Code gave up on in the current leg decides
@@ -157,11 +220,10 @@ still refused, and stale or partial ones keep their own 409.
 
 ## Behaviour that looks like a bug and is not
 
-- **System prompt policy is `drop`.** Only the Claude Code preset is sent.
-  Stock pi's system prompt reproducibly draws a 400 "out of extra usage" from
-  subscription accounts (gotgenes/pi-packages#883). The seam
-  (`system-prompt-policy.ts`, recorded as `sdk_bridge_turns.system_prompt_policy`)
-  exists for a later `verbatim` or `rewrite` policy. An "out of extra usage" 400
+- **pi's own prompt text is never forwarded whole.** Stock pi's system
+  prompt reproducibly draws a 400 "out of extra usage" from subscription
+  accounts (gotgenes/pi-packages#883), which is why `pi-head-v1` removes
+  pi's head and checks the rest. An "out of extra usage" 400
   from an inner call reaches the client verbatim and changes no account.
 - **"Failed to authenticate".** The CLI reports any 403 from its base URL that
   way. The inner listener rewrites a ClankerMux 403 to 400 for the child, and

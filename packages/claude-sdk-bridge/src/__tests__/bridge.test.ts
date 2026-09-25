@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import {
 	existsSync,
 	lstatSync,
@@ -40,6 +41,10 @@ import {
 	streamedMessage,
 	waitFor,
 } from "./fixtures/fake-sdk";
+import {
+	expectedAppend,
+	loadPiPromptFixture,
+} from "./fixtures/pi-prompt-fixtures";
 
 type Msg = { role: string; content: unknown };
 
@@ -269,7 +274,7 @@ describe("a plain turn", () => {
 		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
 	});
 
-	it("never sends the client's system prompt", async () => {
+	it("never sends the system prompt of a client other than pi", async () => {
 		const h = harness();
 		const t = await start(h, {
 			system: "You are pi. Use extra usage.",
@@ -281,6 +286,11 @@ describe("a plain turn", () => {
 			snapshot: false,
 		});
 		expect(JSON.stringify(t.query.options)).not.toContain("You are pi");
+		await waitFor(() => h.repo.turns.has(t.plan.turnId));
+		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+			systemPromptPolicy: "drop",
+		});
+		expect(h.repo.turns.get(t.plan.turnId)?.systemPromptDetail).toBeNull();
 	});
 
 	it("answers stream:false with one JSON Message", async () => {
@@ -1220,6 +1230,280 @@ describe("parked tool calls", () => {
 		});
 		await settled(h);
 		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("failed");
+	});
+});
+
+describe("pi's system prompt", () => {
+	const PI = {
+		clientHarness: "pi",
+		clientUserAgent: "pi (linux 6.12.101+deb13-amd64; x64)",
+		piPromptVersion: "0.87",
+	} as const;
+	const fixture = (name: string) => loadPiPromptFixture("0.87", name);
+
+	async function refused(
+		h: Harness,
+		system: string,
+		meta: Partial<SdkBridgeTurnMeta>,
+	) {
+		const plan = makePlan();
+		const res = await h.bridge.startTurn({
+			request: messagesRequest({
+				system,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+			plan,
+			meta: makeMeta({ ...PI, ...meta }),
+			signal: new AbortController().signal,
+		});
+		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
+		await waitFor(() => !!h.repo.turns.get(plan.turnId)?.legs[0]?.finished);
+		return {
+			status: res.status,
+			error: ((await res.json()) as { error: Record<string, unknown> }).error,
+			row: h.repo.turns.get(plan.turnId),
+		};
+	}
+
+	it("appends pi's prompt without its head to the preset and records the policy", async () => {
+		const h = harness();
+		const f = fixture("stock-all");
+		const t = await start(
+			h,
+			{ system: f.system, messages: [{ role: "user", content: "hello" }] },
+			{ meta: PI },
+		);
+		expect(t.query.options.systemPrompt).toEqual({
+			type: "preset",
+			preset: "claude_code",
+			append: expectedAppend(f) as string,
+			snapshot: false,
+		});
+		await waitFor(() => h.repo.turns.has(t.plan.turnId));
+		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+			systemPromptPolicy: "pi-head-v1",
+			systemPromptDetail: {
+				outcome: "forwarded",
+				version: "0.87",
+				headStripped: true,
+				forwardedLength: (expectedAppend(f) as string).length,
+				// A diagnostic, so an opener inside a section counts too.
+				sectionsSeen: [
+					"addendum",
+					"project_context",
+					"skills",
+					"available_skills",
+					"cwd",
+				],
+			},
+		});
+	});
+
+	it("reads pi's prompt from a system array, the Chat adapter's shape", async () => {
+		const h = harness();
+		const f = fixture("collapsed-section-update");
+		const t = await start(
+			h,
+			{
+				system: [{ type: "text", text: f.system }],
+				messages: [{ role: "user", content: "hello" }],
+			},
+			{ meta: PI },
+		);
+		expect((t.query.options.systemPrompt as { append?: string }).append).toBe(
+			expectedAppend(f) as string,
+		);
+	});
+
+	for (const [what, system, meta, code, reason] of [
+		[
+			"without a declared layout",
+			"You are pi",
+			{ piPromptVersion: null },
+			"sdk_bridge_prompt_unsupported",
+			"missing_version",
+		],
+		[
+			"under an unknown layout",
+			"You are pi",
+			{ piPromptVersion: "0.99" },
+			"sdk_bridge_prompt_unsupported",
+			"unsupported_version",
+		],
+		[
+			"that does not parse",
+			fixture("context-closes-docs").system,
+			{},
+			"sdk_bridge_prompt_malformed",
+			"duplicate_closing_tag",
+		],
+		[
+			"whose forwarded text carries the rejected text",
+			fixture("trigger-docs-pair").system,
+			{},
+			"sdk_bridge_prompt_refused",
+			"trigger_docs_pair",
+		],
+	] as const)
+		it(`refuses a pi prompt ${what} with a named 400, recording no text`, async () => {
+			const h = harness();
+			const r = await refused(h, system, meta);
+			expect(r.status).toBe(400);
+			expect(r.error).toMatchObject({ type: "invalid_request_error", code });
+			expect(h.sdk.queries).toEqual([]);
+			expect(r.row).toMatchObject({
+				status: "rejected",
+				httpStatus: 400,
+				systemPromptPolicy: "pi-head-v1",
+				systemPromptDetail: {
+					outcome: "refused",
+					code,
+					reason,
+					promptLength: system.length,
+					promptSha256: createHash("sha256").update(system).digest("hex"),
+				},
+			});
+			expect(r.row?.legs).toEqual([
+				expect.objectContaining({
+					kind: "start",
+					httpStatus: 400,
+					errorPhase: "pre_head",
+				}),
+			]);
+			expect(JSON.stringify(r.row)).not.toContain(system.slice(0, 40));
+			expect(h.bridge.status().counters.rejected).toEqual({
+				[code.replace("sdk_bridge_", "")]: 1,
+			});
+		});
+
+	it("refuses before the conversation claim: a parked turn stays parked", async () => {
+		const h = harness();
+		const conversation = {
+			...PI,
+			affinityScope: "client_session",
+			affinityKey: "pi-parked",
+		};
+		const first: Msg = { role: "user", content: "TOOL read" };
+		const t = await start(
+			h,
+			{ tools: [READ_TOOL], messages: [first] },
+			{ meta: conversation },
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_pi", name: "mcp__c__read", input: {} },
+			]),
+		);
+		await reply(t.response);
+		void t.query.callTool("toolu_pi", "read");
+		await waitFor(() => h.bridge.status().parked === 1);
+
+		const r = await refused(h, "x", {
+			...conversation,
+			piPromptVersion: null,
+		});
+		expect(r.status).toBe(400);
+		expect(t.query.closed).toBe(false);
+		expect(h.bridge.status().parked).toBe(1);
+	});
+
+	it("does not run on a continuation, whose query keeps its prompt", async () => {
+		const h = harness();
+		const first: Msg = { role: "user", content: "TOOL read" };
+		const f = fixture("stock-skills");
+		const t = await start(
+			h,
+			{ system: f.system, tools: [READ_TOOL], messages: [first] },
+			{ meta: PI },
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_pc", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const r1 = await reply(t.response);
+		const call = t.query.callTool("toolu_pc", "read");
+		await waitFor(() => h.bridge.status().parked === 1);
+
+		// Neither a declared layout nor a parseable prompt: a start would refuse both.
+		const c = continueTurn(
+			h,
+			t.plan.turnId,
+			{
+				system: fixture("context-closes-docs").system,
+				tools: [READ_TOOL],
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_pc", content: "A" },
+						],
+					},
+				],
+			},
+			{ ...PI, piPromptVersion: null },
+		);
+		expect((await call).isError).toBe(false);
+		t.query.emit(...streamedMessage([{ type: "text", text: "done" }]));
+		expect((await reply(c.response)).status).toBe(200);
+		expect(h.sdk.queries).toHaveLength(1);
+	});
+
+	it("runs again on a resumed turn, which renders the prompt it sends now", async () => {
+		const h = harness();
+		const conversation = {
+			...PI,
+			affinityScope: "client_session",
+			affinityKey: "pi-resume",
+		};
+		const before = fixture("stock-skills");
+		const t = await start(
+			h,
+			{ system: before.system, messages: [{ role: "user", content: "hello" }] },
+			{ meta: conversation },
+		);
+		const store = t.query.options.sessionStore as SessionStore;
+		await store.append(
+			{ projectKey: "p", sessionId: t.query.options.sessionId as string },
+			[
+				{
+					type: "user",
+					uuid: "u1",
+					sessionId: t.query.options.sessionId as string,
+					message: { role: "user", content: "hello" },
+				},
+			],
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo: hello" }]),
+		);
+		const r = await reply(t.response);
+		t.query.emit(resultMessage());
+		await settled(h);
+
+		const after = fixture("stock-all");
+		const t2 = await start(
+			h,
+			{
+				system: after.system,
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: r.content },
+					{ role: "user", content: "again" },
+				],
+			},
+			{ meta: conversation },
+		);
+		expect(t2.query.options.resume).toBeTruthy();
+		expect(t2.query.options.systemPrompt).toMatchObject({
+			append: expectedAppend(after) as string,
+			snapshot: false,
+		});
 	});
 });
 

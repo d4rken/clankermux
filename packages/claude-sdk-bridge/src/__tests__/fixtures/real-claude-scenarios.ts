@@ -173,8 +173,8 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		legId: crypto.randomUUID(),
 		apiKeyId: "key-1",
 		apiKeyName: "key one",
-		clientHarness: "pi",
-		clientUserAgent: "pi/test",
+		clientHarness: "opencode",
+		clientUserAgent: "opencode/test",
 		project: "real-claude",
 		projectAttributionSource: null,
 		affinityScope: null,
@@ -182,6 +182,7 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		model: MODEL,
 		reasoningEffort: null,
 		translationGaps: null,
+		piPromptVersion: null,
 		...extra,
 	};
 }

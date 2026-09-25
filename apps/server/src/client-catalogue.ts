@@ -1,12 +1,13 @@
 import { ALIAS_ADVERTISED_EFFORTS } from "@clankermux/core";
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
-import type {
-	ClientCatalogue,
-	ClientFormat,
-	ClientModel,
-	ClientModelMetadata,
-	ClientModelMetadataMap,
+import {
+	type ClientCatalogue,
+	type ClientFormat,
+	type ClientModel,
+	type ClientModelMetadata,
+	type ClientModelMetadataMap,
+	SUPPORTED_PI_PROMPT_VERSIONS,
 } from "@clankermux/types";
 
 /**
@@ -97,6 +98,10 @@ export function renderClientCatalogue(
 	const response = handleModelsRequest(
 		catalogue.models.map((model) => model.id),
 		metadata,
+		// pi reads it to warn before a Claude turn on the SDK bridge is refused.
+		metadata
+			? { piPromptVersions: [...SUPPORTED_PI_PROMPT_VERSIONS] }
+			: undefined,
 	);
 	response.headers.set("Cache-Control", "private, no-store");
 	return response;

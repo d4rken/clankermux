@@ -58,6 +58,8 @@ const MODEL_CREATED = 1_700_000_000;
 export function handleModelsRequest(
 	ids: readonly string[] = CODEX_MODELS,
 	metadata?: ClientModelMetadataMap,
+	/** Gateway-wide facts, under a top-level `clankermux` next to `data`. */
+	gateway?: Record<string, unknown>,
 ): Response {
 	const body = {
 		object: "list",
@@ -68,6 +70,7 @@ export function handleModelsRequest(
 			owned_by: "clankermux",
 			...(metadata ? { clankermux: metadata[id] ?? {} } : {}),
 		})),
+		...(gateway ? { clankermux: gateway } : {}),
 	};
 	return new Response(JSON.stringify(body), {
 		status: 200,

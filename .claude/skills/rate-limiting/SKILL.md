@@ -87,6 +87,14 @@ one reading. A new consumer picks one of the two on purpose.
 - The routing view is fresh only while `seven_day_oauth_apps` (finite) and
   enabled `extra_usage` (finite) are within the bound too; headers never carry
   them.
+- Idle trust: a poll of an account that has consumed nothing since it was
+  observed counts as current (freshness instant `now`) while it is within the
+  10-min TTL and a demand-aware poller is live. "Consumed" is every upstream
+  send (`sendAuthorizedRequest` holds `usageCache.beginQuotaUse` from send to
+  body end), `noteActivity`, and the cold-start resolver's stored last use; no
+  known use means no trust. Without it the selection warmer re-read every idle
+  account every ~150 s whenever any account had traffic. It assumes nothing
+  outside this process uses the accounts.
 
 ## What actually blocks routing
 

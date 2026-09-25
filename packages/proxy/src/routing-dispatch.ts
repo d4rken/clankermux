@@ -128,6 +128,9 @@ export async function sendAuthorizedRequest(
 	};
 	let response: Response;
 	let recorded = false;
+	// Held from the send until the body is over, so the usage cache never takes
+	// a poll that landed mid-request as proof the account has been idle.
+	let endQuotaUse: (() => void) | null = null;
 	try {
 		// A mismatch here is an internal authorization invariant failure (403);
 		// client field incompatibilities were already rejected during route building.
@@ -259,6 +262,12 @@ export async function sendAuthorizedRequest(
 		recorded = true;
 		if (audit) audit.id = attempt.id;
 		noteSdkBridgeInnerSend(meta, account.id);
+		if (
+			attempt.kind === "upstream_send" &&
+			account.provider === "anthropic" &&
+			!account.custom_endpoint
+		)
+			endQuotaUse = usageCache.beginQuotaUse(account.id);
 		response = transport
 			? await transport(request)
 			: await makeProxyRequest(
@@ -271,6 +280,7 @@ export async function sendAuthorizedRequest(
 				);
 		if (prepareResponse) response = await prepareResponse(response);
 	} catch (error) {
+		endQuotaUse?.();
 		attempt.finished_at = Date.now();
 		attempt.status =
 			error instanceof RoutingPolicyError
@@ -323,19 +333,24 @@ export async function sendAuthorizedRequest(
 	}
 
 	if (transport)
-		return observeRoutingResponse(response, async ({ reportedModel, error }) =>
-			ctx.dbOps.routing.finishAttempt(
-				attempt.id,
-				Date.now(),
-				response.status,
-				error ?? (response.ok ? null : `SDK bridge HTTP ${response.status}`),
-				reportedModel,
-			),
+		return observeRoutingResponse(
+			response,
+			async ({ reportedModel, error }) => {
+				endQuotaUse?.();
+				await ctx.dbOps.routing.finishAttempt(
+					attempt.id,
+					Date.now(),
+					response.status,
+					error ?? (response.ok ? null : `SDK bridge HTTP ${response.status}`),
+					reportedModel,
+				);
+			},
 		);
 
 	return observeRoutingResponse(
 		response,
 		async ({ reportedModel, error, modelRejected }) => {
+			endQuotaUse?.();
 			if (modelRejected && attempt.kind === "upstream_send") {
 				await ctx.dbOps.routing.suppressModel(
 					account.id,
@@ -373,4 +388,5 @@ import {
 	type DevinRequestProvenance,
 	getDevinReportedModel,
 	getDevinRequestProvenance,
+	usageCache,
 } from "@clankermux/providers";

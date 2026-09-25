@@ -1,0 +1,21 @@
+{
+	"name": "forced-prompt",
+	"description": "forceSystemPrompt with no pi head: forwarded whole.",
+	"input": {
+		"cwd": "/home/user/projects/widget",
+		"toolSnippets": {
+			"read": "Read file contents",
+			"bash": "Execute bash commands (ls, grep, find, etc.)",
+			"edit": "Make precise file edits with exact text replacement",
+			"write": "Create or overwrite files"
+		},
+		"forceSystemPrompt": "You are a commit-message writer. Answer with one line, imperative mood."
+	},
+	"system": "You are a commit-message writer. Answer with one line, imperative mood.",
+	"sections": null,
+	"expect": {
+		"outcome": "forwarded",
+		"headStripped": false,
+		"forwarded": "You are a commit-message writer. Answer with one line, imperative mood."
+	}
+}

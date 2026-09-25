@@ -455,8 +455,8 @@ export function makeMeta(
 		legId: crypto.randomUUID(),
 		apiKeyId: "key-1",
 		apiKeyName: "key one",
-		clientHarness: "pi",
-		clientUserAgent: "pi/0.86",
+		clientHarness: "opencode",
+		clientUserAgent: "opencode/1.14.0",
 		project: "proj",
 		projectAttributionSource: null,
 		affinityScope: null,
@@ -464,6 +464,7 @@ export function makeMeta(
 		model: MODEL,
 		reasoningEffort: null,
 		translationGaps: null,
+		piPromptVersion: null,
 		...overrides,
 	};
 }

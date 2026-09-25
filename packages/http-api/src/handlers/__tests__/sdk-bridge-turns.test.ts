@@ -33,6 +33,7 @@ beforeEach(async () => {
 		historyMode: "rebuild_transcript",
 		rebuildReason: "edit",
 		systemPromptPolicy: "drop",
+		systemPromptDetail: null,
 		accountId: "acct-a",
 		ignoredFields: ["temperature"],
 	});
@@ -76,6 +77,7 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 			historyMode: "rebuild_transcript",
 			rebuildReason: "edit",
 			systemPromptPolicy: "drop",
+			systemPromptDetail: null,
 			ignoredFields: ["temperature"],
 		});
 		expect(view.accountName).toBe("Claude A");
@@ -84,6 +86,25 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 		expect(view.inner.requestCount).toBe(1);
 		expect(view.prunedInnerCalls).toBe(0);
 		expect(view.matchedLegId).toBeNull();
+	});
+
+	it("passes a policy's detail through", async () => {
+		const detail = {
+			outcome: "forwarded" as const,
+			version: "0.87",
+			headStripped: true,
+			forwardedLength: 1234,
+			sectionsSeen: ["project_context", "cwd"],
+		};
+		await turns.insertTurn({
+			id: "turn-pi",
+			startedAt: 2_000,
+			historyMode: "fresh",
+			systemPromptPolicy: "pi-head-v1",
+			systemPromptDetail: detail,
+		});
+		const view = (await (await handler("turn-pi")).json()) as SdkBridgeTurnView;
+		expect(view.turn.systemPromptDetail).toEqual(detail);
 	});
 
 	it("resolves a leg id, which has no requests row, to its turn", async () => {
