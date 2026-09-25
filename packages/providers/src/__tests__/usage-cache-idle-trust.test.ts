@@ -115,6 +115,20 @@ describe("idle trust — the poll's own freshness", () => {
 		expect(pollFresh(id)).toBe(false);
 	});
 
+	it("does not trust a reading restored from before this process", () => {
+		const id = freshId("restored");
+		register(id);
+		usageCache.restoreAnthropicUsageRead(id, {
+			lastReadAt: Date.now() - 5 * 60_000,
+			reading: reading(),
+			readingObservedAt: Date.now() - 5 * 60_000,
+		});
+		usageCache.noteActivity(id, Date.now() - HOUR);
+
+		expect(routingFresh(id)).toBe(false);
+		expect(pollFresh(id)).toBe(false);
+	});
+
 	it("does not trust an account without a demand-aware poller", () => {
 		const id = freshId("fixed");
 		register(id, false);
@@ -153,6 +167,20 @@ describe("idle trust — quota use through this process", () => {
 		// A poll observed after the send ended is trusted again.
 		usageCache.setWithAgeForTests(id, reading(), 0);
 		expect(routingFresh(id)).toBe(true);
+	});
+
+	it("keeps trust off while a send is in flight, however long it runs", () => {
+		const id = freshId("long-flight");
+		register(id);
+		usageCache.noteActivity(id, Date.now() - 3 * HOUR);
+		const now = Date.now();
+		const nowSpy = spyOn(Date, "now").mockReturnValue(now - 2 * HOUR);
+		usageCache.beginQuotaUse(id);
+		nowSpy.mockRestore();
+		usageCache.setWithAgeForTests(id, reading(), 5 * 60_000);
+
+		expect(routingFresh(id)).toBe(false);
+		expect(pollFresh(id)).toBe(false);
 	});
 
 	it("counts a send as activity that makes the account's activity known", () => {

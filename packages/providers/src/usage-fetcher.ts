@@ -171,8 +171,6 @@ export const UI_STALE_HORIZON_MS = 30 * 60_000;
  */
 const IDLE_POLL_INTERVAL_MS = 10 * 60_000;
 export const IDLE_REFRESH_LEAD_MS = 60_000;
-/** An upstream send still "in flight" after this long is taken as lost. */
-const QUOTA_USE_IN_FLIGHT_MAX_MS = 60 * 60_000;
 const ACTIVITY_RECENCY_MS = 15 * 60_000;
 const MAX_BACKOFF_MS = 30 * 60 * 1000;
 
@@ -1322,6 +1320,8 @@ interface UsageCacheEntry {
 	data: AnyUsageData;
 	timestamp: number;
 	observedAtMs: number | null;
+	/** Restored from storage rather than read by this process. */
+	restored?: true;
 }
 
 /** Where Anthropic usage reads outlive the process. Must not throw. */
@@ -1428,10 +1428,10 @@ class UsageCache {
 	private headerWindows = new Map<string, HeaderWindows>();
 	private headerEpochs = new Map<string, number>();
 	private nextHeaderEpoch = 0;
-	// Idle trust (see pollFreshAtMs): upstream sends in flight per account, keyed
-	// by token with their start time, and when one last began or ended. Facts
-	// about the account rather than its poller, so kept across stopPolling.
-	private quotaUseInFlight = new Map<string, Map<symbol, number>>();
+	// Idle trust (see pollFreshAtMs): upstream sends in flight per account, one
+	// token each, and when one last began or ended. Facts about the account
+	// rather than its poller, so kept across stopPolling.
+	private quotaUseInFlight = new Map<string, Set<symbol>>();
 	private lastQuotaUseAt = new Map<string, number>();
 	// The cold-start activity resolver's last answer (the stored last use),
 	// same lifecycle as lastActivityAt.
@@ -2191,6 +2191,7 @@ class UsageCache {
 			data: restored.reading,
 			timestamp: observedAt,
 			observedAtMs: observedAt,
+			restored: true,
 		});
 	}
 
@@ -3227,10 +3228,10 @@ class UsageCache {
 		const startedAt = Date.now();
 		let flights = this.quotaUseInFlight.get(accountId);
 		if (!flights) {
-			flights = new Map();
+			flights = new Set();
 			this.quotaUseInFlight.set(accountId, flights);
 		}
-		flights.set(token, startedAt);
+		flights.add(token);
 		this.noteQuotaUseAt(accountId, startedAt);
 		let ended = false;
 		return () => {
@@ -3258,8 +3259,10 @@ class UsageCache {
 	 * unknown once the reset passes. Such a poll counts as current (`now`),
 	 * provided all of:
 	 *  - a demand-aware poller is live (Anthropic);
-	 *  - the entry is within {@link USAGE_CACHE_TTL_MS} of its write;
-	 *  - no upstream send is in flight (one older than an hour is taken as lost);
+	 *  - the entry is within {@link USAGE_CACHE_TTL_MS} of its write, and was
+	 *    read by this process: a restored reading's stored last use can have
+	 *    missed a write lost with the previous process;
+	 *  - no upstream send is in flight;
 	 *  - the account's latest known use (noteActivity, beginQuotaUse, or the
 	 *    cold-start resolver's stored last use) is known and at or before the
 	 *    poll's observation time (its write time when that is unknown).
@@ -3273,10 +3276,8 @@ class UsageCache {
 		if (!this.pollingPolicies.get(accountId)?.demandAware)
 			return entry.timestamp;
 		if (now - entry.timestamp > USAGE_CACHE_TTL_MS) return entry.timestamp;
-		for (const startedAt of this.quotaUseInFlight.get(accountId)?.values() ??
-			[]) {
-			if (now - startedAt < QUOTA_USE_IN_FLIGHT_MAX_MS) return entry.timestamp;
-		}
+		if (entry.restored) return entry.timestamp;
+		if (this.quotaUseInFlight.has(accountId)) return entry.timestamp;
 		const known = [
 			this.lastActivityAt.get(accountId),
 			this.lastQuotaUseAt.get(accountId),
