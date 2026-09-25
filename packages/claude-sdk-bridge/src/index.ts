@@ -4,7 +4,6 @@ export {
 	type SdkBridgeCounters,
 	type SdkBridgeStatus,
 } from "./bridge";
-export { SUPPORTED_PI_PROMPT_VERSIONS } from "./pi-prompt";
 export {
 	getSystemPromptPolicy,
 	registeredSystemPromptPolicies,

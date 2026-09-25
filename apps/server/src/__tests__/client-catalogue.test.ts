@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/claude-sdk-bridge";
 import { resolveClientModelMetadata } from "@clankermux/core";
-import type {
-	ClientCatalogue,
-	ClientModelMetadataMap,
+import {
+	type ClientCatalogue,
+	type ClientModelMetadataMap,
+	SUPPORTED_PI_PROMPT_VERSIONS,
 } from "@clankermux/types";
 import { aliasCodexMetadata, renderClientCatalogue } from "../client-catalogue";
 import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";

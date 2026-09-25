@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SUPPORTED_PI_PROMPT_VERSIONS } from "../pi-prompt";
+import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/types";
+import { PI_PROMPT_HEAD_VERSIONS } from "../pi-prompt";
 import {
 	dropSystemPromptPolicy,
 	piHeadSystemPromptPolicy,
@@ -61,6 +62,12 @@ describe("policy selection", () => {
 });
 
 describe("fixtures", () => {
+	it("cover a head for exactly the versions discovery publishes", () => {
+		expect([...PI_PROMPT_HEAD_VERSIONS].sort()).toEqual(
+			[...SUPPORTED_PI_PROMPT_VERSIONS].sort(),
+		);
+	});
+
 	it("exist for exactly the supported layouts, each generated from its pi release", () => {
 		expect(readdirSync(PI_PROMPT_FIXTURES).sort()).toEqual(
 			[...SUPPORTED_PI_PROMPT_VERSIONS].sort(),
@@ -194,9 +201,12 @@ describe("pi 0.87 head strip", () => {
 		const f = fixture("stock");
 		const update = (n: number) =>
 			`\n\nUpdated system prompt section "tools":\n\n<tools>\n- t${n}\n</tools>`;
-		const kept = '\n\nUpdated system prompt section "skills":\n\n<skills>\nk\n</skills>';
+		const kept =
+			'\n\nUpdated system prompt section "skills":\n\n<skills>\nk\n</skills>';
 		const system =
-			f.system + Array.from({ length: 50_000 }, (_, i) => update(i)).join("") + kept;
+			f.system +
+			Array.from({ length: 50_000 }, (_, i) => update(i)).join("") +
+			kept;
 		const t0 = performance.now();
 		const outcome = decide(system);
 		const elapsed = performance.now() - t0;

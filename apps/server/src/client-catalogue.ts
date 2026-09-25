@@ -1,13 +1,13 @@
-import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/claude-sdk-bridge";
 import { ALIAS_ADVERTISED_EFFORTS } from "@clankermux/core";
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
-import type {
-	ClientCatalogue,
-	ClientFormat,
-	ClientModel,
-	ClientModelMetadata,
-	ClientModelMetadataMap,
+import {
+	type ClientCatalogue,
+	type ClientFormat,
+	type ClientModel,
+	type ClientModelMetadata,
+	type ClientModelMetadataMap,
+	SUPPORTED_PI_PROMPT_VERSIONS,
 } from "@clankermux/types";
 
 /**

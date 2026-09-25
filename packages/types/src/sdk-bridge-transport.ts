@@ -120,6 +120,12 @@ export interface SdkBridgeTurnMeta {
 /** The pi prompt-layout version a pi client declares, e.g. `0.87`. */
 export const SDK_BRIDGE_PI_PROMPT_HEADER = "x-clankermux-pi-prompt";
 
+/**
+ * The pi prompt layouts the SDK bridge serves, each with fixtures. Discovery
+ * publishes them so pi can warn before a Claude turn is refused.
+ */
+export const SUPPORTED_PI_PROMPT_VERSIONS: readonly string[] = ["0.87"];
+
 export interface SdkBridgeTransport {
 	availability(): SdkBridgeAvailability;
 	/**

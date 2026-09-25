@@ -45,8 +45,8 @@ const BY_VERSION: ReadonlyMap<string, PiPromptHead> = new Map(
 	HEADS.flatMap(({ versions, head }) => versions.map((v) => [v, head])),
 );
 
-/** Layout versions with fixtures; a pi release outside these is refused. */
-export const SUPPORTED_PI_PROMPT_VERSIONS: readonly string[] = [
+/** Every version with a head; `SUPPORTED_PI_PROMPT_VERSIONS` must list exactly these. */
+export const PI_PROMPT_HEAD_VERSIONS: readonly string[] = [
 	...BY_VERSION.keys(),
 ];
 
@@ -145,7 +145,10 @@ function removeHeadUpdates(
 		const value = nameEnd + 4;
 		let end: number | null = null;
 		if (head.sections.includes(name)) end = blockEnd(text, value, name);
-		else if (name === "preamble" && text.startsWith(head.stockPreamble, value)) {
+		else if (
+			name === "preamble" &&
+			text.startsWith(head.stockPreamble, value)
+		) {
 			const after = value + head.stockPreamble.length;
 			if (
 				after === text.length ||
