@@ -195,7 +195,12 @@ async function parkTurn(
 		answeredAlive = alive(query.pid);
 		return result;
 	});
-	await waitFor(() => h.bridge.status().parked === 1);
+	// This turn parked (others may be parked too).
+	await waitFor(
+		() =>
+			h.bridge.findContinuation(ids, { apiKeyId: meta.apiKeyId, model: MODEL })
+				?.turnId === plan.turnId,
+	);
 	return {
 		turnId: plan.turnId,
 		meta,
@@ -1287,5 +1292,111 @@ describe("release edges", () => {
 		expect(existsSync(parkDir(h)) ? parkFiles(h) : []).toEqual([]);
 		expect(h.repo.turns.get(p.turnId)?.status).toBe("failed");
 		rmSync(h.workRoot, { recursive: true, force: true });
+	});
+});
+
+describe("recovery, row by row", () => {
+	/** Two released parks from one bridge, then that bridge gone. */
+	async function twoReleased() {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const one = await parkTurn(a);
+		await released(a, one);
+		const two = await parkTurn(a);
+		await released(a, two);
+		await a.bridge.dispose();
+		const dir = join(workRoot, "released-parks");
+		return { workRoot, repo, parkRepo, one, two, dir };
+	}
+
+	it("ends a park it cannot use and keeps recovering the rest", async () => {
+		const { workRoot, repo, parkRepo, one, two } = await twoReleased();
+		// Unreadable awaited ids read as none: unusable.
+		(
+			parkRepo.parks.get(one.turnId) as { awaitedToolUseIds: string[] }
+		).awaitedToolUseIds = [];
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(b.bridge.availability()).toEqual({ state: "available" });
+		expect(repo.turns.get(one.turnId)?.status).toBe("failed");
+		expect(parkRepo.parks.has(two.turnId)).toBe(true);
+		expect(b.bridge.status().releasedParks).toBe(1);
+	});
+
+	it("ends a park whose own transition fails, and keeps the rest", async () => {
+		const { workRoot, repo, parkRepo, one, two } = await twoReleased();
+		await parkRepo.claim(one.turnId, "dead-owner", 1);
+		parkRepo.failNext.unclaim = new Error("SQLITE_BUSY");
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(parkRepo.parks.has(one.turnId)).toBe(false);
+		expect(repo.turns.get(one.turnId)?.status).toBe("failed");
+		expect(parkRepo.parks.get(two.turnId)?.state).toBe("released");
+		expect(b.bridge.status().releasedParks).toBe(1);
+	});
+
+	it("stays unavailable while recovery fails, and retries until it succeeds", async () => {
+		const { workRoot, repo, parkRepo, one } = await twoReleased();
+		parkRepo.failNext.list = new Error("database is locked");
+		const b = await releaseHarness({
+			workRoot,
+			repo,
+			parkRepo,
+			timing: { recoveryRetryMs: 150 },
+		});
+		const state = b.bridge.availability();
+		expect(state.state).toBe("unavailable");
+		expect(state.state === "unavailable" ? state.reason : "").toContain(
+			"recovering",
+		);
+		await waitFor(() => b.bridge.availability().state === "available", 3_000);
+		expect(b.bridge.status().releasedParks).toBe(2);
+		expect(
+			b.bridge.findContinuation(one.ids, { apiKeyId: "key-1", model: MODEL })
+				?.turnId,
+		).toBe(one.turnId);
+	});
+
+	it("checks only the file's size and resume point at startup; the chain at the resume", async () => {
+		const { workRoot, repo, parkRepo, one, two, dir } = await twoReleased();
+		// One file shorter than recorded: unusable at startup.
+		const shortFile = join(
+			dir,
+			String(parkRepo.parks.get(one.turnId)?.sessionFile),
+		);
+		writeFileSync(shortFile, readFileSync(shortFile).subarray(0, 10));
+		// One with its calls blanked out, same size: kept until the resume.
+		const blank = join(
+			dir,
+			String(parkRepo.parks.get(two.turnId)?.sessionFile),
+		);
+		const text = readFileSync(blank, "utf8");
+		const id = two.ids[0] as string;
+		writeFileSync(blank, text.replaceAll(id, "x".repeat(id.length)));
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(repo.turns.get(one.turnId)?.status).toBe("failed");
+		expect(parkRepo.parks.get(two.turnId)?.state).toBe("released");
+		const response = answer(b, two, results(two));
+		const q = await b.sdk.next();
+		// The chain check at the claim sends it to a flattened rebuild.
+		expect(q.options.resume).toBeUndefined();
+		q.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "rebuilt" }]),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+		expect(repo.turns.get(two.turnId)?.status).toBe("failed");
+	});
+
+	it("deletes a consumed park whose turn already finished without touching the turn", async () => {
+		const { workRoot, repo, parkRepo, one } = await twoReleased();
+		const park = parkRepo.parks.get(one.turnId);
+		if (park) park.state = "consumed";
+		await repo.finishTurn(one.turnId, { finishedAt: 5, status: "completed" });
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(parkRepo.parks.has(one.turnId)).toBe(false);
+		expect(repo.turns.get(one.turnId)?.status).toBe("completed");
+		expect(b.bridge.status().releasedParks).toBe(1);
 	});
 });

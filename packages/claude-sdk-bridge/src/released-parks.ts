@@ -157,6 +157,24 @@ export function forkVerifiedTranscript(
 }
 
 /**
+ * Whether a stored session looks whole without parsing it: a regular file of
+ * the size its record names, holding the resume point's entry.
+ */
+function fileLooksWhole(
+	path: string,
+	bytes: number,
+	resumeAt: string,
+): boolean {
+	try {
+		const stat = lstatSync(path);
+		if (!stat.isFile() || stat.size !== bytes) return false;
+		return readFileSync(path).includes(`"uuid":"${resumeAt}"`);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Released parks: session files under a directory of the work root that
  * generation cleanup never touches, and their records in the database. One
  * bridge process owns the directory at a time (a lock file); a bridge
@@ -402,6 +420,72 @@ export class ReleasedParkStore {
 	}
 
 	/**
+	 * One record at startup: its entry when it stays resumable, null when it
+	 * was ended. A throw (a failed transition) leaves the caller to end it.
+	 */
+	private async recoverOne(
+		park: SdkBridgeReleasedPark,
+		errors: {
+			preparing: BridgeError;
+			consumed: BridgeError;
+			unusable: BridgeError;
+			expired: BridgeError;
+		},
+		now: number,
+		end: (
+			park: SdkBridgeReleasedPark,
+			error: BridgeError,
+			status: SdkBridgeTurnFinish["status"],
+		) => Promise<void>,
+	): Promise<ReleasedEntry | null> {
+		if (park.state === "preparing") {
+			await end(park, errors.preparing, "failed");
+			return null;
+		}
+		if (park.state === "consumed") {
+			await end(park, errors.consumed, "failed");
+			return null;
+		}
+		// Claims are this lock's alone, and no model call followed them.
+		if (park.state === "claimed")
+			if (!(await this.opts.repo.unclaim(park.turnId, null)))
+				throw new Error("its stale claim could not be taken back");
+		if (park.expiresAt <= now) {
+			await end(park, errors.expired, "timed_out");
+			return null;
+		}
+		let path: string;
+		let descriptor: ResumeDescriptor;
+		try {
+			path = this.pathOf(park.sessionFile);
+			descriptor = JSON.parse(park.descriptor) as ResumeDescriptor;
+			if (descriptor.v !== 1) throw new Error("unknown descriptor version");
+			if (!park.awaitedToolUseIds.length) throw new Error("it awaits no call");
+		} catch (error) {
+			this.opts.log.warn(
+				`SDK bridge turn ${park.turnId}: released park unusable (${errorSummary(error)})`,
+			);
+			await end(park, errors.unusable, "failed");
+			return null;
+		}
+		// Cheap at startup: the whole chain is checked when a resume claims it.
+		if (!fileLooksWhole(path, park.fileBytes, park.resumeAt)) {
+			this.opts.log.warn(
+				`SDK bridge turn ${park.turnId}: released session missing or truncated`,
+			);
+			await end(park, errors.unusable, "failed");
+			return null;
+		}
+		return {
+			park: { ...park, state: "released", claimOwner: null, claimedAt: null },
+			descriptor,
+			state: "released",
+			consumed: false,
+			path,
+		};
+	}
+
+	/**
 	 * Bring the directory and the records into agreement after a restart,
 	 * before any request can see them: unfinished releases and spent resumes
 	 * end their turns, stale claims go back to `released`, records whose file
@@ -439,49 +523,31 @@ export class ReleasedParkStore {
 				durationMs: now - startedAt,
 			});
 		};
+		// A retry starts from the records again, never from a partial index.
+		this.entries.clear();
+		this.byToolId.clear();
 		for (const park of await repo.list()) {
-			if (park.state === "preparing") {
-				await end(park, errors.preparing, "failed");
-				continue;
-			}
-			if (park.state === "consumed") {
-				await end(park, errors.consumed, "failed");
-				continue;
-			}
-			// Claims are this lock's alone, and no model call followed them.
-			if (park.state === "claimed") await repo.unclaim(park.turnId, null);
-			if (park.expiresAt <= now) {
-				await end(park, errors.expired, "timed_out");
-				continue;
-			}
-			let path: string;
-			let descriptor: ResumeDescriptor;
 			try {
-				path = this.pathOf(park.sessionFile);
-				descriptor = JSON.parse(park.descriptor) as ResumeDescriptor;
-				if (descriptor.v !== 1) throw new Error("unknown descriptor version");
+				const entry = await this.recoverOne(park, errors, now, end);
+				if (entry) {
+					kept.add(park.sessionFile);
+					this.index(entry);
+				}
 			} catch (error) {
 				this.opts.log.warn(
-					`SDK bridge turn ${park.turnId}: released park unusable (${errorSummary(error)})`,
+					`SDK bridge turn ${park.turnId}: released park not recoverable (${errorSummary(error)})`,
 				);
-				await end(park, errors.unusable, "failed");
-				continue;
+				try {
+					await end(park, errors.unusable, "failed");
+				} catch (endError) {
+					// Its record stays, so its file does too, for a later start.
+					kept.add(park.sessionFile);
+					this.opts.log.error(
+						`SDK bridge turn ${park.turnId}: could not end its unrecoverable park`,
+						endError,
+					);
+				}
 			}
-			if (!transcriptHoldsCalls(path, park.resumeAt, park.awaitedToolUseIds)) {
-				this.opts.log.warn(
-					`SDK bridge turn ${park.turnId}: released session missing or corrupt`,
-				);
-				await end(park, errors.unusable, "failed");
-				continue;
-			}
-			kept.add(park.sessionFile);
-			this.index({
-				park: { ...park, state: "released", claimOwner: null, claimedAt: null },
-				descriptor,
-				state: "released",
-				consumed: false,
-				path,
-			});
 		}
 		for (const name of readdirSync(this.dir))
 			if (name !== LOCK_FILE && !kept.has(name))

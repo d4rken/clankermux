@@ -124,6 +124,8 @@ export interface SdkBridgeTiming {
 	maintenanceIntervalMs: number;
 	/** How long dispose waits for releases in flight. */
 	releaseDrainMs: number;
+	/** First wait before retrying a failed recovery; it doubles up to 5 min. */
+	recoveryRetryMs: number;
 }
 
 export const DEFAULT_SDK_BRIDGE_TIMING: SdkBridgeTiming = {
@@ -134,6 +136,7 @@ export const DEFAULT_SDK_BRIDGE_TIMING: SdkBridgeTiming = {
 	exitGraceMs: 5_000,
 	maintenanceIntervalMs: 60_000,
 	releaseDrainMs: 15_000,
+	recoveryRetryMs: 5_000,
 };
 
 export interface ClaudeSdkBridgeDeps {

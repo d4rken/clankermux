@@ -175,6 +175,32 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		});
 	});
 
+	it("closing never overwrites a turn that already finished, and still deletes the park", async () => {
+		await insertTurn();
+		await turns.finishTurn("turn-1", { finishedAt: 600, status: "completed" });
+		await parks.insertPreparing(park());
+		await parks.closeTurn("turn-1", {
+			finishedAt: 9_000,
+			status: "failed",
+			errorMessage: "late",
+		});
+		expect(await parks.find("turn-1")).toBeNull();
+		expect(statusOf()).toBe("completed");
+	});
+
+	it("reads a row whose awaited ids are not a JSON list of strings as awaiting nothing", async () => {
+		await parks.insertPreparing(park());
+		await parks.insertPreparing(park({ turnId: "turn-2", sessionFile: "t2" }));
+		db.run(
+			"UPDATE sdk_bridge_released_parks SET awaited_tool_use_ids = '{not json' WHERE turn_id = 'turn-1'",
+		);
+		db.run(
+			`UPDATE sdk_bridge_released_parks SET awaited_tool_use_ids = '[1, null]' WHERE turn_id = 'turn-2'`,
+		);
+		const listed = await parks.list();
+		expect(listed.map((p) => p.awaitedToolUseIds)).toEqual([[], []]);
+	});
+
 	it("lists every park and deletes one", async () => {
 		await parks.insertPreparing(park());
 		await parks.insertPreparing(park({ turnId: "turn-2", sessionFile: "t2" }));

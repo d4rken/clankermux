@@ -614,7 +614,7 @@ export function memoryParkRepo(
 			await check("closeTurn");
 			parks.delete(turnId);
 			const turn = turns.get(turnId);
-			if (turn) Object.assign(turn, finish);
+			if (turn && !turn.finishedAt) Object.assign(turn, finish);
 		},
 		async closeOpenTurnsWithoutPark(before, finish) {
 			await check("closeOpenTurnsWithoutPark");

@@ -26,6 +26,16 @@ interface ParkRow {
 	created_at: number;
 }
 
+/** A JSON list of strings; anything else reads as awaiting nothing (unusable). */
+function toolUseIds(json: string): string[] {
+	try {
+		const parsed: unknown = JSON.parse(json);
+		if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string"))
+			return parsed as string[];
+	} catch {}
+	return [];
+}
+
 function toPark(row: ParkRow): SdkBridgeReleasedPark {
 	return {
 		turnId: row.turn_id,
@@ -35,7 +45,7 @@ function toPark(row: ParkRow): SdkBridgeReleasedPark {
 		sessionId: row.session_id,
 		sessionFile: row.session_file,
 		resumeAt: row.resume_at,
-		awaitedToolUseIds: JSON.parse(row.awaited_tool_use_ids) as string[],
+		awaitedToolUseIds: toolUseIds(row.awaited_tool_use_ids),
 		requestedModel: row.requested_model,
 		descriptor: row.descriptor,
 		activeMs: Number(row.active_ms),
@@ -59,7 +69,7 @@ const TURN_OPEN = `NOT EXISTS (
 const FINISH_TURN = `UPDATE sdk_bridge_turns SET
 	finished_at = ?, status = ?, http_status = ?, error_type = ?,
 	error_message = ?, duration_ms = COALESCE(?, duration_ms)
-	WHERE id = ?`;
+	WHERE id = ? AND finished_at IS NULL`;
 
 function finishParams(
 	id: string,
@@ -203,7 +213,11 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 		]);
 	}
 
-	/** End the turn and forget its park together: expiry, supersession, recovery. */
+	/**
+	 * End the turn and forget its park together: expiry, supersession,
+	 * recovery. A turn that already finished keeps its outcome; its park is
+	 * deleted all the same.
+	 */
 	async closeTurn(turnId: string, finish: SdkBridgeTurnFinish): Promise<void> {
 		await this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();

@@ -105,6 +105,9 @@ import {
 	sweepGenerations,
 } from "./work-dirs";
 
+/** The longest wait between two attempts at recovering released parks. */
+const RECOVERY_RETRY_MAX_MS = 5 * 60_000;
+
 /** Claude Code version the bundled binary reports; written into rebuilt transcripts. */
 const CLAUDE_CODE_VERSION = "2.1.280";
 
@@ -330,8 +333,16 @@ export function createClaudeSdkBridge(
 	/** Live queries resumed from a released park, by turn id. */
 	const resumedFrom = new Map<string, ReleasedEntry>();
 
-	const ready: Promise<void> = (async () => {
-		if (!parks?.owned || !deps.parkRepo) return;
+	/**
+	 * Set while released parks an earlier process left are not recovered:
+	 * the bridge is unavailable until they are, since results for a park it
+	 * has not indexed would look dead and start a flattened rebuild.
+	 */
+	let recovering: string | null = null;
+	let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function recoverParks(): Promise<boolean> {
+		if (!parks?.owned || !deps.parkRepo) return true;
 		try {
 			const kept = await parks.recover({
 				preparing: bridgeErrors.bridgeRestarted("while this turn was released"),
@@ -343,6 +354,17 @@ export function createClaudeSdkBridge(
 				),
 				expired: bridgeErrors.releasedParkExpired(limits().releasedParkTtlMs),
 			});
+			recovering = null;
+			if (kept)
+				log.info(
+					`SDK bridge: ${kept} released park${kept === 1 ? "" : "s"} recovered`,
+				);
+		} catch (error) {
+			recovering = `recovering released parks (${errorSummary(error)})`;
+			log.error(`SDK bridge: ${recovering}`, error);
+			return false;
+		}
+		try {
 			const error = bridgeErrors.bridgeRestarted("while this turn ran");
 			const closed = await deps.parkRepo.closeOpenTurnsWithoutPark(createdAt, {
 				finishedAt: now(),
@@ -351,14 +373,29 @@ export function createClaudeSdkBridge(
 				errorType: error.type,
 				errorMessage: error.message,
 			});
-			if (kept || closed)
+			if (closed)
 				log.info(
-					`SDK bridge: ${kept} released park${kept === 1 ? "" : "s"} recovered; ${closed} turn${closed === 1 ? "" : "s"} an earlier process left open closed`,
+					`SDK bridge: ${closed} turn${closed === 1 ? "" : "s"} an earlier process left open closed`,
 				);
 		} catch (error) {
-			parksOffReason = `released-park recovery failed (${errorSummary(error)})`;
-			log.error(`SDK bridge: ${parksOffReason}`, error);
+			log.warn("SDK bridge: could not close turns left open", error);
 		}
+		return true;
+	}
+
+	/** Retry a failed recovery, doubling the wait up to five minutes. */
+	function retryRecovery(delay: number): void {
+		recoveryTimer = setTimeout(async () => {
+			recoveryTimer = null;
+			if (shuttingDown) return;
+			if (!(await recoverParks()))
+				retryRecovery(Math.min(delay * 2, RECOVERY_RETRY_MAX_MS));
+		}, delay);
+		recoveryTimer.unref?.();
+	}
+
+	const ready: Promise<void> = (async () => {
+		if (!(await recoverParks())) retryRecovery(timing.recoveryRetryMs);
 	})();
 
 	const listener = new InnerListener({
@@ -374,6 +411,7 @@ export function createClaudeSdkBridge(
 		if (shuttingDown) return { state: "shutting_down" };
 		if (unavailableReason)
 			return { state: "unavailable", reason: unavailableReason };
+		if (recovering) return { state: "unavailable", reason: recovering };
 		return { state: "available" };
 	};
 
@@ -1043,8 +1081,8 @@ export function createClaudeSdkBridge(
 	}
 
 	async function startTurn(input: StartInput): Promise<Response> {
-		assertAvailable();
 		await ready;
+		assertAvailable();
 		const { query: run, mcp } = await loadSdks();
 		const { plan, meta } = input;
 		const startedAt = now();
@@ -1918,6 +1956,7 @@ export function createClaudeSdkBridge(
 	async function dispose(): Promise<void> {
 		beginShutdown();
 		if (maintenance) clearInterval(maintenance);
+		if (recoveryTimer) clearTimeout(recoveryTimer);
 		// Everything not being released ends now; a query being released
 		// ignores the teardown.
 		const all = [...lives.values()];
