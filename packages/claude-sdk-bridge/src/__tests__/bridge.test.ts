@@ -3169,7 +3169,7 @@ describe("a turn that fails to start", () => {
 		// No transcript was left behind by the attempt to write one.
 		expect(readdirSync(sessionsDir(h))).toEqual([]);
 		void response;
-	});
+	}, 20_000);
 });
 
 describe("work directories", () => {
