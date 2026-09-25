@@ -108,6 +108,11 @@ function seedRows(db: Database): void {
 		) VALUES (?, ?, ?, 'manual', ?, 'pending', ?)`,
 		["evt-1", "acct-1", "seeded-account", "idem-1", ts],
 	);
+	db.run(
+		`INSERT INTO sdk_bridge_turns (id, started_at, status, history_mode, system_prompt_policy)
+		 VALUES (?, ?, 'completed', 'fresh', 'drop')`,
+		["turn-1", ts],
+	);
 }
 
 describe("runMigrations() restores every ADDITIVE_COLUMNS entry", () => {
@@ -184,5 +189,10 @@ describe("runMigrations() restores every ADDITIVE_COLUMNS entry", () => {
 		expect([...indexDefinitions(db)].sort()).toEqual(
 			[...expectedIndexes].sort(),
 		);
+
+		// A NOT NULL column added to a populated table fills from its default.
+		expect(
+			db.query("SELECT kind FROM sdk_bridge_turns WHERE id = 'turn-1'").get(),
+		).toEqual({ kind: "turn" });
 	});
 });
