@@ -92,7 +92,6 @@ function send(
 	f: PiPromptFixture,
 	headers: Record<string, string> = { "x-clankermux-pi-prompt": "0.87" },
 ): Promise<Response> {
-	expect(f.transport).toBe("collapsed");
 	const history =
 		endpoint === "chat"
 			? [

@@ -43,7 +43,6 @@ interface SystemPromptModule {
 
 interface TextModule {
 	getSystemMessageText(message: Record<string, unknown>): string;
-	renderSystemMessageUpdate(message: Record<string, unknown>): string;
 }
 
 interface TranscriptModule {
@@ -57,6 +56,17 @@ interface ClaudeContextModule {
 		catalog: unknown[];
 		alwaysOn: unknown[];
 	}): string;
+}
+
+interface SubagentPromptModule {
+	rewriteSubagentPrompt(
+		prompt: string,
+		options: {
+			inheritProjectContext: boolean;
+			inheritGlobalContext: boolean;
+			inheritSkills: boolean;
+		},
+	): string;
 }
 
 interface AdvertisedAgentsModule {
@@ -74,7 +84,6 @@ type Expectation =
 			headStripped: boolean;
 			/** The exact append; null when nothing is left. */
 			forwarded: string | null;
-			removedUpdates: number;
 	  }
 	| {
 			outcome: "refused";
@@ -97,15 +106,11 @@ interface Case {
 	description: string;
 	/** pi's prompt options for the leading system message. */
 	input: Record<string, unknown>;
-	/** Options of a later turn: pi sends the changed sections as an update. */
-	next?: Record<string, unknown>;
 	/**
-	 * How pi sends that update. Its clankermux provider (openai-responses, no
-	 * `compat`) collapses every system message into one leading message;
-	 * `mid-conversation` is the shape of a model with
-	 * `supportsMidConvoSystemMessages`, where the update stays a message of its own.
+	 * Options of a later turn. pi's clankermux provider (openai-responses, no
+	 * `compat`) collapses the resulting update into its one leading message.
 	 */
-	transport?: "collapsed" | "mid-conversation";
+	next?: Record<string, unknown>;
 	/** An extension's `before_agent_start` rewrite, which pi sends as a forced prompt. */
 	force?: (rendered: string) => string;
 	expect: Expected;
@@ -126,9 +131,14 @@ const piRoot = join(piHome, "node_modules/@earendil-works");
 const agentDir = join(piRoot, "pi-coding-agent");
 const aiDir = join(piRoot, "pi-ai");
 const CLAUDE_CONTEXT = join(piHome, "packages/claude-context/core.mjs");
+const PI_SUBAGENTS = join(piHome, "agent/git/github.com/d4rken/pi-subagents");
 const ADVERTISED_AGENTS = join(
-	piHome,
-	"agent/git/github.com/d4rken/pi-subagents/src/agents/advertised-agent-prompt.ts",
+	PI_SUBAGENTS,
+	"src/agents/advertised-agent-prompt.ts",
+);
+const SUBAGENT_PROMPT = join(
+	PI_SUBAGENTS,
+	"src/runs/shared/subagent-prompt-runtime.ts",
 );
 
 const packageVersion = (dir: string): string =>
@@ -170,6 +180,7 @@ const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextModule;
 const advertisedAgents = (await import(
 	ADVERTISED_AGENTS
 )) as AdvertisedAgentsModule;
+const subagentPrompt = (await import(SUBAGENT_PROMPT)) as SubagentPromptModule;
 
 const CWD = "/home/user/projects/widget";
 const TOOL_SNIPPETS = {
@@ -271,6 +282,19 @@ function withAdvertisedAgents(rendered: string): string {
 			},
 		]),
 	);
+}
+
+/**
+ * What pi-subagents' herdr child bridge returns (extension/herdr-pi-bridge.ts
+ * `before_agent_start`): its boundary instructions first, then pi's prompt,
+ * the agent tag and the persona.
+ */
+function asHerdrChild(rendered: string): string {
+	return `${subagentPrompt.rewriteSubagentPrompt(rendered, {
+		inheritProjectContext: true,
+		inheritGlobalContext: true,
+		inheritSkills: true,
+	})}\n\n<active_agent name=${JSON.stringify("reviewer")}/>\n\nYou are the reviewer agent.`;
 }
 
 const forwarded: Expected = { outcome: "forwarded" };
@@ -524,76 +548,18 @@ const CASES: Case[] = [
 	{
 		name: "collapsed-custom-to-stock-refused",
 		description:
-			"A session whose replaced preamble goes back to stock: pi's collapse keeps the preamble's place but appends tools, rules and docs at the end, so the stock preamble is not followed by its head. Refused under pi-head-v1; the pi side is being asked about it.",
+			"A session whose replaced preamble goes back to stock: pi's collapse keeps the preamble's place but appends tools, rules and docs at the end, so the stock preamble is not followed by its head. Refused as incomplete_head, the behaviour agreed with the pi side (no extension of theirs changes a custom prompt mid-session).",
 		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
 		next: { ...BASE },
 		expect: refused("sdk_bridge_prompt_malformed", "incomplete_head"),
 	},
 	{
-		name: "midconvo-update-tools",
+		name: "herdr-child-refused",
 		description:
-			"Mid-conversation messages: a later turn changes a tool snippet; pi's update to the tools section is removed.",
+			"A pi-subagents child placed through herdr today: boundary instructions before pi's stock prompt, so the head is not at the start and the forwarded text carries pi's preamble line. Refused until the pi side moves the boundary after the head.",
 		input: { ...BASE, contextFiles: [AGENTS_MD] },
-		next: {
-			...BASE,
-			contextFiles: [AGENTS_MD],
-			toolSnippets: {
-				...TOOL_SNIPPETS,
-				read: "Read file contents (images too)",
-			},
-		},
-		transport: "mid-conversation",
-		expect: forwarded,
-	},
-	{
-		name: "midconvo-update-extension-section",
-		description:
-			"Mid-conversation messages: a later turn changes an extension section; the update is forwarded.",
-		input: { ...BASE, sections: { claude_context: "Guidance v1" } },
-		next: { ...BASE, sections: { claude_context: "Guidance v2" } },
-		transport: "mid-conversation",
-		expect: forwarded,
-	},
-	{
-		name: "midconvo-update-tools-and-skills",
-		description:
-			"Mid-conversation messages: one update changing tools and skills; the tools part goes, the skills part stays.",
-		input: { ...BASE, skills: SKILLS.slice(0, 1) },
-		next: {
-			...BASE,
-			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
-			toolSnippets: { ...TOOL_SNIPPETS, bash: "Execute bash commands" },
-		},
-		transport: "mid-conversation",
-		expect: forwarded,
-	},
-	{
-		name: "midconvo-update-preamble-to-stock",
-		description:
-			"Mid-conversation messages: the replaced preamble goes back to stock; that update and the head sections it adds are removed.",
-		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
-		next: { ...BASE },
-		transport: "mid-conversation",
-		expect: forwarded,
-	},
-	{
-		name: "midconvo-section-update",
-		description:
-			"Mid-conversation messages: skills and context change, the addendum goes and an extension section arrives; every update is forwarded.",
-		input: {
-			...BASE,
-			appendSystemPrompt: "Always answer in British English.",
-			contextFiles: [AGENTS_MD],
-			skills: SKILLS.slice(0, 1),
-		},
-		next: {
-			...BASE,
-			contextFiles: [AGENTS_MD, NESTED_AGENTS_MD],
-			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
-			sections: { todo_list: "- [ ] deploy" },
-		},
-		transport: "mid-conversation",
-		expect: forwarded,
+		force: asHerdrChild,
+		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
 	},
 	{
 		name: "trigger-preamble-in-context",
@@ -658,33 +624,6 @@ function tailOf(sections: Sections): string {
 	return Object.values(rest).join("\n\n");
 }
 
-/** An update message without its head parts, rendered by pi; null when nothing is left. */
-function updateWithoutHead(patch: Patch): {
-	text: string | null;
-	removed: number;
-} {
-	const kept: Patch = {};
-	let removed = 0;
-	for (const [name, value] of Object.entries(patch)) {
-		if (
-			(HEAD_SECTIONS.includes(name) && value !== null) ||
-			(name === "preamble" && value === STOCK_PREAMBLE)
-		)
-			removed++;
-		else kept[name] = value;
-	}
-	return {
-		text: Object.keys(kept).length
-			? text.renderSystemMessageUpdate({
-					role: "system",
-					content: "",
-					sections: kept,
-				})
-			: null,
-		removed,
-	};
-}
-
 function render(c: Case) {
 	const leading = prompt.buildSystemPromptSections(c.input);
 	if (c.input.forceSystemPrompt !== undefined || c.force) {
@@ -697,9 +636,8 @@ function render(c: Case) {
 		const after = stripped ? system.slice((head as string).length + 2) : system;
 		return {
 			system: portable(system),
-			messages: [portable(system)],
 			sections: null,
-			expected: { headStripped: stripped, forwarded: after, removedUpdates: 0 },
+			expected: { headStripped: stripped, forwarded: after },
 		};
 	}
 	const first = text.getSystemMessageText({
@@ -717,30 +655,9 @@ function render(c: Case) {
 	const updateMessage = patch
 		? { role: "system", content: "", sections: patch, timestamp: 2 }
 		: null;
-	if (c.transport === "mid-conversation") {
-		const messages = [first];
-		const parts = [tailOf(leading)];
-		let removedUpdates = 0;
-		if (updateMessage && patch) {
-			messages.push(text.renderSystemMessageUpdate(updateMessage));
-			const update = updateWithoutHead(patch);
-			if (update.text !== null) parts.push(update.text);
-			removedUpdates += update.removed;
-		}
-		return {
-			// The Responses and Chat adapters join instruction messages this way.
-			system: portable(messages.join("\n\n")),
-			messages: messages.map(portable),
-			sections: portableSections(next ?? leading),
-			expected: {
-				headStripped: isStock(leading),
-				forwarded: parts.filter(Boolean).join("\n\n"),
-				removedUpdates,
-			},
-		};
-	}
-	// pi-ai's resolveTranscript for a model without mid-conversation system
-	// messages: every system message replayed into one leading message.
+	// What pi's clankermux provider sends: pi-ai's resolveTranscript without
+	// mid-conversation system messages replays every system message into one
+	// leading message, patching sections in place and appending new ones.
 	const [collapsed] = transcript.collapseSystemMessages({
 		messages: [
 			{ role: "system", content: "", sections: leading, timestamp: 0 },
@@ -762,12 +679,10 @@ function render(c: Case) {
 		);
 	return {
 		system: portable(system),
-		messages: [portable(system)],
 		sections: portableSections(sections),
 		expected: {
 			headStripped: headFirst,
 			forwarded: headFirst ? tailOf(sections) : system,
-			removedUpdates: 0,
 		},
 	};
 }
@@ -781,14 +696,12 @@ function fixture(c: Case) {
 					outcome: "forwarded",
 					headStripped: expected.headStripped,
 					forwarded: expected.forwarded ? portable(expected.forwarded) : null,
-					removedUpdates: expected.removedUpdates,
 				};
 	return {
 		name: c.name,
 		description: c.description,
 		input: c.input,
 		...(c.next ? { next: c.next } : {}),
-		transport: c.transport ?? "collapsed",
 		...rendered,
 		expect,
 	};
@@ -822,6 +735,8 @@ writeFileSync(
 				"packages/claude-context/core.mjs": sha256(CLAUDE_CONTEXT),
 				"pi-subagents/src/agents/advertised-agent-prompt.ts":
 					sha256(ADVERTISED_AGENTS),
+				"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts":
+					sha256(SUBAGENT_PROMPT),
 			},
 			docsRoot: DOCS_ROOT,
 			generator:

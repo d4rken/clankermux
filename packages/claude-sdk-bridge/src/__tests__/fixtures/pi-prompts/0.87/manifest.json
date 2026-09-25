@@ -13,7 +13,8 @@
 	},
 	"extensionFiles": {
 		"packages/claude-context/core.mjs": "bf13e788be1e05ca8751d0e835dbd0ee24ef23aa175f984b68e6270ef767a10f",
-		"pi-subagents/src/agents/advertised-agent-prompt.ts": "7c6ad623f39f42d843b0094ff25589e2a13c42c7d9489120567e31fce8627fd6"
+		"pi-subagents/src/agents/advertised-agent-prompt.ts": "7c6ad623f39f42d843b0094ff25589e2a13c42c7d9489120567e31fce8627fd6",
+		"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts": "9235a871fd8a6b0105466c500bdab551afb137ba10718a3d59bfa5a38e5e2c2f"
 	},
 	"docsRoot": "/opt/pi/node_modules/@earendil-works/pi-coding-agent",
 	"generator": "packages/claude-sdk-bridge/scripts/generate-pi-prompt-fixtures.ts",
@@ -39,11 +40,7 @@
 		"collapsed-section-update",
 		"collapsed-extension-section-update",
 		"collapsed-custom-to-stock-refused",
-		"midconvo-update-tools",
-		"midconvo-update-extension-section",
-		"midconvo-update-tools-and-skills",
-		"midconvo-update-preamble-to-stock",
-		"midconvo-section-update",
+		"herdr-child-refused",
 		"trigger-preamble-in-context",
 		"trigger-docs-pair",
 		"trigger-persona-embeds-pi"

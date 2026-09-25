@@ -53,8 +53,6 @@ export type SdkBridgeSystemPromptDetail =
 			headStripped: boolean;
 			/** Characters appended to Claude Code's preset. */
 			forwardedLength: number;
-			/** Later updates to the head's sections that were taken out. */
-			removedUpdates: number;
 			/** Section openers seen in the forwarded text; a diagnostic only. */
 			sectionsSeen: string[];
 	  }

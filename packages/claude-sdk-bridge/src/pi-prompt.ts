@@ -16,11 +16,10 @@
  *   …
  *   </docs>
  *
- * Everything after the head (pi's own later sections, extension sections,
- * raw text an extension appended) is the operator's and is forwarded byte
- * for byte, never parsed. A section pi changes mid-session arrives as a
- * later system message, `Updated system prompt section "tools":` and the
- * block; updates to the head's sections are removed with it.
+ * pi sends its prompt as one leading system message (pi-ai collapses later
+ * system messages into it). Everything after the head (pi's own later
+ * sections, extension sections, raw text an extension appended) is the
+ * operator's and is forwarded byte for byte, never parsed.
  */
 
 /** pi's harness text, identical across the pi releases that share it. */
@@ -54,9 +53,6 @@ export function piPromptHead(version: string): PiPromptHead | null {
 	return BY_VERSION.get(version) ?? null;
 }
 
-const UPDATED = 'Updated system prompt section "';
-const REMOVED = 'Removed system prompt section "';
-
 /** The text the in-pi bridge refused to forward: subscription accounts answer it with a 400. */
 const PI_PREAMBLE_LINE =
 	"You are an expert coding assistant operating inside pi";
@@ -75,8 +71,6 @@ export type PiHeadStrip =
 			/** Null when nothing is left to append. */
 			append: string | null;
 			headStripped: boolean;
-			/** Updates to the head's sections taken out. */
-			removedUpdates: number;
 			/** Section openers seen in what is forwarded; a diagnostic, never a filter. */
 			sectionsSeen: string[];
 	  }
@@ -122,54 +116,6 @@ function headEnd(text: string, head: PiPromptHead): number | null {
 	return pos;
 }
 
-/**
- * Removes updates that put back or change the head: its sections, or the
- * preamble back to stock. Every other update, and every removal, stays.
- * One scan: the removed spans are collected and the rest joined once.
- */
-function removeHeadUpdates(
-	tail: string,
-	head: PiPromptHead,
-): { text: string; removed: number } {
-	// Each update is preceded by a blank line: the one joining it to the text before.
-	const text = `\n\n${tail}`;
-	const marker = `\n\n${UPDATED}`;
-	const kept: string[] = [];
-	let from = 0;
-	let removed = 0;
-	let at = text.indexOf(marker);
-	while (at !== -1) {
-		const nameStart = at + marker.length;
-		const nameEnd = text.indexOf('":\n\n', nameStart);
-		const name = nameEnd === -1 ? "" : text.slice(nameStart, nameEnd);
-		const value = nameEnd + 4;
-		let end: number | null = null;
-		if (head.sections.includes(name)) end = blockEnd(text, value, name);
-		else if (
-			name === "preamble" &&
-			text.startsWith(head.stockPreamble, value)
-		) {
-			const after = value + head.stockPreamble.length;
-			if (
-				after === text.length ||
-				text.startsWith(marker, after) ||
-				text.startsWith(`\n\n${REMOVED}`, after)
-			)
-				end = after;
-		}
-		if (end === null) {
-			at = text.indexOf(marker, nameStart);
-			continue;
-		}
-		kept.push(text.slice(from, at));
-		from = end;
-		removed++;
-		at = text.indexOf(marker, end);
-	}
-	kept.push(text.slice(from));
-	return { text: kept.join("").slice(2), removed };
-}
-
 function triggerIn(text: string): PiPromptRefusedReason | null {
 	for (
 		let at = text.indexOf(PI_PREAMBLE_LINE);
@@ -196,21 +142,17 @@ function sectionsSeen(text: string): string[] {
  * replaced preamble, or a forced prompt without pi's head).
  */
 export function stripPiHead(text: string, head: PiPromptHead): PiHeadStrip {
-	const stock = text.startsWith(head.stockPreamble);
-	const updates = (name: string) =>
-		countOf(text, `\n\n${UPDATED}${name}":\n\n<${name}>\n`);
-	// A second closing tag could move the head's end, or an update's.
-	for (const name of head.sections) {
-		const allowed = Math.max(1, (stock ? 1 : 0) + updates(name));
-		if (countOf(text, `</${name}>`) > allowed)
+	// A second closing tag could move the head's end.
+	for (const name of head.sections)
+		if (countOf(text, `</${name}>`) > 1)
 			return {
 				ok: false,
 				kind: "malformed",
 				reason: "duplicate_closing_tag",
 				section: name,
 			};
-	}
-	let tail = text;
+	const stock = text.startsWith(head.stockPreamble);
+	let forwarded = text;
 	if (stock) {
 		const end = headEnd(text, head);
 		if (end === null)
@@ -220,16 +162,14 @@ export function stripPiHead(text: string, head: PiPromptHead): PiHeadStrip {
 				reason: "incomplete_head",
 				section: null,
 			};
-		tail = text.slice(Math.min(end + 2, text.length));
+		forwarded = text.slice(Math.min(end + 2, text.length));
 	}
-	const { text: forwarded, removed } = removeHeadUpdates(tail, head);
 	const trigger = triggerIn(forwarded);
 	if (trigger) return { ok: false, kind: "refused", reason: trigger };
 	return {
 		ok: true,
 		append: forwarded || null,
 		headStripped: stock,
-		removedUpdates: removed,
 		sectionsSeen: sectionsSeen(forwarded),
 	};
 }

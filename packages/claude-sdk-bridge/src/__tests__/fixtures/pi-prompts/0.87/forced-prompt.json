@@ -11,16 +11,11 @@
 		},
 		"forceSystemPrompt": "You are a commit-message writer. Answer with one line, imperative mood."
 	},
-	"transport": "collapsed",
 	"system": "You are a commit-message writer. Answer with one line, imperative mood.",
-	"messages": [
-		"You are a commit-message writer. Answer with one line, imperative mood."
-	],
 	"sections": null,
 	"expect": {
 		"outcome": "forwarded",
 		"headStripped": false,
-		"forwarded": "You are a commit-message writer. Answer with one line, imperative mood.",
-		"removedUpdates": 0
+		"forwarded": "You are a commit-message writer. Answer with one line, imperative mood."
 	}
 }

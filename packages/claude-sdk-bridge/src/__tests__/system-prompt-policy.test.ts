@@ -36,8 +36,6 @@ function appendOf(outcome: SystemPromptOutcome): string | null {
 }
 
 const fixture = (name: string) => loadPiPromptFixture("0.87", name);
-const expectedTail = (f: ReturnType<typeof fixture>) =>
-	f.expect.outcome === "forwarded" ? (f.expect.forwarded ?? "") : "";
 
 describe("policy selection", () => {
 	it("strips pi's head from pi's prompt and drops every other client's", () => {
@@ -108,7 +106,6 @@ for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
 						version,
 						headStripped: f.expect.headStripped,
 						forwardedLength: f.expect.forwarded?.length ?? 0,
-						removedUpdates: f.expect.removedUpdates,
 					});
 					return;
 				}
@@ -182,7 +179,6 @@ describe("pi 0.87 head strip", () => {
 
 	it("strips the head of what pi sends after a mid-session tools change", () => {
 		const f = fixture("collapsed-tools-change");
-		expect(f.messages).toHaveLength(1);
 		const append = appendOf(decide(f.system)) ?? "";
 		expect(append).not.toContain("<tools>");
 		expect(append).toContain("<project_context>\n");
@@ -190,7 +186,7 @@ describe("pi 0.87 head strip", () => {
 
 	it("refuses a session gone back to stock, whose collapsed head is split", () => {
 		// pi's collapse keeps the preamble's place and appends tools, rules and
-		// docs at the end; the pi side is being asked how to treat it.
+		// docs at the end. Agreed with the pi side: no extension of theirs does this.
 		const f = fixture("collapsed-custom-to-stock-refused");
 		expect(f.system).toEndWith("</docs>");
 		expect(refusalOf(decide(f.system)).detail).toMatchObject({
@@ -199,41 +195,22 @@ describe("pi 0.87 head strip", () => {
 		});
 	});
 
-	it("removes mid-conversation updates to the head and forwards the others", () => {
-		expect(
-			appendOf(decide(fixture("midconvo-update-tools").system)),
-		).not.toContain("Updated system prompt section");
-		const mixed = appendOf(
-			decide(fixture("midconvo-update-tools-and-skills").system),
-		);
-		expect(mixed).toContain('Updated system prompt section "skills"');
-		expect(mixed).not.toContain('"tools"');
-		expect(
-			appendOf(decide(fixture("midconvo-update-extension-section").system)),
-		).toContain(
-			'Updated system prompt section "claude_context":\n\n<claude_context>\nGuidance v2\n</claude_context>',
-		);
-		const back = decide(fixture("midconvo-update-preamble-to-stock").system);
-		expect(appendOf(back)).not.toContain("Updated system prompt section");
-		expect(back.detail).toMatchObject({ removedUpdates: 4 });
+	it("refuses a herdr child, whose boundary text comes before pi's head", () => {
+		const f = fixture("herdr-child-refused");
+		expect(f.system).not.toStartWith("You are an expert coding assistant");
+		expect(refusalOf(decide(f.system)).detail).toMatchObject({
+			code: "sdk_bridge_prompt_refused",
+			reason: "trigger_preamble",
+		});
 	});
 
-	it("removes 50k head updates in linear time", () => {
-		const f = fixture("stock");
-		const update = (n: number) =>
-			`\n\nUpdated system prompt section "tools":\n\n<tools>\n- t${n}\n</tools>`;
-		const kept =
+	it("forwards update-message text after the head untouched", () => {
+		const tail =
 			'\n\nUpdated system prompt section "skills":\n\n<skills>\nk\n</skills>';
-		const system =
-			f.system +
-			Array.from({ length: 50_000 }, (_, i) => update(i)).join("") +
-			kept;
-		const t0 = performance.now();
-		const outcome = decide(system);
-		const elapsed = performance.now() - t0;
-		expect(appendOf(outcome)).toBe(`${expectedTail(f)}${kept}`);
-		expect(outcome.detail).toMatchObject({ removedUpdates: 50_000 });
-		expect(elapsed).toBeLessThan(1_000);
+		const f = fixture("stock");
+		expect(appendOf(decide(f.system + tail))).toBe(
+			`${(f.expect as { forwarded: string }).forwarded}${tail}`,
+		);
 	});
 
 	it("refuses the docs pair only together", () => {
@@ -305,6 +282,12 @@ describe("pi 0.87 malformed heads", () => {
 			`${stock}\n\nThe tag </rules> ends pi's rules.`,
 			"duplicate_closing_tag",
 			"rules",
+		],
+		[
+			"a tools update after the head, whose </tools> is a second one",
+			`${stock}\n\nUpdated system prompt section "tools":\n\n<tools>\n- x\n</tools>`,
+			"duplicate_closing_tag",
+			"tools",
 		],
 		[
 			"two </docs> in a replaced prompt",

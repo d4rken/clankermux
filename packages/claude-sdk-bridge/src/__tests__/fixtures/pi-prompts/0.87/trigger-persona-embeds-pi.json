@@ -11,11 +11,7 @@
 		},
 		"customPrompt": "You are an expert coding assistant operating inside pi, acting as the reviewer."
 	},
-	"transport": "collapsed",
 	"system": "You are an expert coding assistant operating inside pi, acting as the reviewer.\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
-	"messages": [
-		"You are an expert coding assistant operating inside pi, acting as the reviewer.\n\n<cwd>\n/home/user/projects/widget\n</cwd>"
-	],
 	"sections": {
 		"preamble": "You are an expert coding assistant operating inside pi, acting as the reviewer.",
 		"cwd": "<cwd>\n/home/user/projects/widget\n</cwd>"

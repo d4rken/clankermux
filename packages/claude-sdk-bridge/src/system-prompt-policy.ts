@@ -129,7 +129,6 @@ export const piHeadSystemPromptPolicy: SystemPromptPolicy = {
 					version,
 					headStripped: strip.headStripped,
 					forwardedLength: strip.append?.length ?? 0,
-					removedUpdates: strip.removedUpdates,
 					sectionsSeen: strip.sectionsSeen,
 				},
 			};

@@ -94,7 +94,6 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 			version: "0.87",
 			headStripped: true,
 			forwardedLength: 1234,
-			removedUpdates: 1,
 			sectionsSeen: ["project_context", "cwd"],
 		};
 		await turns.insertTurn({

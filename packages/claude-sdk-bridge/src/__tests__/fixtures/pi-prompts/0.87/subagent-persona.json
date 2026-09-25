@@ -17,11 +17,7 @@
 			}
 		]
 	},
-	"transport": "collapsed",
 	"system": "<active_agent name=\"reviewer\"/>\n\nYou are the reviewer agent. Review the diff you are given and report defects.\n\n<rules>\n- Report only defects you can point at in the diff.\n- Never edit files.\n</rules>\n\n<example>\nFinding: off-by-one in `slice(0, n - 1)`.\n</example>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
-	"messages": [
-		"<active_agent name=\"reviewer\"/>\n\nYou are the reviewer agent. Review the diff you are given and report defects.\n\n<rules>\n- Report only defects you can point at in the diff.\n- Never edit files.\n</rules>\n\n<example>\nFinding: off-by-one in `slice(0, n - 1)`.\n</example>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>\n\n<cwd>\n/home/user/projects/widget\n</cwd>"
-	],
 	"sections": {
 		"preamble": "<active_agent name=\"reviewer\"/>\n\nYou are the reviewer agent. Review the diff you are given and report defects.\n\n<rules>\n- Report only defects you can point at in the diff.\n- Never edit files.\n</rules>\n\n<example>\nFinding: off-by-one in `slice(0, n - 1)`.\n</example>",
 		"project_context": "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>",
@@ -30,7 +26,6 @@
 	"expect": {
 		"outcome": "forwarded",
 		"headStripped": false,
-		"forwarded": "<active_agent name=\"reviewer\"/>\n\nYou are the reviewer agent. Review the diff you are given and report defects.\n\n<rules>\n- Report only defects you can point at in the diff.\n- Never edit files.\n</rules>\n\n<example>\nFinding: off-by-one in `slice(0, n - 1)`.\n</example>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>\n\n<cwd>\n/home/user/projects/widget\n</cwd>",
-		"removedUpdates": 0
+		"forwarded": "<active_agent name=\"reviewer\"/>\n\nYou are the reviewer agent. Review the diff you are given and report defects.\n\n<rules>\n- Report only defects you can point at in the diff.\n- Never edit files.\n</rules>\n\n<example>\nFinding: off-by-one in `slice(0, n - 1)`.\n</example>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/home/user/projects/widget/AGENTS.md\">\n# Widget\n\n- Run `bun test` before committing.\n- Never edit generated files under `dist/`.\n</project_instructions>\n</project_context>\n\n<cwd>\n/home/user/projects/widget\n</cwd>"
 	}
 }

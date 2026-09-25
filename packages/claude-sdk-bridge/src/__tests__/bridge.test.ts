@@ -1287,7 +1287,6 @@ describe("pi's system prompt", () => {
 				version: "0.87",
 				headStripped: true,
 				forwardedLength: (expectedAppend(f) as string).length,
-				removedUpdates: 0,
 				// A diagnostic, so an opener inside a section counts too.
 				sectionsSeen: [
 					"addendum",
@@ -1300,14 +1299,13 @@ describe("pi's system prompt", () => {
 		});
 	});
 
-	it("sends a system array's text blocks the way pi's messages join", async () => {
+	it("reads pi's prompt from a system array, the Chat adapter's shape", async () => {
 		const h = harness();
-		// The mid-conversation shape: the leading prompt and an update, as two blocks.
-		const f = fixture("midconvo-update-tools-and-skills");
+		const f = fixture("collapsed-section-update");
 		const t = await start(
 			h,
 			{
-				system: f.messages.map((text) => ({ type: "text", text })),
+				system: [{ type: "text", text: f.system }],
 				messages: [{ role: "user", content: "hello" }],
 			},
 			{ meta: PI },
