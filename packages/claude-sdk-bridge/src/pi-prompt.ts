@@ -125,43 +125,46 @@ function headEnd(text: string, head: PiPromptHead): number | null {
 /**
  * Removes updates that put back or change the head: its sections, or the
  * preamble back to stock. Every other update, and every removal, stays.
+ * One scan: the removed spans are collected and the rest joined once.
  */
 function removeHeadUpdates(
 	tail: string,
 	head: PiPromptHead,
 ): { text: string; removed: number } {
 	// Each update is preceded by a blank line: the one joining it to the text before.
-	let text = `\n\n${tail}`;
+	const text = `\n\n${tail}`;
+	const marker = `\n\n${UPDATED}`;
+	const kept: string[] = [];
+	let from = 0;
 	let removed = 0;
-	for (const name of head.sections) {
-		const marker = `\n\n${UPDATED}${name}":\n\n`;
-		let at = text.indexOf(marker);
-		while (at !== -1) {
-			const end = blockEnd(text, at + marker.length, name);
-			if (end === null) {
-				at = text.indexOf(marker, at + marker.length);
-				continue;
-			}
-			text = text.slice(0, at) + text.slice(end);
-			removed++;
-			at = text.indexOf(marker, at);
-		}
-	}
-	const stock = `\n\n${UPDATED}preamble":\n\n${head.stockPreamble}`;
-	let at = text.indexOf(stock);
+	let at = text.indexOf(marker);
 	while (at !== -1) {
-		const end = at + stock.length;
-		if (
-			end === text.length ||
-			text.startsWith(`\n\n${UPDATED}`, end) ||
-			text.startsWith(`\n\n${REMOVED}`, end)
-		) {
-			text = text.slice(0, at) + text.slice(end);
-			removed++;
-			at = text.indexOf(stock, at);
-		} else at = text.indexOf(stock, end);
+		const nameStart = at + marker.length;
+		const nameEnd = text.indexOf('":\n\n', nameStart);
+		const name = nameEnd === -1 ? "" : text.slice(nameStart, nameEnd);
+		const value = nameEnd + 4;
+		let end: number | null = null;
+		if (head.sections.includes(name)) end = blockEnd(text, value, name);
+		else if (name === "preamble" && text.startsWith(head.stockPreamble, value)) {
+			const after = value + head.stockPreamble.length;
+			if (
+				after === text.length ||
+				text.startsWith(marker, after) ||
+				text.startsWith(`\n\n${REMOVED}`, after)
+			)
+				end = after;
+		}
+		if (end === null) {
+			at = text.indexOf(marker, nameStart);
+			continue;
+		}
+		kept.push(text.slice(from, at));
+		from = end;
+		removed++;
+		at = text.indexOf(marker, end);
 	}
-	return { text: text.slice(2), removed };
+	kept.push(text.slice(from));
+	return { text: kept.join("").slice(2), removed };
 }
 
 function triggerIn(text: string): PiPromptRefusedReason | null {

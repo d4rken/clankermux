@@ -35,6 +35,8 @@ function appendOf(outcome: SystemPromptOutcome): string | null {
 }
 
 const fixture = (name: string) => loadPiPromptFixture("0.87", name);
+const expectedTail = (f: ReturnType<typeof fixture>) =>
+	f.expect.outcome === "forwarded" ? (f.expect.forwarded ?? "") : "";
 
 describe("policy selection", () => {
 	it("strips pi's head from pi's prompt and drops every other client's", () => {
@@ -186,6 +188,21 @@ describe("pi 0.87 head strip", () => {
 		const back = decide(fixture("update-preamble-to-stock").system);
 		expect(appendOf(back)).not.toContain("Updated system prompt section");
 		expect(back.detail).toMatchObject({ removedUpdates: 4 });
+	});
+
+	it("removes 50k head updates in linear time", () => {
+		const f = fixture("stock");
+		const update = (n: number) =>
+			`\n\nUpdated system prompt section "tools":\n\n<tools>\n- t${n}\n</tools>`;
+		const kept = '\n\nUpdated system prompt section "skills":\n\n<skills>\nk\n</skills>';
+		const system =
+			f.system + Array.from({ length: 50_000 }, (_, i) => update(i)).join("") + kept;
+		const t0 = performance.now();
+		const outcome = decide(system);
+		const elapsed = performance.now() - t0;
+		expect(appendOf(outcome)).toBe(`${expectedTail(f)}${kept}`);
+		expect(outcome.detail).toMatchObject({ removedUpdates: 50_000 });
+		expect(elapsed).toBeLessThan(1_000);
 	});
 
 	it("sends nothing for an empty prompt", () => {
