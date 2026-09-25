@@ -60,20 +60,50 @@ pipeline. The client keeps executing its own tools.
   a user message after them) holds `tool_result` ids a live query waits on
   *now* goes straight to that query (`continueParkedSdkBridgeTurn`), before
   any route is built. The bridge refuses, with one `continue` leg recorded
-  each: another key's turn (409), ids that do not cover every awaited call or
-  that an earlier round handed out (409 "stale tool results"), shutdown (503).
+  each: another key's turn (409), ids that do not name every awaited call
+  exactly once, name one it does not wait on, or that an earlier round
+  handed out (409 "stale tool results"), shutdown (503). The same holds for
+  a released park (below).
+- **Released parks.** Parked for `sdk_bridge_park_release_ms` (2 min), a
+  query is released instead of held: token revoked, process group SIGTERMed
+  (SIGKILL after the grace), and only then the parked MCP handlers closed.
+  Never `interrupt()`, `close()` or an MCP answer while the child lives:
+  each writes a synthetic result into the transcript, and a later plain
+  resume of that session carries it instead of the real one. The session
+  file moves to `<workRoot>/released-parks/` (temp + fsync + rename) and a
+  `sdk_bridge_released_parks` row records it (`preparing` → `released` →
+  `claimed` → `consumed`) with an immutable resume descriptor; the turn row
+  reads `released`. The client's results claim it (a second claimant gets
+  409 stale), fork it under a new id and run Claude Code with `resume` +
+  `resumeSessionAt` at the last envelope of the message that made the calls
+  (envelopes arrive after `message_stop`), the final user message as one
+  prompt. The listener writes `consumed` before the first model call goes
+  out. A gone session file falls back to a flattened dead continuation.
+  Parks survive restarts: one process holds the directory's owner lock, and
+  recovery (before `installSdkBridge` exposes the transport) ends
+  `preparing`/`consumed` records and unusable files, and returns stale
+  claims to `released`. They expire after `sdk_bridge_released_park_ttl_ms`
+  (24 h, `timed_out`). Shutdown releases parked turns, including ones that
+  park during the drain.
 - **Dead continuations.** Tool results no live query holds, sent with the
   assistant message that made the calls, start a new query with
   `rebuild_reason = dead_continuation`: the history and the results are
   flattened into the prompt. Never a transcript: resuming a transcript that
   ends in tool calls, Claude Code drops the calls as interrupted and the
   results with them ("No response requested." / "(no content)" upstream).
+  `resumeSessionAt` avoids that only for Claude Code's own transcript (a
+  released park); a synthetic one is refused at that point ("No message
+  found with message.uuid").
 - **Text sent with tool results** goes to Claude Code before the results,
   while it still waits on the MCP calls; it then sends it after them in the
   same model request. Sent after the results, it became a turn of its own
   whose answer reached nobody.
 - **Superseding.** A new start turn of a conversation whose query is parked
-  on tool calls tears that query down (`aborted`, "superseded").
+  on tool calls tears that query down (`aborted`, "superseded"), and ends
+  its released parks the same way.
+- **Deadline.** `sdk_bridge_turn_deadline_ms` is an active-time budget:
+  parked and released time is not counted, and each resume moves the inner
+  `deadlineAt` to what is left.
 - **Accounting.** `sdk_bridge_turns` (one per Claude Code query) and
   `sdk_bridge_turn_legs` (one per outer HTTP request; the leg id is the
   client's `x-clankermux-request-id`). Legs have no `requests` row.
@@ -300,8 +330,18 @@ still refused, and stale or partial ones keep their own 409.
 
 Measured 220–270 MB RSS per Claude Code child (about 220 MB each with four
 turns parked).
-`sdk_bridge_max_processes` defaults to 8; parked queries count against it.
-`/api/system/status` reports live, parked, cap and peak RSS (VmHWM).
+`sdk_bridge_max_processes` defaults to 8; parked queries count against it,
+released ones do not (a resume needs a free slot, else 529).
+`/api/system/status` reports live, parked, released, cap and peak RSS
+(VmHWM), the session bytes and why parked turns are not being released.
+
+Session files (generation sessions and released parks) are held under
+`sdk_bridge_session_bytes_ceiling` (2 GiB, soft) by a periodic pass that
+evicts idle conversations, least recently used first. When live and
+released sessions alone exceed it, parked turns stay parked under the
+parked timeout instead of being released; new turns are never refused. The
+DB cleanup worker never deletes a `running`/`released` turn or one a park
+still owns.
 
 ## Tests
 

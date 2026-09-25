@@ -266,7 +266,11 @@ function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
  * Whether `resultIds` answer exactly the tool calls the history's final
  * message makes: the shape of a continuation whose query is gone, which the
  * history alone can rebuild. The rebuild is flattened, calls and results as
- * text: a transcript ending in those calls does not survive a resume.
+ * text: a transcript ending in those calls does not survive a plain resume
+ * (Claude Code answers them itself as interrupted). Only Claude Code's own
+ * transcript resumed with `resumeSessionAt` at the calls keeps them, which
+ * is what a released park does; a transcript built from the history
+ * (buildSyntheticTranscript) is refused at that point.
  */
 export function answersFinalToolCalls(
 	history: readonly ApiMessage[],
