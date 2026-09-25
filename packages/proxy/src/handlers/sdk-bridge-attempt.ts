@@ -4,11 +4,13 @@ import {
 	getNativeResponsesMetaContext,
 	type RequestMeta,
 	SDK_BRIDGE_PI_PROMPT_HEADER,
+	SDK_BRIDGE_SIDE_REQUEST_HEADER,
 	SdkBridgeCapacityError,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	sdkBridgeHeaderToken,
 } from "@clankermux/types";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
@@ -93,19 +95,6 @@ export function buildSdkBridgeRoutePlan(
 	});
 }
 
-/**
- * The declared pi prompt layout, as the bridge may echo it in a refusal and
- * record it: printable ASCII, at most 32 characters.
- */
-function piPromptVersion(headers: Headers): string | null {
-	const raw = headers.get(SDK_BRIDGE_PI_PROMPT_HEADER);
-	const value = raw
-		?.replace(/[^\x20-\x7e]/g, "")
-		.trim()
-		.slice(0, 32);
-	return value || null;
-}
-
 export function sdkBridgeTurnMeta(
 	meta: RequestMeta,
 	headers: Headers,
@@ -126,7 +115,8 @@ export function sdkBridgeTurnMeta(
 		reasoningEffort: meta.reasoningEffort ?? null,
 		translationGaps:
 			getNativeResponsesMetaContext(meta)?.translationGaps ?? null,
-		piPromptVersion: piPromptVersion(headers),
+		piPromptVersion: sdkBridgeHeaderToken(headers, SDK_BRIDGE_PI_PROMPT_HEADER),
+		sideRequest: sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER),
 	};
 }
 
@@ -296,6 +286,9 @@ export async function continueParkedSdkBridgeTurn(input: {
 	const { req, ctx, requestMeta } = input;
 	const bridge = ctx.sdkBridge;
 	if (requestMeta.officialAnthropicVia !== "sdk-bridge" || !bridge) return null;
+	// A side request never answers the conversation's parked turn; the bridge
+	// refuses tool results on it.
+	if (req.headers.has(SDK_BRIDGE_SIDE_REQUEST_HEADER)) return null;
 	const ids = lastUserToolResultIds(input.parsedBody);
 	if (!ids.length) return null;
 	const parked = bridge.findContinuation(ids, {

@@ -168,6 +168,22 @@ export class ConversationStore {
 		};
 	}
 
+	/**
+	 * The conversation's settled session, read without taking the
+	 * conversation: a turn holding it is not waited for, and nothing about the
+	 * record changes. Only a session already settling is waited on, at most
+	 * `waitMs`, since the reply the caller builds on is that session's.
+	 */
+	async peek(key: string, waitMs: number): Promise<StoredSession | null> {
+		const pending = this.records.get(key)?.pending;
+		if (pending) {
+			await Promise.race([pending.done.catch(() => false), Bun.sleep(waitMs)]);
+			// Let the settle callback run before the record is read.
+			await Promise.resolve();
+		}
+		return this.records.get(key)?.current ?? null;
+	}
+
 	private settle(
 		record: ConversationRecord,
 		session: StoredSession,

@@ -154,8 +154,11 @@ const IGNORED_FIELDS = ["temperature", "top_p"] as const;
 function applyFieldPolicy(
 	body: Record<string, unknown>,
 	gaps: SdkBridgeTranslationGaps | null,
+	mode: TurnRequestMode,
 ): { maxOutputTokens: number | null; ignoredFields: string[] } | BridgeError {
-	const refused = sdkBridgeRefusedField(body);
+	const refused = sdkBridgeRefusedField(body, {
+		sideRequest: mode === "side_request",
+	});
 	if (refused) return bridgeErrors.invalid(refused.message);
 	let maxOutputTokens: number | null = null;
 	if (body.max_tokens !== undefined && !gaps?.maxTokensDefaulted) {
@@ -171,11 +174,18 @@ function applyFieldPolicy(
 	return { maxOutputTokens, ignoredFields };
 }
 
+/**
+ * `side_request` parses a side request: `tool_choice: none` passes, and the
+ * tools a replayed body declares are not the turn's, which has none.
+ */
+export type TurnRequestMode = "turn" | "side_request";
+
 export function parseTurnRequest(
 	body: unknown,
 	reasoningEffort: string | null,
 	bodyBytes: number,
 	gaps: SdkBridgeTranslationGaps | null = null,
+	mode: TurnRequestMode = "turn",
 ): { ok: true; turn: TurnRequest } | { ok: false; error: BridgeError } {
 	const fail = (error: BridgeError) => ({ ok: false as const, error });
 	if (!isRecord(body))
@@ -217,9 +227,12 @@ export function parseTurnRequest(
 		.filter((m) => m.role === "user");
 	const last: ClientMessage =
 		run.length === 1 ? final : { role: "user", content: run.flatMap(blocksOf) };
-	const tools = parseTools(body.tools);
+	const tools =
+		mode === "side_request"
+			? { tools: [], schemaBytes: 0 }
+			: parseTools(body.tools);
 	if ("status" in tools) return fail(tools);
-	const fields = applyFieldPolicy(body, gaps);
+	const fields = applyFieldPolicy(body, gaps, mode);
 	if ("status" in fields) return fail(fields);
 	const toolResults = blocksOf(last).filter((b) => b.type === "tool_result");
 	return {

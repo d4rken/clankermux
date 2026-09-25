@@ -12,6 +12,7 @@ import {
 	getChatContext,
 	getNativeResponsesRequestContext,
 	getSdkBridgeInnerRequestContext,
+	isSdkBridgeSideRequestFork,
 	type ProjectAttributionSource,
 	type RequestMeta,
 	type SdkBridgeInnerContext,
@@ -457,7 +458,9 @@ export async function ingestProxyRequest(
 		floored && !sdkBridgeInner ? "sdk-bridge" : "direct";
 	requestMeta.sdkBridgeRefusedField =
 		requestMeta.officialAnthropicVia === "sdk-bridge"
-			? sdkBridgeRefusedField(parsedBody)
+			? sdkBridgeRefusedField(parsedBody, {
+					sideRequest: isSdkBridgeSideRequestFork(req.headers),
+				})
 			: null;
 	if (sdkBridgeInner) {
 		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);

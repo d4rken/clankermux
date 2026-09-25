@@ -1,5 +1,9 @@
 import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
-import type { SdkBridgeInnerOutcome } from "@clankermux/types";
+import {
+	SDK_BRIDGE_SIDE_REQUEST_FORK,
+	SDK_BRIDGE_SIDE_REQUEST_HEADER,
+	type SdkBridgeInnerOutcome,
+} from "@clankermux/types";
 
 /** An error the bridge answers the client with, as JSON or as an SSE `error`. */
 export interface BridgeError {
@@ -327,6 +331,33 @@ export const bridgeErrors = {
 			status: 499,
 			type: "client_closed_request",
 			message: "The client closed the request",
+			retryAfter: null,
+		};
+	},
+	sideRequestUnknown(value: string): BridgeError {
+		return {
+			status: 400,
+			type: "invalid_request_error",
+			code: "sdk_bridge_side_request_unknown",
+			message: `${SDK_BRIDGE_SIDE_REQUEST_HEADER} "${value}" is not a side-request mode the SDK bridge serves; it serves "${SDK_BRIDGE_SIDE_REQUEST_FORK}"`,
+			retryAfter: null,
+		};
+	},
+	sideRequestNoSession(why: string): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			code: "sdk_bridge_side_request_no_session",
+			message: `No Claude Code session is stored for this conversation to fork: ${why}`,
+			retryAfter: null,
+		};
+	},
+	sideRequestPrefixMismatch(why: string): BridgeError {
+		return {
+			status: 409,
+			type: "invalid_request_error",
+			code: "sdk_bridge_side_request_prefix_mismatch",
+			message: `This side request is not the stored conversation plus one new user message: ${why}`,
 			retryAfter: null,
 		};
 	},

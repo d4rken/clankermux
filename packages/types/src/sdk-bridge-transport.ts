@@ -20,6 +20,8 @@ export interface SdkBridgeCounters {
 	rejected: Record<string, number>;
 	resumes: number;
 	rebuilds: number;
+	/** Side requests started; each also counts in `turnsStarted`. */
+	sideRequests: number;
 }
 
 /** The bridge's live state, as `/api/system/status` reports it. */
@@ -115,6 +117,8 @@ export interface SdkBridgeTurnMeta {
 	readonly translationGaps: SdkBridgeTranslationGaps | null;
 	/** The client's {@link SDK_BRIDGE_PI_PROMPT_HEADER}, sanitized; null when absent. */
 	readonly piPromptVersion: string | null;
+	/** The client's {@link SDK_BRIDGE_SIDE_REQUEST_HEADER}, sanitized; null when absent. */
+	readonly sideRequest: string | null;
 }
 
 /** The pi prompt-layout version a pi client declares, e.g. `0.87`. */
@@ -125,6 +129,45 @@ export const SDK_BRIDGE_PI_PROMPT_HEADER = "x-clankermux-pi-prompt";
  * publishes them so pi can warn before a Claude turn is refused.
  */
 export const SUPPORTED_PI_PROMPT_VERSIONS: readonly string[] = ["0.87"];
+
+/**
+ * Marks a client's auxiliary request (pi's recap and session title) that
+ * must not become the conversation's next turn.
+ */
+export const SDK_BRIDGE_SIDE_REQUEST_HEADER = "x-clankermux-side-request";
+
+/**
+ * The side-request mode the bridge serves: the request runs on a copy of the
+ * conversation's stored Claude Code session, whose own session stays as it was.
+ */
+export const SDK_BRIDGE_SIDE_REQUEST_FORK = "session-fork-v1";
+
+/**
+ * A declaration header as the bridge may echo it in a refusal and record it:
+ * printable ASCII, trimmed, at most 32 characters; null when absent or blank.
+ *
+ *   " 0.87 "          → "0.87"
+ *   "0.9\t" + 40 × 9 → "0.9" + 29 × 9
+ */
+export function sdkBridgeHeaderToken(
+	headers: Headers,
+	name: string,
+): string | null {
+	const value = headers
+		.get(name)
+		?.replace(/[^\x20-\x7e]/g, "")
+		.trim()
+		.slice(0, 32);
+	return value || null;
+}
+
+/** Whether the request declares the side-request mode the bridge serves. */
+export function isSdkBridgeSideRequestFork(headers: Headers): boolean {
+	return (
+		sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER) ===
+		SDK_BRIDGE_SIDE_REQUEST_FORK
+	);
+}
 
 export interface SdkBridgeTransport {
 	availability(): SdkBridgeAvailability;

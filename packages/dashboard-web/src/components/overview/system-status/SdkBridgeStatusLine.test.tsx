@@ -17,6 +17,7 @@ function status(over: Partial<SdkBridgeStatus> = {}): SdkBridgeStatus {
 			rejected: {},
 			resumes: 0,
 			rebuilds: 0,
+			sideRequests: 0,
 		},
 		peakRssBytes: 262_144_000,
 		...over,

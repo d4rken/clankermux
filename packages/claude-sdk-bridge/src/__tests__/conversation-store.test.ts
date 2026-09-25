@@ -167,4 +167,73 @@ describe("ConversationStore", () => {
 		(await store.claim("k", 1_000)).release();
 		expect(Date.now() - t0).toBeLessThan(100);
 	});
+
+	describe("peek", () => {
+		it("reads the settled session without taking the conversation", async () => {
+			const store = new ConversationStore({
+				now: Date.now,
+				onDiscard: () => {},
+			});
+			expect(await store.peek("k", 100)).toBeNull();
+			(await store.claim("k", 100)).register(
+				session("s1"),
+				Promise.resolve(true),
+			);
+			const holder = await store.claim("k", 100);
+			const t0 = Date.now();
+			// A turn holding the conversation does not delay a peek.
+			expect((await store.peek("k", 1_000))?.sessionId).toBe("s1");
+			expect(Date.now() - t0).toBeLessThan(100);
+			// Nor does a peek hold up the next claim.
+			holder.release();
+			expect((await store.claim("k", 100)).current?.sessionId).toBe("s1");
+		});
+
+		it("waits for a session already settling, at most the bound", async () => {
+			const store = new ConversationStore({
+				now: Date.now,
+				onDiscard: () => {},
+			});
+			(await store.claim("k", 100)).register(
+				session("s1"),
+				Promise.resolve(true),
+			);
+			let settle!: (ok: boolean) => void;
+			(await store.claim("k", 100)).register(
+				session("s2"),
+				new Promise((resolve) => (settle = resolve)),
+			);
+			const peeked = store.peek("k", 1_000);
+			await Bun.sleep(20);
+			settle(true);
+			expect((await peeked)?.sessionId).toBe("s2");
+
+			let never!: (ok: boolean) => void;
+			(await store.claim("k", 100)).register(
+				session("s3"),
+				new Promise((resolve) => (never = resolve)),
+			);
+			const t0 = Date.now();
+			expect((await store.peek("k", 60))?.sessionId).toBe("s2");
+			expect(Date.now() - t0).toBeGreaterThanOrEqual(50);
+			never(false);
+		});
+
+		it("never changes the conversation's session", async () => {
+			const discarded: string[] = [];
+			const store = new ConversationStore({
+				now: Date.now,
+				onDiscard: (id) => discarded.push(id),
+			});
+			(await store.claim("k", 100)).register(
+				session("s1"),
+				Promise.resolve(true),
+			);
+			await store.peek("k", 100);
+			await store.peek("other", 100);
+			expect(store.size).toBe(1);
+			expect((await store.claim("k", 100)).current?.sessionId).toBe("s1");
+			expect(discarded).toEqual([]);
+		});
+	});
 });

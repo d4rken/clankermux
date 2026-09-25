@@ -335,6 +335,7 @@ describe("RequestsTab — SDK bridge turns", () => {
 	const turnView = (): SdkBridgeTurnView => ({
 		turn: {
 			id: "turn-1",
+			kind: "turn",
 			startedAt: 1_700_000_000_000,
 			finishedAt: 1_700_000_004_000,
 			status: "completed",

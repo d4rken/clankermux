@@ -13,6 +13,12 @@ export type SdkBridgeTurnStatus =
 	| "shutdown"
 	| "rejected";
 
+/**
+ * `side_request`: a client's auxiliary request (recap, title) run on a copy
+ * of its conversation's session, which it never replaces.
+ */
+export type SdkBridgeTurnKind = "turn" | "side_request";
+
 /** How the turn's conversation history reached Claude Code. */
 export type SdkBridgeHistoryMode =
 	| "fresh"
@@ -71,6 +77,7 @@ export type SdkBridgeSystemPromptDetail =
 
 export interface SdkBridgeTurn {
 	id: string;
+	kind: SdkBridgeTurnKind;
 	startedAt: number;
 	finishedAt: number | null;
 	status: SdkBridgeTurnStatus;
@@ -126,6 +133,7 @@ export type SdkBridgeTurnInsert = Pick<
 	Partial<
 		Pick<
 			SdkBridgeTurn,
+			| "kind"
 			| "status"
 			| "apiKeyId"
 			| "apiKeyName"

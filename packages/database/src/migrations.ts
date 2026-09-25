@@ -1136,7 +1136,8 @@ export function ensureSchema(db: Database): void {
 			sdk_cache_read_input_tokens INTEGER,
 			sdk_cache_creation_input_tokens INTEGER,
 			ignored_fields TEXT,
-			system_prompt_detail TEXT
+			system_prompt_detail TEXT,
+			kind TEXT NOT NULL DEFAULT 'turn'
 		)
 	`);
 	db.run(
@@ -2016,6 +2017,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "sdk_bridge_turns",
 		column: "system_prompt_detail",
 		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN system_prompt_detail TEXT",
+	},
+	// SdkBridgeTurnKind: `turn`, or `side_request` for a client's auxiliary
+	// request run on a copy of its conversation's session.
+	{
+		table: "sdk_bridge_turns",
+		column: "kind",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN kind TEXT NOT NULL DEFAULT 'turn'",
 	},
 ];
 

@@ -1,15 +1,19 @@
 import { randomBytes } from "node:crypto";
 import { Logger } from "@clankermux/logger";
 import {
+	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeAvailability,
 	SdkBridgeCapacityError,
 	type SdkBridgeCounters,
 	type SdkBridgeHistoryMode,
 	type SdkBridgeInnerContext,
+	type SdkBridgeRouteCandidate,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeStatus,
 	type SdkBridgeSystemPromptDetail,
 	type SdkBridgeTransport,
+	type SdkBridgeTurnInsert,
+	type SdkBridgeTurnKind,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
 } from "@clankermux/types";
@@ -30,6 +34,7 @@ import {
 	errorSummary,
 } from "./errors";
 import {
+	type ApiMessage,
 	answersFinalToolCalls,
 	buildSyntheticTranscript,
 	classifyRebuild,
@@ -37,6 +42,7 @@ import {
 	flattenBlocks,
 	flattenHistory,
 	messageDigests,
+	messagesAfter,
 	normalizeHistory,
 	type RebuildReason,
 	sameDigests,
@@ -55,7 +61,10 @@ import {
 	resolveClaudeExecutable,
 } from "./spawn";
 import { LegResponse } from "./sse";
-import { selectSystemPromptPolicy } from "./system-prompt-policy";
+import {
+	type SystemPromptDecision,
+	selectSystemPromptPolicy,
+} from "./system-prompt-policy";
 import {
 	createToolServer,
 	loadMcpSdk,
@@ -88,6 +97,12 @@ import {
 const CLAUDE_CODE_VERSION = "2.1.280";
 
 export type { SdkBridgeCounters, SdkBridgeStatus };
+
+/** The system-prompt policy a turn ran and what it made of the prompt. */
+interface PromptRecord {
+	policy: string;
+	detail: SdkBridgeSystemPromptDetail | null;
+}
 
 export interface ClaudeSdkBridge extends SdkBridgeTransport {
 	/** Refuse new turns and kill parked queries, now and whenever one parks later. */
@@ -240,6 +255,7 @@ export function createClaudeSdkBridge(
 		rejected: {},
 		resumes: 0,
 		rebuilds: 0,
+		sideRequests: 0,
 	};
 	let peakRssBytes: number | null = null;
 	const notePeakRss = (bytes: number) => {
@@ -276,15 +292,14 @@ export function createClaudeSdkBridge(
 		meta: SdkBridgeTurnMeta,
 		plan: SdkBridgeRoutePlan | null,
 		startedAt: number,
-		prompt: {
-			policy: string;
-			detail: SdkBridgeSystemPromptDetail | null;
-		},
+		prompt: PromptRecord,
+		kind: SdkBridgeTurnKind,
 		error: BridgeError,
 		reason: string,
 	): Response {
 		counters.rejected[reason] = (counters.rejected[reason] ?? 0) + 1;
 		void recorder.insertTurn({
+			kind,
 			startedAt,
 			status: "rejected",
 			historyMode: "fresh",
@@ -437,25 +452,259 @@ export function createClaudeSdkBridge(
 		return leg;
 	}
 
-	async function startTurn(input: {
-		request: Request;
-		plan: SdkBridgeRoutePlan;
-		meta: SdkBridgeTurnMeta;
-		signal: AbortSignal;
-		bumpIdleTimeout?: () => void;
-	}): Promise<Response> {
+	type StartInput = Parameters<SdkBridgeTransport["startTurn"]>[0];
+
+	/** What starting a query took, for its caller to give back if the start fails. */
+	interface Launching {
+		registration: InnerRegistration | null;
+		prompt: PromptStream | null;
+		query: ReturnType<QueryFn> | null;
+		pids: Set<number>;
+	}
+
+	const launching = (): Launching => ({
+		registration: null,
+		prompt: null,
+		query: null,
+		pids: new Set(),
+	});
+
+	/** Give back everything a failed start took, and the new session's files. */
+	function abandonLaunch(taken: Launching, sessionId: string | null): void {
+		taken.registration?.revoke();
+		taken.prompt?.end();
+		try {
+			taken.query?.close();
+		} catch {}
+		for (const pid of taken.pids) spawner.kill(pid, "SIGKILL");
+		if (sessionId) {
+			discardSession(sessionId);
+			discardClaudeCodeTranscripts(sessionId);
+		}
+	}
+
+	/**
+	 * Start Claude Code on `sessionId` and make the query live. What it takes
+	 * is recorded in `taken` as it goes; a throw leaves the rest to
+	 * {@link abandonLaunch}.
+	 */
+	function launchQuery(
+		taken: Launching,
+		input: {
+			start: StartInput;
+			run: QueryFn;
+			mcp: McpSdk;
+			turn: TurnRequest;
+			target: SdkBridgeRouteCandidate;
+			toolNames: ToolNames;
+			systemPrompt: SystemPromptDecision;
+			sessionId: string;
+			historyMode: SdkBridgeHistoryMode;
+			promptContent: Block[];
+			/** The conversation this query holds and may register with. */
+			claim: ConversationClaim | null;
+			convKey: string | null;
+			recorder: TurnRecorder;
+			startedAt: number;
+		},
+	): LiveQuery {
+		const { plan, meta } = input.start;
+		const { turn, toolNames } = input;
+		const dirs = workDirs();
+		let live: LiveQuery | null = null;
+		const context: SdkBridgeInnerContext = {
+			turnId: plan.turnId,
+			plan,
+			apiKeyId: meta.apiKeyId ?? plan.apiKeyId,
+			apiKeyName: meta.apiKeyName ?? plan.apiKeyName,
+			clientHarness: meta.clientHarness,
+			project: meta.project,
+			projectAttributionSource: meta.projectAttributionSource,
+			deadlineAt: input.startedAt + limits().turnDeadlineMs,
+			onInnerRequestStarted: (requestId) =>
+				live?.onInnerRequestStarted(requestId),
+			onInnerOutcome: (outcome) => live?.onInnerOutcome(outcome),
+		};
+		const registration = listener.register(context);
+		taken.registration = registration;
+		const baseUrl = listener.ensureStarted();
+		const parked = new ParkedCalls();
+		const toolServer = turn.tools.length
+			? createToolServer(input.mcp, turn.tools, toolNames, (id) =>
+					live ? live.onToolCall(id) : parked.wait(id),
+				)
+			: null;
+		const abortController = new AbortController();
+		const prompt = new PromptStream();
+		taken.prompt = prompt;
+		prompt.push(input.promptContent);
+		const query = input.run({
+			prompt,
+			options: buildQueryOptions({
+				paths: dirs,
+				baseUrl,
+				token: registration.token,
+				model: input.target.upstreamModel,
+				toolNames: toolNames.exposed,
+				toolServer,
+				systemPrompt: input.systemPrompt,
+				effort: turn.effort,
+				maxOutputTokens: turn.maxOutputTokens,
+				sessionId: input.sessionId,
+				resume:
+					input.historyMode === "resume" ||
+					input.historyMode === "rebuild_transcript",
+				sessionStore: sessionStore(),
+				executablePath,
+				spawn: (options) =>
+					spawner.spawn(options, (pid) => {
+						taken.pids.add(pid);
+					}),
+				stderr: (text) =>
+					log.debug(`[claude ${plan.turnId}] ${text.trimEnd()}`),
+				abortController,
+			}),
+		});
+		taken.query = query;
+
+		const composer = new ReplyComposer({
+			toolNames,
+			onToolUse: (id) => {
+				toolIndex.set(id, plan.turnId);
+				const ids = turnToolIds.get(plan.turnId) ?? [];
+				ids.push(id);
+				turnToolIds.set(plan.turnId, ids);
+				live?.onToolUseForwarded();
+			},
+			newMessageId: () => `msg_sdk_bridge_${randomId().replaceAll("-", "")}`,
+		});
+		const current = limits();
+		live = new LiveQuery({
+			turnId: plan.turnId,
+			ownerApiKeyId: meta.apiKeyId,
+			sessionId: input.sessionId,
+			accountId: plan.preferredAccountId,
+			requestedModel: meta.model,
+			historyMode: input.historyMode,
+			query,
+			prompt,
+			parked,
+			composer,
+			recorder: input.recorder,
+			registration,
+			pids: taken.pids,
+			killProcessGroup: (pid, signal) => spawner.kill(pid, signal),
+			isAlive: (pid) => spawner.isAlive(pid),
+			readPeakRss: readPeakRssBytes,
+			claim: input.claim,
+			clientMessages: turn.messages,
+			timing,
+			parkedTimeoutMs: current.parkedTimeoutMs,
+			turnDeadlineMs: current.turnDeadlineMs,
+			maxParkedCalls: current.maxParkedCallsPerTurn,
+			startedAt: input.startedAt,
+			now,
+			log,
+			isShuttingDown: () => shuttingDown,
+			conversationKey: input.convKey,
+			discardSession,
+			discardClaudeCodeTranscripts,
+			onPeakRss: notePeakRss,
+			onClosed: (closed) => {
+				lives.delete(closed.turnId);
+				if (
+					closed.conversationKey &&
+					liveByConversation.get(closed.conversationKey) === closed
+				)
+					liveByConversation.delete(closed.conversationKey);
+				for (const id of turnToolIds.get(closed.turnId) ?? [])
+					toolIndex.delete(id);
+				turnToolIds.delete(closed.turnId);
+				void closed.done.then((ok) => {
+					if (ok) counters.turnsCompleted++;
+					else counters.turnsFailed++;
+				});
+			},
+		});
+		lives.set(plan.turnId, live);
+		if (input.convKey) liveByConversation.set(input.convKey, live);
+		return live;
+	}
+
+	/** Record the started turn and open its first leg on the live query. */
+	function openStartLeg(
+		live: LiveQuery,
+		recorder: TurnRecorder,
+		row: Omit<SdkBridgeTurnInsert, "id">,
+		turn: TurnRequest,
+		start: StartInput,
+	): Promise<Response> {
+		const { plan, meta } = start;
+		void recorder.insertTurn(row);
+		if (turn.ignoredFields.length)
+			log.info(
+				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code sets its own sampling`,
+			);
+		void recorder.insertLeg(meta.legId, "start", row.startedAt);
+		const leg = newLeg(
+			meta.legId,
+			"start",
+			turn.stream,
+			start.signal,
+			start.bumpIdleTimeout,
+			(l) => live.onClientGone(l),
+		);
+		live.start(leg);
+		return leg.response.response;
+	}
+
+	/** An admission refusal; thrown when it is capacity, which the proxy fails over on. */
+	function refuseAdmission(
+		rejection: AdmissionRejection,
+		refuse: (error: BridgeError, reason: string) => Response,
+	): Response {
+		const response = refuse(rejection, rejection.reason);
+		if (
+			rejection.reason === "process_cap" ||
+			rejection.reason === "rebuild_cap"
+		)
+			throw new SdkBridgeCapacityError({
+				reason: rejection.reason,
+				status: rejection.status,
+				type: rejection.type,
+				message: rejection.message,
+				retryAfter: rejection.retryAfter,
+			});
+		return response;
+	}
+
+	async function startTurn(input: StartInput): Promise<Response> {
 		assertAvailable();
 		const { query: run, mcp } = await loadSdks();
 		const { plan, meta } = input;
 		const startedAt = now();
 		const recorder = new TurnRecorder(deps.turnRepo, log, plan.turnId);
 		const policy = selectSystemPromptPolicy(meta.clientHarness);
-		const promptRecord: {
-			policy: string;
-			detail: SdkBridgeSystemPromptDetail | null;
-		} = { policy: policy.name, detail: null };
+		const promptRecord: PromptRecord = { policy: policy.name, detail: null };
+		const sideRequest = meta.sideRequest ?? null;
+		const kind: SdkBridgeTurnKind =
+			sideRequest === null ? "turn" : "side_request";
 		const refuse = (error: BridgeError, reason: string) =>
-			reject(recorder, meta, plan, startedAt, promptRecord, error, reason);
+			reject(
+				recorder,
+				meta,
+				plan,
+				startedAt,
+				promptRecord,
+				kind,
+				error,
+				reason,
+			);
+		if (sideRequest !== null && sideRequest !== SDK_BRIDGE_SIDE_REQUEST_FORK)
+			return refuse(
+				bridgeErrors.sideRequestUnknown(sideRequest),
+				"side_request_unknown",
+			);
 		const body = await readBody(input.request);
 		if ("error" in body) return refuse(body.error, body.error.reason);
 		const parsed = parseTurnRequest(
@@ -463,6 +712,7 @@ export function createClaudeSdkBridge(
 			meta.reasoningEffort,
 			body.bytes,
 			meta.translationGaps,
+			kind,
 		);
 		if (!parsed.ok) return refuse(parsed.error, "invalid");
 		const turn = parsed.turn;
@@ -471,6 +721,11 @@ export function createClaudeSdkBridge(
 		// an earlier round are a stale replay of that query; otherwise the query
 		// is gone, and the history up to its tool calls rebuilds it.
 		const resultIds = toolResultIds(turn);
+		if (kind === "side_request" && resultIds.length)
+			return refuse(
+				bridgeErrors.invalid("A side request cannot carry tool results"),
+				"invalid",
+			);
 		const deadContinuation = resultIds.length > 0;
 		if (deadContinuation) {
 			const issuer = liveIssuing(resultIds);
@@ -519,6 +774,21 @@ export function createClaudeSdkBridge(
 				`SDK bridge turn ${plan.turnId}: no conversation key (${errorSummary(error)})`,
 			);
 		}
+		if (kind === "side_request")
+			return startSideRequest({
+				start: input,
+				run,
+				mcp,
+				turn,
+				target,
+				toolNames,
+				systemPrompt,
+				convKey,
+				recorder,
+				startedAt,
+				promptRecord,
+				refuse,
+			});
 		// A new turn replaces one of its conversation still waiting on tool
 		// results; the old one could only ever be answered out of order now.
 		// Synchronous, so a continuation for it arriving meanwhile finds it closed.
@@ -538,12 +808,9 @@ export function createClaudeSdkBridge(
 			claimReleased = true;
 			claim?.release();
 		};
-		let registration: InnerRegistration | null = null;
+		const taken = launching();
 		let sessionId: string | null = null;
-		let prompt: PromptStream | null = null;
-		let query: ReturnType<QueryFn> | null = null;
-		const pids = new Set<number>();
-		let live: LiveQuery | null = null;
+		let live: LiveQuery;
 		let history: HistoryDecision;
 		try {
 			if (shuttingDown) throw new SdkBridgeUnavailableError("shutting down");
@@ -576,19 +843,7 @@ export function createClaudeSdkBridge(
 			});
 			if (rejection) {
 				releaseClaim();
-				const response = refuse(rejection, rejection.reason);
-				if (
-					rejection.reason === "process_cap" ||
-					rejection.reason === "rebuild_cap"
-				)
-					throw new SdkBridgeCapacityError({
-						reason: rejection.reason,
-						status: rejection.status,
-						type: rejection.type,
-						message: rejection.message,
-						retryAfter: rejection.retryAfter,
-					});
-				return response;
+				return refuseAdmission(rejection, refuse);
 			}
 
 			const dirs = workDirs();
@@ -643,132 +898,27 @@ export function createClaudeSdkBridge(
 						? lastBlocks
 						: blocksOf(turn.last);
 
-			const context: SdkBridgeInnerContext = {
-				turnId: plan.turnId,
-				plan,
-				apiKeyId: meta.apiKeyId ?? plan.apiKeyId,
-				apiKeyName: meta.apiKeyName ?? plan.apiKeyName,
-				clientHarness: meta.clientHarness,
-				project: meta.project,
-				projectAttributionSource: meta.projectAttributionSource,
-				deadlineAt: startedAt + limits().turnDeadlineMs,
-				onInnerRequestStarted: (requestId) =>
-					live?.onInnerRequestStarted(requestId),
-				onInnerOutcome: (outcome) => live?.onInnerOutcome(outcome),
-			};
-			registration = listener.register(context);
-			const baseUrl = listener.ensureStarted();
-			const parked = new ParkedCalls();
-			const toolServer = turn.tools.length
-				? createToolServer(mcp, turn.tools, toolNames, (id) =>
-						live ? live.onToolCall(id) : parked.wait(id),
-					)
-				: null;
-			const abortController = new AbortController();
-			prompt = new PromptStream();
-			prompt.push(promptContent);
-			query = run({
-				prompt,
-				options: buildQueryOptions({
-					paths: dirs,
-					baseUrl,
-					token: registration.token,
-					model: target.upstreamModel,
-					toolNames: toolNames.exposed,
-					toolServer,
-					systemPrompt,
-					effort: turn.effort,
-					maxOutputTokens: turn.maxOutputTokens,
-					sessionId: newSessionId,
-					resume:
-						history.mode === "resume" || history.mode === "rebuild_transcript",
-					sessionStore: store,
-					executablePath,
-					spawn: (options) =>
-						spawner.spawn(options, (pid) => {
-							pids.add(pid);
-						}),
-					stderr: (text) =>
-						log.debug(`[claude ${plan.turnId}] ${text.trimEnd()}`),
-					abortController,
-				}),
-			});
-
-			const composer = new ReplyComposer({
+			live = launchQuery(taken, {
+				start: input,
+				run,
+				mcp,
+				turn,
+				target,
 				toolNames,
-				onToolUse: (id) => {
-					toolIndex.set(id, plan.turnId);
-					const ids = turnToolIds.get(plan.turnId) ?? [];
-					ids.push(id);
-					turnToolIds.set(plan.turnId, ids);
-					live?.onToolUseForwarded();
-				},
-				newMessageId: () => `msg_sdk_bridge_${randomId().replaceAll("-", "")}`,
-			});
-			const current = limits();
-			live = new LiveQuery({
-				turnId: plan.turnId,
-				ownerApiKeyId: meta.apiKeyId,
+				systemPrompt,
 				sessionId: newSessionId,
-				accountId: plan.preferredAccountId,
-				requestedModel: meta.model,
 				historyMode: history.mode,
-				query,
-				prompt,
-				parked,
-				composer,
-				recorder,
-				registration,
-				pids,
-				killProcessGroup: (pid, signal) => spawner.kill(pid, signal),
-				isAlive: (pid) => spawner.isAlive(pid),
-				readPeakRss: readPeakRssBytes,
+				promptContent,
 				claim,
-				clientMessages: turn.messages,
-				timing,
-				parkedTimeoutMs: current.parkedTimeoutMs,
-				turnDeadlineMs: current.turnDeadlineMs,
-				maxParkedCalls: current.maxParkedCallsPerTurn,
+				convKey,
+				recorder,
 				startedAt,
-				now,
-				log,
-				isShuttingDown: () => shuttingDown,
-				conversationKey: convKey,
-				discardSession,
-				discardClaudeCodeTranscripts,
-				onPeakRss: notePeakRss,
-				onClosed: (closed) => {
-					lives.delete(closed.turnId);
-					if (
-						closed.conversationKey &&
-						liveByConversation.get(closed.conversationKey) === closed
-					)
-						liveByConversation.delete(closed.conversationKey);
-					for (const id of turnToolIds.get(closed.turnId) ?? [])
-						toolIndex.delete(id);
-					turnToolIds.delete(closed.turnId);
-					void closed.done.then((ok) => {
-						if (ok) counters.turnsCompleted++;
-						else counters.turnsFailed++;
-					});
-				},
 			});
 			// The query owns the claim from here.
 			claimReleased = true;
-			lives.set(plan.turnId, live);
-			if (convKey) liveByConversation.set(convKey, live);
 		} catch (error) {
-			registration?.revoke();
 			releaseClaim();
-			prompt?.end();
-			try {
-				query?.close();
-			} catch {}
-			for (const pid of pids) spawner.kill(pid, "SIGKILL");
-			if (sessionId) {
-				discardSession(sessionId);
-				discardClaudeCodeTranscripts(sessionId);
-			}
+			abandonLaunch(taken, sessionId);
 			if (error instanceof SdkBridgeUnavailableError) throw error;
 			if (isNestingOverflow(error))
 				return refuse(bridgeErrors.tooDeep(), "invalid");
@@ -781,39 +931,160 @@ export function createClaudeSdkBridge(
 		counters.turnsStarted++;
 		if (history.mode === "resume") counters.resumes++;
 		if (history.mode.startsWith("rebuild")) counters.rebuilds++;
-		void recorder.insertTurn({
-			startedAt,
-			historyMode: history.mode,
-			systemPromptPolicy: policy.name,
-			systemPromptDetail: promptRecord.detail,
-			apiKeyId: meta.apiKeyId,
-			apiKeyName: meta.apiKeyName,
-			accountId: plan.preferredAccountId,
-			model: target.upstreamModel,
-			clientHarness: meta.clientHarness,
-			clientUserAgent: meta.clientUserAgent,
-			project: meta.project,
-			conversationKeyHash: convKey,
-			ccSessionId: live.sessionId,
-			rebuildReason: history.reason,
-			ignoredFields: turn.ignoredFields,
-		});
-		if (turn.ignoredFields.length)
-			log.info(
-				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code sets its own sampling`,
-			);
-		void recorder.insertLeg(meta.legId, "start", startedAt);
-		const owner = live;
-		const leg = newLeg(
-			meta.legId,
-			"start",
-			turn.stream,
-			input.signal,
-			input.bumpIdleTimeout,
-			(l) => owner.onClientGone(l),
+		return openStartLeg(
+			live,
+			recorder,
+			{
+				kind,
+				startedAt,
+				historyMode: history.mode,
+				systemPromptPolicy: policy.name,
+				systemPromptDetail: promptRecord.detail,
+				apiKeyId: meta.apiKeyId,
+				apiKeyName: meta.apiKeyName,
+				accountId: plan.preferredAccountId,
+				model: target.upstreamModel,
+				clientHarness: meta.clientHarness,
+				clientUserAgent: meta.clientUserAgent,
+				project: meta.project,
+				conversationKeyHash: convKey,
+				ccSessionId: live.sessionId,
+				rebuildReason: history.reason,
+				ignoredFields: turn.ignoredFields,
+			},
+			turn,
+			input,
 		);
-		live.start(leg);
-		return leg.response.response;
+	}
+
+	/**
+	 * A side request ({@link SDK_BRIDGE_SIDE_REQUEST_FORK}): the conversation's
+	 * stored session plus one new user message, answered on a copy of that
+	 * session with no tools. It takes no claim and registers nothing, so the
+	 * conversation's next turn still resumes the stored session, and the copy
+	 * goes when the query closes. A history the session does not match is
+	 * refused, never rebuilt.
+	 */
+	async function startSideRequest(input: {
+		start: StartInput;
+		run: QueryFn;
+		mcp: McpSdk;
+		turn: TurnRequest;
+		target: SdkBridgeRouteCandidate;
+		toolNames: ToolNames;
+		systemPrompt: SystemPromptDecision;
+		convKey: string | null;
+		recorder: TurnRecorder;
+		startedAt: number;
+		promptRecord: PromptRecord;
+		refuse: (error: BridgeError, reason: string) => Response;
+	}): Promise<Response> {
+		const { turn, refuse, convKey } = input;
+		const { plan, meta, signal } = input.start;
+		const noSession = (why: string) =>
+			refuse(bridgeErrors.sideRequestNoSession(why), "side_request_no_session");
+		const mismatch = (why: string) =>
+			refuse(
+				bridgeErrors.sideRequestPrefixMismatch(why),
+				"side_request_prefix_mismatch",
+			);
+		if (!convKey) return noSession("the request names no client session");
+		const current = await conversations.peek(convKey, timing.settleWaitMs);
+		if (!current) return noSession("no turn of it has completed");
+		let tail: ApiMessage[] | null;
+		try {
+			tail = messagesAfter(turn.messages, current.digests);
+		} catch {
+			tail = null;
+		}
+		if (!tail) return mismatch("its history differs from the stored one");
+		const [next] = tail;
+		if (!next) return mismatch("nothing follows the stored history");
+		if (next.role !== "user")
+			return mismatch("an assistant message follows the stored history");
+		if (tail.length > 1)
+			return mismatch(
+				`${tail.length} messages follow the stored history, not one user message`,
+			);
+
+		// From the copy until the query is live, a failed start deletes the copy.
+		const taken = launching();
+		let sessionId: string | null = null;
+		let live: LiveQuery;
+		try {
+			if (shuttingDown) throw new SdkBridgeUnavailableError("shutting down");
+			if (signal.aborted)
+				return refuse(bridgeErrors.clientGone(), "client_gone");
+			const rejection = checkAdmission({
+				turn,
+				plan,
+				limits: limits(),
+				processes: lives.size,
+				rebuilds: rebuildsInFlight(),
+				needsRebuild: false,
+			});
+			if (rejection) return refuseAdmission(rejection, refuse);
+			const forkId = randomId();
+			if (!isUuid(forkId))
+				throw new Error("randomId must produce UUIDs for session ids");
+			sessionId = forkId;
+			// No await since the peek, so nothing can have discarded the session.
+			if (!sessionStore().fork(current.sessionId, forkId))
+				return noSession("its session files are gone");
+			live = launchQuery(taken, {
+				start: input.start,
+				run: input.run,
+				mcp: input.mcp,
+				turn,
+				target: input.target,
+				toolNames: input.toolNames,
+				systemPrompt: input.systemPrompt,
+				sessionId: forkId,
+				historyMode: "resume",
+				promptContent: next.content,
+				claim: null,
+				convKey: null,
+				recorder: input.recorder,
+				startedAt: input.startedAt,
+			});
+		} catch (error) {
+			abandonLaunch(taken, sessionId);
+			if (error instanceof SdkBridgeUnavailableError) throw error;
+			log.warn(
+				`SDK bridge side request ${plan.turnId}: could not start`,
+				error,
+			);
+			throw new SdkBridgeUnavailableError(
+				`Claude Code could not start: ${errorSummary(error)}`,
+			);
+		}
+
+		counters.turnsStarted++;
+		counters.sideRequests++;
+		return openStartLeg(
+			live,
+			input.recorder,
+			{
+				kind: "side_request",
+				startedAt: input.startedAt,
+				historyMode: "resume",
+				systemPromptPolicy: input.promptRecord.policy,
+				systemPromptDetail: input.promptRecord.detail,
+				apiKeyId: meta.apiKeyId,
+				apiKeyName: meta.apiKeyName,
+				accountId: plan.preferredAccountId,
+				model: input.target.upstreamModel,
+				clientHarness: meta.clientHarness,
+				clientUserAgent: meta.clientUserAgent,
+				project: meta.project,
+				conversationKeyHash: convKey,
+				ccSessionId: live.sessionId,
+				rebuildReason: null,
+				ignoredFields: turn.ignoredFields,
+			},
+			turn,
+			input.start,
+		);
 	}
 
 	async function continueTurn(input: {

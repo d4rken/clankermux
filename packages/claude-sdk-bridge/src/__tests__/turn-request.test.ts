@@ -234,6 +234,46 @@ describe("field policy", () => {
 	});
 });
 
+describe("a side request", () => {
+	const side = (patch: Record<string, unknown>) =>
+		parseTurnRequest({ ...base, ...patch }, null, 1, null, "side_request");
+
+	it("takes tool_choice none, and still refuses one that forces a tool", () => {
+		expect(side({ tool_choice: { type: "none" } }).ok).toBe(true);
+		for (const tool_choice of [{ type: "any" }, { type: "tool", name: "read" }])
+			expect(side({ tool_choice }).ok).toBe(false);
+		expect(side({ stop_sequences: ["END"] }).ok).toBe(false);
+	});
+
+	it("exposes none of the tools the replayed body declares", () => {
+		const parsed = side({
+			tools: [
+				{
+					name: "read",
+					input_schema: { type: "object", properties: {} },
+				},
+			],
+			tool_choice: { type: "none" },
+		});
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		expect(parsed.turn.tools).toEqual([]);
+		expect(parsed.turn.schemaBytes).toBe(0);
+	});
+
+	it("keeps the output cap and the effort", () => {
+		const parsed = parseTurnRequest(
+			{ ...base, max_tokens: 128, tool_choice: { type: "none" } },
+			"high",
+			1,
+			null,
+			"side_request",
+		);
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		expect(parsed.turn.maxOutputTokens).toBe(128);
+		expect(parsed.turn.effort).toBe("high");
+	});
+});
+
 describe("mapEffort", () => {
 	it("maps the client vocabulary onto the SDK's", () => {
 		expect(mapEffort("minimal")).toBe("low");

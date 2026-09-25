@@ -183,6 +183,7 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		reasoningEffort: null,
 		translationGaps: null,
 		piPromptVersion: null,
+		sideRequest: null,
 		...extra,
 	};
 }
@@ -493,6 +494,119 @@ await scenario("resumeWithHeader", async () => {
 		upstreamCarriesFirstTurn:
 			sent.includes("hello resume") && sent.includes("echo:"),
 		upstreamCarriesSecondTurn: sent.includes("second turn"),
+	};
+});
+
+await scenario("sideRequestFork", async () => {
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const start = async (
+		messages: Msg[],
+		tools: unknown[],
+		extra: Partial<SdkBridgeTurnMeta>,
+		fields: Record<string, unknown> = { max_tokens: 1024 },
+	) => {
+		const p = plan();
+		const from = calls().length;
+		const r = await read(
+			bridge.startTurn({
+				request: request(messages, tools as (typeof READ_TOOL)[], fields),
+				plan: p,
+				meta: meta(extra),
+				signal: new AbortController().signal,
+			}),
+		);
+		await settled();
+		const row = repo.turns.get(p.turnId);
+		const sent = calls().slice(from);
+		return {
+			reply: r,
+			turnId: p.turnId,
+			row: {
+				kind: row?.kind,
+				status: row?.status,
+				historyMode: row?.historyMode,
+				ccSessionId: row?.ccSessionId,
+			},
+			upstream: sent.map((q) => {
+				const body = q.body as {
+					tools?: Array<{ name: string }>;
+					messages?: unknown[];
+				};
+				return {
+					status: q.status,
+					cacheRead: q.cache?.read ?? null,
+					tools: (body.tools ?? []).map((t) => t.name),
+					text: JSON.stringify(body.messages ?? []),
+				};
+			}),
+		};
+	};
+	const recapFields = { max_tokens: 256, tool_choice: { type: "none" } };
+
+	// A conversation without client tools: the copy's prompt is the
+	// session's, plus the new message.
+	const header = {
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	};
+	const history: Msg[] = [{ role: "user", content: "hello fork" }];
+	const first = await start(history, [], header);
+	history.push({ role: "assistant", content: first.reply.content as Block[] });
+	const side = await start(
+		[...history, { role: "user", content: "RECAP the session" }],
+		[],
+		{ ...header, sideRequest: "session-fork-v1" },
+		recapFields,
+	);
+	history.push({ role: "user", content: "second main turn" });
+	const next = await start(history, [], header);
+
+	// With client tools and a tool round: the copy runs with none.
+	const toolHeader = {
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	};
+	const toolHistory: Msg[] = [{ role: "user", content: "TOOL read a.txt" }];
+	const p1 = plan();
+	const r1 = await read(
+		bridge.startTurn({
+			request: request(toolHistory),
+			plan: p1,
+			meta: meta(toolHeader),
+			signal: new AbortController().signal,
+		}),
+	);
+	const tu = (r1.content ?? []).find((b) => b.type === "tool_use");
+	toolHistory.push(
+		{ role: "assistant", content: r1.content as Block[] },
+		{
+			role: "user",
+			content: [
+				{ type: "tool_result", tool_use_id: String(tu?.id), content: "FORK-A" },
+			],
+		},
+	);
+	const r2 = await answer(p1.turnId, toolHistory);
+	await settled();
+	toolHistory.push({ role: "assistant", content: r2.content as Block[] });
+	const toolSide = await start(
+		[...toolHistory, { role: "user", content: "RECAP the tool session" }],
+		[READ_TOOL],
+		{ ...toolHeader, sideRequest: "session-fork-v1" },
+		recapFields,
+	);
+
+	await Bun.sleep(3_000);
+	const onDisk = transcriptsOnDisk();
+	const forks = [side, toolSide].map((t) => String(t.row.ccSessionId));
+	return {
+		first: first.row,
+		firstCacheWrite: first.upstream,
+		side,
+		next,
+		toolSide,
+		forksLeft: onDisk.filter((f) => forks.some((id) => f.includes(id))),
 	};
 });
 

@@ -1704,6 +1704,360 @@ describe("conversations", () => {
 	});
 });
 
+describe("side requests", () => {
+	const header = {
+		affinityScope: "client_session",
+		affinityKey: "sess-side",
+	} as const;
+	const side = { ...header, sideRequest: "session-fork-v1" } as const;
+
+	async function mirror(
+		query: FakeQuery,
+		entries: Array<Record<string, unknown>>,
+	) {
+		const store = query.options.sessionStore as SessionStore;
+		const sessionId = (query.options.sessionId ??
+			query.options.resume) as string;
+		await store.append(
+			{ projectKey: "p", sessionId },
+			entries.map((e) => ({ type: "user", sessionId, ...e })),
+		);
+	}
+
+	/** One settled main turn: the conversation has a session to fork. */
+	async function mainTurn(h: Harness) {
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }], tools: [READ_TOOL] },
+			{ meta: header },
+		);
+		await mirror(t.query, [
+			{ uuid: "u1", message: { role: "user", content: "hello" } },
+		]);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo: hello" }]),
+			resultMessage(),
+		);
+		const r = await reply(t.response);
+		await settled(h);
+		return { t, r, mainSession: t.query.options.sessionId as string };
+	}
+
+	/** What pi's recap sends: the main turn's body, its reply, one new prompt. */
+	const recap = (
+		r: { content: unknown },
+		extra: Record<string, unknown> = {},
+	) => ({
+		messages: [
+			{ role: "user", content: "hello" },
+			{ role: "assistant", content: r.content },
+			{ role: "user", content: "RECAP the session" },
+		],
+		tools: [READ_TOOL],
+		tool_choice: { type: "none" },
+		max_tokens: 256,
+		...extra,
+	});
+
+	function sideRequest(
+		h: Harness,
+		body: Record<string, unknown>,
+		meta: Partial<SdkBridgeTurnMeta> = side,
+	) {
+		const plan = makePlan();
+		const abort = new AbortController();
+		const response = h.bridge.startTurn({
+			request: messagesRequest(body),
+			plan,
+			meta: makeMeta(meta),
+			signal: abort.signal,
+		});
+		return { plan, abort, response };
+	}
+
+	const sessionFiles = (h: Harness) => readdirSync(sessionsDir(h)).sort();
+
+	/**
+	 * The conversation's session is the main turn's still: the next main turn
+	 * resumes a copy of it, not of anything a side request ran.
+	 */
+	async function expectMainResumes(
+		h: Harness,
+		r: { content: unknown },
+		mainSession: string,
+	) {
+		expect(sessionFiles(h)).toEqual([`${mainSession}.jsonl`]);
+		const next = await start(
+			h,
+			{
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: r.content },
+					{ role: "user", content: "again" },
+				],
+				tools: [READ_TOOL],
+			},
+			{ meta: header },
+		);
+		const resumed = next.query.options.resume as string;
+		expect(resumed).toBeTruthy();
+		expect(
+			new FileSessionStore(sessionsDir(h)).read(resumed)?.map((e) => e.uuid),
+		).toEqual(["u1"]);
+		expect(h.repo.turns.get(next.plan.turnId)).toMatchObject({
+			kind: "turn",
+			historyMode: "resume",
+			rebuildReason: null,
+		});
+		next.query.emit(
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		await reply(next.response);
+	}
+
+	it("runs the new prompt on a copy of the conversation's session, with no tools", async () => {
+		const h = harness();
+		const { r, mainSession } = await mainTurn(h);
+		const s = sideRequest(h, recap(r));
+		const query = await h.sdk.next();
+		const fork = query.options.resume as string;
+		expect(fork).toBeTruthy();
+		expect(fork).not.toBe(mainSession);
+		expect(
+			new FileSessionStore(sessionsDir(h))
+				.read(fork)
+				?.map((e) => [e.uuid, e.sessionId]),
+		).toEqual([["u1", fork]]);
+		expect(query.options.tools).toEqual([]);
+		expect(query.options.allowedTools).toEqual([]);
+		expect(query.options.mcpServers).toEqual({});
+		expect(query.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("256");
+		expect(query.prompts[0]?.message.content).toEqual([
+			{ type: "text", text: "RECAP the session" },
+		]);
+		query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "You said hello." }]),
+			resultMessage(),
+		);
+		const answer = await reply(s.response);
+		expect(answer).toMatchObject({
+			status: 200,
+			stop: "end_turn",
+			content: [{ type: "text", text: "You said hello." }],
+		});
+		await settled(h);
+		expect(h.repo.turns.get(s.plan.turnId)).toMatchObject({
+			kind: "side_request",
+			status: "completed",
+			historyMode: "resume",
+			rebuildReason: null,
+		});
+		expect(h.bridge.status().counters).toMatchObject({
+			turnsStarted: 2,
+			sideRequests: 1,
+			resumes: 0,
+		});
+		await expectMainResumes(h, r, mainSession);
+	});
+
+	it("waits for the conversation's session while it is still settling", async () => {
+		const h = harness();
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }] },
+			{ meta: header },
+		);
+		await mirror(t.query, [
+			{ uuid: "u1", message: { role: "user", content: "hello" } },
+		]);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo: hello" }]),
+		);
+		const r = await reply(t.response);
+		// The reply ended; Claude Code has not reported `result` yet.
+		const s = sideRequest(h, recap(r));
+		await Bun.sleep(50);
+		expect(h.sdk.queries).toHaveLength(1);
+		t.query.emit(resultMessage());
+		const query = await h.sdk.next();
+		expect(query.options.resume).toBeTruthy();
+		query.emit(
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		expect((await reply(s.response)).status).toBe(200);
+	});
+
+	it("refuses a history that is not the stored one plus a user message with 409, rebuilding nothing", async () => {
+		const h = harness();
+		const { r, mainSession } = await mainTurn(h);
+		const edited = recap(r);
+		edited.messages[1] = { role: "assistant", content: "an edited answer" };
+		const longer = recap(r);
+		longer.messages.splice(
+			2,
+			0,
+			{ role: "user", content: "a turn the session never saw" },
+			{ role: "assistant", content: "its answer" },
+		);
+		for (const body of [edited, longer]) {
+			const s = sideRequest(h, body);
+			const res = await s.response;
+			expect(res.status).toBe(409);
+			expect(
+				((await res.json()) as { error: { code: string } }).error.code,
+			).toBe("sdk_bridge_side_request_prefix_mismatch");
+			await waitFor(() => h.repo.turns.get(s.plan.turnId)?.httpStatus === 409);
+			expect(h.repo.turns.get(s.plan.turnId)).toMatchObject({
+				kind: "side_request",
+				status: "rejected",
+				httpStatus: 409,
+			});
+		}
+		expect(h.sdk.queries).toHaveLength(1);
+		expect(h.bridge.status().counters.rejected).toEqual({
+			side_request_prefix_mismatch: 2,
+		});
+		await expectMainResumes(h, r, mainSession);
+	});
+
+	it("refuses with 409 when the conversation has no stored session", async () => {
+		const h = harness();
+		const body = recap({ content: [{ type: "text", text: "echo: hello" }] });
+		for (const meta of [
+			side,
+			// Without a session header there is no conversation at all.
+			{ sideRequest: "session-fork-v1" },
+		]) {
+			const res = await sideRequest(h, body, meta).response;
+			expect(res.status).toBe(409);
+			expect(
+				((await res.json()) as { error: { code: string } }).error.code,
+			).toBe("sdk_bridge_side_request_no_session");
+		}
+		expect(h.sdk.queries).toHaveLength(0);
+	});
+
+	it("refuses an unknown side-request mode with 400", async () => {
+		const h = harness();
+		const { r } = await mainTurn(h);
+		const s = sideRequest(h, recap(r), { ...header, sideRequest: "fork-v9" });
+		const res = await s.response;
+		expect(res.status).toBe(400);
+		const { error } = (await res.json()) as {
+			error: { code: string; message: string };
+		};
+		expect(error.code).toBe("sdk_bridge_side_request_unknown");
+		expect(error.message).toContain("fork-v9");
+		expect(h.sdk.queries).toHaveLength(1);
+		expect(h.repo.turns.get(s.plan.turnId)?.kind).toBe("side_request");
+	});
+
+	it("refuses tool results with 400", async () => {
+		const h = harness();
+		const { r } = await mainTurn(h);
+		const body = recap(r);
+		body.messages[2] = {
+			role: "user",
+			content: [{ type: "tool_result", tool_use_id: "toolu_x", content: "r" }],
+		};
+		expect((await sideRequest(h, body).response).status).toBe(400);
+		expect(h.sdk.queries).toHaveLength(1);
+	});
+
+	it("keeps tool_choice none refused on an ordinary turn", async () => {
+		const h = harness();
+		const { r } = await mainTurn(h);
+		const res = await sideRequest(h, recap(r), header).response;
+		expect(res.status).toBe(400);
+		expect(
+			((await res.json()) as { error: { message: string } }).error.message,
+		).toContain('tool_choice "none"');
+	});
+
+	it("applies pi's system-prompt policy and its refusal", async () => {
+		const h = harness();
+		const { r } = await mainTurn(h);
+		const s = sideRequest(h, recap(r), { ...side, clientHarness: "pi" });
+		const res = await s.response;
+		expect(res.status).toBe(400);
+		expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+			"sdk_bridge_prompt_unsupported",
+		);
+		expect(h.repo.turns.get(s.plan.turnId)).toMatchObject({
+			kind: "side_request",
+			systemPromptPolicy: "pi-head-v1",
+		});
+	});
+
+	it("counts against the process cap", async () => {
+		const h = harness({ limits: () => ({ maxProcesses: 1 }) });
+		const { r } = await mainTurn(h);
+		sideRequest(h, recap(r));
+		await h.sdk.next();
+		await expect(sideRequest(h, recap(r)).response).rejects.toBeInstanceOf(
+			SdkBridgeCapacityError,
+		);
+		expect(h.sdk.queries).toHaveLength(2);
+	});
+
+	describe("deletes its copy and leaves the conversation's session", () => {
+		it("when Claude Code fails", async () => {
+			const h = harness();
+			const { r, mainSession } = await mainTurn(h);
+			const s = sideRequest(h, recap(r));
+			const query = await h.sdk.next();
+			query.emit(
+				initMessage(),
+				resultMessage({ isError: true, subtype: "error_during_execution" }),
+			);
+			query.end();
+			expect((await s.response).status).toBe(502);
+			await settled(h);
+			expect(h.repo.turns.get(s.plan.turnId)?.status).toBe("failed");
+			await expectMainResumes(h, r, mainSession);
+		});
+
+		it("when the client disconnects", async () => {
+			const h = harness();
+			const { r, mainSession } = await mainTurn(h);
+			const s = sideRequest(h, recap(r));
+			const query = await h.sdk.next();
+			query.emit(initMessage());
+			s.abort.abort();
+			expect((await s.response).status).toBe(499);
+			await settled(h);
+			expect(query.closed).toBe(true);
+			expect(h.repo.turns.get(s.plan.turnId)?.status).toBe("aborted");
+			await expectMainResumes(h, r, mainSession);
+		});
+
+		it("when the bridge shuts down", async () => {
+			const h = harness();
+			const { r, mainSession } = await mainTurn(h);
+			const s = sideRequest(h, recap(r));
+			const query = await h.sdk.next();
+			const fork = query.options.resume as string;
+			query.emit(initMessage());
+			const dir = sessionsDir(h);
+			// Teardown is synchronous; dispose removes the whole work directory later.
+			const disposed = h.bridge.dispose();
+			expect(existsSync(join(dir, `${fork}.jsonl`))).toBe(false);
+			expect(existsSync(join(dir, `${mainSession}.jsonl`))).toBe(true);
+			expect((await s.response).status).toBe(503);
+			expect(query.closed).toBe(true);
+			await disposed;
+			await waitFor(
+				() => h.repo.turns.get(s.plan.turnId)?.status === "shutdown",
+			);
+		});
+	});
+});
+
 describe("errors", () => {
 	it("answers a pre-output inner 429 with its status and Retry-After", async () => {
 		const h = harness();
