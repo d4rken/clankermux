@@ -79,12 +79,21 @@ pipeline. The client keeps executing its own tools.
   (envelopes arrive after `message_stop`), the final user message as one
   prompt. The listener writes `consumed` before the first model call goes
   out. A gone session file falls back to a flattened dead continuation.
-  Parks survive restarts: one process holds the directory's owner lock, and
-  recovery (before `installSdkBridge` exposes the transport) ends
-  `preparing`/`consumed` records and unusable files, and returns stale
-  claims to `released`. They expire after `sdk_bridge_released_park_ttl_ms`
-  (24 h, `timed_out`). Shutdown releases parked turns, including ones that
-  park during the drain.
+  Parks survive restarts. Files live in
+  `released-parks/<sha256(realpath(db))[:16]>`, so servers on different
+  databases sharing a cache never meet; acting on them needs both that
+  directory's owner lock (hard-linked into place, stale ones renamed aside
+  by inode) and the database's `sdk_bridge_park_lease` row. Recovery
+  (before `installSdkBridge` exposes the transport) goes row by row: it
+  ends `preparing`/`consumed` records and unusable ones (size or resume
+  point wrong; the full chain is checked when a resume claims the park),
+  returns stale claims to `released`, and never overwrites a finished turn.
+  If recovery itself fails the bridge stays unavailable ("recovering") and
+  retries with backoff. Everything from a resume's claim to its launch is
+  one sequence with one rollback, and a resume that ends before its first
+  model call gives the park back. They expire after
+  `sdk_bridge_released_park_ttl_ms` (24 h, `timed_out`). Shutdown releases
+  parked turns, including ones that park during the drain.
 - **Dead continuations.** Tool results no live query holds, sent with the
   assistant message that made the calls, start a new query with
   `rebuild_reason = dead_continuation`: the history and the results are
