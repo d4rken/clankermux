@@ -88,6 +88,26 @@ describe("GET /api/sdk-bridge-turns/:id", () => {
 		expect(view.matchedLegId).toBeNull();
 	});
 
+	it("passes a policy's detail through", async () => {
+		const detail = {
+			outcome: "forwarded" as const,
+			version: "0.87",
+			headStripped: true,
+			forwardedLength: 1234,
+			removedUpdates: 1,
+			sectionsSeen: ["project_context", "cwd"],
+		};
+		await turns.insertTurn({
+			id: "turn-pi",
+			startedAt: 2_000,
+			historyMode: "fresh",
+			systemPromptPolicy: "pi-head-v1",
+			systemPromptDetail: detail,
+		});
+		const view = (await (await handler("turn-pi")).json()) as SdkBridgeTurnView;
+		expect(view.turn.systemPromptDetail).toEqual(detail);
+	});
+
 	it("resolves a leg id, which has no requests row, to its turn", async () => {
 		const view = (await (await handler("leg-1")).json()) as SdkBridgeTurnView;
 		expect(view.turn.id).toBe("turn-1");

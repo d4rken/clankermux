@@ -236,6 +236,21 @@ describe("pi 0.87 head strip", () => {
 		expect(elapsed).toBeLessThan(1_000);
 	});
 
+	it("refuses the docs pair only together", () => {
+		const custom = fixture("custom-prompt").system;
+		for (const one of ["docs/custom-provider.md", "docs/packages.md"])
+			expect(appendOf(decide(`${custom}\n\nSee ${one}.`))).toBe(
+				`${custom}\n\nSee ${one}.`,
+			);
+	});
+
+	it("forwards a mid-line mention of pi's preamble line", () => {
+		// Only a line starting with it is pi's prompt, as in pi-claude-bridge's preambleAtLineStart.
+		const text =
+			"Persona. pi's prompt opens with: You are an expert coding assistant operating inside pi.";
+		expect(appendOf(decide(text))).toBe(text);
+	});
+
 	it("sends nothing for an empty prompt", () => {
 		const outcome = decide("");
 		expect(appendOf(outcome)).toBeNull();
@@ -325,6 +340,12 @@ describe("the version gate", () => {
 		expect(refused.error.message).toContain("x-clankermux-pi-prompt");
 		expect(refused.detail).toMatchObject({
 			version: null,
+			reason: "missing_version",
+		});
+	});
+
+	it("treats an empty header as none", () => {
+		expect(refusalOf(decide(system, "")).detail).toMatchObject({
 			reason: "missing_version",
 		});
 	});

@@ -128,7 +128,7 @@ describe("SdkBridgeTurnRepository", () => {
 			version: "0.87",
 			code: "sdk_bridge_prompt_malformed",
 			reason: "duplicate_closing_tag",
-			section: "project_context",
+			section: "docs",
 			promptLength: 42,
 			promptSha256: "ab".repeat(32),
 		};

@@ -545,10 +545,12 @@ describe("Chat Completions through the SDK bridge", () => {
 		await run(declared(" 0.87 "), harness.ctx);
 		await run(declared(`0.9\t${"9".repeat(40)}`), harness.ctx);
 		await run(declared(null), harness.ctx);
+		await run(declared("   "), harness.ctx);
 
 		expect(bridge.starts.map((s) => s.meta.piPromptVersion)).toEqual([
 			"0.87",
 			`0.9${"9".repeat(29)}`,
+			null,
 			null,
 		]);
 	});
