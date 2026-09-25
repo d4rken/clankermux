@@ -197,14 +197,22 @@ on it; on any other route the header does nothing.
   busy lock and changes nothing; it waits only for a session already
   settling, at most `settleWaitMs`. The body must be `current`'s messages
   plus exactly one user message (`messagesAfter`). Nothing is rebuilt.
-- **Run.** The `side_request` parse drops the body's tools and admits
-  `tool_choice: none`. The query resumes a copy of `current`
-  (`FileSessionStore.fork`) with the new message as its prompt, `tools: []`,
-  `allowedTools: []` and no MCP server; model, effort and `max_tokens` as
-  for any turn, and the system-prompt policy applies. It holds no claim and
-  no conversation key, so it never registers, supersedes nothing and is
-  superseded by nothing. The copy is an unregistered session and goes at
-  close: success, failure, client disconnect or shutdown.
+- **Run.** The `side_request` parse admits `tool_choice: none`. The query
+  resumes a copy of `current` (`FileSessionStore.fork`) with the new message
+  as its prompt and the replayed tools exactly as a turn would get them
+  (same names, schemas, `allowedTools` and MCP server): `tools` open the
+  cached prefix, and the history's `tool_use` blocks need them defined.
+  Model, effort and `max_tokens` are as for any turn, and the system-prompt
+  policy applies. It holds no claim and no conversation key, so it never
+  registers, supersedes nothing and is superseded by nothing. The copy is an
+  unregistered session and goes at close: success, failure, client
+  disconnect or shutdown.
+- **Tool calls.** `maxTurns: 1`, and every call gets an MCP error result at
+  once ("Tools are disabled in a side request"); nothing parks and no
+  `tool_use` reaches the client. A model message ending in a call settles
+  the reply: its text is the answer (`end_turn`), and a call with no text
+  is a 502 `sdk_bridge_side_request_tool_call`. Claude Code's
+  `error_max_turns` result after that is the expected end, not a failure.
 - **Accounting.** It counts against `maxProcesses`. Its row has
   `sdk_bridge_turns.kind = side_request` (`turn` otherwise), and the
   `sideRequests` counter counts it next to `turnsStarted`.
@@ -215,14 +223,7 @@ on it; on any other route the header does nothing.
 | 409 `sdk_bridge_side_request_prefix_mismatch` | the history differs from the stored one, or anything other than one user message follows it (an unregistered main turn in between included) |
 | 400 `sdk_bridge_side_request_unknown` | any other header value |
 | 400 `invalid_request_error` | tool results in the new message |
-
-The copy's model call sends no tools, and `tools` is the start of the
-cached prefix. For a conversation whose turns carried client tools it
-therefore reads nothing of the conversation's prompt cache, and its history
-keeps the earlier `tool_use` and `tool_result` blocks with no tool
-definitions. In the real-binary scenario (the mock caches the way the API
-does) the copy reads 3 498 tokens for a tool-free conversation and 0 for
-one with a tool round.
+| 502 `sdk_bridge_side_request_tool_call` | the model answered with a tool call and no text |
 
 ## How a failed turn reaches the client
 

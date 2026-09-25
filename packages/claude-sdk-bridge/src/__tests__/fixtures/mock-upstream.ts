@@ -4,6 +4,7 @@
 //   last user turn carries tool_result      -> text "done: <first result text>"
 //   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
+//   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
 //   last user text contains "SLOW"          -> any of the above, 3 s late
@@ -174,6 +175,14 @@ function script(
 				input: { path },
 			});
 		}
+	} else if (readTool && /SAYTOOL/.test(text)) {
+		content.push({ type: "text", text: `echo: ${text.slice(-200)}` });
+		content.push({
+			type: "tool_use",
+			id: `toolu_mock_${++toolSeq}`,
+			name: readTool,
+			input: { path: "a.txt" },
+		});
 	} else if (readTool && /TOOL/.test(text)) {
 		content.push({
 			type: "tool_use",

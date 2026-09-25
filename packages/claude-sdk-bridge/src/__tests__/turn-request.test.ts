@@ -245,7 +245,7 @@ describe("a side request", () => {
 		expect(side({ stop_sequences: ["END"] }).ok).toBe(false);
 	});
 
-	it("exposes none of the tools the replayed body declares", () => {
+	it("keeps the tools the replayed body declares", () => {
 		const parsed = side({
 			tools: [
 				{
@@ -256,8 +256,7 @@ describe("a side request", () => {
 			tool_choice: { type: "none" },
 		});
 		if (!parsed.ok) throw new Error(parsed.error.message);
-		expect(parsed.turn.tools).toEqual([]);
-		expect(parsed.turn.schemaBytes).toBe(0);
+		expect(parsed.turn.tools.map((t) => t.name)).toEqual(["read"]);
 	});
 
 	it("keeps the output cap and the effort", () => {

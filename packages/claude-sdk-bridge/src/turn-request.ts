@@ -174,10 +174,7 @@ function applyFieldPolicy(
 	return { maxOutputTokens, ignoredFields };
 }
 
-/**
- * `side_request` parses a side request: `tool_choice: none` passes, and the
- * tools a replayed body declares are not the turn's, which has none.
- */
+/** `side_request` parses a side request, where `tool_choice: none` passes. */
 export type TurnRequestMode = "turn" | "side_request";
 
 export function parseTurnRequest(
@@ -227,10 +224,7 @@ export function parseTurnRequest(
 		.filter((m) => m.role === "user");
 	const last: ClientMessage =
 		run.length === 1 ? final : { role: "user", content: run.flatMap(blocksOf) };
-	const tools =
-		mode === "side_request"
-			? { tools: [], schemaBytes: 0 }
-			: parseTools(body.tools);
+	const tools = parseTools(body.tools);
 	if ("status" in tools) return fail(tools);
 	const fields = applyFieldPolicy(body, gaps, mode);
 	if ("status" in fields) return fail(fields);

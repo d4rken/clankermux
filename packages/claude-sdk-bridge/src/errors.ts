@@ -361,6 +361,16 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	sideRequestToolCall(): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "sdk_bridge_side_request_tool_call",
+			message:
+				"The model answered this side request with a tool call and no text; tools are disabled in a side request",
+			retryAfter: null,
+		};
+	},
 	internal(message: string): BridgeError {
 		return { status: 502, type: "api_error", message, retryAfter: null };
 	},

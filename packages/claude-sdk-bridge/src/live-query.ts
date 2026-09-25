@@ -100,6 +100,11 @@ export interface LiveQueryInit {
 	isShuttingDown: () => boolean;
 	/** The conversation this query holds a claim on, if any. */
 	conversationKey: string | null;
+	/**
+	 * A side request: Claude Code runs one model turn, and a tool call ends
+	 * the reply instead of reaching the client.
+	 */
+	sideRequest?: boolean;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
 	/** Claude Code's own copy of the session, which nothing resumes from. */
@@ -143,6 +148,8 @@ export class LiveQuery {
 	private claudeCodeCause: ClaudeCodeFailureCause | null = null;
 	private resultSeen = false;
 	private resultOk = false;
+	/** A side request's model called a tool, which settled its reply. */
+	private sideToolCall = false;
 	private registered = false;
 	private pendingTeardown: {
 		reason: TeardownReason;
@@ -478,6 +485,26 @@ export class LiveQuery {
 
 	private handleEnd(end: UpstreamMessageEnd | null): void {
 		if (end?.kind === "end") this.endLeg(end.stopReason);
+		else if (
+			end?.stopReason === "tool_use" &&
+			this.init.sideRequest &&
+			this.leg
+		)
+			this.endSideRequestOnToolCall();
+	}
+
+	/**
+	 * The side request's one model turn ended in a tool call, which the tool
+	 * server refuses and maxTurns leaves unanswered. The text before it is the
+	 * reply; a call with no text is an error.
+	 */
+	private endSideRequestOnToolCall(): void {
+		this.sideToolCall = true;
+		const text = this.init.composer
+			.legContent()
+			.some((b) => b.type === "text" && String(b.text ?? "").trim());
+		if (text) this.endLeg("end_turn");
+		else this.failTurn(bridgeErrors.sideRequestToolCall());
 	}
 
 	private async pump(): Promise<void> {
@@ -580,6 +607,12 @@ export class LiveQuery {
 			cacheCreation: usage?.cache_creation_input_tokens ?? null,
 		};
 		const failed = message.is_error || message.subtype !== "success";
+		// maxTurns stopped Claude Code after the refused call; the reply was
+		// already settled, as an answer or as its error.
+		if (failed && this.sideToolCall && message.subtype === "error_max_turns") {
+			this.resultOk = this.finalError === null;
+			return;
+		}
 		if (!failed) {
 			this.resultOk = true;
 			if (this.leg) this.endLeg(this.init.composer.lastStopReason);

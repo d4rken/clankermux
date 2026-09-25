@@ -251,7 +251,7 @@ for (const endpoint of ["responses", "chat"] as const)
 			["user", RECAP_PROMPT],
 		];
 
-		it("answers pi's recap on a copy of the session, with no tools and the cache reads", async () => {
+		it("answers pi's recap on a copy of the session, with the main turn's tools and the cache reads", async () => {
 			const h = await harness();
 			const main = await mainTurn(h, endpoint);
 			const pending = send(
@@ -263,9 +263,13 @@ for (const endpoint of ["responses", "chat"] as const)
 			const query = await h.sdk.next();
 			expect(query.options.resume).toBeTruthy();
 			expect(query.options.resume).not.toBe(main.options.sessionId);
-			expect(query.options.tools).toEqual([]);
-			expect(query.options.allowedTools).toEqual([]);
-			expect(query.options.mcpServers).toEqual({});
+			expect(query.options.tools).toEqual(main.options.tools);
+			expect(query.options.allowedTools).toEqual(main.options.allowedTools);
+			expect(query.options.allowedTools).toHaveLength(1);
+			expect(Object.keys(query.options.mcpServers ?? {})).toEqual(
+				Object.keys(main.options.mcpServers ?? {}),
+			);
+			expect(query.options.maxTurns).toBe(1);
 			expect(query.options.model).toBe(MODEL);
 			expect(query.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("4096");
 			// pi's prompt policy applies as on the main turn.

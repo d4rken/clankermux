@@ -70,6 +70,7 @@ import {
 	loadMcpSdk,
 	type McpSdk,
 	ParkedCalls,
+	sideRequestToolResult,
 	ToolNames,
 } from "./tool-server";
 import {
@@ -504,12 +505,14 @@ export function createClaudeSdkBridge(
 			/** The conversation this query holds and may register with. */
 			claim: ConversationClaim | null;
 			convKey: string | null;
+			/** A side request: its tool calls are refused, never parked. */
+			sideRequest: boolean;
 			recorder: TurnRecorder;
 			startedAt: number;
 		},
 	): LiveQuery {
 		const { plan, meta } = input.start;
-		const { turn, toolNames } = input;
+		const { turn, toolNames, sideRequest } = input;
 		const dirs = workDirs();
 		let live: LiveQuery | null = null;
 		const context: SdkBridgeInnerContext = {
@@ -531,7 +534,11 @@ export function createClaudeSdkBridge(
 		const parked = new ParkedCalls();
 		const toolServer = turn.tools.length
 			? createToolServer(input.mcp, turn.tools, toolNames, (id) =>
-					live ? live.onToolCall(id) : parked.wait(id),
+					sideRequest
+						? Promise.resolve(sideRequestToolResult())
+						: live
+							? live.onToolCall(id)
+							: parked.wait(id),
 				)
 			: null;
 		const abortController = new AbortController();
@@ -551,6 +558,7 @@ export function createClaudeSdkBridge(
 				effort: turn.effort,
 				maxOutputTokens: turn.maxOutputTokens,
 				sessionId: input.sessionId,
+				maxTurns: sideRequest ? 1 : null,
 				resume:
 					input.historyMode === "resume" ||
 					input.historyMode === "rebuild_transcript",
@@ -577,6 +585,7 @@ export function createClaudeSdkBridge(
 				live?.onToolUseForwarded();
 			},
 			newMessageId: () => `msg_sdk_bridge_${randomId().replaceAll("-", "")}`,
+			forwardToolUse: !sideRequest,
 		});
 		const current = limits();
 		live = new LiveQuery({
@@ -607,6 +616,7 @@ export function createClaudeSdkBridge(
 			log,
 			isShuttingDown: () => shuttingDown,
 			conversationKey: input.convKey,
+			sideRequest,
 			discardSession,
 			discardClaudeCodeTranscripts,
 			onPeakRss: notePeakRss,
@@ -911,6 +921,7 @@ export function createClaudeSdkBridge(
 				promptContent,
 				claim,
 				convKey,
+				sideRequest: false,
 				recorder,
 				startedAt,
 			});
@@ -960,10 +971,11 @@ export function createClaudeSdkBridge(
 	/**
 	 * A side request ({@link SDK_BRIDGE_SIDE_REQUEST_FORK}): the conversation's
 	 * stored session plus one new user message, answered on a copy of that
-	 * session with no tools. It takes no claim and registers nothing, so the
-	 * conversation's next turn still resumes the stored session, and the copy
-	 * goes when the query closes. A history the session does not match is
-	 * refused, never rebuilt.
+	 * session in one model turn. It keeps the turn's tools, so the prompt's
+	 * cached prefix is the conversation's, and refuses every call to them.
+	 * It takes no claim and registers nothing, so the conversation's next turn
+	 * still resumes the stored session, and the copy goes when the query
+	 * closes. A history the session does not match is refused, never rebuilt.
 	 */
 	async function startSideRequest(input: {
 		start: StartInput;
@@ -1044,6 +1056,7 @@ export function createClaudeSdkBridge(
 				promptContent: next.content,
 				claim: null,
 				convKey: null,
+				sideRequest: true,
 				recorder: input.recorder,
 				startedAt: input.startedAt,
 			});

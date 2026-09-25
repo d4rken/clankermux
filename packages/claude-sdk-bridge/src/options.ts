@@ -87,6 +87,8 @@ export interface QueryOptionsInput {
 	sessionId: string;
 	/** Resume `sessionId` from the session store instead of starting it. */
 	resume: boolean;
+	/** Model turns before Claude Code stops; null leaves its own limit. */
+	maxTurns?: number | null;
 	sessionStore: SessionStore;
 	executablePath: string;
 	spawn: (options: SpawnOptions) => SpawnedProcess;
@@ -122,6 +124,7 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 			snapshot: false,
 		},
 		...(input.effort ? { effort: input.effort } : {}),
+		...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
 		extraArgs: { "thinking-display": "summarized" },
 		includePartialMessages: true,
 		persistSession: true,

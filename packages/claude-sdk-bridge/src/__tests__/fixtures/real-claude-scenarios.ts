@@ -562,7 +562,7 @@ await scenario("sideRequestFork", async () => {
 	history.push({ role: "user", content: "second main turn" });
 	const next = await start(history, [], header);
 
-	// With client tools and a tool round: the copy runs with none.
+	// With client tools and a tool round: the copy has the same tools.
 	const toolHeader = {
 		affinityScope: "client_session" as const,
 		affinityKey: `conv-${crypto.randomUUID()}`,
@@ -596,16 +596,36 @@ await scenario("sideRequestFork", async () => {
 		{ ...toolHeader, sideRequest: "session-fork-v1" },
 		recapFields,
 	);
+	// The model calls a tool anyway: after text, and with nothing else.
+	const textThenCall = await start(
+		[...toolHistory, { role: "user", content: "SAYTOOL recap" }],
+		[READ_TOOL],
+		{ ...toolHeader, sideRequest: "session-fork-v1" },
+		recapFields,
+	);
+	const onlyCall = await start(
+		[...toolHistory, { role: "user", content: "TOOL recap" }],
+		[READ_TOOL],
+		{ ...toolHeader, sideRequest: "session-fork-v1" },
+		recapFields,
+	);
+	toolHistory.push({ role: "user", content: "third main turn" });
+	const toolNext = await start(toolHistory, [READ_TOOL], toolHeader);
 
 	await Bun.sleep(3_000);
 	const onDisk = transcriptsOnDisk();
-	const forks = [side, toolSide].map((t) => String(t.row.ccSessionId));
+	const forks = [side, toolSide, textThenCall, onlyCall].map((t) =>
+		String(t.row.ccSessionId),
+	);
 	return {
 		first: first.row,
 		firstCacheWrite: first.upstream,
 		side,
 		next,
 		toolSide,
+		textThenCall,
+		onlyCall,
+		toolNext,
 		forksLeft: onDisk.filter((f) => forks.some((id) => f.includes(id))),
 	};
 });

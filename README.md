@@ -138,9 +138,11 @@ What differs from a direct request:
 * A client's auxiliary requests (pi's recap and session title) send
   `x-clankermux-side-request: session-fork-v1` with the conversation's session
   header, its history, and one new user message. They run on a copy of the
-  conversation's Claude Code session with no tools (`tool_choice: "none"` is
-  accepted here), so the conversation's next turn resumes as if they never
-  happened. Nothing is rebuilt for them: a conversation with no stored session
+  conversation's Claude Code session, with its tools declared but every call
+  refused (`tool_choice: "none"` is accepted here), so the conversation's
+  next turn resumes as if they never happened. If the model still calls a
+  tool, the text before the call is the answer; a call with no text is a 502
+  `sdk_bridge_side_request_tool_call`. Nothing is rebuilt for them: a conversation with no stored session
   gets a 409 `sdk_bridge_side_request_no_session`, and a history that is not
   the stored one plus one user message a 409
   `sdk_bridge_side_request_prefix_mismatch`. Another header value is a 400

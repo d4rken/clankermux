@@ -1817,9 +1817,9 @@ describe("side requests", () => {
 		await reply(next.response);
 	}
 
-	it("runs the new prompt on a copy of the conversation's session, with no tools", async () => {
+	it("runs the new prompt on a copy of the conversation's session, with the main turn's tools", async () => {
 		const h = harness();
-		const { r, mainSession } = await mainTurn(h);
+		const { t, r, mainSession } = await mainTurn(h);
 		const s = sideRequest(h, recap(r));
 		const query = await h.sdk.next();
 		const fork = query.options.resume as string;
@@ -1830,9 +1830,17 @@ describe("side requests", () => {
 				.read(fork)
 				?.map((e) => [e.uuid, e.sessionId]),
 		).toEqual([["u1", fork]]);
-		expect(query.options.tools).toEqual([]);
-		expect(query.options.allowedTools).toEqual([]);
-		expect(query.options.mcpServers).toEqual({});
+		// The main turn's tools, so the prompt's cached prefix is the same.
+		expect(query.options.tools).toEqual(t.query.options.tools);
+		expect(query.options.allowedTools).toEqual(["mcp__c__read"]);
+		expect(query.options.allowedTools).toEqual(t.query.options.allowedTools);
+		expect(Object.keys(query.options.mcpServers ?? {})).toEqual(["c"]);
+		expect(
+			(await (await query.mcp()).listTools()).tools.map((tool) => tool.name),
+		).toEqual(["read"]);
+		// One model turn: a call it makes is never answered by another.
+		expect(query.options.maxTurns).toBe(1);
+		expect(t.query.options.maxTurns).toBeUndefined();
 		expect(query.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("256");
 		expect(query.prompts[0]?.message.content).toEqual([
 			{ type: "text", text: "RECAP the session" },
@@ -2003,6 +2011,94 @@ describe("side requests", () => {
 			SdkBridgeCapacityError,
 		);
 		expect(h.sdk.queries).toHaveLength(2);
+	});
+
+	describe("a tool call", () => {
+		const call = {
+			type: "tool_use" as const,
+			id: "toolu_side",
+			name: "mcp__c__read",
+			input: { path: "a.txt" },
+		};
+
+		it("is refused at once, never parked", async () => {
+			const h = harness();
+			const { r } = await mainTurn(h);
+			const s = sideRequest(h, recap(r));
+			const query = await h.sdk.next();
+			const result = await query.callTool("toolu_side", "read", {
+				path: "a.txt",
+			});
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).toContain(
+				"Tools are disabled in a side request",
+			);
+			expect(h.bridge.status().parked).toBe(0);
+			query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "Recap." }]),
+				resultMessage(),
+			);
+			expect((await reply(s.response)).content).toEqual([
+				{ type: "text", text: "Recap." },
+			]);
+		});
+
+		it("ends the reply with the text before it, and never reaches the client", async () => {
+			const h = harness();
+			const { r, mainSession } = await mainTurn(h);
+			const s = sideRequest(h, recap(r));
+			const query = await h.sdk.next();
+			query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "Recap." }, call]),
+			);
+			expect(await reply(s.response)).toMatchObject({
+				status: 200,
+				stop: "end_turn",
+				content: [{ type: "text", text: "Recap." }],
+				errors: [],
+			});
+			// maxTurns ends Claude Code after the refused call.
+			query.emit(resultMessage({ isError: true, subtype: "error_max_turns" }));
+			query.end();
+			await settled(h);
+			expect(h.bridge.findContinuation(["toolu_side"], CALLER)).toBeNull();
+			await waitFor(
+				() => h.repo.turns.get(s.plan.turnId)?.status === "completed",
+			);
+			expect(h.repo.turns.get(s.plan.turnId)?.legs[0]).toMatchObject({
+				httpStatus: 200,
+				stopReason: "end_turn",
+				toolUseIds: null,
+			});
+			await expectMainResumes(h, r, mainSession);
+		});
+
+		it("answers a reply that is only a tool call with a coded 502", async () => {
+			const h = harness();
+			const { r, mainSession } = await mainTurn(h);
+			const s = sideRequest(h, recap(r, { stream: false }));
+			const query = await h.sdk.next();
+			query.emit(initMessage(), ...streamedMessage([call]));
+			const res = await s.response;
+			expect(res.status).toBe(502);
+			expect(
+				((await res.json()) as { error: { type: string; code: string } }).error,
+			).toMatchObject({
+				type: "api_error",
+				code: "sdk_bridge_side_request_tool_call",
+			});
+			query.emit(resultMessage({ isError: true, subtype: "error_max_turns" }));
+			query.end();
+			await settled(h);
+			await waitFor(() => h.repo.turns.get(s.plan.turnId)?.status === "failed");
+			expect(h.repo.turns.get(s.plan.turnId)).toMatchObject({
+				httpStatus: 502,
+				errorType: "api_error",
+			});
+			await expectMainResumes(h, r, mainSession);
+		});
 	});
 
 	describe("deletes its copy and leaves the conversation's session", () => {
