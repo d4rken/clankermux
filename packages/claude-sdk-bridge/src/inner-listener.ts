@@ -176,16 +176,18 @@ export class InnerListener {
 				`${req.method} ${url.pathname} is not served here`,
 			);
 		const token = this.credential(req);
-		const entry =
+		const key =
 			token?.startsWith(`cmxsdk_${this.instanceId}_`) === true
-				? this.tokens.get(hash(token))
-				: undefined;
-		if (!entry || entry.revoked)
-			return jsonError(
+				? hash(token)
+				: null;
+		const entry = key ? this.tokens.get(key) : undefined;
+		const unauthorized = () =>
+			jsonError(
 				401,
 				"authentication_error",
 				"Unknown or revoked SDK bridge token",
 			);
+		if (!key || !entry || entry.revoked) return unauthorized();
 		const limit = this.opts.maxBodyBytes();
 		const declared = Number(req.headers.get("content-length"));
 		if (Number.isFinite(declared) && declared > limit)
@@ -197,6 +199,9 @@ export class InnerListener {
 			if (req.signal.aborted) return new Response(null, { status: 499 });
 			throw error;
 		}
+		// The turn may have ended while the body arrived. Nothing awaits between
+		// here and the dispatch, so a call that passes this check is the turn's.
+		if (entry.revoked || this.tokens.get(key) !== entry) return unauthorized();
 		if (!bytes) return this.tooLarge(entry, limit, null);
 		const body = new TextDecoder().decode(bytes);
 		let model: unknown;

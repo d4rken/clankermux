@@ -181,6 +181,61 @@ Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code
 render that prompt rather than the stored one.
 
+## Side requests
+
+`x-clankermux-side-request: session-fork-v1` marks a client's auxiliary
+request (pi's recap and session title: the main turn's body replayed with
+its reply and one new prompt, `tool_choice: "none"`, a capped output) that
+must not become the conversation's next turn. Only a bridged attempt acts
+on it; on any other route the header does nothing.
+
+- **Proxy.** One reading of the header, `sdkBridgeSideRequestMode`: null
+  when absent, `""` when blank, which is a declaration and never an
+  ordinary turn. It reaches the bridge as `SdkBridgeTurnMeta.sideRequest`,
+  and a request carrying it never takes the continuation shortcut. Routing
+  lets `tool_choice: none` through only for the exact value
+  (`sdkBridgeRefusedField(body, { sideRequest })`), and skips the field
+  refusal for any other value, so the bridge answers it with its own code.
+- **Verification.** `ConversationStore.peek` reads `current` without the
+  busy lock and changes nothing; it waits only for a session already
+  settling, at most `settleWaitMs`. The body (`parseTurnBody`, which unlike
+  a turn's parse requires no final user message) must be `current`'s
+  messages plus exactly one user message (`messagesAfter`). A stored empty
+  reply is nothing in the digests, and its replay an assistant message that
+  normalizes away; it still ends the stored conversation. Nothing is
+  rebuilt.
+- **Run.** The `side_request` parse admits `tool_choice: none`. The query
+  resumes a copy of `current` (`FileSessionStore.fork`) with the new message
+  as its prompt and the replayed tools exactly as a turn would get them
+  (same names, schemas, `allowedTools` and MCP server): `tools` open the
+  cached prefix, and the history's `tool_use` blocks need them defined.
+  Model, effort and `max_tokens` are as for any turn, and the system-prompt
+  policy applies. It holds no claim and no conversation key, so it never
+  registers, supersedes nothing and is superseded by nothing. The copy is an
+  unregistered session and goes at close: success, failure, client
+  disconnect or shutdown.
+- **Tool calls.** `maxTurns: 1`, and every call gets an MCP error result at
+  once ("Tools are disabled in a side request"); nothing parks and no
+  `tool_use` reaches the client. A model message ending in a call settles
+  the reply: its text is the answer (`end_turn`), and a call with no text
+  is a 502 `sdk_bridge_side_request_tool_call`.
+- **One model call.** A `max_tokens` stop settles the reply too, truncated,
+  with `max_tokens` as its stop reason. Once the reply is settled the turn
+  token is revoked, so a recovery call is refused before it spends output
+  past the client's cap, and whatever Claude Code reports afterwards
+  (`error_max_turns`, a failed call) leaves the turn as it was.
+- **Accounting.** It counts against `maxProcesses`. Its row has
+  `sdk_bridge_turns.kind = side_request` (`turn` otherwise), and the
+  `sideRequests` counter counts it next to `turnsStarted`.
+
+| Answer | When |
+| --- | --- |
+| 409 `sdk_bridge_side_request_no_session` | no session header, no completed turn stored, or its files gone |
+| 409 `sdk_bridge_side_request_prefix_mismatch` | the history differs from the stored one, or anything other than one user message follows it: nothing, an assistant message, an unregistered main turn |
+| 400 `sdk_bridge_side_request_unknown` | any other header value, a blank one included |
+| 400 `invalid_request_error` | tool results in the new message |
+| 502 `sdk_bridge_side_request_tool_call` | the model answered with a tool call and no text |
+
 ## How a failed turn reaches the client
 
 The inner call Claude Code gave up on in the current leg decides

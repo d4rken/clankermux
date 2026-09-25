@@ -149,6 +149,21 @@ describe("SdkBridgeTurnRepository", () => {
 		).toBeNull();
 	});
 
+	it("stores the turn's kind, `turn` when the insert names none", async () => {
+		await insertTurn("turn-5");
+		await repo.insertTurn({
+			id: "turn-6",
+			kind: "side_request",
+			startedAt: 1_000,
+			historyMode: "resume",
+			systemPromptPolicy: "pi-head-v1",
+		});
+		expect((await repo.getTurnWithLegs("turn-5"))?.turn.kind).toBe("turn");
+		expect((await repo.getTurnWithLegs("turn-6"))?.turn.kind).toBe(
+			"side_request",
+		);
+	});
+
 	it("returns null for an unknown turn", async () => {
 		expect(await repo.getTurnWithLegs("missing")).toBeNull();
 	});

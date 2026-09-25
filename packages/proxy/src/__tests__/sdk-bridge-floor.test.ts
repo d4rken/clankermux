@@ -573,6 +573,7 @@ describe("fields the SDK bridge refuses", () => {
 	const refusals = [
 		["stop_sequences", { stop_sequences: ["END"] }],
 		["tool_choice", { tool_choice: { type: "any" } }],
+		["tool_choice", { tool_choice: { type: "none" } }],
 	] as const;
 
 	it("leave the request to a candidate that is not bridged", async () => {
@@ -654,6 +655,113 @@ describe("fields the SDK bridge refuses", () => {
 		expect(response.status).toBe(200);
 		expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
 	});
+});
+
+describe("side requests (x-clankermux-side-request)", () => {
+	const SIDE = { "x-clankermux-side-request": "session-fork-v1" };
+	const none = { tool_choice: { type: "none" } };
+
+	it("reach the bridge with tool_choice none, naming the mode", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+
+		const { response } = await run(flooredRequest(none, SIDE), harness.ctx);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(bridge.starts[0].meta.sideRequest).toBe("session-fork-v1");
+		expect(sends(harness).map((r) => r.account_id)).toEqual(["claude-a"]);
+	});
+
+	it("leave an unknown or blank mode for the bridge to refuse, whatever the fields", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		for (const value of [" fork-v9 ", "   ", ""])
+			for (const body of [{}, none]) {
+				const { response } = await run(
+					flooredRequest(body, { "x-clankermux-side-request": value }),
+					harness.ctx,
+				);
+				expect(response.status).toBe(200);
+			}
+
+		expect(bridge.starts.map((s) => s.meta.sideRequest)).toEqual([
+			"fork-v9",
+			"fork-v9",
+			"",
+			"",
+			"",
+			"",
+		]);
+	});
+
+	it("keep tool_choice none refused without the header", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		const { response, text } = await run(flooredRequest(none), harness.ctx);
+
+		expect(response.status).toBe(400);
+		expect(JSON.parse(text).error.param).toBe("tool_choice");
+		expect(bridge.starts).toEqual([]);
+	});
+
+	it("are ordinary requests where the route is not bridged", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([other()], { bridge });
+
+		const { response } = await run(flooredRequest(none, SIDE), harness.ctx);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toEqual([]);
+		expect(sends(harness).map((r) => r.account_id)).toEqual(["other"]);
+	});
+
+	it("never continue a parked turn, a blank mode included", async () => {
+		for (const headers of [SIDE, { "x-clankermux-side-request": " " }]) {
+			const bridge = makeFakeBridge();
+			bridge.continuation = { turnId: "turn-parked", ownerApiKeyId: KEY };
+			harness = await makeBridgeHarness([claudeA()], { bridge });
+			await sideContinuation(bridge, headers);
+			harness.restore();
+			harness = null;
+		}
+	});
+
+	async function sideContinuation(
+		bridge: FakeBridge,
+		headers: Record<string, string>,
+	) {
+		if (!harness) throw new Error("no harness");
+		await run(
+			flooredRequest(
+				{
+					messages: [
+						{ role: "user", content: "run it" },
+						{
+							role: "assistant",
+							content: [
+								{ type: "tool_use", id: "toolu_1", name: "bash", input: {} },
+							],
+						},
+						{
+							role: "user",
+							content: [
+								{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+							],
+						},
+					],
+				},
+				headers,
+			),
+			harness.ctx,
+		);
+
+		expect(bridge.lookups).toEqual([]);
+		expect(bridge.continues).toEqual([]);
+		expect(bridge.starts).toHaveLength(1);
+	}
 });
 
 describe("SDK bridge continuations", () => {

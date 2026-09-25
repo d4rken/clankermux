@@ -54,6 +54,8 @@ export class ReplyComposer {
 			/** A client tool_use was forwarded; its id now names this turn. */
 			onToolUse: (id: string) => void;
 			newMessageId: () => string;
+			/** False for a side request, whose tool calls no client runs. */
+			forwardToolUse?: boolean;
 		},
 	) {}
 
@@ -137,6 +139,7 @@ export class ReplyComposer {
 	private openBlock(block: Block): number | null {
 		let out: Block;
 		if (block.type === "tool_use") {
+			if (this.opts.forwardToolUse === false) return null;
 			const name = this.opts.toolNames.clientName(String(block.name ?? ""));
 			if (name === null) return null;
 			const id = String(block.id);

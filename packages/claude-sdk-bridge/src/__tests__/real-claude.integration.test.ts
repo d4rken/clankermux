@@ -221,6 +221,99 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"answers a side request on a copy of the session, which the next turn never sees",
+			async () => {
+				const s = scenario(await results(), "sideRequestFork");
+				type Call = {
+					status: number;
+					cacheRead: number | null;
+					tools: string[];
+					text: string;
+				};
+				type Run = {
+					reply: {
+						status: number;
+						stop: unknown;
+						content?: unknown;
+						errors?: Array<{ data: { error?: { code?: string } } }>;
+					};
+					row: Record<string, unknown>;
+					upstream: Call[];
+				};
+				const side = s.side as Run;
+				const next = s.next as Run;
+				const toolSide = s.toolSide as Run;
+				const toolNext = s.toolNext as Run;
+				const textThenCall = s.textThenCall as Run;
+				const onlyCall = s.onlyCall as Run;
+				const cutOff = s.cutOff as Run;
+				console.log(
+					`[claude-sdk-bridge] side request cache reads: fork of a tool-free session ${side.upstream.map((c) => c.cacheRead)}, its next main turn ${next.upstream.map((c) => c.cacheRead)}; fork of a session with client tools ${toolSide.upstream.map((c) => c.cacheRead)}, its next main turn ${toolNext.upstream.map((c) => c.cacheRead)}`,
+				);
+				expect(side.reply).toMatchObject({ status: 200, stop: "end_turn" });
+				expect(JSON.stringify(side.reply.content)).toContain(
+					"echo: RECAP the session",
+				);
+				expect(side.row).toMatchObject({
+					kind: "side_request",
+					status: "completed",
+					historyMode: "resume",
+				});
+				expect(side.upstream).toHaveLength(1);
+				const [fork] = side.upstream;
+				expect(fork?.text).toContain("hello fork");
+				expect(fork?.cacheRead).toBeGreaterThan(0);
+				// The next main turn resumes the conversation's own session.
+				expect(next.row).toMatchObject({
+					kind: "turn",
+					status: "completed",
+					historyMode: "resume",
+				});
+				expect(next.upstream[0]?.text).toContain("second main turn");
+				expect(next.upstream[0]?.text).not.toContain("RECAP");
+				expect(next.upstream[0]?.cacheRead).toBeGreaterThan(0);
+				// The copy of a session with client tools sends those tools, so
+				// the conversation's cached prefix holds.
+				expect(toolSide.reply).toMatchObject({ status: 200, stop: "end_turn" });
+				expect(toolSide.upstream.map((c) => c.tools)).toEqual([
+					["mcp__c__read"],
+				]);
+				expect(toolSide.upstream[0]?.text).toContain("FORK-A");
+				expect(toolSide.upstream[0]?.cacheRead).toBeGreaterThan(0);
+				expect(toolNext.row).toMatchObject({
+					kind: "turn",
+					status: "completed",
+					historyMode: "resume",
+				});
+				expect(toolNext.upstream[0]?.text).not.toContain("recap");
+				expect(toolNext.upstream[0]?.cacheRead).toBeGreaterThan(0);
+				// A tool call ends the copy after one model call: the text before
+				// it is the answer, and a call alone is a coded error.
+				expect(textThenCall.reply).toMatchObject({
+					status: 200,
+					stop: "end_turn",
+					content: [{ type: "text", text: "echo: SAYTOOL recap" }],
+				});
+				expect(textThenCall.upstream).toHaveLength(1);
+				expect(textThenCall.row).toMatchObject({ status: "completed" });
+				expect(onlyCall.reply.errors?.[0]?.data.error?.code).toBe(
+					"sdk_bridge_side_request_tool_call",
+				);
+				expect(onlyCall.upstream).toHaveLength(1);
+				expect(onlyCall.row).toMatchObject({ status: "failed" });
+				expect(cutOff.reply).toMatchObject({
+					status: 200,
+					stop: "max_tokens",
+					content: [{ type: "text", text: "echo: MAXTOK recap" }],
+				});
+				expect(cutOff.upstream).toHaveLength(1);
+				expect(cutOff.row).toMatchObject({ status: "completed" });
+				expect(s.forksLeft).toEqual([]);
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"rebuilds a header-less history as a transcript Claude Code replays",
 			async () => {
 				const s = scenario(await results(), "rebuildWithoutHeader");

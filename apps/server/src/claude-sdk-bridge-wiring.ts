@@ -108,6 +108,7 @@ function unavailableWiring(
 				rejected: {},
 				resumes: 0,
 				rebuilds: 0,
+				sideRequests: 0,
 			},
 			peakRssBytes: null,
 		}),

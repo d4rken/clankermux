@@ -161,6 +161,19 @@ export function toMcpResult(block: Block): McpToolResult {
 	return { content, isError: block.is_error === true };
 }
 
+/** What a side request's tool calls get: no client ever runs them. */
+export function sideRequestToolResult(): McpToolResult {
+	return {
+		content: [
+			{
+				type: "text",
+				text: "Tools are disabled in a side request; answer in text.",
+			},
+		],
+		isError: true,
+	};
+}
+
 export function abortedResult(reason: string): McpToolResult {
 	return {
 		content: [{ type: "text", text: `Tool call aborted (${reason})` }],

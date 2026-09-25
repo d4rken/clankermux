@@ -7,6 +7,7 @@ import {
 	firstUserDigest,
 	flattenHistory,
 	messageDigests,
+	messagesAfter,
 	normalizeHistory,
 	transcriptEligible,
 } from "../history";
@@ -144,6 +145,82 @@ describe("messageDigests", () => {
 				},
 			]),
 		);
+	});
+});
+
+describe("messagesAfter", () => {
+	const stored = messageDigests(conversation);
+
+	it("gives the messages that follow the stored conversation, normalized", () => {
+		expect(
+			messagesAfter(
+				[
+					...conversation,
+					{ role: "system", content: "effort: low" },
+					{ role: "user", content: "recap" },
+				],
+				stored,
+			),
+		).toEqual([{ role: "user", content: [{ type: "text", text: "recap" }] }]);
+		expect(messagesAfter(conversation, stored)).toEqual([]);
+	});
+
+	it("is null when the messages do not start with the stored conversation", () => {
+		const edited = structuredClone(conversation);
+		edited[4] = { role: "assistant", content: "something else" };
+		expect(
+			messagesAfter([...edited, { role: "user", content: "recap" }], stored),
+		).toBeNull();
+		expect(messagesAfter(conversation.slice(0, 3), stored)).toBeNull();
+	});
+
+	it("takes an empty replayed reply for an empty stored one", () => {
+		// An empty reply is stored as nothing; replayed, it would merge the
+		// prompt into the user message before it.
+		const asked: ClientMessage[] = [{ role: "user", content: "a" }];
+		const digests = messageDigests([
+			...asked,
+			{ role: "assistant", content: [] },
+		]);
+		expect(
+			messagesAfter(
+				[
+					...asked,
+					{ role: "assistant", content: [] },
+					{ role: "user", content: "recap" },
+				],
+				digests,
+			),
+		).toEqual([{ role: "user", content: [{ type: "text", text: "recap" }] }]);
+		// A reply that was not empty is not the stored one: it stays in the tail.
+		expect(
+			messagesAfter(
+				[
+					...asked,
+					{ role: "assistant", content: "not empty" },
+					{ role: "user", content: "recap" },
+				],
+				digests,
+			)?.map((m) => m.role),
+		).toEqual(["assistant", "user"]);
+	});
+
+	it("skips a message that digests empty, as the digests do", () => {
+		const withThinkingOnly: ClientMessage[] = [
+			{ role: "user", content: "a" },
+			{
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "t", signature: "s" }],
+			},
+		];
+		const digests = messageDigests(withThinkingOnly);
+		expect(digests).toHaveLength(1);
+		expect(
+			messagesAfter(
+				[...withThinkingOnly, { role: "user", content: "b" }],
+				digests,
+			),
+		).toEqual([{ role: "user", content: [{ type: "text", text: "b" }] }]);
 	});
 });
 

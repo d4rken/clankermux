@@ -4,11 +4,20 @@
 //   last user turn carries tool_result      -> text "done: <first result text>"
 //   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
+//   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   a tools[].name outside ^[a-zA-Z0-9_-]{1,64}$ -> the API's 400
+//
+// Usage reports prompt caching the way the API does it: a cache_control
+// breakpoint writes the prefix up to it (tools, then system, then messages),
+// and a later request reads the longest written prefix that ends at one of
+// its own breakpoints or up to 20 blocks before one. Tokens are bytes / 4;
+// input_tokens stays 100.
+
+import { createHash } from "node:crypto";
 
 type Block = { type: string; [k: string]: unknown };
 type Msg = { role: string; content: string | Block[] };
@@ -20,6 +29,8 @@ export interface MockRequest {
 	body: unknown;
 	at: number;
 	status?: number;
+	/** The prompt-cache usage a scripted answer reported. */
+	cache?: { read: number; creation: number };
 	/** Set when the caller dropped the connection while a SLOW answer was pending. */
 	abortedAfterMs?: number;
 }
@@ -71,11 +82,72 @@ function sse(event: string, data: unknown): string {
 interface ScriptBody {
 	model: string;
 	messages: Msg[];
+	system?: string | Block[];
 	tools?: Array<{ name: string }>;
 	stream?: boolean;
 }
 
-function script(body: ScriptBody): string {
+const LOOKBACK_BLOCKS = 20;
+
+/** The prompt's cacheable blocks in the API's order, and which carry a breakpoint. */
+function promptBlocks(body: ScriptBody): { keys: string[]; marks: number[] } {
+	const units: Array<{ where: string; block: unknown }> = [];
+	for (const tool of body.tools ?? [])
+		units.push({ where: "tool", block: tool });
+	const system =
+		typeof body.system === "string"
+			? [{ type: "text", text: body.system }]
+			: (body.system ?? []);
+	for (const block of system) units.push({ where: "system", block });
+	body.messages.forEach((m, i) => {
+		for (const block of blocksOf(m))
+			units.push({ where: `${i}:${m.role}`, block });
+	});
+	const keys: string[] = [];
+	const marks: number[] = [];
+	units.forEach(({ where, block }, i) => {
+		const { cache_control, ...rest } = block as Record<string, unknown>;
+		if (cache_control) marks.push(i);
+		keys.push(JSON.stringify([where, rest]));
+	});
+	return { keys, marks };
+}
+
+function createPromptCache() {
+	/** Written prefixes: their digest and size in tokens. */
+	const written = new Map<string, number>();
+	const prefix = (model: string, keys: string[], end: number) => {
+		const text = [model, ...keys.slice(0, end + 1)].join("\n");
+		return {
+			digest: createHash("sha256").update(text).digest("hex"),
+			tokens: Math.ceil(Buffer.byteLength(text) / 4),
+		};
+	};
+	return (body: ScriptBody): { read: number; creation: number } => {
+		const { keys, marks } = promptBlocks(body);
+		let read = 0;
+		for (const mark of marks)
+			for (let end = mark; end >= 0 && end >= mark - LOOKBACK_BLOCKS; end--) {
+				const hit = written.get(prefix(body.model, keys, end).digest);
+				if (hit !== undefined) {
+					read = Math.max(read, hit);
+					break;
+				}
+			}
+		let longest = 0;
+		for (const mark of marks) {
+			const { digest, tokens } = prefix(body.model, keys, mark);
+			written.set(digest, tokens);
+			longest = Math.max(longest, tokens);
+		}
+		return { read, creation: Math.max(0, longest - read) };
+	};
+}
+
+function script(
+	body: ScriptBody,
+	cache: { read: number; creation: number },
+): string {
 	const user = blocksOf(lastUser(body.messages));
 	const toolResults = user.filter((b) => b.type === "tool_result");
 	const text = textOf(user);
@@ -103,6 +175,14 @@ function script(body: ScriptBody): string {
 				input: { path },
 			});
 		}
+	} else if (readTool && /SAYTOOL/.test(text)) {
+		content.push({ type: "text", text: `echo: ${text.slice(-200)}` });
+		content.push({
+			type: "tool_use",
+			id: `toolu_mock_${++toolSeq}`,
+			name: readTool,
+			input: { path: "a.txt" },
+		});
 	} else if (readTool && /TOOL/.test(text)) {
 		content.push({
 			type: "tool_use",
@@ -122,8 +202,8 @@ function script(body: ScriptBody): string {
 	const usage = {
 		input_tokens: 100,
 		output_tokens: 20,
-		cache_read_input_tokens: 0,
-		cache_creation_input_tokens: 0,
+		cache_read_input_tokens: cache.read,
+		cache_creation_input_tokens: cache.creation,
 	};
 	let out = sse("message_start", {
 		type: "message_start",
@@ -210,6 +290,7 @@ export function startMockUpstream(): MockUpstream {
 		match: string | null;
 	};
 	let failures: Failure[] = [];
+	const promptCache = createPromptCache();
 
 	async function handle(req: Request): Promise<Response> {
 		const url = new URL(req.url);
@@ -270,7 +351,8 @@ export function startMockUpstream(): MockUpstream {
 					{ status: 400 },
 				);
 			}
-			return new Response(script(b), {
+			record.cache = promptCache(b);
+			return new Response(script(b, record.cache), {
 				headers: { "content-type": "text/event-stream" },
 			});
 		}

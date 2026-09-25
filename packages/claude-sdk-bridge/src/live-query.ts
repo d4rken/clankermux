@@ -100,6 +100,11 @@ export interface LiveQueryInit {
 	isShuttingDown: () => boolean;
 	/** The conversation this query holds a claim on, if any. */
 	conversationKey: string | null;
+	/**
+	 * A side request: its reply is one model call's, and a tool call or a
+	 * max_tokens stop ends it instead of reaching the client or continuing.
+	 */
+	sideRequest?: boolean;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
 	/** Claude Code's own copy of the session, which nothing resumes from. */
@@ -143,6 +148,8 @@ export class LiveQuery {
 	private claudeCodeCause: ClaudeCodeFailureCause | null = null;
 	private resultSeen = false;
 	private resultOk = false;
+	/** A side request's reply is settled; nothing Claude Code does after counts. */
+	private sideSettled = false;
 	private registered = false;
 	private pendingTeardown: {
 		reason: TeardownReason;
@@ -477,7 +484,34 @@ export class LiveQuery {
 	}
 
 	private handleEnd(end: UpstreamMessageEnd | null): void {
-		if (end?.kind === "end") this.endLeg(end.stopReason);
+		if (!end) return;
+		if (this.init.sideRequest && this.leg) this.endSideRequest(end);
+		else if (end.kind === "end") this.endLeg(end.stopReason);
+	}
+
+	/**
+	 * A side request's reply is its first model call's. A tool call (refused
+	 * by the tool server, left unanswered by maxTurns) ends it with the text
+	 * before it, or fails it when there is none; a max_tokens stop ends it
+	 * truncated. The token goes at once, so Claude Code's recovery calls
+	 * never spend output past the client's cap.
+	 */
+	private endSideRequest(end: UpstreamMessageEnd): void {
+		const toolCall = end.stopReason === "tool_use";
+		if (end.kind !== "end" && !toolCall && end.stopReason !== "max_tokens")
+			return;
+		this.sideSettled = true;
+		this.init.registration.revoke();
+		this.scheduleExit();
+		if (!toolCall) {
+			this.endLeg(end.stopReason);
+			return;
+		}
+		const text = this.init.composer
+			.legContent()
+			.some((b) => b.type === "text" && String(b.text ?? "").trim());
+		if (text) this.endLeg("end_turn");
+		else this.failTurn(bridgeErrors.sideRequestToolCall());
 	}
 
 	private async pump(): Promise<void> {
@@ -579,6 +613,12 @@ export class LiveQuery {
 			cacheRead: usage?.cache_read_input_tokens ?? null,
 			cacheCreation: usage?.cache_creation_input_tokens ?? null,
 		};
+		// Whatever ended Claude Code after a side request's reply settled
+		// (maxTurns, a refused recovery call) does not change that reply.
+		if (this.sideSettled) {
+			this.resultOk = this.finalError === null;
+			return;
+		}
 		const failed = message.is_error || message.subtype !== "success";
 		if (!failed) {
 			this.resultOk = true;
@@ -683,6 +723,11 @@ export class LiveQuery {
 		if (this.exitTimer) clearTimeout(this.exitTimer);
 		this.exitTimer = null;
 		if (this.state === "closed") return;
+		if (this.sideSettled) {
+			this.samplePeakRss();
+			this.close(this.finalError ? "failed" : "completed", !this.finalError);
+			return;
+		}
 		if (!this.resultSeen) {
 			this.noteGiveUp();
 			this.failTurn(

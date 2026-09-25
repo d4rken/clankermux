@@ -7,6 +7,7 @@ export interface SdkBridgeRefusedField {
 }
 
 const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
+const SIDE_REQUEST_FORCING_TOOL_CHOICES = new Set(["any", "tool"]);
 
 /**
  * The field of a Messages body that the SDK bridge refuses, or null. Claude
@@ -18,11 +19,15 @@ const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
  *   { tool_choice: { type: "auto" } }   → null
  *   { stop_sequences: [] }              → null
  *
+ * With `sideRequest` (the request declares SDK_BRIDGE_SIDE_REQUEST_FORK),
+ * `tool_choice: { type: "none" }` passes.
+ *
  * Route construction reads it to leave a bridged account out of a route that
  * has another candidate, and the bridge reads it again when it parses a turn.
  */
 export function sdkBridgeRefusedField(
 	body: unknown,
+	options: { sideRequest?: boolean } = {},
 ): SdkBridgeRefusedField | null {
 	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
 	const { stop_sequences: stops, tool_choice: toolChoice } = body as Record<
@@ -39,7 +44,10 @@ export function sdkBridgeRefusedField(
 		toolChoice && typeof toolChoice === "object" && !Array.isArray(toolChoice)
 			? (toolChoice as Record<string, unknown>).type
 			: null;
-	if (typeof choice === "string" && FORCING_TOOL_CHOICES.has(choice))
+	const forcing = options.sideRequest
+		? SIDE_REQUEST_FORCING_TOOL_CHOICES
+		: FORCING_TOOL_CHOICES;
+	if (typeof choice === "string" && forcing.has(choice))
 		return {
 			field: "tool_choice",
 			message: `tool_choice "${choice}" is not supported through the SDK bridge; Claude Code decides when to call tools`,

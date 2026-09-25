@@ -131,6 +131,57 @@ describe("InnerListener", () => {
 		expect(inner.calls).toHaveLength(0);
 	});
 
+	it("refuses a call whose token is revoked while its body is read, and never dispatches it", async () => {
+		for (const end of ["revoke", "stop"] as const) {
+			const { inner, listener } = setup();
+			const outcomes: SdkBridgeInnerOutcome[] = [];
+			const registration = listener.register(context(outcomes));
+			const payload = new TextEncoder().encode(
+				JSON.stringify({ model: MODEL, messages: [] }),
+			);
+			let release!: () => void;
+			const held = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let firstRead!: () => void;
+			const reading = new Promise<void>((resolve) => {
+				firstRead = resolve;
+			});
+			let pulls = 0;
+			const body = new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					pulls++;
+					if (pulls === 1) {
+						controller.enqueue(payload.slice(0, 10));
+						firstRead();
+						return;
+					}
+					await held;
+					controller.enqueue(payload.slice(10));
+					controller.close();
+				},
+			});
+			const pending = listener.handle(
+				new Request("http://127.0.0.1:1/v1/messages", {
+					method: "POST",
+					headers: { authorization: `Bearer ${registration.token}` },
+					body,
+				}),
+			);
+			await reading;
+			if (end === "revoke") registration.revoke();
+			else listener.stop();
+			release();
+			const res = await pending;
+			expect(res.status).toBe(401);
+			expect(
+				((await res.json()) as { error: { type: string } }).error.type,
+			).toBe("authentication_error");
+			expect(inner.calls).toHaveLength(0);
+			expect(outcomes).toEqual([]);
+		}
+	});
+
 	it("refuses a model the plan does not target and reports it to the turn", async () => {
 		const { inner, listener } = setup();
 		const outcomes: SdkBridgeInnerOutcome[] = [];

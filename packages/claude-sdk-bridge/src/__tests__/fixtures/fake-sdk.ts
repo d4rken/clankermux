@@ -206,7 +206,12 @@ export interface ScriptBlock {
 /** One streamed model message, as Claude Code relays it with includePartialMessages. */
 export function streamedMessage(
 	blocks: ScriptBlock[],
-	opts: { id?: string; stopReason?: string; model?: string } = {},
+	opts: {
+		id?: string;
+		stopReason?: string;
+		model?: string;
+		usage?: Record<string, number>;
+	} = {},
 ): SDKMessage[] {
 	const id = opts.id ?? `msg_${uuid()}`;
 	const out: SDKMessage[] = [
@@ -220,7 +225,7 @@ export function streamedMessage(
 				content: [],
 				stop_reason: null,
 				stop_sequence: null,
-				usage: { input_tokens: 10, output_tokens: 1 },
+				usage: opts.usage ?? { input_tokens: 10, output_tokens: 1 },
 			},
 		}),
 	];
@@ -465,6 +470,7 @@ export function makeMeta(
 		reasoningEffort: null,
 		translationGaps: null,
 		piPromptVersion: null,
+		sideRequest: null,
 		...overrides,
 	};
 }

@@ -135,6 +135,21 @@ What differs from a direct request:
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
   `tool_choice` that forces or forbids tool use are rejected with a 400 naming
   the field, unless another destination in the route can serve the request.
+* A client's auxiliary requests (pi's recap and session title) send
+  `x-clankermux-side-request: session-fork-v1` with the conversation's session
+  header, its history, and one new user message. They run on a copy of the
+  conversation's Claude Code session, with its tools declared but every call
+  refused (`tool_choice: "none"` is accepted here), so the conversation's
+  next turn resumes as if they never happened. If the model still calls a
+  tool, the text before the call is the answer; a call with no text is a 502
+  `sdk_bridge_side_request_tool_call`. The answer is one model call's: a
+  reply cut off at the output limit ends there, with stop reason
+  `max_tokens`. Nothing is rebuilt for them: a conversation with no stored
+  session gets a 409 `sdk_bridge_side_request_no_session`, and a history
+  that is not the stored one plus one user message a 409
+  `sdk_bridge_side_request_prefix_mismatch`. Another header value, a blank
+  one included, is a 400 (`sdk_bridge_side_request_unknown`). On a route
+  that is not served this way the header does nothing.
 * `max_tokens` applies to each model call, not to the whole reply.
 * Each user turn starts a Claude Code process, which adds 1–3 s. A
   conversation resumes across turns only when the client sends a session

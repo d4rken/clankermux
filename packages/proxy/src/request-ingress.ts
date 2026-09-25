@@ -14,8 +14,10 @@ import {
 	getSdkBridgeInnerRequestContext,
 	type ProjectAttributionSource,
 	type RequestMeta,
+	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeInnerContext,
 	sdkBridgeRefusedField,
+	sdkBridgeSideRequestMode,
 	setNativeResponsesMetaContext,
 	setSdkBridgeInnerMetaContext,
 	transferChatContext,
@@ -455,9 +457,16 @@ export async function ingestProxyRequest(
 		getChatContext(requestMeta)?.denyDirectOfficialAnthropic === true;
 	requestMeta.officialAnthropicVia =
 		floored && !sdkBridgeInner ? "sdk-bridge" : "direct";
+	// A side-request mode the bridge does not serve is the bridge's to refuse,
+	// with its own code, whatever the body's fields.
+	const sideRequestMode = sdkBridgeSideRequestMode(req.headers);
 	requestMeta.sdkBridgeRefusedField =
-		requestMeta.officialAnthropicVia === "sdk-bridge"
-			? sdkBridgeRefusedField(parsedBody)
+		requestMeta.officialAnthropicVia === "sdk-bridge" &&
+		(sideRequestMode === null ||
+			sideRequestMode === SDK_BRIDGE_SIDE_REQUEST_FORK)
+			? sdkBridgeRefusedField(parsedBody, {
+					sideRequest: sideRequestMode === SDK_BRIDGE_SIDE_REQUEST_FORK,
+				})
 			: null;
 	if (sdkBridgeInner) {
 		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);

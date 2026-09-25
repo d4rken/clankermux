@@ -13,6 +13,7 @@ import type {
 	SdkBridgeTurnDetail,
 	SdkBridgeTurnFinish,
 	SdkBridgeTurnInsert,
+	SdkBridgeTurnKind,
 	SdkBridgeTurnLeg,
 	SdkBridgeTurnStatus,
 } from "@clankermux/types";
@@ -20,6 +21,7 @@ import { BaseRepository } from "./base.repository";
 
 interface TurnRow {
 	id: string;
+	kind: string;
 	started_at: number;
 	finished_at: number | null;
 	status: string;
@@ -96,6 +98,7 @@ interface InnerSummaryRow {
 function toTurn(row: TurnRow): SdkBridgeTurn {
 	return {
 		id: row.id,
+		kind: row.kind as SdkBridgeTurnKind,
 		startedAt: row.started_at,
 		finishedAt: row.finished_at,
 		status: row.status as SdkBridgeTurnStatus,
@@ -166,14 +169,15 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	async insertTurn(turn: SdkBridgeTurnInsert): Promise<void> {
 		await this.run(
 			`INSERT INTO sdk_bridge_turns (
-				id, started_at, status, api_key_id, api_key_name, account_id, model,
-				client_harness, client_user_agent, project, conversation_key_hash,
-				cc_session_id, history_mode, rebuild_reason, system_prompt_policy,
-				system_prompt_detail, ignored_fields,
+				id, kind, started_at, status, api_key_id, api_key_name, account_id,
+				model, client_harness, client_user_agent, project,
+				conversation_key_hash, cc_session_id, history_mode, rebuild_reason,
+				system_prompt_policy, system_prompt_detail, ignored_fields,
 				leg_count, tool_round_count, inner_call_count, inner_error_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
 			[
 				turn.id,
+				turn.kind ?? "turn",
 				turn.startedAt,
 				turn.status ?? "running",
 				turn.apiKeyId ?? null,
