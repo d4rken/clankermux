@@ -9,9 +9,10 @@
  * mock.module (bun registers those globally and they leak into later files in
  * the suite; see codex-spend-coordinator.test.ts for the established style).
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import type { CodexResetCreditEventRow } from "@clankermux/database";
+import { Logger } from "@clankermux/logger";
 import {
 	type CodexRateLimitResetCredit,
 	type CodexRateLimitResetCreditsCacheEntry,
@@ -1990,6 +1991,7 @@ describe("weekly reset conservation with the production pool check", () => {
 			now?: () => number;
 			readUsage?: (id: string) => Promise<{ success: boolean }>;
 			refreshCredits?: () => Promise<{ success: boolean }>;
+			pending?: CodexResetCreditEventRow[];
 		} = {},
 	) {
 		const consumed: string[] = [];
@@ -2010,7 +2012,10 @@ describe("weekly reset conservation with the production pool check", () => {
 						pinnedAccountId,
 						pinnedProviders: null,
 					})),
-				getPendingCodexResetCreditAttempt: async () => null,
+				getPendingCodexResetCreditAttempt: async (id) =>
+					options.pending?.find(
+						(row) => row.account_id === id && row.status === "pending",
+					) ?? null,
 				getAccount: async (id) => accounts.find((a) => a.id === id) ?? null,
 				getTerminallyResolvedCodexResetCreditIds: async () => new Set(),
 				getCodexResetCreditAutoApplyCooldownAnchorAt: async () => null,
@@ -2334,6 +2339,107 @@ describe("weekly reset conservation with the production pool check", () => {
 		await h.scheduler.tick();
 		expect(h.consumed).toEqual([targetId]);
 	});
+
+	for (const cause of ["expiry", "weekly-limit"] as const) {
+		it(`conserves the pool beside an uncertain ${cause} claim with replay disabled`, async () => {
+			const accounts = [
+				makeCodexAccount({ id: targetId, ...weeklyOnly }),
+				makeCodexAccount({
+					id: otherId,
+					codex_auto_apply_reset_credits_enabled: false,
+					codex_auto_apply_reset_on_weekly_limit_enabled: false,
+				}),
+			];
+			for (const account of accounts) usageCache.set(account.id, usage(100));
+			const attempt = pendingAttempt({ account_id: otherId, cause });
+			const h = poolHarness(accounts, { pending: [attempt] });
+			await h.scheduler.tick();
+			expect(h.consumed).toEqual([]);
+			attempt.status = "nothingToReset";
+			await h.scheduler.tick();
+			expect(h.consumed).toEqual([targetId]);
+		});
+	}
+
+	it("keeps an old dormant claim held until resolution and diagnoses the blocker once", async () => {
+		const accounts = [
+			makeCodexAccount({ id: targetId, ...weeklyOnly }),
+			makeCodexAccount({
+				id: otherId,
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: false,
+			}),
+		];
+		for (const account of accounts) usageCache.set(account.id, usage(100));
+		const attempt = pendingAttempt({
+			account_id: otherId,
+			cause: "expiry",
+			created_at: NOW - 7 * 86_400_000,
+			credit_expires_at: expirySec(-86_400_000),
+		});
+		const h = poolHarness(accounts, { pending: [attempt] });
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			for (let tick = 0; tick < 3; tick++) await h.scheduler.tick();
+			expect(h.consumed).toEqual([]);
+			const blocked = warning.mock.calls.filter(([message]) =>
+				String(message).includes("unresolved reset attempt"),
+			);
+			expect(blocked).toHaveLength(1);
+			expect(String(blocked[0]?.[0])).toContain(attempt.id);
+			expect(String(blocked[0]?.[0])).toContain(otherId);
+			attempt.status = "nothingToReset";
+			await h.scheduler.tick();
+			expect(h.consumed).toEqual([targetId]);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	it("holds an uncertain claim through an overage pause the reset can lift", async () => {
+		const accounts = [
+			makeCodexAccount({ id: targetId, ...weeklyOnly }),
+			makeCodexAccount({
+				id: otherId,
+				codex_auto_apply_reset_credits_enabled: false,
+				paused: true,
+				pause_reason: "overage",
+				auto_pause_on_overage_enabled: true,
+			}),
+		];
+		for (const account of accounts) usageCache.set(account.id, usage(100));
+		const h = poolHarness(accounts, {
+			pending: [pendingAttempt({ account_id: otherId, cause: "expiry" })],
+		});
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([]);
+	});
+
+	for (const excluded of [
+		{ disabled: true },
+		{ paused: true, pause_reason: "manual" },
+		{ pause_reason: PAUSE_REASON_NEEDS_REAUTH },
+		{ rate_limited_reason: "org_permission_denied" },
+	] satisfies Partial<Account>[]) {
+		it(`does not hold an uncertain claim on an unreachable alternative ${JSON.stringify(excluded)}`, async () => {
+			const accounts = [
+				makeCodexAccount({ id: targetId, ...weeklyOnly }),
+				makeCodexAccount({
+					id: otherId,
+					codex_auto_apply_reset_credits_enabled: false,
+					...excluded,
+				}),
+			];
+			for (const account of accounts) usageCache.set(account.id, usage(100));
+			const h = poolHarness(accounts, {
+				pending: [pendingAttempt({ account_id: otherId, cause: "expiry" })],
+			});
+			await h.scheduler.tick();
+			expect(h.consumed).toEqual([targetId]);
+		});
+	}
 
 	it("restores one exhausted account and conserves the other account's reset", async () => {
 		const accounts = [targetId, otherId].map((id) => {

@@ -4,7 +4,7 @@
  * usage cache.
  */
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import type { ModelFamily } from "@clankermux/core";
+import { type ModelFamily, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import type {
 	AccountPauseMarker,
 	AnthropicBankedResetAutoClaim,
@@ -1352,6 +1352,7 @@ function poolScheduler(options: {
 	/** When each account's cached usage reading was observed. */
 	observedAt?: Record<string, number | null>;
 	pauseMarkers?: Record<string, AccountPauseMarker>;
+	statuses?: Record<string, AnthropicBankedResetStatus | null>;
 }) {
 	const self = account(weeklyOnly);
 	const others = options.others.map(({ account: overrides }, index) =>
@@ -1389,7 +1390,10 @@ function poolScheduler(options: {
 				[self, ...others].find((candidate) => candidate.id === id) ?? null,
 			getActiveApiKeys: async () => (options.keys ?? []) as ApiKey[],
 			expireStaleAnthropicBankedResetAttempts: async () => 0,
-			getPendingAnthropicBankedResetAttempts: async () => [],
+			getPendingAnthropicBankedResetAttempts: async (id) =>
+				(options.ledger ?? []).filter(
+					(row) => row.account_id === id && row.status === "pending",
+				),
 			getAnthropicBankedResetAutoApplyCooldownAnchorAt: async () => null,
 			getAnthropicBankedResetRearmAt: async () => null,
 			getRestoringAnthropicBankedResetEventsSince: async (sinceMs) =>
@@ -1418,11 +1422,13 @@ function poolScheduler(options: {
 			refreshNow,
 		},
 		overrides: {
-			getCachedStatus: () =>
-				status({
-					exhausted: options.exhausted,
-					grants: [grant({ clears: options.clears })],
-				}),
+			getCachedStatus: (id) =>
+				options.statuses && id in options.statuses
+					? (options.statuses[id] ?? null)
+					: status({
+							exhausted: options.exhausted,
+							grants: [grant({ clears: options.clears })],
+						}),
 			dispatchClaim: async (_id, request) => {
 				dispatched.push(request);
 				return completedOutcome();
@@ -1434,6 +1440,104 @@ function poolScheduler(options: {
 }
 
 describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
+	for (const trigger of ["manual", "expiry", "weekly-limit"] as const) {
+		it(`conserves the pool beside an uncertain ${trigger} claim with replay disabled`, async () => {
+			const pending = pendingRow({
+				account_id: "other-0",
+				trigger: trigger === "manual" ? "manual" : "auto",
+				cause: trigger === "manual" ? null : trigger,
+				next_attempt_at: NOW + 60_000,
+			});
+			const ledger = [pending];
+			const h = poolScheduler({
+				exhausted: ["seven_day"],
+				clears: ["seven_day"],
+				ledger,
+				others: [{ account: {}, usage: usageWith({ seven_day: 100 }) }],
+				observedAt: { "other-0": NOW },
+			});
+			await h.scheduler.tick();
+			expect(h.dispatched).toEqual([]);
+			// A definitive refusal ends uncertainty; the still-exhausted pool may act.
+			pending.status = "not_limited";
+			await h.scheduler.tick();
+			expect(h.dispatched).toHaveLength(1);
+		});
+	}
+
+	it("holds an uncertain claim conservatively when its grant metadata is unavailable", async () => {
+		const h = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			ledger: [pendingRow({ account_id: "other-0", cause: "expiry" })],
+			statuses: { "other-0": null },
+			others: [{ account: {}, usage: usageWith({ seven_day: 100 }) }],
+		});
+		await h.scheduler.tick();
+		expect(h.dispatched).toEqual([]);
+	});
+
+	it("holds an uncertain claim through the overage pause its reset can lift", async () => {
+		const h = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			ledger: [pendingRow({ account_id: "other-0", cause: "expiry" })],
+			others: [
+				{
+					account: {
+						paused: true,
+						pause_reason: "overage",
+						auto_pause_on_overage_enabled: true,
+					},
+					usage: usageWith({ seven_day: 100 }),
+				},
+			],
+			pauseMarkers: {
+				"other-0": {
+					paused: true,
+					pauseReason: "overage",
+					autoPauseOnOverageEnabled: true,
+					pauseEpoch: 3,
+					pauseChangedAt: NOW - DAY,
+				},
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.dispatched).toEqual([]);
+	});
+
+	it("does not hold a weekly window for an uncertain five-hour-only claim", async () => {
+		const h = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			ledger: [pendingRow({ account_id: "other-0", cause: "expiry" })],
+			statuses: {
+				"other-0": status({ grants: [grant({ clears: ["five_hour"] })] }),
+			},
+			others: [{ account: {}, usage: usageWith({ seven_day: 100 }) }],
+		});
+		await h.scheduler.tick();
+		expect(h.dispatched).toHaveLength(1);
+	});
+
+	for (const excluded of [
+		{ disabled: true },
+		{ paused: true, pause_reason: "manual" },
+		{ pause_reason: PAUSE_REASON_NEEDS_REAUTH },
+		{ rate_limited_reason: "org_permission_denied" },
+	] satisfies Partial<Account>[]) {
+		it(`does not hold an uncertain claim on an unreachable alternative ${JSON.stringify(excluded)}`, async () => {
+			const h = poolScheduler({
+				exhausted: ["seven_day"],
+				clears: ["seven_day"],
+				ledger: [pendingRow({ account_id: "other-0", cause: "expiry" })],
+				others: [{ account: excluded, usage: usageWith({ seven_day: 100 }) }],
+			});
+			await h.scheduler.tick();
+			expect(h.dispatched).toHaveLength(1);
+		});
+	}
+
 	it("conserves an account-wide grant while another account has weekly headroom", async () => {
 		const { scheduler, dispatched } = poolScheduler({
 			exhausted: ["seven_day"],

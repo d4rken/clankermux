@@ -593,7 +593,8 @@ describe("routing table through the real proxy", () => {
 		Object.assign(ctx.dbOps, {
 			saveCodexWindowObservations: mock(async () => {}),
 			getAdapter: () => ({
-				runWithChanges: async () => 1,
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({ run: () => ({ changes: 1 }) }),
 				run: async () => {},
 				get: async () => null,
 			}),
@@ -1229,7 +1230,8 @@ describe("definitive model rejection failover", () => {
 		Object.assign(ctx.dbOps, {
 			saveCodexWindowObservations: mock(async () => {}),
 			getAdapter: () => ({
-				runWithChanges: async () => 1,
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({ run: () => ({ changes: 1 }) }),
 				run: async () => {},
 				get: async () => null,
 			}),

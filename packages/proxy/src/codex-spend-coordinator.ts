@@ -24,6 +24,7 @@ import type {
 	CodexResetCreditEventStatus,
 	InternalDispatchSpendRow,
 } from "@clankermux/types";
+import { invalidateCodexObservations } from "./codex-observation-fence";
 import {
 	applyCodexObservation,
 	applyCodexUsageStatus,
@@ -31,6 +32,7 @@ import {
 	type CodexObservationSource,
 	type CodexRateLimitAction,
 	type CodexRequestAccounting,
+	clearCodexUsagePersistMemo,
 } from "./handlers/codex-observation";
 import type { ProxyContext } from "./handlers/proxy-types";
 import {
@@ -199,7 +201,8 @@ export class CodexSpendCoordinator {
 	 * overwriting the fresher window/reset state (or clearing a cooldown the newer
 	 * spend just set). Real-traffic {@link applyCodexObservation} calls made by the
 	 * response pipeline do NOT flow through the coordinator and deliberately do NOT
-	 * participate in this guard — they stay the authoritative freshest signal.
+	 * participate in this guard — they have their own reset-generation fence,
+	 * captured per request attempt.
 	 */
 	private readonly lastAppliedSeq = new Map<string, number>();
 
@@ -487,8 +490,11 @@ export class CodexSpendCoordinator {
 			// is known and before any await: a read issued during the ledger write
 			// below is genuinely post-reset and must keep its higher sequence, and
 			// a read that applies between the claim and the delete would only be
-			// wiped again.
+			// wiped again. The separate reset generation fences real traffic and
+			// queued snapshot writes, which do not use the coordinator's sequence.
 			this.claimApplication(accountId, this.reserveApplicationSeq(accountId));
+			invalidateCodexObservations(accountId);
+			clearCodexUsagePersistMemo(accountId);
 			usageCache.delete(accountId);
 		}
 

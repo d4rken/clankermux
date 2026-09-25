@@ -456,10 +456,13 @@ function makeRealCoordinator() {
 				},
 				// The Codex usage-snapshot persist is credential-CAS'd and reads the
 				// changed-row count. This double has no rows: report a match.
-				runWithChanges: async (sql: string, params: unknown[]) => {
-					runSql.push({ sql, params });
-					return 1;
-				},
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({
+					run: (sql: string, params: unknown[]) => {
+						runSql.push({ sql, params });
+						return { changes: 1 };
+					},
+				}),
 			}),
 		},
 		asyncWriter: {
@@ -2321,10 +2324,13 @@ describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
 					},
 					// The Codex usage-snapshot persist is credential-CAS'd and reads
 					// the changed-row count. This double has no rows: report a match.
-					runWithChanges: async (sql: string, params: unknown[]) => {
-						runSql.push({ sql, params });
-						return 1;
-					},
+					runTransaction: async (body: () => number) => body(),
+					getSQLiteDb: () => ({
+						run: (sql: string, params: unknown[]) => {
+							runSql.push({ sql, params });
+							return { changes: 1 };
+						},
+					}),
 				}),
 			},
 			asyncWriter: {

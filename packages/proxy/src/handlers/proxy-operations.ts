@@ -62,6 +62,7 @@ import {
 } from "@clankermux/types";
 import { bindAnthropicAccountUuid } from "../anthropic-account-uuid";
 import { cacheBodyStore } from "../cache-body-store";
+import { getCodexObservationEpoch } from "../codex-observation-fence";
 import { recordCodexTransientFailure } from "../codex-transient-health";
 import {
 	CODEX_TRANSIENT_MAX_RETRY,
@@ -1218,6 +1219,7 @@ export async function proxyWithAccount(
 	// Before anything is sent, so a response that outlives a poller restart
 	// cannot feed the restarted poller's header store.
 	const usageHeaderEpoch = usageCache.usageHeaderEpoch(account.id);
+	const codexObservationEpoch = getCodexObservationEpoch(account.id);
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
 	// never disagree about whether this attempt is terminal.
@@ -2580,6 +2582,7 @@ export async function proxyWithAccount(
 				} else if (account.provider === "codex") {
 					applyCodexObservation(account, rawResponse, ctx, {
 						source: "real-traffic",
+						observationEpoch: codexObservationEpoch,
 						rateLimitInfo: provider.parseRateLimit(rawResponse),
 						requestAccounting: "none",
 						rateLimitAction: { kind: "apply", reason, cooldownUntil },
@@ -3192,7 +3195,7 @@ export async function proxyWithAccount(
 							provider,
 						},
 						requestMeta,
-						{ locallySynthesized: isLocalCountTokens },
+						{ locallySynthesized: isLocalCountTokens, codexObservationEpoch },
 					);
 		} finally {
 			// processProxyResponse only needed the rate-limit view (headers, or a

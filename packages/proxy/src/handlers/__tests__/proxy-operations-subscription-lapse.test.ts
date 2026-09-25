@@ -15,7 +15,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
-import { devinClient } from "@clankermux/providers";
+import { devinClient, usageCache } from "@clankermux/providers";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { DevinRpcError } from "../../../../providers/src/providers/devin/connect";
@@ -24,6 +24,7 @@ import {
 	routingAttempts,
 } from "../../__tests__/fixtures/routing-harness";
 import { cacheBodyStore } from "../../cache-body-store";
+import { invalidateCodexObservations } from "../../codex-observation-fence";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import type { ProxyContext } from "../proxy-types";
 
@@ -80,6 +81,7 @@ function makeProxyContext() {
 				},
 			),
 			saveRequest: mock(async () => {}),
+			saveCodexWindowObservations: mock(async () => {}),
 			updateAccountUsage: mock(async () => {}),
 			updateAccountRateLimitMeta: mock(async () => {}),
 			getAdapter: mock(() => ({
@@ -196,6 +198,41 @@ describe("proxyWithAccount — Codex subscription lapse", () => {
 				expect.objectContaining({ provider: "codex", status: 429 }),
 			]),
 		);
+	});
+
+	it("carries the pre-send reset epoch into the early Codex 429 observation", async () => {
+		const account = canonicalAccount({
+			id: "codex-reset-during-traffic",
+			provider: "codex",
+			access_token: "at",
+			refresh_token: "rt",
+			expires_at: Date.now() + 3_600_000,
+		});
+		const { cooldownCalls } = await run(account, () => {
+			// This callback runs INSIDE the mocked network call: the request already
+			// captured its epoch, then a restoring reset advances it before response.
+			invalidateCodexObservations(account.id);
+			usageCache.delete(account.id);
+			return new Response(
+				JSON.stringify({
+					error: { type: "usage_limit_reached", message: "Rate limited" },
+				}),
+				{
+					status: 429,
+					headers: {
+						"content-type": "application/json",
+						"x-codex-primary-used-percent": "100",
+						"x-codex-primary-window-minutes": "10080",
+						"x-codex-primary-reset-at": String(
+							Math.floor(Date.now() / 1000) + 604800,
+						),
+					},
+				},
+			);
+		});
+		expect(cooldownCalls).toEqual([]);
+		expect(account.rate_limited_until).toBeNull();
+		expect(usageCache.get(account.id)).toBeNull();
 	});
 
 	it("leaves an ordinary Codex 429 to the rate-limit path", async () => {

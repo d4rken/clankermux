@@ -11,6 +11,11 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason } from "@clankermux/types";
+import {
+	fenceCodexObservationWrites,
+	getCodexObservationEpoch,
+	isCodexObservationCurrent,
+} from "../codex-observation-fence";
 import type { ProxyContext } from "./proxy-types";
 import {
 	applyRateLimitCooldown,
@@ -79,26 +84,32 @@ function persistCodexUsageSnapshot(
 
 	const observedAt = Date.now();
 	const refreshTokenAtEnqueue = account.refresh_token ?? null;
+	const epoch = getCodexObservationEpoch(account.id);
 	const accepted = ctx.asyncWriter.enqueue(async () => {
-		const changed = await ctx.dbOps
-			.getAdapter()
-			.runWithChanges(PERSIST_CODEX_USAGE_SQL, [
-				json,
-				observedAt,
-				account.id,
-				refreshTokenAtEnqueue,
-			]);
+		const adapter = ctx.dbOps.getAdapter();
+		// runTransaction re-invokes this synchronous body on SQLITE_BUSY. A
+		// queue-entry check alone cannot fence a write already sleeping in retry.
+		const changed = await adapter.runTransaction(() => {
+			if (!isCodexObservationCurrent(account.id, epoch)) return 0;
+			return adapter
+				.getSQLiteDb()
+				.run(PERSIST_CODEX_USAGE_SQL, [
+					json,
+					observedAt,
+					account.id,
+					refreshTokenAtEnqueue,
+				]).changes;
+		});
 		if (changed !== 0) return;
-		// The CAS voided this write: the account's refresh token moved on between
-		// the enqueue and the flush (a re-auth, or a routine token rotation). Forget
-		// the memo so the NEXT observation persists instead of being deduped against
+		// Credentials rotated or a reset invalidated this write. Forget the
+		// memo so the NEXT observation persists instead of being deduped against
 		// a snapshot that never landed — but only while it still describes THIS job,
 		// so a newer snapshot enqueued in the meantime keeps its own dedup entry.
 		if (codexUsagePersistMemo.get(account.id) === json) {
 			codexUsagePersistMemo.delete(account.id);
 		}
 		log.debug(
-			`Voided the persisted Codex usage snapshot for ${account.name}: the account's credentials rotated before the write ran`,
+			`Voided the persisted Codex usage snapshot for ${account.name}: credentials rotated or a reset restored the windows before the write ran`,
 		);
 	});
 	if (accepted === false) {
@@ -170,6 +181,9 @@ export type CodexRateLimitAction =
 
 export interface ApplyCodexObservationOptions {
 	source: CodexObservationSource;
+	/** Reset generation captured before sending the request. Coordinator callers
+	 * already fence in-flight reads and default to the current generation here. */
+	observationEpoch?: number;
 	/**
 	 * Pre-parsed rate-limit view of the response (`provider.parseRateLimit`).
 	 * Passed in so this function never reparses — the caller owns which provider
@@ -441,6 +455,19 @@ export function applyCodexObservation(
 	// ── 1. Request accounting ──────────────────────────────────────────────
 	applyCodexRequestAccounting(account, ctx, opts.requestAccounting);
 
+	const epoch = opts.observationEpoch ?? getCodexObservationEpoch(account.id);
+	if (!isCodexObservationCurrent(account.id, epoch)) {
+		return {
+			usage: null,
+			effectiveCredits: null,
+			earliestResetMs: null,
+			windowRolledOver: false,
+			isRateLimited,
+			responseStatus,
+		};
+	}
+	ctx = fenceCodexObservationWrites(ctx, account.id, epoch);
+
 	// ── 2. Rate-limit status-meta persistence ──────────────────────────────
 	// Persist status/reset/remaining only when the unified-status header was
 	// present (mirrors persistRateLimitStatusMeta). Uses the PASSED rateLimitInfo
@@ -582,6 +609,11 @@ export function applyCodexUsageStatus(
 
 	// ── 1. Request accounting ──────────────────────────────────────────────
 	applyCodexRequestAccounting(account, ctx, opts.requestAccounting);
+	ctx = fenceCodexObservationWrites(
+		ctx,
+		account.id,
+		getCodexObservationEpoch(account.id),
+	);
 
 	// (No rate-limit status-meta persistence and no 429 cooldown: a free read is
 	// neither a unified-status response nor a spend. See the CRITICAL GUARD.)

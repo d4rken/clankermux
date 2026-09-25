@@ -98,10 +98,13 @@ function makeCtx() {
 				},
 				// The usage-snapshot persist is credential-CAS'd, so it needs the
 				// changed-row count. This double has no rows: report a match.
-				runWithChanges: async (sql: string, params: unknown[]) => {
-					calls.runSql.push({ sql, params });
-					return 1;
-				},
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({
+					run: (sql: string, params: unknown[]) => {
+						calls.runSql.push({ sql, params });
+						return { changes: 1 };
+					},
+				}),
 			}),
 		},
 		asyncWriter: {

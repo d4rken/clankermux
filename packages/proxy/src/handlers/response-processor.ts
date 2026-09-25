@@ -11,6 +11,11 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
+import {
+	fenceCodexObservationWrites,
+	getCodexObservationEpoch,
+	isCodexObservationCurrent,
+} from "../codex-observation-fence";
 import { resolveLiveAccountQuota429 } from "./anthropic-account-quota";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { applyCodexObservation } from "./codex-observation";
@@ -165,6 +170,7 @@ export function updateAccountMetadata(
 	response: Response,
 	ctx: ProxyContext,
 	bypassSession = false,
+	codexObservationEpoch?: number,
 ): void {
 	// Codex responses are observed through the single shared applicator, which
 	// owns request accounting, rate-limit status-meta persistence, and the
@@ -178,6 +184,7 @@ export function updateAccountMetadata(
 	if (account.provider === "codex") {
 		applyCodexObservation(account, response, ctx, {
 			source: "real-traffic",
+			observationEpoch: codexObservationEpoch,
 			rateLimitInfo: ctx.provider.parseRateLimit(response),
 			requestAccounting: bypassSession ? "count-only" : "session",
 			rateLimitAction: { kind: "skip" },
@@ -238,6 +245,8 @@ export async function processProxyResponse(
 		 * evidence about nothing.
 		 */
 		locallySynthesized?: boolean;
+		/** Captured before this Codex attempt was sent. */
+		codexObservationEpoch?: number;
 	},
 ): Promise<boolean> {
 	// Scoped projection BEFORE any consumer: both the cooldown applied below
@@ -250,6 +259,22 @@ export async function processProxyResponse(
 		response,
 		ctx.provider.parseRateLimit(response),
 	);
+
+	const codexEpoch =
+		options?.codexObservationEpoch ?? getCodexObservationEpoch(account.id);
+	const metadataCtx = ctx;
+	if (account.provider === "codex") {
+		if (!isCodexObservationCurrent(account.id, codexEpoch)) {
+			// Count the request, but its old quota evidence cannot mutate the restored
+			// account. Preserve the response/failover verdict for this request itself.
+			const bypassSession =
+				requestMeta?.internal === true &&
+				requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
+			updateAccountMetadata(account, response, ctx, bypassSession, codexEpoch);
+			return rateLimitInfo.isRateLimited;
+		}
+		ctx = fenceCodexObservationWrites(ctx, account.id, codexEpoch);
+	}
 
 	// For Zai provider, if we got a 429 without resetTime, try parsing the body
 	if (
@@ -396,7 +421,13 @@ export async function processProxyResponse(
 		const bypassSession =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
-		updateAccountMetadata(account, response, ctx, bypassSession);
+		updateAccountMetadata(
+			account,
+			response,
+			metadataCtx,
+			bypassSession,
+			codexEpoch,
+		);
 		return true; // Signal rate limit
 	}
 
@@ -404,7 +435,13 @@ export async function processProxyResponse(
 	const bypassSession =
 		requestMeta?.internal === true &&
 		requestMeta?.headers?.get("x-clankermux-bypass-session") === "true";
-	updateAccountMetadata(account, response, ctx, bypassSession);
+	updateAccountMetadata(
+		account,
+		response,
+		metadataCtx,
+		bypassSession,
+		codexEpoch,
+	);
 
 	// On a non-rate-limited upstream response, resolve the probe lease and —
 	// when the response POSITIVELY proves the account serves (`response.ok`) —

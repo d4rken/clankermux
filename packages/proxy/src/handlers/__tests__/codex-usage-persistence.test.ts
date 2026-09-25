@@ -89,10 +89,13 @@ function makeDbCtx(db: Database) {
 					runSql.push({ sql, params });
 					db.run(sql, params as never[]);
 				},
-				runWithChanges: async (sql: string, params: unknown[]) => {
-					runSql.push({ sql, params });
-					return db.run(sql, params as never[]).changes;
-				},
+				runTransaction: async (body: () => number) => body(),
+				getSQLiteDb: () => ({
+					run: (sql: string, params: unknown[]) => {
+						runSql.push({ sql, params });
+						return db.run(sql, params as never[]);
+					},
+				}),
 			}),
 		},
 		asyncWriter: {
