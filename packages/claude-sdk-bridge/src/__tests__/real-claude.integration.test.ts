@@ -402,6 +402,76 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"resumes a released park at its call, and only there",
+			async () => {
+				const s = scenario(await results(), "releasedParkResume");
+				type Msg = { role: string; content: Array<Record<string, unknown>> };
+				const [a, b] = s.toolUseIds as string[];
+				expect(s.toolUseIds).toHaveLength(2);
+				// SIGTERM writes nothing onto the conversation's chain.
+				expect(s.addedByRelease).not.toContain("user");
+				expect(s.addedByRelease).not.toContain("assistant");
+				expect(s.resumeAtIsStoredEntry).toBe(true);
+
+				// A plain resume answers the calls itself, as interrupted, and
+				// the client's results never reach the model.
+				const plain = s.plain as { messages: Msg[] };
+				expect(JSON.stringify(plain.messages)).not.toContain("RELEASED-B");
+
+				// Resumed at the call: the calls, then their results, image and
+				// typed text in one user message, on the cached prefix.
+				const resumed = s.resumed as {
+					result: { subtype: string };
+					reply: unknown;
+					cache: { read: number };
+					messages: Msg[];
+				};
+				expect(resumed.result.subtype).toBe("success");
+				expect(resumed.reply).toEqual([
+					{ type: "text", text: "done: RELEASED-A" },
+				]);
+				expect(resumed.cache.read).toBe(s.firstCallCacheCreation as number);
+				const [assistant, user] = resumed.messages.slice(-2) as [Msg, Msg];
+				expect(assistant.role).toBe("assistant");
+				expect(assistant.content.map((c) => c.type)).toEqual([
+					"thinking",
+					"tool_use",
+					"tool_use",
+				]);
+				expect(typeof assistant.content[0]?.signature).toBe("string");
+				expect(user.role).toBe("user");
+				expect(
+					user.content.map((c) => [c.type, c.tool_use_id ?? c.text]),
+				).toEqual([
+					["tool_result", a],
+					["tool_result", b],
+					["text", "TYPED-WITH-RESULTS"],
+				]);
+				expect(JSON.stringify(user.content[0])).toContain('"image"');
+				const sent = JSON.stringify(resumed.messages);
+				expect(sent).not.toContain("interrupted");
+				expect(sent).not.toContain("No response requested");
+
+				// The conversation's next turn resumes the session plainly.
+				const next = s.next as { reply: unknown; messages: Msg[] };
+				expect(next.reply).toEqual([
+					{ type: "text", text: "echo: NEXT after release" },
+				]);
+				expect(JSON.stringify(next.messages)).toContain("RELEASED-B");
+				expect(JSON.stringify(next.messages)).not.toContain("interrupted");
+
+				// A resume point the session lacks fails before any model call.
+				expect(s.unknownPoint).toMatchObject({
+					subtype: "error_during_execution",
+				});
+				expect(
+					(s.unknownPoint as { errors: string[] }).errors.join(" "),
+				).toContain("No message found with message.uuid");
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {
 				const s = scenario(await results(), "oversizedInnerBody");

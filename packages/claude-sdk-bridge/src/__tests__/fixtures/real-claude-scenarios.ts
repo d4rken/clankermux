@@ -25,7 +25,18 @@ import {
 	type SdkBridgeTurnMeta,
 } from "@clankermux/types";
 import { type ClaudeSdkBridge, createClaudeSdkBridge } from "../../bridge";
+import { buildQueryOptions, workPaths } from "../../options";
+import { PromptStream } from "../../prompt-stream";
+import { FileSessionStore } from "../../session-store";
+import { ProcessGroupSpawner, resolveClaudeExecutable } from "../../spawn";
+import {
+	createToolServer,
+	loadMcpSdk,
+	ParkedCalls,
+	ToolNames,
+} from "../../tool-server";
 import type { SdkBridgeLimits } from "../../types";
+import { ensurePrivateDir } from "../../work-dirs";
 import {
 	foldReply,
 	MODEL,
@@ -806,6 +817,200 @@ await scenario("deadContinuation", async () => {
 		};
 	} finally {
 		await shortLived.dispose();
+	}
+});
+
+await scenario("releasedParkResume", async () => {
+	// What release-then-resume relies on, driven on the SDK directly: the
+	// bridge's options, tool server and session store, no bridge around them.
+	const exe = resolveClaudeExecutable();
+	if ("error" in exe) throw new Error(exe.error);
+	const { query } = await import("@anthropic-ai/claude-agent-sdk");
+	const mcp = await loadMcpSdk();
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-release-"));
+	const paths = workPaths(root);
+	for (const dir of Object.values(paths)) ensurePrivateDir(dir);
+	const store = new FileSessionStore(paths.sessions);
+	const spawner = new ProcessGroupSpawner();
+	const names = new ToolNames([READ_TOOL.name]);
+	// Only model calls reach the shared mock, as through the bridge's listener.
+	const front = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: (req) =>
+			new URL(req.url).pathname === "/v1/messages"
+				? mock.handle(req)
+				: new Response(null, { status: 404 }),
+	});
+	type Entry = Record<string, unknown> & { type: string; uuid?: string };
+	const entries = (id: string) => (store.read(id) ?? []) as Entry[];
+	const toolUseIds = (e: Entry): string[] => {
+		if (e.type !== "assistant") return [];
+		const content = (e.message as { content?: unknown } | undefined)?.content;
+		return Array.isArray(content)
+			? (content as Block[])
+					.filter((b) => b.type === "tool_use")
+					.map((b) => String(b.id))
+			: [];
+	};
+
+	const run = (
+		sessionId: string,
+		resume: boolean,
+		content: string | Block[],
+		extra: Record<string, unknown> = {},
+	) => {
+		const parked = new ParkedCalls();
+		const prompt = new PromptStream();
+		prompt.push(content);
+		const pids = new Set<number>();
+		const q = query({
+			prompt,
+			options: {
+				...buildQueryOptions({
+					paths,
+					baseUrl: `http://127.0.0.1:${front.port}`,
+					token: crypto.randomUUID(),
+					model: MODEL,
+					toolNames: names.exposed,
+					toolServer: createToolServer(mcp, [READ_TOOL], names, (id) =>
+						parked.wait(id),
+					),
+					systemPrompt: { append: null, excludeDynamicSections: false },
+					effort: null,
+					maxOutputTokens: 1024,
+					sessionId,
+					resume,
+					sessionStore: store,
+					executablePath: exe.path,
+					spawn: (o) => spawner.spawn(o, (pid) => pids.add(pid)),
+					stderr: () => {},
+					abortController: new AbortController(),
+				}),
+				...extra,
+			},
+		});
+		const assistants: Array<{ uuid: string; content: Block[] }> = [];
+		let result: { subtype: string; errors?: string[]; result?: string } | null =
+			null;
+		const done = (async () => {
+			try {
+				for await (const m of q) {
+					if (m.type === "assistant")
+						assistants.push({
+							uuid: m.uuid,
+							content: m.message.content as unknown as Block[],
+						});
+					if (m.type === "result") {
+						result = m as never;
+						prompt.end();
+					}
+				}
+			} catch {}
+		})();
+		return { parked, pids, assistants, done, result: () => result };
+	};
+	const lastCall = (from: number) =>
+		mock.requests
+			.slice(from)
+			.filter((r) => r.path.startsWith("/v1/messages"))
+			.at(-1);
+	const resumeWith = async (
+		sessionId: string,
+		content: string | Block[],
+		extra: Record<string, unknown> = {},
+	) => {
+		const from = mock.requests.length;
+		const leg = run(sessionId, true, content, extra);
+		await Promise.race([leg.done, Bun.sleep(60_000)]);
+		const call = lastCall(from);
+		return {
+			result: leg.result(),
+			reply: leg.assistants.at(-1)?.content ?? null,
+			cache: call?.cache ?? null,
+			messages: (call?.body as { messages?: Msg[] } | undefined)?.messages,
+		};
+	};
+
+	try {
+		// A turn parked on two calls, after a signed thinking block.
+		const released = crypto.randomUUID();
+		const from = mock.requests.length;
+		const first = run(released, false, "THINK PARALLEL read both");
+		const ids = () =>
+			first.assistants.flatMap((a) =>
+				a.content.filter((b) => b.type === "tool_use").map((b) => String(b.id)),
+			);
+		const stored = () =>
+			new Set(entries(released).flatMap((e) => toolUseIds(e)));
+		const t0 = performance.now();
+		// Claude Code runs MCP calls one at a time: only the first one parks.
+		while (
+			!(
+				first.parked.size > 0 &&
+				ids().length === 2 &&
+				ids().every((id) => stored().has(id))
+			) &&
+			performance.now() - t0 < 30_000
+		)
+			await Bun.sleep(25);
+		const firstCall = lastCall(from);
+		const resumeAt = first.assistants.at(-1)?.uuid ?? "";
+		// Release: the parked call is never answered, and nothing is interrupted.
+		const before = entries(released).length;
+		for (const pid of first.pids) spawner.kill(pid, "SIGTERM");
+		await Promise.race([first.done, Bun.sleep(10_000)]);
+		const results: Block[] = [
+			{
+				type: "tool_result",
+				tool_use_id: ids()[0],
+				content: [
+					{ type: "text", text: "RELEASED-A" },
+					{
+						type: "image",
+						source: {
+							type: "base64",
+							media_type: "image/png",
+							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+						},
+					},
+				],
+			},
+			{ type: "tool_result", tool_use_id: ids()[1], content: "RELEASED-B" },
+			{ type: "text", text: "TYPED-WITH-RESULTS" },
+		];
+		const copy = () => {
+			const id = crypto.randomUUID();
+			if (!store.fork(released, id)) throw new Error("fork failed");
+			return id;
+		};
+
+		const plain = await resumeWith(copy(), results);
+		const resumedId = copy();
+		const resumed = await resumeWith(resumedId, results, {
+			resumeSessionAt: resumeAt,
+		});
+		const next = await resumeWith(resumedId, "NEXT after release");
+		const unknownPoint = await resumeWith(copy(), results, {
+			resumeSessionAt: crypto.randomUUID(),
+		});
+		return {
+			toolUseIds: ids(),
+			resumeAtIsStoredEntry:
+				entries(released).find((e) => e.uuid === resumeAt) !== undefined,
+			addedByRelease: entries(released)
+				.slice(before)
+				.map((e) => e.type),
+			firstCallCacheCreation: firstCall?.cache?.creation ?? null,
+			plain,
+			resumed,
+			next,
+			unknownPoint: unknownPoint.result,
+		};
+	} finally {
+		spawner.killAll("SIGKILL");
+		front.stop(true);
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 
