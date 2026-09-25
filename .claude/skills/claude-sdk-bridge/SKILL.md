@@ -133,9 +133,7 @@ the conversation claim, so it supersedes no parked turn and leaves a
   `<docs>`, that head and the blank line after it are removed; everything
   after it is appended to the preset byte for byte and never parsed. Any
   other text (a replaced preamble, a forced prompt without the head) is
-  appended whole. pi's section updates to `tools`, `rules`, `docs`, or the
-  preamble back to stock are removed; every other update and every
-  `Removed system prompt section` message stays.
+  appended whole.
 
 It strips rather than selects because pi's extensions append to the
 prompt: claude-context returns pi's prompt plus raw guidance after `<cwd>`,
@@ -150,7 +148,7 @@ entry. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
-prompt. Only a pi release that changes the head or the update wording
+prompt. Only a pi release that changes the head
 needs new fixtures. Discovery lists the versions at
 `clankermux.piPromptVersions` in the OpenAI-shape
 `/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
@@ -161,21 +159,21 @@ All refusals are `400 invalid_request_error`:
 | `error.code` | When |
 | --- | --- |
 | `sdk_bridge_prompt_unsupported` | header missing, or a version without fixtures |
-| `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more often than the head and its updates account for (at least once is always allowed), or the stock preamble not followed by the full head |
+| `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more than once anywhere, or the stock preamble not followed by the full head |
 | `sdk_bridge_prompt_refused` | the forwarded text carries pi's preamble line at a line start, or both `docs/custom-provider.md` and `docs/packages.md`; subscription accounts answer those with a 400. A persona embedding its parent's pi prompt lands here too |
 
-pi's clankermux provider (openai-responses, no `compat`) sends one leading
-system message: pi-ai's `resolveTranscript` collapses every later system
-message into it, patching sections in place and appending new ones at the
-end. A mid-session tools change therefore stays inside the head and is
-stripped with it. A session whose replaced preamble goes back to stock
-comes out as the stock preamble with `tools`, `rules` and `docs` after
-everything else, which is refused as `incomplete_head`. Separate
-`Updated system prompt section` messages only arrive from a model with
-`supportsMidConvoSystemMessages`; the Responses adapter folds them into
-`system`, the Chat adapter refuses instruction messages after the first
-non-instruction one. Fixtures carry a `transport` saying which shape they
-are.
+The single leading system message is the layout's contract. pi's
+clankermux provider (openai-responses, no `compat`) sends only that:
+pi-ai's `resolveTranscript` collapses every later system message into it,
+patching sections in place and appending new ones at the end. A
+mid-session tools change stays inside the head and is stripped with it. A
+session whose replaced preamble goes back to stock comes out as the stock
+preamble with `tools`, `rules` and `docs` after everything else; that is
+refused as `incomplete_head`, as agreed with the pi side (none of its
+extensions does it). If pi ever sends mid-conversation system messages to
+ClankerMux, that comes with a new `x-clankermux-pi-prompt` value. A
+pi-subagents child placed through herdr today puts its boundary text before
+pi's head and is refused by the trigger check until the pi side moves it.
 
 Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code

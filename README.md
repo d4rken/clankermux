@@ -127,8 +127,7 @@ What differs from a direct request:
   refused with a 400 rather than sent without your instructions when the
   header is missing or names another version
   (`sdk_bridge_prompt_unsupported`), when `</tools>`, `</rules>` or
-  `</docs>` appears more often than pi's opening and its updates account
-  for (one is always allowed) or pi's opening lacks the sections that
+  `</docs>` appears more than once or pi's opening lacks the sections that
   follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
   contains pi's opening line or both `docs/custom-provider.md` and
   `docs/packages.md`, which subscription accounts answer with a 400
