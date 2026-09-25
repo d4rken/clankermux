@@ -181,6 +181,49 @@ Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code
 render that prompt rather than the stored one.
 
+## Side requests
+
+`x-clankermux-side-request: session-fork-v1` marks a client's auxiliary
+request (pi's recap and session title: the main turn's body replayed with
+its reply and one new prompt, `tool_choice: "none"`, a capped output) that
+must not become the conversation's next turn. Only a bridged attempt acts
+on it; on any other route the header does nothing.
+
+- **Proxy.** The value reaches the bridge as `SdkBridgeTurnMeta.sideRequest`.
+  Routing lets `tool_choice: none` through only for the exact value
+  (`sdkBridgeRefusedField(body, { sideRequest })`), and a request carrying
+  the header never takes the continuation shortcut.
+- **Verification.** `ConversationStore.peek` reads `current` without the
+  busy lock and changes nothing; it waits only for a session already
+  settling, at most `settleWaitMs`. The body must be `current`'s messages
+  plus exactly one user message (`messagesAfter`). Nothing is rebuilt.
+- **Run.** The `side_request` parse drops the body's tools and admits
+  `tool_choice: none`. The query resumes a copy of `current`
+  (`FileSessionStore.fork`) with the new message as its prompt, `tools: []`,
+  `allowedTools: []` and no MCP server; model, effort and `max_tokens` as
+  for any turn, and the system-prompt policy applies. It holds no claim and
+  no conversation key, so it never registers, supersedes nothing and is
+  superseded by nothing. The copy is an unregistered session and goes at
+  close: success, failure, client disconnect or shutdown.
+- **Accounting.** It counts against `maxProcesses`. Its row has
+  `sdk_bridge_turns.kind = side_request` (`turn` otherwise), and the
+  `sideRequests` counter counts it next to `turnsStarted`.
+
+| Answer | When |
+| --- | --- |
+| 409 `sdk_bridge_side_request_no_session` | no session header, no completed turn stored, or its files gone |
+| 409 `sdk_bridge_side_request_prefix_mismatch` | the history differs from the stored one, or anything other than one user message follows it (an unregistered main turn in between included) |
+| 400 `sdk_bridge_side_request_unknown` | any other header value |
+| 400 `invalid_request_error` | tool results in the new message |
+
+The copy's model call sends no tools, and `tools` is the start of the
+cached prefix. For a conversation whose turns carried client tools it
+therefore reads nothing of the conversation's prompt cache, and its history
+keeps the earlier `tool_use` and `tool_result` blocks with no tool
+definitions. In the real-binary scenario (the mock caches the way the API
+does) the copy reads 3 498 tokens for a tool-free conversation and 0 for
+one with a tool round.
+
 ## How a failed turn reaches the client
 
 The inner call Claude Code gave up on in the current leg decides
