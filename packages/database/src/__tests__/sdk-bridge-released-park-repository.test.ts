@@ -242,3 +242,50 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		expect(statusOf("fresh")).toBe("running");
 	});
 });
+
+describe("the released-park lease", () => {
+	const lease = (dir: string, token: string, pid = 100) => ({
+		dir,
+		pid,
+		startTime: "1",
+		token,
+		at: 1_000,
+	});
+	const nobodyDead = () => false;
+	const everyoneDead = () => true;
+
+	it("goes to the first taker, to anyone on the same directory, and to anyone once its holder is dead", async () => {
+		expect(
+			await parks.acquireLease(lease("/root-a/ns", "t1"), nobodyDead),
+		).toBe(true);
+		// Its own token: still held.
+		expect(
+			await parks.acquireLease(lease("/root-a/ns", "t1"), nobodyDead),
+		).toBe(true);
+		// Another directory while the holder lives: refused.
+		expect(
+			await parks.acquireLease(lease("/root-b/ns", "t2"), nobodyDead),
+		).toBe(false);
+		// The same directory: its directory lock already decided.
+		expect(
+			await parks.acquireLease(lease("/root-a/ns", "t3"), nobodyDead),
+		).toBe(true);
+		// A dead holder's lease is taken over from anywhere.
+		expect(
+			await parks.acquireLease(lease("/root-b/ns", "t4", 200), everyoneDead),
+		).toBe(true);
+		expect(await parks.holdsLease("t4")).toBe(true);
+		expect(await parks.holdsLease("t3")).toBe(false);
+	});
+
+	it("is given up only by its holder", async () => {
+		await parks.acquireLease(lease("/root-a/ns", "t1"), nobodyDead);
+		await parks.releaseLease("other");
+		expect(await parks.holdsLease("t1")).toBe(true);
+		await parks.releaseLease("t1");
+		expect(await parks.holdsLease("t1")).toBe(false);
+		expect(
+			await parks.acquireLease(lease("/root-b/ns", "t2"), nobodyDead),
+		).toBe(true);
+	});
+});

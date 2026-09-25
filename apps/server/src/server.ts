@@ -144,6 +144,7 @@ import {
 import {
 	installSdkBridge,
 	type SdkBridgeWiring,
+	sdkBridgeParkNamespace,
 } from "./claude-sdk-bridge-wiring";
 import { ClientService } from "./client-service";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
@@ -1333,6 +1334,7 @@ export default async function startServer(options?: {
 		config,
 		turnRepo: dbOps.sdkBridgeTurns,
 		parkRepo: dbOps.sdkBridgeReleasedParks,
+		parkNamespace: sdkBridgeParkNamespace(dbOps.getResolvedDbPath()),
 	});
 	sdkBridge = bridgeWiring;
 	// The graceful path disposes it explicitly after the HTTP drain; this covers

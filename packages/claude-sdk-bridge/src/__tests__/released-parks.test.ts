@@ -75,6 +75,7 @@ async function releaseHarness(
 	const h = makeHarness(
 		{
 			parkRepo,
+			parkNamespace: parkRepo.namespace,
 			limits: () => ({
 				parkReleaseMs: 60,
 				releasedParkTtlMs: 60_000,
@@ -248,11 +249,11 @@ async function released(h: ReleaseHarness, p: Parked) {
 	await waitFor(() => h.repo.turns.get(p.turnId)?.status === "released", 8_000);
 }
 
-function parkDir(h: Harness): string {
-	return join(h.workRoot, "released-parks");
+function parkDir(h: ReleaseHarness): string {
+	return join(h.workRoot, "released-parks", h.parkRepo.namespace);
 }
 
-function parkFiles(h: Harness): string[] {
+function parkFiles(h: ReleaseHarness): string[] {
 	return readdirSync(parkDir(h)).filter((n) => n.endsWith(".jsonl"));
 }
 
@@ -832,7 +833,7 @@ describe("across a restart", () => {
 		await released(a, missing);
 		await a.bridge.dispose();
 
-		const dir = join(workRoot, "released-parks");
+		const dir = join(workRoot, "released-parks", parkRepo.namespace);
 		const base = parkRepo.parks.get(kept.turnId);
 		// A claim a dead process held, with no model call after it.
 		await parkRepo.claim(staleClaim.turnId, "dead-owner", 1);
@@ -888,11 +889,15 @@ describe("across a restart", () => {
 		);
 	});
 
-	it("a second bridge on a work root another live one owns releases nothing", async () => {
+	it("a second bridge on a work root and database another live one owns releases nothing", async () => {
 		const workRoot = tempRoot();
-		const a = await releaseHarness({ workRoot });
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo });
 		const b = await releaseHarness({
 			workRoot,
+			repo,
+			parkRepo,
 			limits: { parkedTimeoutMs: 300 },
 		});
 		expect(a.bridge.status().releaseBlocked).toBeNull();
@@ -904,7 +909,7 @@ describe("across a restart", () => {
 			() => b.repo.turns.get(p.turnId)?.status === "timed_out",
 			3_000,
 		);
-		expect(b.parkRepo.parks.size).toBe(0);
+		expect(parkRepo.parks.size).toBe(0);
 	});
 });
 
@@ -1247,10 +1252,14 @@ describe("release edges", () => {
 
 	it("arms the parked timeout at park time when no release can happen", async () => {
 		const workRoot = tempRoot();
-		await releaseHarness({ workRoot });
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		await releaseHarness({ workRoot, repo, parkRepo });
 		// Another bridge owns the directory: this one never releases.
 		const b = await releaseHarness({
 			workRoot,
+			repo,
+			parkRepo,
 			limits: { parkReleaseMs: 5_000, parkedTimeoutMs: 300 },
 		});
 		const t0 = Date.now();
@@ -1307,7 +1316,7 @@ describe("recovery, row by row", () => {
 		const two = await parkTurn(a);
 		await released(a, two);
 		await a.bridge.dispose();
-		const dir = join(workRoot, "released-parks");
+		const dir = join(workRoot, "released-parks", parkRepo.namespace);
 		return { workRoot, repo, parkRepo, one, two, dir };
 	}
 
@@ -1398,5 +1407,97 @@ describe("recovery, row by row", () => {
 		expect(parkRepo.parks.has(one.turnId)).toBe(false);
 		expect(repo.turns.get(one.turnId)?.status).toBe("completed");
 		expect(b.bridge.status().releasedParks).toBe(1);
+	});
+});
+
+describe("ownership of released parks", () => {
+	it("an instance on another database, same work root, neither deletes nor touches the first's parks", async () => {
+		const workRoot = tempRoot();
+		const repoA = memoryTurnRepo();
+		const parksA = memoryParkRepo(repoA.turns);
+		const a = await releaseHarness({
+			workRoot,
+			repo: repoA,
+			parkRepo: parksA,
+			keep: true,
+		});
+		const p = await parkTurn(a);
+		await released(a, p);
+		const fileA = parkFiles(a);
+
+		// A dev instance with its own database, on the same cache directory.
+		const b = await releaseHarness({ workRoot });
+		expect(b.bridge.status().releaseBlocked).toBeNull();
+		expect(parkFiles(a)).toEqual(fileA);
+		await b.bridge.dispose();
+		await a.bridge.dispose();
+		// Still there for A's next start.
+		const c = await releaseHarness({ workRoot });
+		await c.bridge.ready();
+		expect(parkFiles(a)).toEqual(fileA);
+		expect(parksA.parks.get(p.turnId)?.state).toBe("released");
+		const a2 = await releaseHarness({
+			workRoot,
+			repo: repoA,
+			parkRepo: parksA,
+		});
+		expect(a2.bridge.status().releasedParks).toBe(1);
+	});
+
+	it("two work roots on one database: only the lease holder recovers or closes turns", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		const p = await parkTurn(a);
+		await released(a, p);
+		// A turn of A's still running.
+		const running = a.bridge.startTurn({
+			request: messagesRequest({ messages: [{ role: "user", content: "hi" }] }),
+			plan: makePlan(),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		const q = await a.sdk.next();
+		await waitFor(() =>
+			[...repo.turns.values()].some((t) => t.status === "running"),
+		);
+		const runningId = [...repo.turns.values()].find(
+			(t) => t.status === "running",
+		)?.id;
+
+		const b = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		expect(b.bridge.status().releaseBlocked).toContain("database");
+		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(repo.turns.get(String(runningId))?.status).toBe("running");
+		expect(parkRepo.lease?.dir).toBe(parkDir(a));
+
+		q.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "hi" }]),
+			resultMessage(),
+		);
+		expect((await reply(running)).status).toBe(200);
+	});
+
+	it("takes over a stale directory lock and never an owned one", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const dir = join(workRoot, "released-parks", parkRepo.namespace);
+		mkdirSync(dir, { recursive: true });
+		// A lock a dead process left.
+		writeFileSync(
+			join(dir, "owner.lock"),
+			JSON.stringify({ pid: 2 ** 22 + 9, startTime: "1", token: "old" }),
+		);
+		const a = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(a.bridge.status().releaseBlocked).toBeNull();
+		expect(JSON.parse(readFileSync(join(dir, "owner.lock"), "utf8")).pid).toBe(
+			process.pid,
+		);
+		expect(readdirSync(dir).filter((n) => n.includes("owner.lock"))).toEqual([
+			"owner.lock",
+		]);
 	});
 });

@@ -314,3 +314,13 @@ export type SdkBridgeReleasedParkInsert = Omit<
 	SdkBridgeReleasedPark,
 	"state" | "claimOwner" | "claimedAt"
 >;
+
+/** The one row of `sdk_bridge_park_lease`: who may act on released parks. */
+export interface SdkBridgeParkLease {
+	/** The holder's released-parks directory. */
+	dir: string;
+	pid: number;
+	startTime: string | null;
+	token: string;
+	at: number;
+}

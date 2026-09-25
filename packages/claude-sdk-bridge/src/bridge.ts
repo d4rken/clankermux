@@ -307,6 +307,7 @@ export function createClaudeSdkBridge(
 			log,
 			now,
 			owner: generationId,
+			namespace: deps.parkNamespace ?? "default",
 		});
 		try {
 			if (!parks.acquire()) {
@@ -344,6 +345,16 @@ export function createClaudeSdkBridge(
 	async function recoverParks(): Promise<boolean> {
 		if (!parks?.owned || !deps.parkRepo) return true;
 		try {
+			if (!(await parks.takeLease())) {
+				// Another server on this database: its parks are its own.
+				recovering = null;
+				parksOffReason =
+					"another running process on this database owns its released parks";
+				log.warn(
+					`SDK bridge: ${parksOffReason}; parked turns will not be released`,
+				);
+				return true;
+			}
 			const kept = await parks.recover({
 				preparing: bridgeErrors.bridgeRestarted("while this turn was released"),
 				consumed: bridgeErrors.bridgeRestarted(
@@ -560,9 +571,8 @@ export function createClaudeSdkBridge(
 
 	/** Why a parked query is not released now; null when it may be. */
 	function releaseRefusal(): string | null {
-		if (!parks?.owned)
-			return parksOffReason ?? "released parks are unavailable";
 		if (parksOffReason) return parksOffReason;
+		if (!parks?.usable) return recovering ?? "released parks are unavailable";
 		if (ceilingBlocked)
 			return "session files have reached sdk_bridge_session_bytes_ceiling";
 		return null;
@@ -1981,7 +1991,7 @@ export function createClaudeSdkBridge(
 			Bun.sleep(2_000),
 		]);
 		spawner.killAll("SIGKILL");
-		parks?.dispose();
+		await parks?.dispose();
 		if (generationRoot) removeTree(generationRoot);
 	}
 

@@ -1170,6 +1170,23 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
 	);
 
+	// Which bridge process may act on sdk_bridge_released_parks: at most one
+	// row, naming the released-parks directory (work root and database
+	// namespace) of its holder, whose pid and start time say whether it still
+	// runs. A process on another directory takes it only once its holder is
+	// dead, so two servers sharing one database never recover each other's
+	// parks.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_park_lease (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			dir TEXT NOT NULL,
+			pid INTEGER NOT NULL,
+			start_time TEXT,
+			token TEXT NOT NULL,
+			acquired_at INTEGER NOT NULL
+		)
+	`);
+
 	// A bridged turn parked on the client's tool calls whose Claude Code process
 	// was stopped: its session file lives in the bridge's released-parks
 	// directory and the client's results resume it, across restarts. One row

@@ -7,6 +7,7 @@ import type {
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
+	SdkBridgeParkLease,
 	SdkBridgeReleasedPark,
 	SdkBridgeReleasedParkInsert,
 	SdkBridgeTurnCounterDelta,
@@ -55,6 +56,13 @@ export interface SdkBridgeParkRepo {
 		startedBefore: number,
 		finish: SdkBridgeTurnFinish,
 	): Promise<number>;
+	/** Take the database's lease on released parks; see the repository. */
+	acquireLease(
+		lease: SdkBridgeParkLease,
+		holderDead: (held: SdkBridgeParkLease) => boolean,
+	): Promise<boolean>;
+	holdsLease(token: string): Promise<boolean>;
+	releaseLease(token: string): Promise<void>;
 }
 
 export interface BridgeLog {
@@ -147,6 +155,12 @@ export interface ClaudeSdkBridgeDeps {
 	turnRepo: SdkBridgeTurnRepo;
 	/** Without it no parked query is released; the parked timeout ends them. */
 	parkRepo?: SdkBridgeParkRepo;
+	/**
+	 * Names the database `parkRepo` writes to, so bridges on different
+	 * databases sharing a work root keep their parks apart
+	 * (`released-parks/<namespace>`). `[A-Za-z0-9_-]{1,64}`.
+	 */
+	parkNamespace?: string;
 	limits?: () => Partial<SdkBridgeLimits>;
 	timing?: Partial<SdkBridgeTiming>;
 	/** Holds HOME, CLAUDE_CONFIG_DIR, TMPDIR, the cwd and session files. */

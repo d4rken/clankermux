@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -47,6 +49,19 @@ export function sdkBridgeWorkRoot(
 ): string {
 	const cacheHome = env.XDG_CACHE_HOME || join(homedir(), ".cache");
 	return join(cacheHome, "clankermux", "claude-agent-sdk");
+}
+
+/**
+ * The database's own subdirectory of released parks: the first 16 hex of
+ * sha256 of its real path, so two servers on different databases sharing
+ * a cache directory never touch each other's parks.
+ */
+export function sdkBridgeParkNamespace(dbPath: string): string {
+	let path = dbPath;
+	try {
+		path = realpathSync(dbPath);
+	} catch {}
+	return createHash("sha256").update(path).digest("hex").slice(0, 16);
 }
 
 /** Read live, per turn, so an edited config applies without a restart. */
@@ -151,6 +166,8 @@ export async function installSdkBridge(input: {
 	turnRepo: SdkBridgeTurnRepo;
 	/** Released parks' records; without it parked turns are never released. */
 	parkRepo?: SdkBridgeParkRepo;
+	/** {@link sdkBridgeParkNamespace} of the database `parkRepo` writes to. */
+	parkNamespace?: string;
 	workRoot?: string;
 	/** Test seam: how the bridge package is loaded. */
 	load?: () => Promise<BridgeModule>;
@@ -167,6 +184,7 @@ export async function installSdkBridge(input: {
 			workRoot: input.workRoot ?? sdkBridgeWorkRoot(),
 			turnRepo: input.turnRepo,
 			...(input.parkRepo ? { parkRepo: input.parkRepo } : {}),
+			...(input.parkNamespace ? { parkNamespace: input.parkNamespace } : {}),
 			limits: () => sdkBridgeLimitsFromConfig(config),
 			dispatchInner: (req, ctx) => {
 				setSdkBridgeInnerRequestContext(req, ctx);

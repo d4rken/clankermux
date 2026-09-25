@@ -605,6 +605,12 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		],
 		source: "create-table-at-intro",
 	},
+	sdk_bridge_park_lease: {
+		shipped: "2026-09-25",
+		commit: "unreleased",
+		columns: ["id", "dir", "pid", "start_time", "token", "acquired_at"],
+		source: "create-table-at-intro",
+	},
 	anthropic_usage_reads: {
 		shipped: "2026-09-24",
 		commit: "unreleased",

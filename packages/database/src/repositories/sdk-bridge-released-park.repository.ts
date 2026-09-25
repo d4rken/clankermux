@@ -1,4 +1,5 @@
 import type {
+	SdkBridgeParkLease,
 	SdkBridgeReleasedPark,
 	SdkBridgeReleasedParkInsert,
 	SdkBridgeReleasedParkState,
@@ -255,6 +256,69 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 				finish.errorMessage ?? null,
 				startedBefore,
 			],
+		);
+	}
+
+	/**
+	 * Take the lease on released parks: when nobody holds it, when the holder
+	 * is on the same directory (whose own lock already decided), when it is
+	 * this token's, or when `holderDead` says the holder is gone. One
+	 * transaction, so two processes cannot both take it.
+	 */
+	async acquireLease(
+		lease: SdkBridgeParkLease,
+		holderDead: (held: SdkBridgeParkLease) => boolean,
+	): Promise<boolean> {
+		return this.adapter.runTransaction(() => {
+			const db = this.adapter.getSQLiteDb();
+			const held = db
+				.query(
+					"SELECT dir, pid, start_time, token, acquired_at FROM sdk_bridge_park_lease WHERE id = 1",
+				)
+				.get() as {
+				dir: string;
+				pid: number;
+				start_time: string | null;
+				token: string;
+				acquired_at: number;
+			} | null;
+			if (held) {
+				const current: SdkBridgeParkLease = {
+					dir: held.dir,
+					pid: Number(held.pid),
+					startTime: held.start_time,
+					token: held.token,
+					at: Number(held.acquired_at),
+				};
+				const takeable =
+					current.token === lease.token ||
+					current.dir === lease.dir ||
+					holderDead(current);
+				if (!takeable) return false;
+			}
+			db.run(
+				`INSERT INTO sdk_bridge_park_lease (id, dir, pid, start_time, token, acquired_at)
+				VALUES (1, ?, ?, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET dir = excluded.dir, pid = excluded.pid,
+					start_time = excluded.start_time, token = excluded.token,
+					acquired_at = excluded.acquired_at`,
+				[lease.dir, lease.pid, lease.startTime, lease.token, lease.at],
+			);
+			return true;
+		});
+	}
+
+	async holdsLease(token: string): Promise<boolean> {
+		const row = await this.get<{ token: string }>(
+			"SELECT token FROM sdk_bridge_park_lease WHERE id = 1",
+		);
+		return row?.token === token;
+	}
+
+	async releaseLease(token: string): Promise<void> {
+		await this.run(
+			"DELETE FROM sdk_bridge_park_lease WHERE id = 1 AND token = ?",
+			[token],
 		);
 	}
 }

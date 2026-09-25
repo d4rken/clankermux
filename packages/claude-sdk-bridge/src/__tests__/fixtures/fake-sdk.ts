@@ -14,6 +14,7 @@ import type {
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
+	SdkBridgeParkLease,
 	SdkBridgeReleasedPark,
 	SdkBridgeRoutePlan,
 	SdkBridgeTurnCounterDelta,
@@ -523,6 +524,9 @@ export function memoryParkRepo(
 	/** The next call of a method waits for this promise first. */
 	hold: Partial<Record<keyof SdkBridgeParkRepo, Promise<void>>>;
 	calls: string[];
+	/** Stands in for the database's identity: its released-parks subdirectory. */
+	namespace: string;
+	lease: SdkBridgeParkLease | null;
 } {
 	const parks = new Map<string, SdkBridgeReleasedPark>();
 	const failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>> = {};
@@ -545,11 +549,34 @@ export function memoryParkRepo(
 		const turn = turns.get(id);
 		if (turn) turn.status = status;
 	};
+	let lease: SdkBridgeParkLease | null = null;
 	return {
 		parks,
 		failNext,
 		hold,
 		calls,
+		namespace: `db${crypto.randomUUID().slice(0, 8)}`,
+		get lease() {
+			return lease;
+		},
+		async acquireLease(candidate, holderDead) {
+			await check("acquireLease");
+			if (
+				lease &&
+				lease.token !== candidate.token &&
+				lease.dir !== candidate.dir &&
+				!holderDead(lease)
+			)
+				return false;
+			lease = { ...candidate };
+			return true;
+		},
+		async holdsLease(token) {
+			return lease?.token === token;
+		},
+		async releaseLease(token) {
+			if (lease?.token === token) lease = null;
+		},
 		async insertPreparing(park) {
 			await check("insertPreparing");
 			if (parks.has(park.turnId)) throw new Error("UNIQUE: park");

@@ -17,6 +17,8 @@ import type { BridgeLog, SdkBridgeParkRepo } from "./types";
 import {
 	acquireOwnerLock,
 	ensurePrivateDir,
+	ownerRunning,
+	processStartTime,
 	publishFileAtomically,
 	releaseOwnerLock,
 	removeTree,
@@ -55,6 +57,7 @@ export interface ReleasedEntry {
 }
 
 const LOCK_FILE = "owner.lock";
+const NAMESPACE = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 
 /**
@@ -200,10 +203,40 @@ export class ReleasedParkStore {
 			now: () => number;
 			/** This process's claim owner, fencing its claims from a later one's. */
 			owner: string;
+			/** The database's own subdirectory ({@link ClaudeSdkBridgeDeps.parkNamespace}). */
+			namespace: string;
 		},
 	) {
-		this.dir = join(opts.workRoot, "released-parks");
+		if (!NAMESPACE.test(opts.namespace))
+			throw new Error(`Invalid released-park namespace ${opts.namespace}`);
+		this.dir = join(opts.workRoot, "released-parks", opts.namespace);
 		this.lockPath = join(this.dir, LOCK_FILE);
+	}
+
+	private leased = false;
+
+	/**
+	 * Take the database's lease for this directory: recovery and every
+	 * transition act on the whole table, so only one directory's owner may.
+	 * False when a live process on another directory holds it.
+	 */
+	async takeLease(): Promise<boolean> {
+		this.leased = await this.opts.repo.acquireLease(
+			{
+				dir: this.dir,
+				pid: process.pid,
+				startTime: processStartTime(process.pid),
+				token: this.lockToken,
+				at: this.opts.now(),
+			},
+			(held) => !ownerRunning(held),
+		);
+		return this.leased;
+	}
+
+	/** The directory lock and the database lease are both this process's. */
+	get usable(): boolean {
+		return this.held && this.leased;
 	}
 
 	/** Take the directory for this process; false when a live process holds it. */
@@ -217,7 +250,15 @@ export class ReleasedParkStore {
 		return this.held;
 	}
 
-	dispose(): void {
+	async dispose(): Promise<void> {
+		if (this.leased)
+			await this.opts.repo.releaseLease(this.lockToken).catch((error) => {
+				this.opts.log.warn(
+					"SDK bridge: could not give the park lease up",
+					error,
+				);
+			});
+		this.leased = false;
 		if (this.held) releaseOwnerLock(this.lockPath, this.lockToken);
 		this.held = false;
 		this.entries.clear();
@@ -289,7 +330,8 @@ export class ReleasedParkStore {
 		/** Checked between the steps: the release was given up (dispose). */
 		abandoned: () => boolean = () => false,
 	): Promise<ReleasedEntry> {
-		if (!this.held) throw new Error("the released-parks directory is not ours");
+		if (!this.usable)
+			throw new Error("the released-parks directory or lease is not ours");
 		const stopIfAbandoned = () => {
 			if (abandoned()) throw new Error("the release was given up");
 		};
@@ -550,7 +592,7 @@ export class ReleasedParkStore {
 			}
 		}
 		for (const name of readdirSync(this.dir))
-			if (name !== LOCK_FILE && !kept.has(name))
+			if (!name.startsWith(LOCK_FILE) && !kept.has(name))
 				removeTree(join(this.dir, name));
 		return kept.size;
 	}
