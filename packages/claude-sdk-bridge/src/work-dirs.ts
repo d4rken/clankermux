@@ -78,6 +78,18 @@ export function writePrivateFile(path: string, data: string): void {
 	}
 }
 
+/** Replace a file's content with `bytes`; private, never through a symlink. */
+export function writePrivateBytes(path: string, bytes: Uint8Array): void {
+	const fd = openPrivate(path, constants.O_TRUNC);
+	try {
+		let offset = 0;
+		while (offset < bytes.length)
+			offset += writeSync(fd, bytes, offset, bytes.length - offset);
+	} finally {
+		closeSync(fd);
+	}
+}
+
 /** Append to a private file, creating it. */
 export function appendPrivateFile(path: string, data: string): void {
 	const fd = openPrivate(path, constants.O_APPEND);

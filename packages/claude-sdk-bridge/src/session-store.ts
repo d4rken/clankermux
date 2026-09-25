@@ -9,8 +9,49 @@ import {
 	appendPrivateFile,
 	ensurePrivateDir,
 	removeTree,
+	writePrivateBytes,
 	writePrivateFile,
 } from "./work-dirs";
+
+/**
+ * A transcript's bytes with every `"sessionId":"<from>"` rewritten to `to`,
+ * and nothing else touched: no JSON parse, so a large session copies at disk
+ * speed and its entries stay exactly as Claude Code wrote them. Latin-1 maps
+ * each byte to one character and back, so multi-byte text survives as is.
+ */
+export function rewriteSessionId(
+	bytes: Buffer,
+	fromId: string,
+	toId: string,
+): Buffer {
+	assertSessionId(fromId);
+	assertSessionId(toId);
+	if (fromId === toId) return bytes;
+	return Buffer.from(
+		bytes
+			.toString("latin1")
+			.replaceAll(`"sessionId":"${fromId}"`, `"sessionId":"${toId}"`),
+		"latin1",
+	);
+}
+
+/** Copy the transcript at `from` to `to` under a new session id; false when unreadable. */
+export function forkTranscriptFile(
+	from: string,
+	to: string,
+	fromId: string,
+	toId: string,
+): boolean {
+	let bytes: Buffer;
+	try {
+		if (!lstatSync(from).isFile()) return false;
+		bytes = readFileSync(from);
+	} catch {
+		return false;
+	}
+	writePrivateBytes(to, rewriteSessionId(bytes, fromId, toId));
+	return true;
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUBPATH = /^[A-Za-z0-9_./-]{1,200}$/;
@@ -76,23 +117,21 @@ export class FileSessionStore implements SessionStore {
 	/**
 	 * Copy a session under a new id, so a turn that fails or is aborted leaves
 	 * the conversation's last good session untouched. False when there is no
-	 * readable session to copy; the turn then rebuilds instead.
+	 * session to copy; the turn then rebuilds instead. Synchronous on purpose:
+	 * a caller that checked a session exists copies it with no await between.
 	 */
 	fork(fromId: string, toId: string): boolean {
-		let entries: SessionStoreEntry[] | null;
-		try {
-			entries = this.read(fromId);
-		} catch {
-			return false;
-		}
-		if (!entries) return false;
-		this.write(
+		return forkTranscriptFile(
+			this.path({ sessionId: fromId }),
+			this.path({ sessionId: toId }),
+			fromId,
 			toId,
-			entries.map((entry) =>
-				"sessionId" in entry ? { ...entry, sessionId: toId } : entry,
-			),
 		);
-		return true;
+	}
+
+	/** Where the session's main transcript lives. */
+	pathOf(sessionId: string): string {
+		return this.path({ sessionId });
 	}
 
 	async delete(key: SessionKey): Promise<void> {
