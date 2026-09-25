@@ -180,19 +180,40 @@ describe("pi 0.87 head strip", () => {
 		});
 	});
 
-	it("removes updates to the head and forwards the others", () => {
-		expect(appendOf(decide(fixture("update-tools").system))).not.toContain(
-			"Updated system prompt section",
+	it("strips the head of what pi sends after a mid-session tools change", () => {
+		const f = fixture("collapsed-tools-change");
+		expect(f.messages).toHaveLength(1);
+		const append = appendOf(decide(f.system)) ?? "";
+		expect(append).not.toContain("<tools>");
+		expect(append).toContain("<project_context>\n");
+	});
+
+	it("refuses a session gone back to stock, whose collapsed head is split", () => {
+		// pi's collapse keeps the preamble's place and appends tools, rules and
+		// docs at the end; the pi side is being asked how to treat it.
+		const f = fixture("collapsed-custom-to-stock-refused");
+		expect(f.system).toEndWith("</docs>");
+		expect(refusalOf(decide(f.system)).detail).toMatchObject({
+			code: "sdk_bridge_prompt_malformed",
+			reason: "incomplete_head",
+		});
+	});
+
+	it("removes mid-conversation updates to the head and forwards the others", () => {
+		expect(
+			appendOf(decide(fixture("midconvo-update-tools").system)),
+		).not.toContain("Updated system prompt section");
+		const mixed = appendOf(
+			decide(fixture("midconvo-update-tools-and-skills").system),
 		);
-		const mixed = appendOf(decide(fixture("update-tools-and-skills").system));
 		expect(mixed).toContain('Updated system prompt section "skills"');
 		expect(mixed).not.toContain('"tools"');
 		expect(
-			appendOf(decide(fixture("update-extension-section").system)),
+			appendOf(decide(fixture("midconvo-update-extension-section").system)),
 		).toContain(
 			'Updated system prompt section "claude_context":\n\n<claude_context>\nGuidance v2\n</claude_context>',
 		);
-		const back = decide(fixture("update-preamble-to-stock").system);
+		const back = decide(fixture("midconvo-update-preamble-to-stock").system);
 		expect(appendOf(back)).not.toContain("Updated system prompt section");
 		expect(back.detail).toMatchObject({ removedUpdates: 4 });
 	});

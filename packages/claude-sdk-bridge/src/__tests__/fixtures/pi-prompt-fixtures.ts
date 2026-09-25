@@ -14,6 +14,12 @@ export interface PiPromptFixture {
 	/** pi's prompt options. */
 	input: Record<string, unknown>;
 	next?: Record<string, unknown>;
+	/**
+	 * `collapsed`: one leading system message, what pi's clankermux provider
+	 * sends. `mid-conversation`: an update stays a message of its own, the
+	 * shape of a model with `supportsMidConvoSystemMessages`.
+	 */
+	transport: "collapsed" | "mid-conversation";
 	/** The system text as the adapters hand it to the bridge. */
 	system: string;
 	/** The system messages pi sends, in order; `system` is them joined by a blank line. */

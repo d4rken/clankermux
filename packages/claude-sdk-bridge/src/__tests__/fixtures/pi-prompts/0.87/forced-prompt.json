@@ -11,6 +11,7 @@
 		},
 		"forceSystemPrompt": "You are a commit-message writer. Answer with one line, imperative mood."
 	},
+	"transport": "collapsed",
 	"system": "You are a commit-message writer. Answer with one line, imperative mood.",
 	"messages": [
 		"You are a commit-message writer. Answer with one line, imperative mood."

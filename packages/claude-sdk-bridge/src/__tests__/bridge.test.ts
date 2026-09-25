@@ -1302,7 +1302,8 @@ describe("pi's system prompt", () => {
 
 	it("sends a system array's text blocks the way pi's messages join", async () => {
 		const h = harness();
-		const f = fixture("update-tools-and-skills");
+		// The mid-conversation shape: the leading prompt and an update, as two blocks.
+		const f = fixture("midconvo-update-tools-and-skills");
 		const t = await start(
 			h,
 			{
@@ -1339,7 +1340,7 @@ describe("pi's system prompt", () => {
 			"duplicate_closing_tag",
 		],
 		[
-			"whose projection carries the rejected text",
+			"whose forwarded text carries the rejected text",
 			fixture("trigger-docs-pair").system,
 			{},
 			"sdk_bridge_prompt_refused",

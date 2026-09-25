@@ -2,13 +2,14 @@
 	"layout": "0.87",
 	"piCodingAgentVersion": "0.87.1",
 	"piAiVersion": "0.87.1",
-	"packageSha256": "619422187151324abd435803a449becc204d974d3f496b5c1133a7cff7b1878e",
+	"packageSha256": "7cf61a659c1c05e4f888777f66c584255f3bb855702943db08696e6dd6dc88d3",
 	"files": {
 		"pi-coding-agent/package.json": "627631b613ba4ca29eba8df793f5280fd20b19f01d73826e9ffda14c15def5dc",
 		"pi-coding-agent/dist/core/system-prompt.js": "c6b7bc71a76a7901a10bc89f0452508cb3be4bc112ae5f883e4edadc938080aa",
 		"pi-coding-agent/dist/core/skills.js": "3b7cc3997c630553eb88931de978e0db623ce51fbf7356e0ab922183885e208c",
 		"pi-ai/package.json": "0422fc7227a158c3c843c1540edfff017d2103be33ee48b882e2ff9032a5f7d2",
-		"pi-ai/dist/utils/text.js": "95037d5b787075ffb951cdeaf3b93aeb89735d10b31b82e19d2921f505ac2b04"
+		"pi-ai/dist/utils/text.js": "95037d5b787075ffb951cdeaf3b93aeb89735d10b31b82e19d2921f505ac2b04",
+		"pi-ai/dist/utils/transcript.js": "cd63514661b4036c3bcdda11a108f6be853f790a01216bf30fa80121e4fd320f"
 	},
 	"extensionFiles": {
 		"packages/claude-context/core.mjs": "bf13e788be1e05ca8751d0e835dbd0ee24ef23aa175f984b68e6270ef767a10f",
@@ -34,11 +35,15 @@
 		"forced-claude-context",
 		"forced-advertised-agents",
 		"forced-claude-context-and-agents",
-		"update-tools",
-		"update-extension-section",
-		"update-tools-and-skills",
-		"update-preamble-to-stock",
-		"section-update",
+		"collapsed-tools-change",
+		"collapsed-section-update",
+		"collapsed-extension-section-update",
+		"collapsed-custom-to-stock-refused",
+		"midconvo-update-tools",
+		"midconvo-update-extension-section",
+		"midconvo-update-tools-and-skills",
+		"midconvo-update-preamble-to-stock",
+		"midconvo-section-update",
 		"trigger-preamble-in-context",
 		"trigger-docs-pair",
 		"trigger-persona-embeds-pi"

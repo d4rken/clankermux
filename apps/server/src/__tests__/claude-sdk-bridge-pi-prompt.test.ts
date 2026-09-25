@@ -1,10 +1,10 @@
 /**
  * pi's system prompt through the public /wire/openai endpoints to the options
- * Claude Code starts with. pi sends its prompt as instruction messages (one
- * leading, one per later section update); the Responses and Chat adapters
- * fold them into the Messages `system`, and the bridge projects that. The
- * cases assert the exact `append`, so an adapter that joined or trimmed the
- * messages differently would fail here rather than shift what is forwarded.
+ * Claude Code starts with. pi sends its prompt as one leading instruction
+ * message; the Responses and Chat adapters turn it into the Messages
+ * `system`, and the bridge strips pi's head. The cases assert the exact
+ * `append`, so an adapter that trimmed or rewrapped the text would fail here
+ * rather than shift what is forwarded.
  */
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -82,10 +82,9 @@ async function harness(): Promise<Harness> {
 }
 
 /**
- * The request pi makes: its leading system message first; a later section
- * update where pi's transcript has it, after the turn it followed. The Chat
- * adapter takes instruction messages only before the conversation, so there
- * they all lead.
+ * The request pi makes: its prompt as one leading instruction message. pi's
+ * clankermux provider has no mid-conversation system messages, so pi-ai
+ * collapses every system message into that one before sending.
  */
 function send(
 	gw: Gateway,
@@ -93,38 +92,21 @@ function send(
 	f: PiPromptFixture,
 	headers: Record<string, string> = { "x-clankermux-pi-prompt": "0.87" },
 ): Promise<Response> {
-	const [leading, ...updates] = f.messages;
-	const instruction = (text: string) =>
+	expect(f.transport).toBe("collapsed");
+	const history =
 		endpoint === "chat"
-			? { role: "system", content: text }
-			: { type: "message", role: "developer", content: text };
-	const user = (text: string) =>
-		endpoint === "chat"
-			? { role: "user", content: text }
-			: {
-					type: "message",
-					role: "user",
-					content: [{ type: "input_text", text }],
-				};
-	const assistant = (text: string) =>
-		endpoint === "chat"
-			? { role: "assistant", content: text }
-			: {
-					type: "message",
-					role: "assistant",
-					content: [{ type: "output_text", text }],
-				};
-	const later = updates.length
-		? endpoint === "chat"
-			? [assistant("hi"), user("again")]
-			: [assistant("hi"), ...updates.map(instruction), user("again")]
-		: [];
-	const history = [
-		instruction(leading ?? ""),
-		...(endpoint === "chat" ? updates.map(instruction) : []),
-		user("hello"),
-		...later,
-	];
+			? [
+					{ role: "system", content: f.system },
+					{ role: "user", content: "hello" },
+				]
+			: [
+					{ type: "message", role: "developer", content: f.system },
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "hello" }],
+					},
+				];
 	return fetch(
 		`${gw.url}/wire/openai/v1/${endpoint === "chat" ? "chat/completions" : "responses"}`,
 		{
@@ -171,8 +153,8 @@ for (const endpoint of ["responses", "chat"] as const)
 			"forced-prompt",
 			"stock-extension-section",
 			"forced-claude-context-and-agents",
-			"section-update",
-			"update-tools-and-skills",
+			"collapsed-tools-change",
+			"collapsed-section-update",
 		])
 			it(`${name}: Claude Code starts with pi's prompt minus its head appended, byte for byte`, async () => {
 				const h = await harness();

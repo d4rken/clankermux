@@ -46,6 +46,12 @@ interface TextModule {
 	renderSystemMessageUpdate(message: Record<string, unknown>): string;
 }
 
+interface TranscriptModule {
+	collapseSystemMessages(context: { messages: unknown[] }): {
+		messages: Array<{ sections?: Sections }>;
+	};
+}
+
 interface ClaudeContextModule {
 	composeSystemPromptSupplement(result: {
 		catalog: unknown[];
@@ -93,6 +99,13 @@ interface Case {
 	input: Record<string, unknown>;
 	/** Options of a later turn: pi sends the changed sections as an update. */
 	next?: Record<string, unknown>;
+	/**
+	 * How pi sends that update. Its clankermux provider (openai-responses, no
+	 * `compat`) collapses every system message into one leading message;
+	 * `mid-conversation` is the shape of a model with
+	 * `supportsMidConvoSystemMessages`, where the update stays a message of its own.
+	 */
+	transport?: "collapsed" | "mid-conversation";
 	/** An extension's `before_agent_start` rewrite, which pi sends as a forced prompt. */
 	force?: (rendered: string) => string;
 	expect: Expected;
@@ -140,6 +153,7 @@ const GRAMMAR_FILES = [
 	"pi-coding-agent/dist/core/skills.js",
 	"pi-ai/package.json",
 	"pi-ai/dist/utils/text.js",
+	"pi-ai/dist/utils/transcript.js",
 ];
 const fileHashes = Object.fromEntries(
 	GRAMMAR_FILES.map((file) => [file, sha256(join(piRoot, file))]),
@@ -149,6 +163,9 @@ const prompt = (await import(
 	join(agentDir, "dist/core/system-prompt.js")
 )) as SystemPromptModule;
 const text = (await import(join(aiDir, "dist/utils/text.js"))) as TextModule;
+const transcript = (await import(
+	join(aiDir, "dist/utils/transcript.js")
+)) as TranscriptModule;
 const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextModule;
 const advertisedAgents = (await import(
 	ADVERTISED_AGENTS
@@ -464,9 +481,9 @@ const CASES: Case[] = [
 		expect: forwarded,
 	},
 	{
-		name: "update-tools",
+		name: "collapsed-tools-change",
 		description:
-			"A later turn changes a tool snippet; pi's update to the tools section is removed.",
+			"What pi sends after a tool snippet changes mid-session: one leading message whose tools section changed in place. The head is still first and is stripped.",
 		input: { ...BASE, contextFiles: [AGENTS_MD] },
 		next: {
 			...BASE,
@@ -479,37 +496,9 @@ const CASES: Case[] = [
 		expect: forwarded,
 	},
 	{
-		name: "update-extension-section",
+		name: "collapsed-section-update",
 		description:
-			"A later turn changes an extension section; the update is forwarded.",
-		input: { ...BASE, sections: { claude_context: "Guidance v1" } },
-		next: { ...BASE, sections: { claude_context: "Guidance v2" } },
-		expect: forwarded,
-	},
-	{
-		name: "update-tools-and-skills",
-		description:
-			"One update message changing tools and skills: the tools part goes, the skills part stays.",
-		input: { ...BASE, skills: SKILLS.slice(0, 1) },
-		next: {
-			...BASE,
-			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
-			toolSnippets: { ...TOOL_SNIPPETS, bash: "Execute bash commands" },
-		},
-		expect: forwarded,
-	},
-	{
-		name: "update-preamble-to-stock",
-		description:
-			"A session whose replaced preamble goes back to stock: that update and the head sections it adds are removed.",
-		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
-		next: { ...BASE },
-		expect: forwarded,
-	},
-	{
-		name: "section-update",
-		description:
-			"A later turn changes skills and context, drops the addendum and adds an extension section; every update is forwarded.",
+			"What pi sends after skills and context change, the addendum goes and an extension section arrives mid-session: one leading message, forwarded after the head.",
 		input: {
 			...BASE,
 			appendSystemPrompt: "Always answer in British English.",
@@ -522,6 +511,88 @@ const CASES: Case[] = [
 			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
 			sections: { todo_list: "- [ ] deploy" },
 		},
+		expect: forwarded,
+	},
+	{
+		name: "collapsed-extension-section-update",
+		description:
+			"What pi sends after an extension section changes mid-session: one leading message, forwarded.",
+		input: { ...BASE, sections: { claude_context: "Guidance v1" } },
+		next: { ...BASE, sections: { claude_context: "Guidance v2" } },
+		expect: forwarded,
+	},
+	{
+		name: "collapsed-custom-to-stock-refused",
+		description:
+			"A session whose replaced preamble goes back to stock: pi's collapse keeps the preamble's place but appends tools, rules and docs at the end, so the stock preamble is not followed by its head. Refused under pi-head-v1; the pi side is being asked about it.",
+		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
+		next: { ...BASE },
+		expect: refused("sdk_bridge_prompt_malformed", "incomplete_head"),
+	},
+	{
+		name: "midconvo-update-tools",
+		description:
+			"Mid-conversation messages: a later turn changes a tool snippet; pi's update to the tools section is removed.",
+		input: { ...BASE, contextFiles: [AGENTS_MD] },
+		next: {
+			...BASE,
+			contextFiles: [AGENTS_MD],
+			toolSnippets: {
+				...TOOL_SNIPPETS,
+				read: "Read file contents (images too)",
+			},
+		},
+		transport: "mid-conversation",
+		expect: forwarded,
+	},
+	{
+		name: "midconvo-update-extension-section",
+		description:
+			"Mid-conversation messages: a later turn changes an extension section; the update is forwarded.",
+		input: { ...BASE, sections: { claude_context: "Guidance v1" } },
+		next: { ...BASE, sections: { claude_context: "Guidance v2" } },
+		transport: "mid-conversation",
+		expect: forwarded,
+	},
+	{
+		name: "midconvo-update-tools-and-skills",
+		description:
+			"Mid-conversation messages: one update changing tools and skills; the tools part goes, the skills part stays.",
+		input: { ...BASE, skills: SKILLS.slice(0, 1) },
+		next: {
+			...BASE,
+			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
+			toolSnippets: { ...TOOL_SNIPPETS, bash: "Execute bash commands" },
+		},
+		transport: "mid-conversation",
+		expect: forwarded,
+	},
+	{
+		name: "midconvo-update-preamble-to-stock",
+		description:
+			"Mid-conversation messages: the replaced preamble goes back to stock; that update and the head sections it adds are removed.",
+		input: { ...BASE, customPrompt: "You are Widget's release assistant." },
+		next: { ...BASE },
+		transport: "mid-conversation",
+		expect: forwarded,
+	},
+	{
+		name: "midconvo-section-update",
+		description:
+			"Mid-conversation messages: skills and context change, the addendum goes and an extension section arrives; every update is forwarded.",
+		input: {
+			...BASE,
+			appendSystemPrompt: "Always answer in British English.",
+			contextFiles: [AGENTS_MD],
+			skills: SKILLS.slice(0, 1),
+		},
+		next: {
+			...BASE,
+			contextFiles: [AGENTS_MD, NESTED_AGENTS_MD],
+			skills: [...SKILLS.slice(0, 1), DEPLOY_SKILL],
+			sections: { todo_list: "- [ ] deploy" },
+		},
+		transport: "mid-conversation",
 		expect: forwarded,
 	},
 	{
@@ -639,35 +710,64 @@ function render(c: Case) {
 	});
 	if (first !== prompt.buildSystemPrompt(c.input))
 		throw new Error(`${c.name}: pi renders its prompt differently`);
-	const messages = [first];
-	const parts = [tailOf(leading)];
-	let removedUpdates = 0;
-	let sections = leading;
-	if (c.next) {
-		sections = prompt.buildSystemPromptSections(c.next);
-		const patch = prompt.diffSystemPromptSections(leading, sections);
-		if (!patch) throw new Error(`${c.name}: the next turn changes nothing`);
-		messages.push(
-			text.renderSystemMessageUpdate({
-				role: "system",
-				content: "",
-				sections: patch,
-				timestamp: 1,
-			}),
-		);
-		const update = updateWithoutHead(patch);
-		if (update.text !== null) parts.push(update.text);
-		removedUpdates += update.removed;
+	const next = c.next ? prompt.buildSystemPromptSections(c.next) : null;
+	const patch = next ? prompt.diffSystemPromptSections(leading, next) : null;
+	if (next && !patch)
+		throw new Error(`${c.name}: the next turn changes nothing`);
+	const updateMessage = patch
+		? { role: "system", content: "", sections: patch, timestamp: 2 }
+		: null;
+	if (c.transport === "mid-conversation") {
+		const messages = [first];
+		const parts = [tailOf(leading)];
+		let removedUpdates = 0;
+		if (updateMessage && patch) {
+			messages.push(text.renderSystemMessageUpdate(updateMessage));
+			const update = updateWithoutHead(patch);
+			if (update.text !== null) parts.push(update.text);
+			removedUpdates += update.removed;
+		}
+		return {
+			// The Responses and Chat adapters join instruction messages this way.
+			system: portable(messages.join("\n\n")),
+			messages: messages.map(portable),
+			sections: portableSections(next ?? leading),
+			expected: {
+				headStripped: isStock(leading),
+				forwarded: parts.filter(Boolean).join("\n\n"),
+				removedUpdates,
+			},
+		};
 	}
+	// pi-ai's resolveTranscript for a model without mid-conversation system
+	// messages: every system message replayed into one leading message.
+	const [collapsed] = transcript.collapseSystemMessages({
+		messages: [
+			{ role: "system", content: "", sections: leading, timestamp: 0 },
+			{ role: "user", content: "hello", timestamp: 1 },
+			...(updateMessage
+				? [updateMessage, { role: "user", content: "again", timestamp: 3 }]
+				: []),
+		],
+	}).messages;
+	const sections = collapsed?.sections ?? {};
+	const system = text.getSystemMessageText({ ...collapsed });
+	const names = Object.keys(sections);
+	const headFirst =
+		isStock(sections) &&
+		HEAD_SECTIONS.every((name, i) => names[i + 1] === name);
+	if (isStock(sections) && !headFirst && c.expect.outcome !== "refused")
+		throw new Error(
+			`${c.name}: the stock preamble is not followed by its head`,
+		);
 	return {
-		// The Responses and Chat adapters join instruction messages this way.
-		system: portable(messages.join("\n\n")),
-		messages: messages.map(portable),
+		system: portable(system),
+		messages: [portable(system)],
 		sections: portableSections(sections),
 		expected: {
-			headStripped: isStock(leading),
-			forwarded: parts.filter(Boolean).join("\n\n"),
-			removedUpdates,
+			headStripped: headFirst,
+			forwarded: headFirst ? tailOf(sections) : system,
+			removedUpdates: 0,
 		},
 	};
 }
@@ -688,6 +788,7 @@ function fixture(c: Case) {
 		description: c.description,
 		input: c.input,
 		...(c.next ? { next: c.next } : {}),
+		transport: c.transport ?? "collapsed",
 		...rendered,
 		expect,
 	};
