@@ -323,6 +323,8 @@ export function createClaudeSdkBridge(
 	let sessionBytes: number | null = null;
 	/** Releases in flight, by turn id; each settles once its turn is stored or ended. */
 	const releases = new Map<string, Promise<void>>();
+	/** Releases dispose gave up on: they must store nothing after that. */
+	const abandoned = new Set<string>();
 	/** Resume descriptors of live queries, by turn id. */
 	const descriptors = new Map<string, ResumeDescriptor>();
 	/** Live queries resumed from a released park, by turn id. */
@@ -558,6 +560,7 @@ export function createClaudeSdkBridge(
 	async function storeRelease(live: LiveQuery): Promise<void> {
 		const descriptor = descriptors.get(live.turnId);
 		const stop = await live.release();
+		if (abandoned.has(live.turnId)) return;
 		if (!stop.ok) {
 			if (!stop.stopped) {
 				counters.releasesRefused++;
@@ -588,6 +591,7 @@ export function createClaudeSdkBridge(
 				resumedFrom.delete(live.turnId);
 				await parks.forget(previous);
 			}
+			if (abandoned.has(live.turnId)) return;
 			const at = now();
 			await parks.store(
 				{
@@ -606,6 +610,7 @@ export function createClaudeSdkBridge(
 				},
 				descriptor,
 				source,
+				() => abandoned.has(live.turnId),
 			);
 		} catch (error) {
 			return fail(errorSummary(error));
@@ -1925,10 +1930,12 @@ export function createClaudeSdkBridge(
 		// One that did not finish in time ends as failed; recovery closes
 		// whatever record it left.
 		for (const live of all)
-			if (live.releasing)
+			if (live.releasing) {
+				abandoned.add(live.turnId);
 				live.failRelease(
 					bridgeErrors.releaseFailed("the bridge stopped first"),
 				);
+			}
 		listener.stop();
 		await Promise.race([
 			Promise.all(all.map((live) => live.done)),

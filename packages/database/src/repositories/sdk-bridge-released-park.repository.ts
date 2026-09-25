@@ -48,6 +48,14 @@ function toPark(row: ParkRow): SdkBridgeReleasedPark {
 	};
 }
 
+/**
+ * The turn is not finished (a missing row counts as open): a park never
+ * becomes released or claimed for a turn that already ended.
+ */
+const TURN_OPEN = `NOT EXISTS (
+	SELECT 1 FROM sdk_bridge_turns t WHERE t.id = ? AND t.finished_at IS NOT NULL
+)`;
+
 const FINISH_TURN = `UPDATE sdk_bridge_turns SET
 	finished_at = ?, status = ?, http_status = ?, error_type = ?,
 	error_message = ?, duration_ms = COALESCE(?, duration_ms)
@@ -128,8 +136,8 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 			const changed = db.run(
 				`UPDATE sdk_bridge_released_parks
 				SET state = 'released', session_file = ?, file_bytes = ?
-				WHERE turn_id = ? AND state = 'preparing'`,
-				[file.sessionFile, file.fileBytes, turnId],
+				WHERE turn_id = ? AND state = 'preparing' AND ${TURN_OPEN}`,
+				[file.sessionFile, file.fileBytes, turnId, turnId],
 			).changes;
 			if (changed !== 1) return false;
 			db.run(`UPDATE sdk_bridge_turns SET status = 'released' WHERE id = ?`, [
@@ -146,8 +154,8 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 			const changed = db.run(
 				`UPDATE sdk_bridge_released_parks
 				SET state = 'claimed', claim_owner = ?, claimed_at = ?
-				WHERE turn_id = ? AND state = 'released'`,
-				[owner, at, turnId],
+				WHERE turn_id = ? AND state = 'released' AND ${TURN_OPEN}`,
+				[owner, at, turnId, turnId],
 			).changes;
 			if (changed !== 1) return false;
 			db.run(`UPDATE sdk_bridge_turns SET status = 'running' WHERE id = ?`, [

@@ -572,11 +572,16 @@ export class LiveQuery {
 			if (this.idleTimer) clearTimeout(this.idleTimer);
 			this.idleTimer = null;
 			const release = this.init.onReleaseDue;
-			if (this.init.parkReleaseMs != null && release)
-				this.releaseTimer = setTimeout(
-					() => release(this),
-					this.init.parkReleaseMs,
-				);
+			const releaseMs = this.init.parkReleaseMs;
+			// The release timer only when a release can happen, and before the
+			// parked timeout would end the query anyway.
+			if (
+				release &&
+				releaseMs != null &&
+				releaseMs < this.init.parkedTimeoutMs &&
+				(this.init.canRelease?.() ?? true)
+			)
+				this.releaseTimer = setTimeout(() => release(this), releaseMs);
 			else this.armParkedTimeout();
 			if (this.init.isShuttingDown() && release)
 				queueMicrotask(() => release(this));
@@ -621,11 +626,15 @@ export class LiveQuery {
 			e.toolUseIds.some((id) => awaited.has(id)),
 		);
 		if (!issuing) return null;
-		if (issuing.messageId === null) return issuing.uuid;
-		return (
-			this.envelopes.findLast((e) => e.messageId === issuing.messageId)?.uuid ??
-			null
-		);
+		const envelopes =
+			issuing.messageId === null
+				? [issuing]
+				: this.envelopes.filter((e) => e.messageId === issuing.messageId);
+		// Not until the message's envelopes carry every awaited call: an
+		// earlier point would leave some of them out of the resume.
+		const covered = new Set(envelopes.flatMap((e) => e.toolUseIds));
+		if ([...awaited].some((id) => !covered.has(id))) return null;
+		return envelopes.at(-1)?.uuid ?? null;
 	}
 
 	/**
@@ -669,6 +678,9 @@ export class LiveQuery {
 		if (!resumeAt) {
 			// Still whole: it stays parked, or the caller tears it down.
 			this.state = "awaiting_client";
+			// Unless Claude Code died meanwhile: then the query ends as the
+			// pump would have ended it.
+			if (this.pumpFinished) void this.afterPump();
 			return {
 				ok: false,
 				reason: "Claude Code reported no message for the parked calls",

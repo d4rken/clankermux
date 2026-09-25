@@ -268,8 +268,13 @@ export class ReleasedParkStore {
 		park: Omit<SdkBridgeReleasedParkInsert, "sessionFile" | "fileBytes">,
 		descriptor: ResumeDescriptor,
 		source: string,
+		/** Checked between the steps: the release was given up (dispose). */
+		abandoned: () => boolean = () => false,
 	): Promise<ReleasedEntry> {
 		if (!this.held) throw new Error("the released-parks directory is not ours");
+		const stopIfAbandoned = () => {
+			if (abandoned()) throw new Error("the release was given up");
+		};
 		const sessionFile = `${park.sessionId}.jsonl`;
 		const path = this.pathOf(sessionFile);
 		await this.opts.repo.insertPreparing({
@@ -279,12 +284,14 @@ export class ReleasedParkStore {
 		});
 		let fileBytes: number;
 		try {
+			stopIfAbandoned();
 			fileBytes = publishFileAtomically(
 				this.dir,
 				sessionFile,
 				readFileSync(source),
 				`.tmp-${randomBytes(8).toString("hex")}`,
 			);
+			stopIfAbandoned();
 			if (
 				!(await this.opts.repo.markReleased(park.turnId, {
 					sessionFile,

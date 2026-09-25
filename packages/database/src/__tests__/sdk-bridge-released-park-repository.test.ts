@@ -135,6 +135,21 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		).toBe(false);
 	});
 
+	it("neither releases nor claims a park whose turn has finished", async () => {
+		await insertTurn();
+		await parks.insertPreparing(park());
+		await turns.finishTurn("turn-1", { finishedAt: 700, status: "failed" });
+		expect(
+			await parks.markReleased("turn-1", { sessionFile: "f", fileBytes: 1 }),
+		).toBe(false);
+		expect(statusOf()).toBe("failed");
+		db.run(
+			"UPDATE sdk_bridge_released_parks SET state = 'released' WHERE turn_id = 'turn-1'",
+		);
+		expect(await parks.claim("turn-1", "owner-a", 2_000)).toBe(false);
+		expect(statusOf()).toBe("failed");
+	});
+
 	it("closes the turn and deletes its park in one step", async () => {
 		await insertTurn();
 		await parks.insertPreparing(park());

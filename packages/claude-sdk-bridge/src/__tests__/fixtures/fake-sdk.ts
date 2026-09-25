@@ -567,7 +567,8 @@ export function memoryParkRepo(
 		async markReleased(turnId, file) {
 			await check("markReleased");
 			const park = parks.get(turnId);
-			if (park?.state !== "preparing") return false;
+			if (park?.state !== "preparing" || turns.get(turnId)?.finishedAt)
+				return false;
 			Object.assign(park, file, { state: "released" });
 			setStatus(turnId, "released");
 			return true;
@@ -575,7 +576,8 @@ export function memoryParkRepo(
 		async claim(turnId, owner, at) {
 			await check("claim");
 			const park = parks.get(turnId);
-			if (park?.state !== "released") return false;
+			if (park?.state !== "released" || turns.get(turnId)?.finishedAt)
+				return false;
 			Object.assign(park, {
 				state: "claimed",
 				claimOwner: owner,

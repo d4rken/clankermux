@@ -148,7 +148,8 @@ async function parkTurn(
 	opts: {
 		ids?: string[];
 		meta?: Partial<SdkBridgeTurnMeta>;
-		envelopes?: boolean;
+		/** false: none; "first": only the envelopes up to the first call. */
+		envelopes?: boolean | "first";
 	} = {},
 ): Promise<Parked> {
 	const ids = opts.ids ?? [`toolu_${crypto.randomUUID().slice(0, 8)}`];
@@ -175,7 +176,9 @@ async function parkTurn(
 	const r = await reply(response);
 	expect(r.stop).toBe("tool_use");
 	if (opts.envelopes !== false)
-		for (const block of blocks)
+		for (const block of opts.envelopes === "first"
+			? blocks.slice(0, 2)
+			: blocks)
 			query.emit(
 				assistantMessage(
 					[
@@ -1207,5 +1210,82 @@ describe("supersession around a release", () => {
 			resultMessage(),
 		);
 		expect((await reply(t)).status).toBe(200);
+	});
+});
+
+describe("release edges", () => {
+	it("does not release before the envelopes cover every awaited call", async () => {
+		const h = await releaseHarness({ limits: { parkedTimeoutMs: 60_000 } });
+		const p = await parkTurn(h, {
+			ids: ["toolu_x", "toolu_y"],
+			envelopes: "first",
+		});
+		await waitFor(
+			() => h.bridge.status().counters.releasesRefused === 1,
+			5_000,
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(h.bridge.status().parked).toBe(1);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("running");
+	});
+
+	it("closes a query whose process died while the release waited, instead of parking it", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { envelopes: false });
+		// Dies while the release waits for the envelopes.
+		await waitFor(() => h.bridge.status().parked === 0);
+		process.kill(Number(p.query.pid), "SIGKILL");
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 5_000);
+		expect(h.bridge.status().live).toBe(0);
+		expect(h.parkRepo.parks.size).toBe(0);
+	});
+
+	it("arms the parked timeout at park time when no release can happen", async () => {
+		const workRoot = tempRoot();
+		await releaseHarness({ workRoot });
+		// Another bridge owns the directory: this one never releases.
+		const b = await releaseHarness({
+			workRoot,
+			limits: { parkReleaseMs: 5_000, parkedTimeoutMs: 300 },
+		});
+		const t0 = Date.now();
+		const p = await parkTurn(b);
+		await waitFor(
+			() => b.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(Date.now() - t0).toBeLessThan(2_000);
+	});
+
+	it("never lets the parked timeout run past its value when it is shorter than the release delay", async () => {
+		const h = await releaseHarness({
+			limits: { parkReleaseMs: 5_000, parkedTimeoutMs: 300 },
+		});
+		const t0 = Date.now();
+		const p = await parkTurn(h);
+		await waitFor(
+			() => h.repo.turns.get(p.turnId)?.status === "timed_out",
+			3_000,
+		);
+		expect(Date.now() - t0).toBeLessThan(2_000);
+		expect(h.parkRepo.parks.size).toBe(0);
+	});
+
+	it("a release dispose gave up on stores nothing afterwards", async () => {
+		const h = await releaseHarness({
+			process: "ignore-term",
+			timing: { releaseDrainMs: 100 },
+			keep: true,
+		});
+		const p = await parkTurn(h);
+		await waitFor(() => h.bridge.status().parked === 0, 2_000);
+		await h.bridge.dispose();
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("failed");
+		// The SIGKILL lands and the release would carry on; it must not.
+		await Bun.sleep(3_000);
+		expect(h.parkRepo.parks.size).toBe(0);
+		expect(existsSync(parkDir(h)) ? parkFiles(h) : []).toEqual([]);
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("failed");
+		rmSync(h.workRoot, { recursive: true, force: true });
 	});
 });
