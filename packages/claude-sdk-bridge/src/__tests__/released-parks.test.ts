@@ -1501,3 +1501,20 @@ describe("ownership of released parks", () => {
 		]);
 	});
 });
+
+describe("timings of a resumed turn", () => {
+	it("measures spawn and first event from the resume's own launch, duration from the turn's start", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		await Bun.sleep(600);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "completed");
+		const turn = h.repo.turns.get(p.turnId) as Record<string, number>;
+		expect(turn.spawnMs).toBeLessThan(400);
+		expect(turn.firstEventMs).toBeLessThan(400);
+		expect(turn.durationMs).toBeGreaterThanOrEqual(600);
+	});
+});

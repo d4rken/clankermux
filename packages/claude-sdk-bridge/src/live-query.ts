@@ -189,7 +189,10 @@ export class LiveQuery {
 	readonly turnId: string;
 	readonly ownerApiKeyId: string | null;
 	readonly sessionId: string;
+	/** When the turn started; a resumed release keeps its turn's start. */
 	readonly startedAt: number;
+	/** When this query was launched: spawn and first-event times count from it. */
+	readonly launchedAt: number;
 	readonly conversationKey: string | null;
 	readonly requestedModel: string;
 	private leg: Leg | null = null;
@@ -259,6 +262,7 @@ export class LiveQuery {
 		this.ownerApiKeyId = init.ownerApiKeyId;
 		this.sessionId = init.sessionId;
 		this.startedAt = init.startedAt;
+		this.launchedAt = init.now();
 		this.conversationKey = init.conversationKey;
 		this.requestedModel = init.requestedModel;
 		this.clientMessages = init.clientMessages;
@@ -841,12 +845,12 @@ export class LiveQuery {
 		switch (message.type) {
 			case "system":
 				if (message.subtype === "init" && this.spawnMs === null)
-					this.spawnMs = this.init.now() - this.startedAt;
+					this.spawnMs = this.init.now() - this.launchedAt;
 				return;
 			case "stream_event": {
 				if (message.parent_tool_use_id !== null) return;
 				if (this.firstEventMs === null)
-					this.firstEventMs = this.init.now() - this.startedAt;
+					this.firstEventMs = this.init.now() - this.launchedAt;
 				this.sawFirstEvent = true;
 				if (!this.leg) {
 					this.init.log.debug(
