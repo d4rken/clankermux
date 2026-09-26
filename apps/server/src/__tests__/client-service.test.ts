@@ -1794,6 +1794,49 @@ describe("client service integration", () => {
 				]);
 		});
 
+		it("withholds a Claude Code alias stage that targets a [1m] id", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:long",
+				displayName: "Long",
+				revision: 0,
+				targets: [
+					{ model: "claude-opus-5-5[1m]", accountIds: null },
+					{ model: "gpt-6-astra", accountIds: null },
+				],
+			});
+			const draft = blank();
+			draft.application = "claude-code";
+			draft.catalogues.anthropic.models = [
+				{
+					id: alias.id,
+					displayName: "Long",
+					targetModel: alias.id,
+					accountIds: null,
+				},
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const models = (await service.modelMetadata(id, "anthropic")).models;
+			// The alias hands the direct route claude-opus-5-5[1m], which it
+			// refuses, so only the Astra stage describes it.
+			const long = models["claude-alias:long"];
+			expect(long?.cost).toMatchObject({ input: 10, output: 50 });
+			// A concrete entry whose own suffix Claude Code strips stays at 1M.
+			expect(models["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
+		});
+
 		it("describes a [1m] entry from the family rule that routes it", async () => {
 			dbOps
 				.getAdapter()

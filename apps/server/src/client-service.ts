@@ -786,8 +786,10 @@ export class ClientService {
 				// value would then describe a route that no longer exists.
 				const lands = resolveRoutingTarget(winning, sent).upstreamModel;
 				// Left as sent, Claude Code's route serves the entry as written.
-				const servedAsWritten = claudeCode && lands === sent;
-				const routed = servedAsWritten ? model.id : lands;
+				const routed = claudeCode && lands === sent ? model.id : lands;
+				// Only a concrete entry's own suffix, which Claude Code strips; an
+				// alias's `[1m]` stages reach the direct route as written.
+				const servedAsWritten = routed !== lands;
 				const alias = routed.startsWith("alias:")
 					? await this.deps.dbOps.modelAliases.get(routed)
 					: null;
