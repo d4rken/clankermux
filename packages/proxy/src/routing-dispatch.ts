@@ -21,7 +21,10 @@ import {
 	RoutingPolicyError,
 } from "./resolved-route";
 import { observeRoutingResponse } from "./routing-response-audit";
-import { getModelPermissionService } from "./routing-service";
+import {
+	getModelPermissionService,
+	isModelSuppressedFor,
+} from "./routing-service";
 import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 
 /** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
@@ -173,11 +176,11 @@ export async function sendAuthorizedRequest(
 				});
 			if (
 				!route.permits(current, permissions) ||
-				(await ctx.dbOps.routing.isModelSuppressed(
-					account.id,
+				(await isModelSuppressedFor(
+					ctx,
+					current,
 					target.scope,
 					target.upstreamModel,
-					Date.now(),
 				))
 			)
 				throw new RoutingPolicyError(
