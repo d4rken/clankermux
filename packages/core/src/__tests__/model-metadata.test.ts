@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ClientModelMetadata, ModelCachePolicy } from "@clankermux/types";
+import type {
+	AliasReasoningEffort,
+	ClientModelMetadata,
+	ModelCachePolicy,
+} from "@clankermux/types";
 import {
 	reduceModelCachePolicies,
 	resolveClientModelMetadata,
@@ -257,7 +261,13 @@ describe("published model metadata", () => {
 		const efforts = async (targetModel: string, providers: string[]) =>
 			(await resolveClientModelMetadata({ targetModel, providers }))
 				.supportedReasoningEfforts;
-		const full = ["low", "medium", "high", "xhigh", "max"];
+		const full: AliasReasoningEffort[] = [
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		];
 		expect(await efforts("claude-opus-5-5", ["anthropic"])).toEqual(full);
 		expect(
 			await efforts("claude-fable-5-1", ["anthropic", "claude-console-api"]),

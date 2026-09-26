@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import type { AliasReasoningEffort } from "@clankermux/types";
 import {
 	ALIAS_ADVERTISED_EFFORTS,
 	aliasEffortClampsToClaudeFamily,
@@ -35,7 +36,13 @@ it("requires matching adapter and model families", () => {
 	);
 });
 it("profiles Claude models on every official Anthropic provider", () => {
-	const full = ["low", "medium", "high", "xhigh", "max"];
+	const full: AliasReasoningEffort[] = [
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max",
+	];
 	for (const provider of ["anthropic", "claude-oauth", "claude-console-api"]) {
 		for (const model of [
 			"claude-opus-5-5",
