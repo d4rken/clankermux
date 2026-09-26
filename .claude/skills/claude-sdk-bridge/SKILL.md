@@ -379,6 +379,12 @@ still refused, and stale or partial ones keep their own 409.
   message id).
 - **Resume needs a session header.** Without one every user turn is a fresh
   session rebuilt from the client's history; nothing resumes on a digest match.
+- **"Resumed session (account change)".** A matching history resumes even
+  when the preferred account differs from the previous turn's; the turn
+  records `rebuild_reason = account_change`. The resumed transcript sends
+  thinking signed under the earlier account's org, which other orgs accept
+  (production, 46 days: no signature 400 across 5 orgs). A rebuild would
+  gain nothing: `/wire/openai` clients never return signed thinking.
 
 ## Resources
 

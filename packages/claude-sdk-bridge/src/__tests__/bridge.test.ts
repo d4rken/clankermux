@@ -314,6 +314,181 @@ describe("a plain turn", () => {
 		expect(body.stop_reason).toBe("end_turn");
 	});
 
+	describe("usage of a reply that spans several model calls", () => {
+		const firstCall = {
+			input_tokens: 10,
+			cache_read_input_tokens: 0,
+			cache_creation_input_tokens: 100,
+			output_tokens: 1,
+		};
+		const lastCall = {
+			input_tokens: 20,
+			cache_read_input_tokens: 100,
+			cache_creation_input_tokens: 30,
+			output_tokens: 1,
+		};
+		const lastCalls = {
+			streamed: {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: lastCall,
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: { ...lastCall, output_tokens: 57 },
+			},
+			"streamed, its delta carrying input": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: lastCall,
+					deltaUsage: {
+						input_tokens: 21,
+						cache_read_input_tokens: 100,
+						cache_creation_input_tokens: 31,
+						output_tokens: 7,
+					},
+				}),
+				expected: {
+					input_tokens: 21,
+					cache_read_input_tokens: 100,
+					cache_creation_input_tokens: 31,
+					output_tokens: 57,
+				},
+			},
+			"non-streamed": {
+				events: [
+					assistantMessage([{ type: "text", text: " second" }], {
+						stopReason: "end_turn",
+						usage: { ...lastCall, output_tokens: 7 },
+					}),
+				],
+				expected: { ...lastCall, output_tokens: 57 },
+			},
+			// A count the last call does not report is 0, never the first call's.
+			"streamed, its cache write null": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: { ...lastCall, cache_creation_input_tokens: null },
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
+			"streamed, its cache write omitted": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: {
+						input_tokens: 20,
+						cache_read_input_tokens: 100,
+						output_tokens: 1,
+					},
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
+			"non-streamed, its cache write null": {
+				events: [
+					assistantMessage([{ type: "text", text: " second" }], {
+						stopReason: "end_turn",
+						usage: {
+							...lastCall,
+							cache_creation_input_tokens: null,
+							output_tokens: 7,
+						},
+					}),
+				],
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
+		};
+
+		for (const stream of [true, false])
+			for (const [name, last] of Object.entries(lastCalls))
+				it(`reports the last call's input and cache and the summed output (${name} last call, stream: ${stream})`, async () => {
+					const h = harness();
+					const t = await start(h, {
+						stream,
+						messages: [{ role: "user", content: "hello" }],
+					});
+					t.query.emit(
+						initMessage(),
+						// Cut at max_tokens: Claude Code asks the model to continue.
+						...streamedMessage([{ type: "text", text: "first" }], {
+							stopReason: "max_tokens",
+							usage: firstCall,
+							deltaUsage: { output_tokens: 50 },
+						}),
+						...last.events,
+					);
+					const res = await t.response;
+					if (!stream) {
+						const body = (await res.json()) as { usage: unknown };
+						expect(body.usage).toEqual(last.expected);
+						return;
+					}
+					const events = parseSse(await res.text());
+					const usageOf = (type: string) =>
+						events
+							.filter((e) => e.data.type === type)
+							.map((e) =>
+								type === "message_start"
+									? (e.data.message as { usage: object }).usage
+									: (e.data.usage as object),
+							);
+					const [delta, ...more] = usageOf("message_delta");
+					expect(more).toHaveLength(0);
+					// The final delta alone carries the whole leg's usage.
+					expect(delta).toEqual(last.expected);
+					// Folded the way a client does, the delta's counts win.
+					expect({ ...usageOf("message_start")[0], ...delta }).toEqual(
+						last.expected,
+					);
+				});
+
+		it("reports the input and cache of a non-streamed last call that ends the leg at a client tool call", async () => {
+			const h = harness();
+			const t = await start(h, {
+				tools: [READ_TOOL],
+				messages: [{ role: "user", content: "TOOL read f" }],
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "first" }], {
+					stopReason: "max_tokens",
+					usage: firstCall,
+					deltaUsage: { output_tokens: 50 },
+				}),
+				assistantMessage(
+					[
+						{
+							type: "tool_use",
+							id: "toolu_f",
+							name: "mcp__c__read",
+							input: { path: "f" },
+						},
+					],
+					{ usage: { ...lastCall, output_tokens: 7 } },
+				),
+			);
+			void t.query.callTool("toolu_f", "read", { path: "f" });
+			const events = (await reply(t.response)).events;
+			expect(events.at(-2)?.data).toMatchObject({
+				type: "message_delta",
+				delta: { stop_reason: "tool_use" },
+				usage: {
+					input_tokens: 20,
+					cache_read_input_tokens: 100,
+					cache_creation_input_tokens: 30,
+				},
+			});
+		});
+	});
+
 	it("revokes the turn's token once the turn is over", async () => {
 		const h = harness();
 		const t = await start(h, {
@@ -1678,22 +1853,111 @@ describe("conversations", () => {
 		});
 	});
 
-	it("rebuilds on an account change", async () => {
+	it("resumes across an account change and records it", async () => {
 		const h = harness();
 		const { t, r } = await firstTurn(h, header);
 		t.query.emit(resultMessage());
 		await settled(h);
-		const t2 = await start(h, second(r), {
-			meta: header,
-			plan: {
-				candidates: [
-					{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
-				],
-				preferredAccountId: "acct-b",
-			},
-		});
+		const onB = {
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
+			],
+			preferredAccountId: "acct-b",
+		} as const;
+		const t2 = await start(h, second(r), { meta: header, plan: onB });
+		const resumed = t2.query.options.resume as string;
+		expect(resumed).toBeTruthy();
+		// A copy of the stored session, not a transcript built from the history.
+		const store = new FileSessionStore(sessionsDir(h));
+		expect(store.read(resumed)?.map((e) => [e.uuid, e.sessionId])).toEqual([
+			["u1", resumed],
+		]);
+		expect(t2.query.prompts[0]?.message.content).toEqual([
+			{ type: "text", text: "again" },
+		]);
 		expect(h.repo.turns.get(t2.plan.turnId)).toMatchObject({
+			historyMode: "resume",
 			rebuildReason: "account_change",
+		});
+		expect(h.bridge.status().counters).toMatchObject({
+			resumes: 1,
+			rebuilds: 0,
+		});
+
+		// The conversation is on acct-b now.
+		t2.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo: again" }]),
+		);
+		const r2 = await reply(t2.response);
+		t2.query.emit(resultMessage());
+		await settled(h);
+		const t3 = await start(
+			h,
+			{
+				messages: [
+					...second(r).messages,
+					{ role: "assistant", content: r2.content },
+					{ role: "user", content: "third" },
+				],
+			},
+			{ meta: header, plan: onB },
+		);
+		expect(h.repo.turns.get(t3.plan.turnId)).toMatchObject({
+			historyMode: "resume",
+			rebuildReason: null,
+		});
+	});
+
+	describe("a stored session that cannot be copied", () => {
+		const onB = {
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
+			],
+			preferredAccountId: "acct-b",
+		} as const;
+
+		async function goneSession(h: Harness) {
+			const { t, r } = await firstTurn(h, header);
+			t.query.emit(resultMessage());
+			await settled(h);
+			rmSync(join(sessionsDir(h), `${t.query.options.sessionId}.jsonl`));
+			return r;
+		}
+
+		it("rebuilds instead, keeping the account change as its reason", async () => {
+			const h = harness();
+			const r = await goneSession(h);
+			const t2 = await start(h, second(r), { meta: header, plan: onB });
+			expect(h.repo.turns.get(t2.plan.turnId)).toMatchObject({
+				historyMode: "rebuild_transcript",
+				rebuildReason: "account_change",
+			});
+		});
+
+		it("refuses that rebuild at the rebuild cap", async () => {
+			const h = harness({ limits: () => ({ maxConcurrentRebuilds: 1 }) });
+			const r = await goneSession(h);
+			// Without a session header, a history always rebuilds.
+			await start(h, second(r));
+			const plan = makePlan();
+			const outcome = await Promise.race([
+				h.bridge
+					.startTurn({
+						request: messagesRequest(second(r)),
+						plan,
+						meta: makeMeta(header),
+						signal: new AbortController().signal,
+					})
+					.then(
+						() => "answered",
+						(e: unknown) => e,
+					),
+				Bun.sleep(1_000).then(() => "launched"),
+			]);
+			expect(outcome).toBeInstanceOf(SdkBridgeCapacityError);
+			expect(h.sdk.queries).toHaveLength(2);
+			expect(h.bridge.status().counters.rejected).toEqual({ rebuild_cap: 1 });
 		});
 	});
 

@@ -615,12 +615,12 @@ export function createClaudeSdkBridge(
 		const digests = messageDigests(turn.history);
 		const current = claim?.current ?? null;
 		const reason = classifyRebuild(current, digests, accountId);
-		if (
-			current &&
-			sameDigests(current.digests, digests) &&
-			reason === "continuation"
-		)
-			return { mode: "resume", reason: null };
+		// Matching history resumes even on another account; the change is still recorded.
+		if (current && sameDigests(current.digests, digests))
+			return {
+				mode: "resume",
+				reason: reason === "account_change" ? reason : null,
+			};
 		return { mode: rebuildMode(turn), reason };
 	}
 
@@ -1359,14 +1359,16 @@ export function createClaudeSdkBridge(
 					reason: deadContinuation ? "dead_continuation" : "unknown",
 				};
 			}
-			const rejection = checkAdmission({
-				turn,
-				plan,
-				limits: limits(),
-				processes: lives.size,
-				rebuilds: rebuildsInFlight(),
-				needsRebuild: history.mode.startsWith("rebuild"),
-			});
+			const admission = () =>
+				checkAdmission({
+					turn,
+					plan,
+					limits: limits(),
+					processes: lives.size,
+					rebuilds: rebuildsInFlight(),
+					needsRebuild: history.mode.startsWith("rebuild"),
+				});
+			const rejection = admission();
 			if (rejection) {
 				releaseClaim();
 				return refuseAdmission(rejection, refuse);
@@ -1380,8 +1382,17 @@ export function createClaudeSdkBridge(
 			sessionId = newSessionId;
 			const normalized = normalizeHistory(turn.history);
 			if (history.mode === "resume" && claim?.current) {
-				if (!store.fork(claim.current.sessionId, newSessionId))
-					history = { mode: rebuildMode(turn), reason: "unknown" };
+				if (!store.fork(claim.current.sessionId, newSessionId)) {
+					history = {
+						mode: rebuildMode(turn),
+						reason: history.reason ?? "unknown",
+					};
+					const rebuildRejection = admission();
+					if (rebuildRejection) {
+						releaseClaim();
+						return refuseAdmission(rebuildRejection, refuse);
+					}
+				}
 			}
 			if (history.mode === "rebuild_transcript")
 				try {
