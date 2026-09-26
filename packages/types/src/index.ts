@@ -31,6 +31,7 @@ export * from "./routing";
 export * from "./runway";
 export * from "./sdk-bridge";
 export * from "./sdk-bridge-field-policy";
+export * from "./sdk-bridge-health";
 export * from "./sdk-bridge-transport";
 export * from "./stats";
 export * from "./stops-history";
