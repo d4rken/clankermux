@@ -221,7 +221,7 @@ export class ResolvedRoute {
 			(!!this.maintenance ||
 				isModelPermitted(
 					permissions,
-					account.id,
+					account,
 					target.upstreamModel,
 					this.#rule,
 				))
@@ -326,7 +326,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			!input.maintenance &&
 			!isModelPermitted(
 				input.permissions.get(account.id) ?? null,
-				account.id,
+				account,
 				resolved.upstreamModel,
 				winning,
 			)

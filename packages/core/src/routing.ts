@@ -1,8 +1,10 @@
-import type {
-	ModelPermissionSet,
-	ResolvedRoutingTarget,
-	RoutingModelFamily,
-	RoutingRule,
+import {
+	isOfficialAnthropicProvider,
+	type ModelPermissionSet,
+	type ResolvedRoutingTarget,
+	type RoutingModelFamily,
+	type RoutingRule,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 
 export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
@@ -68,19 +70,28 @@ export function resolveRoutingTarget(
 	return { upstreamModel: requestedModel, targetSource: "identity" };
 }
 
+/**
+ * An official Anthropic account permits a `[1m]` id wherever it permits the
+ * bare one: Claude Code sends the bare id with the 1M beta header.
+ *
+ *   lists claude-opus-5-5  ->  permits claude-opus-5-5[1m]
+ */
 export function isModelPermitted(
 	permissions: ModelPermissionSet | null,
-	accountId: string,
+	account: { id: string; provider: string },
 	model: string,
 	winningRule: RoutingRule | null,
 ): boolean {
-	if (permissions?.manual_ids.includes(model)) return true;
+	const ids = isOfficialAnthropicProvider(account.provider)
+		? [model, sdkBridgeWireModel(model)]
+		: [model];
+	if (ids.some((id) => permissions?.manual_ids.includes(id))) return true;
 	if (permissions && permissions.completeness !== "unknown")
-		return permissions.discovered_ids.includes(model);
+		return ids.some((id) => permissions.discovered_ids.includes(id));
 	return (
 		winningRule?.enabled === true &&
 		winningRule.pool_kind === "accounts" &&
-		winningRule.pool_account_ids?.includes(accountId) === true &&
+		winningRule.pool_account_ids?.includes(account.id) === true &&
 		winningRule.target_kind === "literal" &&
 		winningRule.target_model === model
 	);

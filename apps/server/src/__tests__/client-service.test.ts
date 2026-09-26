@@ -1525,6 +1525,26 @@ describe("client service integration", () => {
 					},
 				},
 			},
+			anthropic: {
+				models: {
+					"claude-opus-5-5": {
+						id: "claude-opus-5-5",
+						name: "Opus 5.5",
+						limit: { context: 1_000_000, output: 128_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+						cost: { input: 5, output: 25 },
+					},
+					"claude-haiku-4-5": {
+						id: "claude-haiku-4-5",
+						name: "Haiku 4.5",
+						limit: { context: 200_000, output: 64_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+						cost: { input: 1, output: 5 },
+					},
+				},
+			},
 			"openai-compatible": {
 				models: {
 					"fast-backup": {
@@ -1602,6 +1622,72 @@ describe("client service integration", () => {
 			if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
 			else process.env.XDG_CACHE_HOME = originalCacheHome;
 			rmSync(cacheDir, { recursive: true, force: true });
+		});
+
+		it("describes Claude entries served by an official Anthropic account, [1m] at 1M", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5", "claude-haiku-4-5"]);
+			const draft = blank();
+			draft.catalogues.openai.models = [
+				"claude-opus-5-5",
+				"claude-opus-5-5[1m]",
+				"claude-haiku-4-5",
+			].map((model) => ({
+				id: model,
+				displayName: model,
+				targetModel: model,
+				accountIds: null,
+			}));
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "openai");
+			const opus = {
+				maxOutputTokens: 128_000,
+				reasoning: true,
+				supportedReasoningEfforts: ALIAS_EFFORTS,
+				inputModalities: ["text", "image"],
+				cost: { input: 5, output: 25 },
+			};
+			expect(models["claude-opus-5-5"]).toMatchObject({
+				...opus,
+				contextWindow: 200_000,
+			});
+			expect(models["claude-opus-5-5[1m]"]).toMatchObject({
+				...opus,
+				contextWindow: 1_000_000,
+			});
+			expect(models["claude-haiku-4-5"]).toMatchObject({
+				contextWindow: 200_000,
+				supportedReasoningEfforts: ["low", "medium"],
+			});
+			const enriched = await (await service.wire(id, "openai", true)).json();
+			expect(
+				Object.fromEntries(
+					enriched.data.map(
+						(m: {
+							id: string;
+							clankermux: {
+								contextWindow?: number;
+								supportedReasoningEfforts?: string[];
+							};
+						}) => [
+							m.id,
+							[
+								m.clankermux.contextWindow,
+								m.clankermux.supportedReasoningEfforts?.length,
+							],
+						],
+					),
+				),
+			).toEqual({
+				"claude-opus-5-5": [200_000, 5],
+				"claude-opus-5-5[1m]": [1_000_000, 5],
+				"claude-haiku-4-5": [200_000, 2],
+			});
 		});
 
 		it("advertises the fixed alias effort range in every format, whatever the targets accept", async () => {

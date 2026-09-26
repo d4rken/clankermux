@@ -845,7 +845,7 @@ export class ClientService {
 									}
 								: winning;
 							if (
-								isModelPermitted(permission, account.id, target, permissionRule)
+								isModelPermitted(permission, account, target, permissionRule)
 							) {
 								cacheRoutes.push({
 									provider: account.provider,

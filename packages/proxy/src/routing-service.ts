@@ -191,8 +191,8 @@ async function claudeCodeRoutingModel(
 	);
 	if (stale.size) return model;
 	const rows = pool.map((a) => [a, permissions.get(a.id) ?? null] as const);
-	return rows.some(([a, p]) => isModelPermitted(p, a.id, target, null)) &&
-		!rows.some(([a, p]) => isModelPermitted(p, a.id, model, null))
+	return rows.some(([a, p]) => isModelPermitted(p, a, target, null)) &&
+		!rows.some(([a, p]) => isModelPermitted(p, a, model, null))
 		? candidate
 		: model;
 }
@@ -339,7 +339,7 @@ export async function initializeRequestRoute(
 					!stale.has(a.id) &&
 					!isModelPermitted(
 						permissions.get(a.id) ?? null,
-						a.id,
+						a,
 						stageModel,
 						stageRule,
 					),
@@ -445,7 +445,7 @@ async function installPooledRoute(
 		const missing = pool.filter(
 			(a) =>
 				!stale.has(a.id) &&
-				!isModelPermitted(permissions.get(a.id) ?? null, a.id, target, winning),
+				!isModelPermitted(permissions.get(a.id) ?? null, a, target, winning),
 		);
 		if (missing.length) {
 			await service.refreshMisses(missing);
