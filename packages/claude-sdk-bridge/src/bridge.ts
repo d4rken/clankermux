@@ -615,12 +615,11 @@ export function createClaudeSdkBridge(
 		const digests = messageDigests(turn.history);
 		const current = claim?.current ?? null;
 		const reason = classifyRebuild(current, digests, accountId);
-		if (
-			current &&
-			sameDigests(current.digests, digests) &&
-			reason === "continuation"
-		)
-			return { mode: "resume", reason: null };
+		if (current && sameDigests(current.digests, digests))
+			return {
+				mode: "resume",
+				reason: reason === "account_change" ? reason : null,
+			};
 		return { mode: rebuildMode(turn), reason };
 	}
 

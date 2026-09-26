@@ -33,7 +33,9 @@ export type SdkBridgeHistoryMode =
 	| "rebuild_flattened";
 
 /**
- * Why a turn could not resume its conversation's Claude Code session.
+ * Why a turn rebuilt its conversation's Claude Code session from the
+ * client's history. `account_change` is the exception: it is recorded on a
+ * resumed session whose previous turn ran on another account.
  * `dead_continuation`: the request answered tool calls of a query that no
  * longer exists, so the history up to those calls was rebuilt and the tool
  * results became the new query's prompt.

@@ -1771,22 +1771,59 @@ describe("conversations", () => {
 		});
 	});
 
-	it("rebuilds on an account change", async () => {
+	it("resumes across an account change and records it", async () => {
 		const h = harness();
 		const { t, r } = await firstTurn(h, header);
 		t.query.emit(resultMessage());
 		await settled(h);
-		const t2 = await start(h, second(r), {
-			meta: header,
-			plan: {
-				candidates: [
-					{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
-				],
-				preferredAccountId: "acct-b",
-			},
-		});
+		const onB = {
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
+			],
+			preferredAccountId: "acct-b",
+		} as const;
+		const t2 = await start(h, second(r), { meta: header, plan: onB });
+		const resumed = t2.query.options.resume as string;
+		expect(resumed).toBeTruthy();
+		// A copy of the stored session, not a transcript built from the history.
+		const store = new FileSessionStore(sessionsDir(h));
+		expect(store.read(resumed)?.map((e) => [e.uuid, e.sessionId])).toEqual([
+			["u1", resumed],
+		]);
+		expect(t2.query.prompts[0]?.message.content).toEqual([
+			{ type: "text", text: "again" },
+		]);
 		expect(h.repo.turns.get(t2.plan.turnId)).toMatchObject({
+			historyMode: "resume",
 			rebuildReason: "account_change",
+		});
+		expect(h.bridge.status().counters).toMatchObject({
+			resumes: 1,
+			rebuilds: 0,
+		});
+
+		// The conversation is on acct-b now.
+		t2.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo: again" }]),
+		);
+		const r2 = await reply(t2.response);
+		t2.query.emit(resultMessage());
+		await settled(h);
+		const t3 = await start(
+			h,
+			{
+				messages: [
+					...second(r).messages,
+					{ role: "assistant", content: r2.content },
+					{ role: "user", content: "third" },
+				],
+			},
+			{ meta: header, plan: onB },
+		);
+		expect(h.repo.turns.get(t3.plan.turnId)).toMatchObject({
+			historyMode: "resume",
+			rebuildReason: null,
 		});
 	});
 

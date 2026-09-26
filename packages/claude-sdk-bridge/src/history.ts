@@ -238,7 +238,8 @@ export function sameDigests(
 
 /**
  * Why the stored session of a conversation does not fit the history the
- * client just sent (or, with matching history, why it may not be resumed).
+ * client just sent. With matching history the session is resumed, and
+ * `account_change` records that it now runs on another account.
  */
 export function classifyRebuild(
 	stored: { digests: readonly string[]; accountId: string | null } | null,
