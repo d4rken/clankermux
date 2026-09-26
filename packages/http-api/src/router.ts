@@ -124,6 +124,7 @@ import {
 	createRoutingHandler,
 } from "./handlers/routing";
 import { createRunwayHandler } from "./handlers/runway";
+import { createSdkBridgeHealthHandler } from "./handlers/sdk-bridge-health";
 import { createSdkBridgeTurnHandler } from "./handlers/sdk-bridge-turns";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import { createStopsHistoryHandler } from "./handlers/stops-history";
@@ -269,6 +270,7 @@ export class APIRouter {
 		const modelSubstitutionsHandler = createModelSubstitutionsHandler(
 			this.context,
 		);
+		const sdkBridgeHealthHandler = createSdkBridgeHealthHandler(this.context);
 		const quotaDriftHandler = createQuotaDriftHandler(this.context);
 		const poolSizingHandler = createPoolSizingHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
@@ -606,6 +608,11 @@ export class APIRouter {
 				params.append(MODEL_SUBSTITUTION_EXCEPTIONS_PARAM, exception);
 			return modelSubstitutionsHandler(params);
 		});
+		// Agent SDK bridge turns started in the range. Takes `range` only: the
+		// analytics filter panel selects request rows, and a turn is not one.
+		this.handlers.set("GET:/api/analytics/sdk-bridge-health", (_req, url) =>
+			sdkBridgeHealthHandler(url.searchParams),
+		);
 		// Precomputed quota-drift analysis. Takes no params: the pass fits the
 		// whole retained history, and a range filter would silently change which
 		// evidence a verdict rests on.

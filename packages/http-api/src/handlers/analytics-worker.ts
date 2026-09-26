@@ -10,6 +10,7 @@ import { createModelSubstitutionsHandler } from "./model-substitutions-direct";
 import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler } from "./quota-drift-direct";
+import { createSdkBridgeHealthHandler } from "./sdk-bridge-health-direct";
 import { createStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler } from "./stops-history-direct";
 import { createToolErrorsHandler } from "./tool-errors-direct";
@@ -36,7 +37,8 @@ export type DashboardWorkerKind =
 	| "filter-options"
 	| "quota-drift"
 	| "pool-sizing"
-	| "model-substitutions";
+	| "model-substitutions"
+	| "sdk-bridge-health";
 
 export interface AnalyticsWorkerRequest {
 	id: string;
@@ -96,6 +98,7 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			"quota-drift": createQuotaDriftHandler,
 			"pool-sizing": createPoolSizingHandler,
 			"model-substitutions": createModelSubstitutionsHandler,
+			"sdk-bridge-health": createSdkBridgeHealthHandler,
 			analytics: createAnalyticsHandler,
 			"tool-errors": createToolErrorsHandler,
 		} satisfies Record<
