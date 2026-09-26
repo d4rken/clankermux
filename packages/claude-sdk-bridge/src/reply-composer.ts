@@ -16,11 +16,15 @@ export type UpstreamMessageEnd =
 
 const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "refusal"]);
 const FORWARDED_BLOCKS = new Set(["text", "thinking", "redacted_thinking"]);
-const INPUT_USAGE_FIELDS = [
-	"input_tokens",
-	"cache_read_input_tokens",
-	"cache_creation_input_tokens",
-] as const;
+/** A model call's input and cache counts before it reports any. */
+const NO_INPUT_USAGE = {
+	input_tokens: 0,
+	cache_read_input_tokens: 0,
+	cache_creation_input_tokens: 0,
+} as const;
+const INPUT_USAGE_FIELDS = Object.keys(NO_INPUT_USAGE) as Array<
+	keyof typeof NO_INPUT_USAGE
+>;
 
 /** The input and cache counts `usage` reports, overlaid on `onto`. */
 function withInputUsage(
@@ -213,7 +217,7 @@ export class ReplyComposer {
 				this.indexMap = new Map();
 				this.heldDelta = null;
 				this.forwardedThisMessage = 0;
-				this.lastInputUsage = withInputUsage({}, message.usage);
+				this.lastInputUsage = withInputUsage(NO_INPUT_USAGE, message.usage);
 				this.startMessage(message);
 				return null;
 			}
@@ -292,11 +296,12 @@ export class ReplyComposer {
 			this.openAndReplay(start, delta ? [delta] : []);
 		}
 		const usage = message.usage as { output_tokens?: number } | undefined;
+		// A client tool call can end the leg on a message without a stop reason.
+		this.lastInputUsage = withInputUsage(NO_INPUT_USAGE, usage);
 		if (message.stop_reason === null || message.stop_reason === undefined)
 			return null;
 		if (typeof usage?.output_tokens === "number")
 			this.outputTokens += usage.output_tokens;
-		this.lastInputUsage = withInputUsage({}, usage);
 		this.heldDelta = {
 			type: "message_delta",
 			delta: {

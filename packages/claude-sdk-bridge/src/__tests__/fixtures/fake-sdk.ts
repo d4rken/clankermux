@@ -300,8 +300,8 @@ export function streamedMessage(
 		id?: string;
 		stopReason?: string;
 		model?: string;
-		usage?: Record<string, number>;
-		deltaUsage?: Record<string, number>;
+		usage?: Record<string, number | null>;
+		deltaUsage?: Record<string, number | null>;
 	} = {},
 ): SDKMessage[] {
 	const id = opts.id ?? `msg_${uuid()}`;
@@ -406,7 +406,7 @@ export function assistantMessage(
 		stopReason?: string | null;
 		error?: string;
 		model?: string;
-		usage?: Record<string, number>;
+		usage?: Record<string, number | null>;
 	} = {},
 ): SDKMessage {
 	return {

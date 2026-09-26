@@ -361,6 +361,50 @@ describe("a plain turn", () => {
 				],
 				expected: { ...lastCall, output_tokens: 57 },
 			},
+			// A count the last call does not report is 0, never the first call's.
+			"streamed, its cache write null": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: { ...lastCall, cache_creation_input_tokens: null },
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
+			"streamed, its cache write omitted": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: {
+						input_tokens: 20,
+						cache_read_input_tokens: 100,
+						output_tokens: 1,
+					},
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
+			"non-streamed, its cache write null": {
+				events: [
+					assistantMessage([{ type: "text", text: " second" }], {
+						stopReason: "end_turn",
+						usage: {
+							...lastCall,
+							cache_creation_input_tokens: null,
+							output_tokens: 7,
+						},
+					}),
+				],
+				expected: {
+					...lastCall,
+					cache_creation_input_tokens: 0,
+					output_tokens: 57,
+				},
+			},
 		};
 
 		for (const stream of [true, false])
@@ -405,6 +449,44 @@ describe("a plain turn", () => {
 						last.expected,
 					);
 				});
+
+		it("reports the input and cache of a non-streamed last call that ends the leg at a client tool call", async () => {
+			const h = harness();
+			const t = await start(h, {
+				tools: [READ_TOOL],
+				messages: [{ role: "user", content: "TOOL read f" }],
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "first" }], {
+					stopReason: "max_tokens",
+					usage: firstCall,
+					deltaUsage: { output_tokens: 50 },
+				}),
+				assistantMessage(
+					[
+						{
+							type: "tool_use",
+							id: "toolu_f",
+							name: "mcp__c__read",
+							input: { path: "f" },
+						},
+					],
+					{ usage: { ...lastCall, output_tokens: 7 } },
+				),
+			);
+			void t.query.callTool("toolu_f", "read", { path: "f" });
+			const events = (await reply(t.response)).events;
+			expect(events.at(-2)?.data).toMatchObject({
+				type: "message_delta",
+				delta: { stop_reason: "tool_use" },
+				usage: {
+					input_tokens: 20,
+					cache_read_input_tokens: 100,
+					cache_creation_input_tokens: 30,
+				},
+			});
+		});
 	});
 
 	it("revokes the turn's token once the turn is over", async () => {
