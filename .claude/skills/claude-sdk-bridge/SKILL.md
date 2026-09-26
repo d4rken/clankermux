@@ -86,10 +86,12 @@ pipeline. The client keeps executing its own tools.
   token in the same statement or transaction and changes nothing without
   it, so whatever a process still has in flight after losing the lease
   (declared dead, or dispose) is harmless. That includes the turn row's
-  own writes: a resumed turn's `TurnRecorder`, and the refusal legs of a
-  released one, pass the token to `finishTurn`, `bumpTurnCounters`,
-  `insertLeg` and `finishLeg`; ordinary turns pass none and are never
-  fenced. Each claim has a generation (`claim_id`), and an unclaim or a
+  own writes: the original turn's `TurnRecorder` is fenced right before
+  its first release writes the park (writes it already queued included,
+  since each reads the token when it runs), and a resumed turn's recorder
+  and the refusal legs of a released one carry the token from the start;
+  they pass it to `finishTurn`, `bumpTurnCounters`, `insertLeg` and
+  `finishLeg`. Ordinary turns pass none and are never fenced. Each claim has a generation (`claim_id`), and an unclaim or a
   consumed mark names the one it belongs to, so a late unclaim of an
   earlier claim never releases a newer one. Refused or failed writes leave
   the park `reconciling` (indexed, not claimable) and the maintenance pass
@@ -102,8 +104,11 @@ pipeline. The client keeps executing its own tools.
   only as `<root>/released-parks/<namespace>/<uuid>.jsonl` with no symlink
   anywhere on its chain: the root is this process's own work root or one
   whose real path is itself, and `released-parks`, the namespace directory
-  and the file are each checked with lstat. The check runs at recovery and
-  again when a resume claims the park.
+  and the file are each checked with lstat. The check runs at recovery,
+  again when a resume claims the park, and before any park file is deleted
+  (close, forget, expiry, a failed publish): a refused path is logged and
+  left alone, only its record goes. The orphan sweep lists this process's
+  own directory only when it too is reached without a symlink.
   Recovery runs before `installSdkBridge` exposes the transport, bounded
   by `recoveryStartupMs` (each DB call with a short busy-retry budget);
   it builds the index privately and publishes it only when every row was
