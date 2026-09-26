@@ -1214,6 +1214,7 @@ export function ensureSchema(db: Database): void {
 			expires_at INTEGER NOT NULL,
 			file_bytes INTEGER NOT NULL,
 			claim_owner TEXT,
+			claim_id TEXT,
 			claimed_at INTEGER,
 			created_at INTEGER NOT NULL
 		)

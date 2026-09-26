@@ -7,6 +7,7 @@ import {
 	openSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
@@ -51,7 +52,8 @@ export interface ResumeDescriptor {
 
 /** A transition the database has not confirmed yet, retried until it does. */
 export type PendingParkWrite =
-	| { kind: "unclaim" }
+	/** Give back the claim of this generation, and only it. */
+	| { kind: "unclaim"; claimId: string }
 	| { kind: "forget" }
 	| {
 			kind: "close";
@@ -77,6 +79,10 @@ export interface ReleasedEntry {
 	consumed: boolean;
 	/** The consumed mark in flight; a close waits for it before deciding. */
 	consuming: Promise<void> | null;
+	/** The generation of this process's current claim of it. */
+	claimId: string | null;
+	/** The entry's park write running now; the next one waits for it. */
+	work: Promise<unknown> | null;
 	/** A new turn of the conversation arrived while it was being claimed. */
 	superseded?: boolean;
 	path: string;
@@ -341,26 +347,66 @@ export class ReleasedParkStore {
 	}
 
 	/**
-	 * Whether a recorded path is one of this database's park files: absolute,
-	 * normalized, `<root>/released-parks/<namespace>/<uuid>.jsonl`, and
-	 * neither the file nor its two directories a symlink.
+	 * Whether a recorded path is one of this database's park files:
+	 * `<root>/released-parks/<namespace>/<uuid>.jsonl`, absolute and
+	 * normalized, reached without any symlink. The root is this store's own
+	 * work root (trusted as configured) or a directory whose whole path
+	 * holds no symlink (its real path is itself); below it, `released-parks`,
+	 * the namespace directory and the file are each checked with lstat.
 	 */
 	acceptsPath(path: string): boolean {
 		if (!isAbsolute(path) || normalize(path) !== path) return false;
 		if (!SESSION_FILE.test(basename(path))) return false;
 		const ns = dirname(path);
 		const parks = dirname(ns);
+		const root = dirname(parks);
 		if (basename(ns) !== this.opts.namespace) return false;
 		if (basename(parks) !== "released-parks") return false;
 		try {
+			if (root !== this.opts.workRoot && realpathSync(root) !== root)
+				return false;
 			return (
-				lstatSync(path).isFile() &&
+				lstatSync(parks).isDirectory() &&
 				lstatSync(ns).isDirectory() &&
-				lstatSync(parks).isDirectory()
+				lstatSync(path).isFile()
 			);
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * A resume's copy of a park: the path checked again as at recovery, then
+	 * read once, the chain verified and written under the new id.
+	 */
+	forkForResume(entry: ReleasedEntry, to: string, toId: string): boolean {
+		return (
+			this.acceptsPath(entry.path) &&
+			forkVerifiedTranscript(
+				entry.path,
+				to,
+				entry.park.sessionId,
+				toId,
+				entry.park.resumeAt,
+				entry.park.awaitedToolUseIds,
+			)
+		);
+	}
+
+	/**
+	 * Run `write` after the entry's park write in flight, if any: an entry
+	 * never has two writes racing (a retry against an unclaim, say).
+	 */
+	private serial<T>(entry: ReleasedEntry, write: () => Promise<T>): Promise<T> {
+		const previous = entry.work ?? Promise.resolve();
+		const next = previous.catch(() => {}).then(write);
+		entry.work = next;
+		void next
+			.catch(() => {})
+			.finally(() => {
+				if (entry.work === next) entry.work = null;
+			});
+		return next;
 	}
 
 	private reconcileLater(entry: ReleasedEntry, pending: PendingParkWrite) {
@@ -430,6 +476,7 @@ export class ReleasedParkStore {
 				fileBytes,
 				state: "released",
 				claimOwner: null,
+				claimId: null,
 				claimedAt: null,
 			},
 			descriptor,
@@ -437,6 +484,8 @@ export class ReleasedParkStore {
 			pending: null,
 			consumed: false,
 			consuming: null,
+			claimId: null,
+			work: null,
 			path,
 		};
 		this.index(entry);
@@ -452,6 +501,7 @@ export class ReleasedParkStore {
 		if (entry.state !== "released" || !this.entries.has(entry.park.turnId))
 			return false;
 		entry.state = "claimed";
+		entry.claimId = randomBytes(12).toString("hex");
 		return true;
 	}
 
@@ -465,6 +515,7 @@ export class ReleasedParkStore {
 			ok = await this.opts.repo.claim(
 				entry.park.turnId,
 				this.token,
+				String(entry.claimId),
 				this.opts.now(),
 				this.owner,
 			);
@@ -481,21 +532,27 @@ export class ReleasedParkStore {
 	 * otherwise it stays reconciling and the retry keeps trying.
 	 */
 	async unclaim(entry: ReleasedEntry): Promise<boolean> {
-		if (entry.consumed) return false;
-		let ok = false;
-		try {
-			ok = await this.opts.repo.unclaim(entry.park.turnId, this.token);
-		} catch (error) {
-			this.opts.log.warn(
-				`SDK bridge turn ${entry.park.turnId}: could not give its claim back`,
-				error,
-			);
-		}
-		if (ok) {
-			entry.state = "released";
-			entry.pending = null;
-		} else this.reconcileLater(entry, { kind: "unclaim" });
-		return ok;
+		if (entry.consumed || !entry.claimId) return false;
+		const claimId = entry.claimId;
+		return this.serial(entry, async () => {
+			let ok = false;
+			try {
+				ok = await this.opts.repo.unclaim(entry.park.turnId, this.token, {
+					claimId,
+				});
+			} catch (error) {
+				this.opts.log.warn(
+					`SDK bridge turn ${entry.park.turnId}: could not give its claim back`,
+					error,
+				);
+			}
+			if (ok) {
+				entry.state = "released";
+				entry.pending = null;
+				entry.claimId = null;
+			} else this.reconcileLater(entry, { kind: "unclaim", claimId });
+			return ok;
+		});
 	}
 
 	/**
@@ -505,8 +562,15 @@ export class ReleasedParkStore {
 	 */
 	consume(entry: ReleasedEntry): Promise<void> {
 		if (entry.consumed) return Promise.resolve();
+		const claimId = String(entry.claimId);
 		const consuming = (async () => {
-			if (!(await this.opts.repo.markConsumed(entry.park.turnId, this.token)))
+			if (
+				!(await this.opts.repo.markConsumed(
+					entry.park.turnId,
+					this.token,
+					claimId,
+				))
+			)
 				throw new Error("the park is no longer this process's claim");
 			entry.consumed = true;
 		})();
@@ -518,7 +582,11 @@ export class ReleasedParkStore {
 	 * Forget a park its resumed turn no longer needs: the record, then the
 	 * file (only once the record is gone).
 	 */
-	async forget(entry: ReleasedEntry): Promise<boolean> {
+	forget(entry: ReleasedEntry): Promise<boolean> {
+		return this.serial(entry, () => this.forgetNow(entry));
+	}
+
+	private async forgetNow(entry: ReleasedEntry): Promise<boolean> {
 		let ok = false;
 		try {
 			ok = await this.opts.repo.delete(entry.park.turnId, this.token);
@@ -548,7 +616,7 @@ export class ReleasedParkStore {
 		status: SdkBridgeTurnFinish["status"],
 	): Promise<boolean> {
 		this.reconcileLater(entry, { kind: "close", error, status });
-		return this.runPending(entry);
+		return this.serial(entry, () => this.runPending(entry));
 	}
 
 	private finishOf(
@@ -576,9 +644,14 @@ export class ReleasedParkStore {
 		try {
 			switch (pending.kind) {
 				case "unclaim": {
-					if (await repo.unclaim(turnId, this.token)) {
+					if (
+						await repo.unclaim(turnId, this.token, {
+							claimId: pending.claimId,
+						})
+					) {
 						entry.state = "released";
 						entry.pending = null;
+						entry.claimId = null;
 						return true;
 					}
 					// Refused: read back what the database holds instead.
@@ -621,10 +694,16 @@ export class ReleasedParkStore {
 					if (row.state === "released") {
 						entry.state = "released";
 						entry.pending = null;
+						entry.claimId = null;
 						return true;
 					}
-					if (row.state === "claimed" && row.claimOwner === this.token) {
-						entry.pending = { kind: "unclaim" };
+					if (
+						row.state === "claimed" &&
+						row.claimOwner === this.token &&
+						row.claimId &&
+						row.claimId === entry.claimId
+					) {
+						entry.pending = { kind: "unclaim", claimId: row.claimId };
 						return this.runPending(entry);
 					}
 					// Claimed elsewhere or spent: not this process's to resume.
@@ -646,7 +725,8 @@ export class ReleasedParkStore {
 	 */
 	async reconcile(): Promise<void> {
 		for (const entry of this.all())
-			if (entry.state === "reconciling") await this.runPending(entry);
+			if (entry.state === "reconciling" && !entry.work)
+				await this.serial(entry, () => this.runPending(entry));
 	}
 
 	/**
@@ -739,12 +819,20 @@ export class ReleasedParkStore {
 			}
 			kept.add(park.sessionPath);
 			entries.set(park.turnId, {
-				park: { ...park, state: "released", claimOwner: null, claimedAt: null },
+				park: {
+					...park,
+					state: "released",
+					claimOwner: null,
+					claimId: null,
+					claimedAt: null,
+				},
 				descriptor,
 				state: "released",
 				pending: null,
 				consumed: false,
 				consuming: null,
+				claimId: null,
+				work: null,
 				path: park.sessionPath,
 			});
 			for (const id of park.awaitedToolUseIds) byToolId.set(id, park.turnId);

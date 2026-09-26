@@ -15,6 +15,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -1798,5 +1799,184 @@ describe("the recovery gate", () => {
 		letGo();
 		await waitFor(() => b.bridge.availability().state === "available", 3_000);
 		expect(b.bridge.status().releasedParks).toBe(1);
+	});
+});
+
+describe("second review fixes", () => {
+	it("a resumed turn's late writes change nothing once the lease has moved on", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		const meta = makeMeta();
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		// Another process takes the lease (this one declared dead).
+		await h.parkRepo.acquireLease(
+			{ dir: "/elsewhere", pid: 1, startTime: null, token: "other", at: 1 },
+			() => true,
+		);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "done" }]),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+		await waitFor(() => h.bridge.status().live === 0);
+		await Bun.sleep(50);
+		const turn = h.repo.turns.get(p.turnId);
+		expect(turn?.status).toBe("running");
+		expect(turn?.finishedAt).toBeUndefined();
+		expect(turn?.counters.toolRounds).toBe(1);
+		expect(h.repo.legs.get(meta.legId)?.finished).toBeUndefined();
+	});
+
+	it("never lets a delayed unclaim of an earlier claim release a newer one", async () => {
+		const h = await releaseHarness({ timing: { maintenanceIntervalMs: 20 } });
+		const p = await parkTurn(h);
+		await released(h, p);
+		// First resume: ends before its first model call, and its unclaim fails.
+		h.parkRepo.failNext.unclaim = new Error("SQLITE_BUSY");
+		const first = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		q2.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		q2.end();
+		expect((await reply(first)).status).toBe(502);
+		// The retry is held: maintenance keeps ticking but never starts another.
+		let letGo!: () => void;
+		await waitFor(
+			() => h.parkRepo.calls.filter((c) => c === "unclaim").length === 1,
+			3_000,
+		);
+		h.parkRepo.hold.unclaim = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		await waitFor(
+			() => h.parkRepo.calls.filter((c) => c === "unclaim").length === 2,
+			3_000,
+		);
+		await Bun.sleep(200);
+		expect(h.parkRepo.calls.filter((c) => c === "unclaim").length).toBe(2);
+		letGo();
+		await waitFor(() => h.bridge.status().releasedParks === 1, 3_000);
+		// A new claim; the first claim's generation can no longer undo it.
+		const second = answer(h, p, results(p));
+		const q3 = await h.sdk.next();
+		const claimed = h.parkRepo.parks.get(p.turnId);
+		expect(claimed?.state).toBe("claimed");
+		expect(
+			await h.parkRepo.unclaim(p.turnId, String(h.parkRepo.lease?.token), {
+				claimId: "an-earlier-claim",
+			}),
+		).toBe(false);
+		await Bun.sleep(100);
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("claimed");
+		expect((await finishResumed(h, q3, second)).status).toBe(200);
+	});
+
+	it("refuses a recorded path with a symlink above released-parks", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const root = tempRoot();
+		const a = await releaseHarness({
+			workRoot: root,
+			repo,
+			parkRepo,
+			keep: true,
+		});
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		const real = String(parkRepo.parks.get(p.turnId)?.sessionPath);
+		// The same file reached through a symlinked work root.
+		const link = `${root}-link`;
+		symlinkSync(root, link);
+		cleanups.push(() => rmSync(link, { force: true }));
+		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, {
+			sessionPath: real.replace(root, link),
+		});
+		const b = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(repo.turns.get(p.turnId)?.status).toBe("failed");
+		// Nothing deleted through the link.
+		expect(existsSync(real)).toBe(true);
+	});
+
+	it("checks the path again when a resume claims the park", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const rootA = tempRoot();
+		const a = await releaseHarness({
+			workRoot: rootA,
+			repo,
+			parkRepo,
+			keep: true,
+		});
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		const b = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(1);
+		// After recovery, released-parks in A's root becomes a symlink.
+		const parksDir = join(rootA, "released-parks");
+		const moved = `${parksDir}-moved`;
+		renameSync(parksDir, moved);
+		symlinkSync(moved, parksDir);
+		const response = answer(b, p, results(p));
+		const q2 = await b.sdk.next();
+		// Not resumed through the link: a flattened rebuild instead.
+		expect(q2.options.resume).toBeUndefined();
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "rebuilt" }]),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+	});
+
+	it("answers 503 for unmatched results while it recovers after another holder exits", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const holder = await releaseHarness({ repo, parkRepo, keep: true });
+		const p = await parkTurn(holder);
+		await released(holder, p);
+		const b = await releaseHarness({
+			repo,
+			parkRepo,
+			timing: { maintenanceIntervalMs: 30 },
+		});
+		expect(b.bridge.status().releaseBlocked).toContain("database");
+		// While it takes over, its recovery waits on the database.
+		let letGo!: () => void;
+		parkRepo.hold.list = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		await holder.bridge.dispose();
+		await waitFor(
+			() => parkRepo.calls.includes("list") && parkRepo.lease !== null,
+			3_000,
+		);
+		const found = b.bridge.findContinuation(p.ids, {
+			apiKeyId: "key-1",
+			model: MODEL,
+		});
+		expect(found).toMatchObject({ retryAfter: "5" });
+		letGo();
+		await waitFor(
+			() =>
+				turnIdOf(
+					b.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
+				) === p.turnId,
+			3_000,
+		);
+		expect(b.bridge.status().releaseBlocked).toBeNull();
 	});
 });

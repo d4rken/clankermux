@@ -121,36 +121,37 @@ describe("SdkBridgeReleasedParkRepository", () => {
 			awaitedToolUseIds: ["toolu_1", "toolu_2"],
 		});
 
-		expect(await parks.claim("turn-1", T, 2_000, owner)).toBe(true);
+		expect(await parks.claim("turn-1", T, "c1", 2_000, owner)).toBe(true);
 		// Claimed: a second claim finds it taken.
-		expect(await parks.claim("turn-1", T, 2_001, owner)).toBe(false);
+		expect(await parks.claim("turn-1", T, "c2", 2_001, owner)).toBe(false);
 		// The claimant owns the turn now.
 		expect(turnOf()).toMatchObject({
 			status: "running",
 			owner_pid: 4242,
 			owner_start_time: "77",
 		});
-		expect(await parks.markConsumed("turn-1", T)).toBe(true);
+		expect(await parks.markConsumed("turn-1", T, "c2")).toBe(false);
+		expect(await parks.markConsumed("turn-1", T, "c1")).toBe(true);
 		expect((await parks.find("turn-1"))?.state).toBe("consumed");
-		expect(await parks.unclaim("turn-1", T)).toBe(false);
+		expect(await parks.unclaim("turn-1", T, { claimId: "c1" })).toBe(false);
 	});
 
 	it("gives a claim back, and recovery takes back any claimant's", async () => {
 		await insertTurn();
 		await released();
-		await parks.claim("turn-1", T, 2_000, owner);
-		expect(await parks.unclaim("turn-1", T)).toBe(true);
+		await parks.claim("turn-1", T, "c1", 2_000, owner);
+		expect(await parks.unclaim("turn-1", T, { claimId: "c1" })).toBe(true);
 		expect(statusOf()).toBe("released");
 		expect(await parks.find("turn-1")).toMatchObject({
 			state: "released",
 			claimOwner: null,
 			claimedAt: null,
 		});
-		await parks.claim("turn-1", T, 2_000, owner);
+		await parks.claim("turn-1", T, "c2", 2_000, owner);
 		db.run(
-			"UPDATE sdk_bridge_released_parks SET claim_owner = 'dead' WHERE turn_id = 'turn-1'",
+			"UPDATE sdk_bridge_released_parks SET claim_owner = 'dead', claim_id = 'd1' WHERE turn_id = 'turn-1'",
 		);
-		expect(await parks.unclaim("turn-1", T)).toBe(false);
+		expect(await parks.unclaim("turn-1", T, { claimId: "c2" })).toBe(false);
 		expect(await parks.unclaim("turn-1", T, { anyClaimant: true })).toBe(true);
 	});
 
@@ -164,7 +165,7 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		db.run(
 			"UPDATE sdk_bridge_released_parks SET state = 'released' WHERE turn_id = 'turn-1'",
 		);
-		expect(await parks.claim("turn-1", T, 2_000, owner)).toBe(false);
+		expect(await parks.claim("turn-1", T, "c1", 2_000, owner)).toBe(false);
 		expect(statusOf()).toBe("failed");
 	});
 
@@ -214,7 +215,7 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		await parks.insertPreparing(park(), T);
 		await expect(parks.insertPreparing(park(), T)).rejects.toThrow();
 		db.run("DROP TABLE sdk_bridge_released_parks");
-		await expect(parks.claim("turn-1", T, 1, owner)).rejects.toThrow();
+		await expect(parks.claim("turn-1", T, "c1", 1, owner)).rejects.toThrow();
 	});
 });
 
@@ -229,9 +230,9 @@ describe("fencing by the lease", () => {
 		expect(await parks.insertPreparing(park({ turnId: "turn-9" }), T)).toBe(
 			false,
 		);
-		expect(await parks.claim("turn-1", T, 2_000, owner)).toBe(false);
+		expect(await parks.claim("turn-1", T, "c1", 2_000, owner)).toBe(false);
 		expect(await parks.unclaim("turn-1", T, { anyClaimant: true })).toBe(false);
-		expect(await parks.markConsumed("turn-1", T)).toBe(false);
+		expect(await parks.markConsumed("turn-1", T, "c1")).toBe(false);
 		expect(await parks.delete("turn-1", T)).toBe(false);
 		expect(
 			await parks.closeTurn("turn-1", { finishedAt: 1, status: "failed" }, T),
@@ -248,7 +249,9 @@ describe("fencing by the lease", () => {
 		expect(await parks.find("turn-1")).toMatchObject({ state: "released" });
 		expect(statusOf()).toBe("released");
 		// The new holder can.
-		expect(await parks.claim("turn-1", "token-b", 2_000, owner)).toBe(true);
+		expect(await parks.claim("turn-1", "token-b", "c9", 2_000, owner)).toBe(
+			true,
+		);
 	});
 
 	it("refuses a late release once the lease was given up", async () => {
@@ -339,5 +342,68 @@ describe("a shorter busy-retry budget", () => {
 			main.close();
 			require("node:fs").rmSync(path, { force: true });
 		}
+	});
+});
+
+describe("claim generations", () => {
+	it("an unclaim or consumed mark applies only to the claim it belongs to", async () => {
+		await insertTurn();
+		await released();
+		await parks.claim("turn-1", T, "c1", 2_000, owner);
+		expect(await parks.unclaim("turn-1", T, { claimId: "c1" })).toBe(true);
+		await parks.claim("turn-1", T, "c2", 3_000, owner);
+		// The first claim's late unclaim, and a second copy of it.
+		expect(await parks.unclaim("turn-1", T, { claimId: "c1" })).toBe(false);
+		expect(await parks.unclaim("turn-1", T, { claimId: "c1" })).toBe(false);
+		expect(await parks.markConsumed("turn-1", T, "c1")).toBe(false);
+		expect(await parks.find("turn-1")).toMatchObject({
+			state: "claimed",
+			claimId: "c2",
+		});
+		expect(statusOf()).toBe("running");
+	});
+});
+
+describe("fenced turn writes", () => {
+	it("a park-owned turn's writes apply only while their token holds the lease", async () => {
+		await insertTurn();
+		await turns.bumpTurnCounters("turn-1", { toolRounds: 1 }, T);
+		await turns.insertLeg(
+			{ id: "leg-1", turnId: "turn-1", kind: "continue", startedAt: 600 },
+			T,
+		);
+		// The lease moves on; the old holder's queued writes arrive late.
+		await parks.acquireLease(lease("token-b", 200), everyoneDead);
+		await turns.finishTurn(
+			"turn-1",
+			{ finishedAt: 9_000, status: "completed" },
+			T,
+		);
+		await turns.bumpTurnCounters("turn-1", { toolRounds: 5 }, T);
+		await turns.insertLeg(
+			{ id: "leg-2", turnId: "turn-1", kind: "continue", startedAt: 700 },
+			T,
+		);
+		await turns.finishLeg("leg-1", { finishedAt: 9_000, httpStatus: 200 }, T);
+		expect(
+			db
+				.query(
+					"SELECT status, finished_at, tool_round_count, leg_count FROM sdk_bridge_turns WHERE id = 'turn-1'",
+				)
+				.get(),
+		).toEqual({
+			status: "running",
+			finished_at: null,
+			tool_round_count: 1,
+			leg_count: 1,
+		});
+		expect(
+			db
+				.query("SELECT id, http_status FROM sdk_bridge_turn_legs ORDER BY id")
+				.all(),
+		).toEqual([{ id: "leg-1", http_status: null }]);
+		// An ordinary turn's writes carry no token and are never fenced.
+		await turns.finishTurn("turn-1", { finishedAt: 9_500, status: "failed" });
+		expect(statusOf()).toBe("failed");
 	});
 });

@@ -26,13 +26,29 @@ export type QueryFn = (params: {
 	options: Options;
 }) => BridgeQuery;
 
-/** The write surface of `SdkBridgeTurnRepository`. */
+/**
+ * The write surface of `SdkBridgeTurnRepository`. `fence`, the park lease
+ * token, is given for a turn a released park owns: the write then applies
+ * only while that token holds the lease. Ordinary turns pass none.
+ */
 export interface SdkBridgeTurnRepo {
 	insertTurn(turn: SdkBridgeTurnInsert): Promise<void>;
-	finishTurn(id: string, finish: SdkBridgeTurnFinish): Promise<void>;
-	bumpTurnCounters(id: string, delta: SdkBridgeTurnCounterDelta): Promise<void>;
-	insertLeg(leg: SdkBridgeLegInsert): Promise<void>;
-	finishLeg(id: string, finish: SdkBridgeLegFinish): Promise<void>;
+	finishTurn(
+		id: string,
+		finish: SdkBridgeTurnFinish,
+		fence?: string,
+	): Promise<void>;
+	bumpTurnCounters(
+		id: string,
+		delta: SdkBridgeTurnCounterDelta,
+		fence?: string,
+	): Promise<void>;
+	insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<void>;
+	finishLeg(
+		id: string,
+		finish: SdkBridgeLegFinish,
+		fence?: string,
+	): Promise<void>;
 }
 
 /**
@@ -63,15 +79,21 @@ export interface SdkBridgeParkRepo {
 	claim(
 		turnId: string,
 		token: string,
+		claimId: string,
 		at: number,
 		owner: { pid: number; startTime: string | null },
 	): Promise<boolean>;
+	/** Only the claim generation named, or any with `anyClaimant` (recovery). */
 	unclaim(
 		turnId: string,
 		token: string,
-		opts?: { anyClaimant?: boolean },
+		which: { claimId: string } | { anyClaimant: true },
 	): Promise<boolean>;
-	markConsumed(turnId: string, token: string): Promise<boolean>;
+	markConsumed(
+		turnId: string,
+		token: string,
+		claimId: string,
+	): Promise<boolean>;
 	delete(turnId: string, token: string): Promise<boolean>;
 	closeTurn(
 		turnId: string,

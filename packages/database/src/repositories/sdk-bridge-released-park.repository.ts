@@ -24,6 +24,7 @@ interface ParkRow {
 	expires_at: number;
 	file_bytes: number;
 	claim_owner: string | null;
+	claim_id: string | null;
 	claimed_at: number | null;
 	created_at: number;
 }
@@ -55,6 +56,7 @@ function toPark(row: ParkRow): SdkBridgeReleasedPark {
 		expiresAt: Number(row.expires_at),
 		fileBytes: Number(row.file_bytes),
 		claimOwner: row.claim_owner,
+		claimId: row.claim_id,
 		claimedAt: row.claimed_at === null ? null : Number(row.claimed_at),
 		createdAt: Number(row.created_at),
 	};
@@ -182,8 +184,8 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 				turn_id, state, owner_api_key_id, conversation_key_hash, session_id,
 				session_path, resume_at, awaited_tool_use_ids, requested_model,
 				descriptor, active_ms, parked_since, expires_at, file_bytes,
-				claim_owner, claimed_at, created_at
-			) SELECT ?, 'preparing', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?
+				claim_owner, claim_id, claimed_at, created_at
+			) SELECT ?, 'preparing', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?
 			WHERE ${LEASED}`,
 			[
 				park.turnId,
@@ -244,13 +246,15 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 	}
 
 	/**
-	 * released → claimed under `token`, which also becomes the claim owner;
-	 * the turn row reads `running` and names the claiming process as its
-	 * owner. False when another claimant was first or the lease is not ours.
+	 * released → claimed under `token` (the claim owner) with a fresh
+	 * `claimId`, the claim's generation; the turn row reads `running` and
+	 * names the claiming process as its owner. False when another claimant
+	 * was first or the lease is not ours.
 	 */
 	async claim(
 		turnId: string,
 		token: string,
+		claimId: string,
 		at: number,
 		owner: { pid: number; startTime: string | null },
 	): Promise<boolean> {
@@ -258,9 +262,9 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 			const db = this.adapter.getSQLiteDb();
 			const changed = db.run(
 				`UPDATE sdk_bridge_released_parks
-				SET state = 'claimed', claim_owner = ?, claimed_at = ?
+				SET state = 'claimed', claim_owner = ?, claim_id = ?, claimed_at = ?
 				WHERE turn_id = ? AND state = 'released' AND ${TURN_OPEN} AND ${LEASED}`,
-				[token, at, turnId, turnId, token],
+				[token, claimId, at, turnId, turnId, token],
 			).changes;
 			if (changed !== 1) return false;
 			db.run(
@@ -273,23 +277,26 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 	}
 
 	/**
-	 * claimed → released, when no model call followed the claim. Only this
-	 * token's claim, unless `anyClaimant` (recovery, whose claims found at
-	 * startup are all stale).
+	 * claimed → released, when no model call followed the claim. Only the
+	 * claim generation `claimId` names (a late unclaim of an earlier claim
+	 * changes nothing), or any claim with `anyClaimant` (recovery, whose
+	 * claims found at startup are all stale).
 	 */
 	async unclaim(
 		turnId: string,
 		token: string,
-		opts: { anyClaimant?: boolean } = {},
+		which: { claimId: string } | { anyClaimant: true },
 	): Promise<boolean> {
+		const claimId = "claimId" in which ? which.claimId : null;
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
 			const changed = db.run(
 				`UPDATE sdk_bridge_released_parks
-				SET state = 'released', claim_owner = NULL, claimed_at = NULL
+				SET state = 'released', claim_owner = NULL, claim_id = NULL,
+					claimed_at = NULL
 				WHERE turn_id = ? AND state = 'claimed'
-					AND (? = 1 OR claim_owner = ?) AND ${LEASED}`,
-				[turnId, opts.anyClaimant ? 1 : 0, token, token],
+					AND (? IS NULL OR claim_id = ?) AND ${LEASED}`,
+				[turnId, claimId, claimId, token],
 			).changes;
 			if (changed !== 1) return false;
 			db.run(
@@ -302,11 +309,16 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 	}
 
 	/** claimed → consumed, written before the resumed query's first model call goes out. */
-	async markConsumed(turnId: string, token: string): Promise<boolean> {
+	async markConsumed(
+		turnId: string,
+		token: string,
+		claimId: string,
+	): Promise<boolean> {
 		const changed = await this.runWithChanges(
 			`UPDATE sdk_bridge_released_parks SET state = 'consumed'
-			WHERE turn_id = ? AND state = 'claimed' AND claim_owner = ? AND ${LEASED}`,
-			[turnId, token, token],
+			WHERE turn_id = ? AND state = 'claimed' AND claim_owner = ?
+				AND claim_id = ? AND ${LEASED}`,
+			[turnId, token, claimId, token],
 		);
 		return changed === 1;
 	}

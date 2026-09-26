@@ -600,6 +600,7 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 			"expires_at",
 			"file_bytes",
 			"claim_owner",
+			"claim_id",
 			"claimed_at",
 			"created_at",
 		],

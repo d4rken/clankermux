@@ -469,6 +469,12 @@ export interface TurnRow extends Record<string, unknown> {
 	counters: { toolRounds: number; innerCalls: number; innerErrors: number };
 }
 
+/** Whether a token holds the park lease, per turn map (set by memoryParkRepo). */
+const leaseChecks = new WeakMap<
+	Map<string, TurnRow>,
+	(token: string) => boolean
+>();
+
 export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 	turns: Map<string, TurnRow>;
 	legs: Map<string, Record<string, unknown>>;
@@ -478,6 +484,9 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 	const turns = new Map<string, TurnRow>();
 	const legs = new Map<string, Record<string, unknown>>();
 	const legInsertHold: { next: Promise<void> | null } = { next: null };
+	/** A fenced write (a park-owned turn's) applies only under the lease. */
+	const fenced = (fence: string | undefined) =>
+		fence !== undefined && !(leaseChecks.get(turns)?.(fence) ?? false);
 	return {
 		turns,
 		legs,
@@ -490,23 +499,30 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 				counters: { toolRounds: 0, innerCalls: 0, innerErrors: 0 },
 			});
 		},
-		async finishTurn(id: string, finish: SdkBridgeTurnFinish) {
+		async finishTurn(id: string, finish: SdkBridgeTurnFinish, fence?: string) {
+			if (fenced(fence)) return;
 			const turn = turns.get(id);
 			if (turn) Object.assign(turn, finish);
 		},
-		async bumpTurnCounters(id: string, delta: SdkBridgeTurnCounterDelta) {
+		async bumpTurnCounters(
+			id: string,
+			delta: SdkBridgeTurnCounterDelta,
+			fence?: string,
+		) {
+			if (fenced(fence)) return;
 			const turn = turns.get(id);
 			if (!turn) return;
 			turn.counters.toolRounds += delta.toolRounds ?? 0;
 			turn.counters.innerCalls += delta.innerCalls ?? 0;
 			turn.counters.innerErrors += delta.innerErrors ?? 0;
 		},
-		async insertLeg(leg: SdkBridgeLegInsert) {
+		async insertLeg(leg: SdkBridgeLegInsert, fence?: string) {
 			const wait = legInsertHold.next;
 			if (wait) {
 				legInsertHold.next = null;
 				await wait;
 			}
+			if (fenced(fence)) return;
 			const turn = turns.get(leg.turnId);
 			if (!turn) throw new Error(`FOREIGN KEY: no turn ${leg.turnId}`);
 			if (legs.has(leg.id)) throw new Error(`UNIQUE: leg ${leg.id}`);
@@ -514,7 +530,8 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			legs.set(leg.id, row);
 			turn.legs.push(row);
 		},
-		async finishLeg(id: string, finish: SdkBridgeLegFinish) {
+		async finishLeg(id: string, finish: SdkBridgeLegFinish, fence?: string) {
+			if (fenced(fence)) return;
 			const leg = legs.get(id);
 			if (leg) Object.assign(leg, finish, { finished: true });
 		},
@@ -557,6 +574,7 @@ export function memoryParkRepo(
 		}
 	};
 	const leased = (token: string) => lease?.token === token;
+	leaseChecks.set(turns, leased);
 	const turnOpen = (id: string) => !turns.get(id)?.finishedAt;
 	const setTurn = (id: string, fields: Record<string, unknown>) => {
 		const turn = turns.get(id);
@@ -592,6 +610,7 @@ export function memoryParkRepo(
 				...park,
 				state: "preparing",
 				claimOwner: null,
+				claimId: null,
 				claimedAt: null,
 			});
 			return true;
@@ -614,7 +633,7 @@ export function memoryParkRepo(
 			setTurn(turnId, { status: "released" });
 			return true;
 		},
-		async claim(turnId, token, at, owner) {
+		async claim(turnId, token, claimId, at, owner) {
 			await check("claim");
 			const park = parks.get(turnId);
 			if (park?.state !== "released" || !turnOpen(turnId) || !leased(token))
@@ -622,6 +641,7 @@ export function memoryParkRepo(
 			Object.assign(park, {
 				state: "claimed",
 				claimOwner: token,
+				claimId,
 				claimedAt: at,
 			});
 			setTurn(turnId, {
@@ -631,23 +651,25 @@ export function memoryParkRepo(
 			});
 			return true;
 		},
-		async unclaim(turnId, token, opts = {}) {
+		async unclaim(turnId, token, which) {
 			await check("unclaim");
 			const park = parks.get(turnId);
 			if (park?.state !== "claimed" || !leased(token)) return false;
-			if (!opts.anyClaimant && park.claimOwner !== token) return false;
+			if ("claimId" in which && park.claimId !== which.claimId) return false;
 			Object.assign(park, {
 				state: "released",
 				claimOwner: null,
+				claimId: null,
 				claimedAt: null,
 			});
 			if (turnOpen(turnId)) setTurn(turnId, { status: "released" });
 			return true;
 		},
-		async markConsumed(turnId, token) {
+		async markConsumed(turnId, token, claimId) {
 			await check("markConsumed");
 			const park = parks.get(turnId);
 			if (park?.state !== "claimed" || park.claimOwner !== token) return false;
+			if (park.claimId !== claimId) return false;
 			if (!leased(token)) return false;
 			park.state = "consumed";
 			return true;

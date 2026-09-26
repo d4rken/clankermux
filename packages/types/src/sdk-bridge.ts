@@ -313,13 +313,15 @@ export interface SdkBridgeReleasedPark {
 	expiresAt: number;
 	fileBytes: number;
 	claimOwner: string | null;
+	/** The current claim's generation: an unclaim names the claim it undoes. */
+	claimId: string | null;
 	claimedAt: number | null;
 	createdAt: number;
 }
 
 export type SdkBridgeReleasedParkInsert = Omit<
 	SdkBridgeReleasedPark,
-	"state" | "claimOwner" | "claimedAt"
+	"state" | "claimOwner" | "claimId" | "claimedAt"
 >;
 
 /** The one row of `sdk_bridge_park_lease`: who may act on released parks. */

@@ -25,6 +25,11 @@ export class TurnRecorder {
 		private readonly repo: SdkBridgeTurnRepo,
 		private readonly log: BridgeLog,
 		readonly turnId: string,
+		/**
+		 * The park lease token, for a turn a released park owns: every write,
+		 * queued ones included, applies only while it holds the lease.
+		 */
+		private readonly fence?: string,
 	) {}
 
 	private enqueue(what: string, write: () => Promise<void>): Promise<void> {
@@ -52,7 +57,10 @@ export class TurnRecorder {
 		startedAt: number,
 	): Promise<void> {
 		return this.enqueue("insertLeg", () =>
-			this.repo.insertLeg({ id, turnId: this.turnId, kind, startedAt }),
+			this.repo.insertLeg(
+				{ id, turnId: this.turnId, kind, startedAt },
+				this.fence,
+			),
 		);
 	}
 
@@ -60,20 +68,22 @@ export class TurnRecorder {
 	finishLeg(id: string, finish: SdkBridgeLegFinish): Promise<void> {
 		if (this.finishedLegs.has(id)) return this.chain;
 		this.finishedLegs.add(id);
-		return this.enqueue("finishLeg", () => this.repo.finishLeg(id, finish));
+		return this.enqueue("finishLeg", () =>
+			this.repo.finishLeg(id, finish, this.fence),
+		);
 	}
 
 	finishTurn(finish: SdkBridgeTurnFinish): Promise<void> {
 		if (this.turnFinished) return this.chain;
 		this.turnFinished = true;
 		return this.enqueue("finishTurn", () =>
-			this.repo.finishTurn(this.turnId, finish),
+			this.repo.finishTurn(this.turnId, finish, this.fence),
 		);
 	}
 
 	bump(delta: SdkBridgeTurnCounterDelta): Promise<void> {
 		return this.enqueue("bumpTurnCounters", () =>
-			this.repo.bumpTurnCounters(this.turnId, delta),
+			this.repo.bumpTurnCounters(this.turnId, delta, this.fence),
 		);
 	}
 

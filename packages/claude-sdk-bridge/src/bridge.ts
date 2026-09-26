@@ -57,7 +57,6 @@ import { buildQueryOptions, type WorkPaths, workPaths } from "./options";
 import { PromptStream } from "./prompt-stream";
 import { TurnRecorder } from "./recorder";
 import {
-	forkVerifiedTranscript,
 	LeaseHeldElsewhere,
 	type ReleasedEntry,
 	ReleasedParkStore,
@@ -355,10 +354,15 @@ export function createClaudeSdkBridge(
 	let recovering: string | null = parks ? "recovering released parks" : null;
 	let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 	let recoveryRun: Promise<boolean> | null = null;
+	let reconcileRun: Promise<void> | null = null;
 
 	/** One recovery attempt; false when it failed and must be retried. */
 	async function recoverParks(): Promise<boolean> {
 		if (!parks || !deps.parkRepo) return true;
+		// The barrier goes up before anything is awaited: until the new index
+		// is published (or the lease is found to be another's), results no
+		// live query holds may belong to a park not indexed yet.
+		recovering = "recovering released parks";
 		try {
 			const kept = await parks.recover({
 				preparing: bridgeErrors.bridgeRestarted("while this turn was released"),
@@ -542,7 +546,13 @@ export function createClaudeSdkBridge(
 		startedAt: number,
 		error: BridgeError,
 	): Response {
-		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
+		// A released park's turn is written under the lease, like its resume.
+		const recorder = new TurnRecorder(
+			deps.turnRepo,
+			log,
+			turnId,
+			parks?.get(turnId) ? parks.token : undefined,
+		);
 		void recorder.insertLeg(meta.legId, "continue", startedAt);
 		void recorder.finishLeg(meta.legId, {
 			finishedAt: now(),
@@ -771,7 +781,14 @@ export function createClaudeSdkBridge(
 				if (entry.state === "released" && entry.park.expiresAt <= now())
 					void expirePark(entry);
 		// Writes the database has not confirmed yet, until it does.
-		if (parks?.usable && !recoveryRun) track(parks.reconcile());
+		// One pass at a time: the next waits for the previous to finish.
+		if (parks?.usable && !recoveryRun && !reconcileRun) {
+			const pass = parks.reconcile().finally(() => {
+				reconcileRun = null;
+			});
+			reconcileRun = pass;
+			track(pass);
+		}
 		// Another server held the lease: it may have gone since.
 		if (parks && parksOffReason === LEASE_ELSEWHERE && !recoveryRun)
 			void runRecovery();
@@ -1863,8 +1880,10 @@ export function createClaudeSdkBridge(
 			else entry.state = "released";
 		};
 		// One recorder for the turn's writes from here, the leg's included, so
-		// the leg's finish is always chained behind its insert.
-		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
+		// the leg's finish is always chained behind its insert. A park owns
+		// the turn: every write carries the lease token and changes nothing
+		// once the lease has moved on.
+		const recorder = new TurnRecorder(deps.turnRepo, log, turnId, store.token);
 		let live: LiveQuery;
 		try {
 			try {
@@ -1911,13 +1930,10 @@ export function createClaudeSdkBridge(
 				throw new Error("randomId must produce UUIDs for session ids");
 			sessionId = newSessionId;
 			if (
-				!forkVerifiedTranscript(
-					entry.path,
+				!store.forkForResume(
+					entry,
 					sessionStore().pathOf(newSessionId),
-					entry.park.sessionId,
 					newSessionId,
-					entry.park.resumeAt,
-					entry.park.awaitedToolUseIds,
 				)
 			) {
 				claim?.release();
