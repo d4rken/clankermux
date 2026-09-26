@@ -71,9 +71,11 @@ import {
 	globalDeltaFromList,
 	globalEntry,
 	isKnownProvider,
+	isOfficialAnthropicProvider,
 	NodeCryptoUtils,
 	type RoutingRule,
 	sameGlobalEntry,
+	sdkBridgeWireModel,
 	toApiKeyResponse,
 } from "@clankermux/types";
 import {
@@ -722,6 +724,7 @@ export class ClientService {
 				key,
 				profile.catalogues[format].models,
 				format,
+				profile.application,
 			),
 			{ models: {}, catalogueLoaded: false, catalogueStale: false },
 			MODEL_METADATA_BUDGET_MS,
@@ -740,7 +743,15 @@ export class ClientService {
 		},
 		models: ClientModel[],
 		format: ClientFormat,
+		application: ClientProfile["application"],
 	): Promise<ClientModelMetadataResponse> {
+		// Anthropic-format requests reach official Anthropic accounts directly,
+		// where a `[1m]` id is refused. Claude Code sends an entry's bare id:
+		//
+		//   entry claude-opus-5-5[1m], no rule   -> sends claude-opus-5-5, served at 1M
+		//   rule rewriting to claude-opus-5-5[1m] -> refused
+		const directAnthropic = format === "anthropic";
+		const claudeCode = directAnthropic && application === "claude-code";
 		const rules = await this.deps.dbOps.routing.listRules();
 		const accounts = await this.accounts({
 			accountId: key.pinnedAccountId,
@@ -768,11 +779,17 @@ export class ClientService {
 		let nativeStale = false;
 		const entries = await Promise.all(
 			models.map(async (model) => {
-				const winning = matchRoutingRule(rules, id, model.id);
+				const sent = claudeCode ? sdkBridgeWireModel(model.id) : model.id;
+				const winning = matchRoutingRule(rules, id, sent);
 				// The live route, not the stored `targetModel`: a literal rule matching
 				// `any` or this model's family remaps the published id, and the stored
 				// value would then describe a route that no longer exists.
-				const routed = resolveRoutingTarget(winning, model.id).upstreamModel;
+				const lands = resolveRoutingTarget(winning, sent).upstreamModel;
+				// Left as sent, Claude Code's route serves the entry as written.
+				const routed = claudeCode && lands === sent ? model.id : lands;
+				// Only a concrete entry's own suffix, which Claude Code strips; an
+				// alias's `[1m]` stages reach the direct route as written.
+				const servedAsWritten = routed !== lands;
 				const alias = routed.startsWith("alias:")
 					? await this.deps.dbOps.modelAliases.get(routed)
 					: null;
@@ -822,6 +839,13 @@ export class ClientService {
 								account.provider !== winning.pool_provider
 							)
 								continue;
+							if (
+								directAnthropic &&
+								!servedAsWritten &&
+								isOfficialAnthropicProvider(account.provider) &&
+								sdkBridgeWireModel(target) !== target
+							)
+								continue;
 							const permission = permissions.get(account.id) ?? null;
 							const permissionRule: RoutingRule | null = alias
 								? {
@@ -845,7 +869,7 @@ export class ClientService {
 									}
 								: winning;
 							if (
-								isModelPermitted(permission, account.id, target, permissionRule)
+								isModelPermitted(permission, account, target, permissionRule)
 							) {
 								cacheRoutes.push({
 									provider: account.provider,
@@ -1025,7 +1049,13 @@ export class ClientService {
 		const metadata =
 			includeMetadata || aliasModels.size > 0
 				? await catalogueWithin(
-						this.resolveModelMetadata(id, key, catalogue.models, format),
+						this.resolveModelMetadata(
+							id,
+							key,
+							catalogue.models,
+							format,
+							profile.application,
+						),
 						{ models: {}, catalogueLoaded: false, catalogueStale: false },
 						WIRE_METADATA_BUDGET_MS,
 					)

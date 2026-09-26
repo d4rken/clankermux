@@ -18,7 +18,9 @@ import {
 	claudeCodeTarget,
 	getChatContext,
 	getSdkBridgeInnerMetaContext,
+	isOfficialAnthropicProvider,
 	sdkBridgeCandidatesForModel,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 import {
 	AccountIdentityChangedError,
@@ -40,16 +42,54 @@ import type { ProxyContext } from "./handlers/proxy-types";
  */
 async function readSuppressionReason(
 	ctx: ProxyContext,
-	accountId: string,
+	account: Account,
 	scope: string,
 	model: string,
 ): Promise<string | null> {
 	const routing = ctx.dbOps.routing;
-	if (routing.modelSuppressionReason)
-		return routing.modelSuppressionReason(accountId, scope, model, Date.now());
-	return (await routing.isModelSuppressed(accountId, scope, model, Date.now()))
-		? ""
-		: null;
+	for (const id of suppressionIds(account, model)) {
+		const reason = routing.modelSuppressionReason
+			? await routing.modelSuppressionReason(account.id, scope, id, Date.now())
+			: (await routing.isModelSuppressed(account.id, scope, id, Date.now()))
+				? ""
+				: null;
+		if (reason !== null) return reason;
+	}
+	return null;
+}
+
+/**
+ * The ids a suppression of `model` on `account` may be recorded under: an
+ * official Anthropic account serves a `[1m]` id as the bare one (see
+ * `sdkBridgeWireModel`).
+ *
+ *   anthropic, claude-opus-5-5[1m]  -> claude-opus-5-5[1m], claude-opus-5-5
+ */
+function suppressionIds(account: Account, model: string): string[] {
+	const wire = sdkBridgeWireModel(model);
+	return isOfficialAnthropicProvider(account.provider) && wire !== model
+		? [model, wire]
+		: [model];
+}
+
+/** Whether `model` is suppressed on `account`, under any id it goes out as. */
+export async function isModelSuppressedFor(
+	ctx: ProxyContext,
+	account: Account,
+	scope: string,
+	model: string,
+): Promise<boolean> {
+	for (const id of suppressionIds(account, model))
+		if (
+			await ctx.dbOps.routing.isModelSuppressed(
+				account.id,
+				scope,
+				id,
+				Date.now(),
+			)
+		)
+			return true;
+	return false;
 }
 
 import { getValidAccessToken } from "./handlers/token-manager";
@@ -191,8 +231,8 @@ async function claudeCodeRoutingModel(
 	);
 	if (stale.size) return model;
 	const rows = pool.map((a) => [a, permissions.get(a.id) ?? null] as const);
-	return rows.some(([a, p]) => isModelPermitted(p, a.id, target, null)) &&
-		!rows.some(([a, p]) => isModelPermitted(p, a.id, model, null))
+	return rows.some(([a, p]) => isModelPermitted(p, a, target, null)) &&
+		!rows.some(([a, p]) => isModelPermitted(p, a, model, null))
 		? candidate
 		: model;
 }
@@ -339,7 +379,7 @@ export async function initializeRequestRoute(
 					!stale.has(a.id) &&
 					!isModelPermitted(
 						permissions.get(a.id) ?? null,
-						a.id,
+						a,
 						stageModel,
 						stageRule,
 					),
@@ -369,7 +409,7 @@ export async function initializeRequestRoute(
 					// and the alias path RETURNS that error to the client.
 					const reason = await readSuppressionReason(
 						ctx,
-						a.id,
+						a,
 						p.scope,
 						stageModel,
 					);
@@ -445,7 +485,7 @@ async function installPooledRoute(
 		const missing = pool.filter(
 			(a) =>
 				!stale.has(a.id) &&
-				!isModelPermitted(permissions.get(a.id) ?? null, a.id, target, winning),
+				!isModelPermitted(permissions.get(a.id) ?? null, a, target, winning),
 		);
 		if (missing.length) {
 			await service.refreshMisses(missing);
@@ -461,7 +501,7 @@ async function installPooledRoute(
 			if (!p) return;
 			// The REASON, not just the fact: a route emptied by substitution
 			// suppressions must not present as a permission failure.
-			const reason = await readSuppressionReason(ctx, a.id, p.scope, target);
+			const reason = await readSuppressionReason(ctx, a, p.scope, target);
 			if (reason === null) return;
 			const key = JSON.stringify([a.id, target]);
 			suppressedPairs.add(key);
@@ -608,11 +648,11 @@ export async function eligibleRouteAccounts(
 				// suppression table yet (see request-model-exclusions).
 				if (
 					isModelExcludedForRequest(meta, account.id, target.upstreamModel) ||
-					(await ctx.dbOps.routing.isModelSuppressed(
-						account.id,
+					(await isModelSuppressedFor(
+						ctx,
+						account,
 						target.scope,
 						target.upstreamModel,
-						Date.now(),
 					))
 				)
 					return null;

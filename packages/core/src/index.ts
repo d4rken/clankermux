@@ -310,6 +310,7 @@ export {
 	aliasEffortClampsToClaudeFamily,
 	aliasEffortReachesProvider,
 	clampEffortToModel,
+	claudeModelTakesEffort,
 	getAliasReasoningEfforts,
 	getModelReasoningEfforts,
 	resolveTargetReasoningProfile,

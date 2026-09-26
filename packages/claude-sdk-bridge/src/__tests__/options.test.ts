@@ -134,6 +134,25 @@ describe("query options", () => {
 		});
 	});
 
+	it("passes the effort only to a model that takes one, clamped to its range", () => {
+		const effort = (model: string, level: "low" | "xhigh" | "max") =>
+			buildQueryOptions({ ...base, model, effort: level }).effort;
+		expect(effort("claude-opus-5-5", "max")).toBe("max");
+		expect(effort("claude-fable-5-1[1m]", "max")).toBe("max");
+		expect(effort("claude-sonnet-5", "xhigh")).toBe("xhigh");
+		expect(effort("claude-sonnet-5", "low")).toBe("low");
+		// A future Haiku takes an effort, within Haiku's range.
+		expect(effort("claude-haiku-5", "max")).toBe("medium");
+		// Haiku 4.5, Sonnet 4.5 and non-Claude ids take none: Claude Code's
+		// default stands.
+		for (const model of [
+			"claude-haiku-4-5",
+			"claude-sonnet-4-5",
+			"primary-model",
+		])
+			expect(effort(model, "max")).toBeUndefined();
+	});
+
 	it("sets the client's output limit only when it gave one", () => {
 		expect(
 			buildQueryOptions({ ...base, maxOutputTokens: 500 }).env

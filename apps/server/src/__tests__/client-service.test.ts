@@ -1525,6 +1525,26 @@ describe("client service integration", () => {
 					},
 				},
 			},
+			anthropic: {
+				models: {
+					"claude-opus-5-5": {
+						id: "claude-opus-5-5",
+						name: "Opus 5.5",
+						limit: { context: 1_000_000, output: 128_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+						cost: { input: 5, output: 25 },
+					},
+					"claude-haiku-4-5": {
+						id: "claude-haiku-4-5",
+						name: "Haiku 4.5",
+						limit: { context: 200_000, output: 64_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+						cost: { input: 1, output: 5 },
+					},
+				},
+			},
 			"openai-compatible": {
 				models: {
 					"fast-backup": {
@@ -1602,6 +1622,254 @@ describe("client service integration", () => {
 			if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
 			else process.env.XDG_CACHE_HOME = originalCacheHome;
 			rmSync(cacheDir, { recursive: true, force: true });
+		});
+
+		it("describes Claude entries served by an official Anthropic account, [1m] at 1M", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5", "claude-haiku-4-5"]);
+			const draft = blank();
+			draft.catalogues.openai.models = [
+				"claude-opus-5-5",
+				"claude-opus-5-5[1m]",
+				"claude-haiku-4-5",
+			].map((model) => ({
+				id: model,
+				displayName: model,
+				targetModel: model,
+				accountIds: null,
+			}));
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "openai");
+			const opus = {
+				maxOutputTokens: 128_000,
+				reasoning: true,
+				supportedReasoningEfforts: ALIAS_EFFORTS,
+				inputModalities: ["text", "image"],
+				cost: { input: 5, output: 25 },
+			};
+			expect(models["claude-opus-5-5"]).toMatchObject({
+				...opus,
+				contextWindow: 200_000,
+			});
+			expect(models["claude-opus-5-5[1m]"]).toMatchObject({
+				...opus,
+				contextWindow: 1_000_000,
+			});
+			expect(models["claude-haiku-4-5"]).toMatchObject({
+				contextWindow: 200_000,
+			});
+			expect(models["claude-haiku-4-5"]).not.toHaveProperty(
+				"supportedReasoningEfforts",
+			);
+			const enriched = await (await service.wire(id, "openai", true)).json();
+			expect(
+				Object.fromEntries(
+					enriched.data.map(
+						(m: {
+							id: string;
+							clankermux: {
+								contextWindow?: number;
+								supportedReasoningEfforts?: string[];
+							};
+						}) => [
+							m.id,
+							[
+								m.clankermux.contextWindow,
+								m.clankermux.supportedReasoningEfforts?.length,
+							],
+						],
+					),
+				),
+			).toEqual({
+				"claude-opus-5-5": [200_000, 5],
+				"claude-opus-5-5[1m]": [1_000_000, 5],
+				"claude-haiku-4-5": [200_000, undefined],
+			});
+		});
+
+		it("withholds a [1m] entry from an Anthropic-format catalogue only Claude Code can use", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:long",
+				displayName: "Long",
+				revision: 0,
+				targets: [
+					{ model: "claude-opus-5-5[1m]", accountIds: null },
+					{ model: "gpt-6-astra", accountIds: null },
+				],
+			});
+			const entries = [
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+				{
+					id: "claude-long",
+					displayName: "Long",
+					targetModel: alias.id,
+					accountIds: null,
+				},
+			];
+			const oneM = async (application: "generic" | "claude-code") => {
+				const draft = blank();
+				draft.name = application;
+				draft.application = application;
+				draft.catalogues.anthropic.models = entries;
+				if (application === "generic") draft.catalogues.openai.models = entries;
+				return (await create(draft)).client.apiKeyId;
+			};
+			const generic = await oneM("generic");
+			// Its /wire/anthropic requests for the id answer 400
+			// model_suffix_requires_claude_code, so it has no route at all...
+			const direct = (await service.modelMetadata(generic, "anthropic")).models;
+			expect(direct["claude-opus-5-5[1m]"]).not.toHaveProperty("contextWindow");
+			// ...and the alias is described by the one target it can reach.
+			expect(direct["claude-long"]?.cost).toMatchObject({
+				input: 10,
+				output: 50,
+			});
+			// The same client's OpenAI-format requests are bridged.
+			const bridged = (await service.modelMetadata(generic, "openai")).models;
+			expect(bridged["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
+			// Two rate cards that disagree publish none.
+			expect(bridged["claude-long"]).not.toHaveProperty("cost");
+			// Claude Code resolves the suffix itself.
+			const claudeCode = await oneM("claude-code");
+			expect(
+				(await service.modelMetadata(claudeCode, "anthropic")).models[
+					"claude-opus-5-5[1m]"
+				]?.contextWindow,
+			).toBe(1_000_000);
+		});
+
+		it("withholds a Claude Code entry whose rule introduces a [1m] target", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "opus-to-1m",
+				name: "Opus to 1M",
+				match_model_kind: "family",
+				match_model_value: "anthropic:opus",
+				target_kind: "literal",
+				target_model: "claude-opus-5-5[1m]",
+			});
+			const draft = blank();
+			draft.application = "claude-code";
+			draft.catalogues.anthropic.models = [
+				"claude-opus-5-5",
+				"claude-opus-5-5[1m]",
+			].map((model) => ({
+				id: model,
+				displayName: model,
+				targetModel: model,
+				accountIds: null,
+			}));
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "anthropic");
+			// Claude Code sends both as claude-opus-5-5; the rule rewrites that to
+			// the suffixed id, which a direct send refuses with a 400.
+			for (const model of ["claude-opus-5-5", "claude-opus-5-5[1m]"])
+				expect([model, models[model]?.contextWindow]).toEqual([
+					model,
+					undefined,
+				]);
+		});
+
+		it("withholds a Claude Code alias stage that targets a [1m] id", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:long",
+				displayName: "Long",
+				revision: 0,
+				targets: [
+					{ model: "claude-opus-5-5[1m]", accountIds: null },
+					{ model: "gpt-6-astra", accountIds: null },
+				],
+			});
+			const draft = blank();
+			draft.application = "claude-code";
+			draft.catalogues.anthropic.models = [
+				{
+					id: alias.id,
+					displayName: "Long",
+					targetModel: alias.id,
+					accountIds: null,
+				},
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const models = (await service.modelMetadata(id, "anthropic")).models;
+			// The alias hands the direct route claude-opus-5-5[1m], which it
+			// refuses, so only the Astra stage describes it.
+			const long = models["claude-alias:long"];
+			expect(long?.cost).toMatchObject({ input: 10, output: 50 });
+			// A concrete entry whose own suffix Claude Code strips stays at 1M.
+			expect(models["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
+		});
+
+		it("describes a [1m] entry from the family rule that routes it", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "opus-to-astra",
+				name: "Opus to Astra",
+				match_model_kind: "family",
+				match_model_value: "anthropic:opus",
+				target_kind: "literal",
+				target_model: "gpt-6-astra",
+			});
+			const draft = blank();
+			draft.catalogues.openai.models = [
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "openai");
+			// The rule sends it to gpt-6-astra, so that is what it describes.
+			expect(models["claude-opus-5-5[1m]"]).toMatchObject({
+				contextWindow: 872_000,
+				supportedReasoningEfforts: ALIAS_EFFORTS,
+			});
 		});
 
 		it("advertises the fixed alias effort range in every format, whatever the targets accept", async () => {

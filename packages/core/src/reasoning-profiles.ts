@@ -1,6 +1,8 @@
 import {
 	ALIAS_REASONING_EFFORTS,
 	type AliasReasoningEffort,
+	isOfficialAnthropicProvider,
+	oneMillionContextBase,
 } from "@clankermux/types";
 import { getModelFamily } from "./model-mappings";
 
@@ -10,6 +12,25 @@ const CLAUDE_EFFORTS: Record<string, readonly AliasReasoningEffort[]> = {
 	haiku: ["low", "medium"],
 	fable: ["low", "medium", "high", "xhigh", "max"],
 };
+/**
+ * Whether a Claude model takes an effort at all: Opus 4.5, and every model
+ * from 4.6 on.
+ *
+ *   claude-opus-4-5, claude-sonnet-4-6, claude-opus-5-5[1m]  -> true
+ *   claude-haiku-4-5, claude-opus-4-1, claude-3-5-haiku-*   -> false
+ */
+export function claudeModelTakesEffort(model: string): boolean {
+	const id = model.toLowerCase().trim().replace(/^.*\//, "");
+	const match =
+		/^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?:-\d{8}|-latest)?$/.exec(
+			oneMillionContextBase(id) ?? id,
+		);
+	if (!match) return false;
+	const major = Number(match[2]);
+	const minor = Number(match[3] ?? 0);
+	if (major !== 4) return major > 4;
+	return minor >= 6 || (match[1] === "opus" && minor === 5);
+}
 const GPT_EFFORTS: Record<string, readonly AliasReasoningEffort[]> = {
 	"gpt-5": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
@@ -112,8 +133,11 @@ export function resolveTargetReasoningProfile(
 	const gpt =
 		Object.hasOwn(GPT_EFFORTS, normalized) ||
 		["gpt-5.4-mini-2026-09-01", "gpt-6-astra-2026-09-03"].includes(normalized);
+	const claude =
+		isOfficialAnthropicProvider(provider) && claudeModelTakesEffort(normalized);
 	const mapped =
-		(provider === "codex" || provider === "openai-compatible") && gpt;
+		((provider === "codex" || provider === "openai-compatible") && gpt) ||
+		claude;
 	if (!mapped) return { status: "unknown" };
 	const efforts = getModelReasoningEfforts(model);
 	return efforts ? { status: "known", efforts } : { status: "unknown" };

@@ -180,8 +180,11 @@ and `max`. Every alias advertises the same fixed range, `low` through `max`.
 
 OpenAI, Anthropic, and Codex are client catalogue formats here, not promises of
 upstream provider support. Verified GPT profiles on the `codex` and
-`openai-compatible` upstream adapters currently substantiate effort metadata.
-Anthropic upstream routes and unknown adapter/model combinations do not.
+`openai-compatible` upstream adapters substantiate effort metadata, and so do
+Claude models that take an effort on official Anthropic accounts: Opus 4.5 and
+every model from 4.6 on, at `low` through `max`. Haiku 4.5, Sonnet 4.5, Opus
+4.1 and `claude-3-*` models publish none. Anthropic-compatible providers and
+unknown adapter/model combinations do not.
 
 For an alias, `supportedReasoningEfforts` is always `low`, `medium`, `high`,
 `xhigh`, `max`, whatever its targets accept, and `reasoning` is `true`. The
@@ -205,6 +208,18 @@ model name alone. Codex's native response uses the same values in
 `supported_reasoning_levels`, with `medium` as an alias's
 `default_reasoning_level`; each level describes an alias acceptance rather than
 one target's native metadata.
+
+## 1M-context model ids
+
+`claude-opus-5-5[1m]`, `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` are
+served on an official Anthropic account that permits the bare id, through the
+SDK bridge only (Responses and Chat Completions on `/wire/openai`). Their
+`contextWindow` is `1000000`; every other metadata field is the bare id's,
+and the bare ids stay at `200000`. Any other `[1m]` id is a literal no
+account serves. A route that would send a suffixed id to Anthropic directly,
+such as `/wire/anthropic` from a client other than Claude Code, answers
+`400 model_suffix_requires_claude_code` before anything is sent, and that
+client's Anthropic-format catalogue publishes no metadata for it.
 
 ## Wire and transport rules
 

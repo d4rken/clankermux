@@ -186,6 +186,18 @@ made private, never deleted: no pid says whether a process still uses them.
   all-accounts 429 took 594 s with the CLI's backoff and 0.7 s without.
 - **Never set `CLAUDE_CODE_ENTRYPOINT`.** Traffic is honestly labelled
   `cc_entrypoint=sdk-ts`; setting it would misdeclare the billing class.
+- `effort` is set only when the planned model takes one
+  (`claudeModelTakesEffort`: Opus 4.5 and every model from 4.6 on), lowered
+  to its family's range (`clampEffortToModel`). Haiku 4.5, Sonnet 4.5 and
+  older models run at Claude Code's default.
+- A `[1m]` model goes to Claude Code as is. Claude Code turns the suffix into
+  the 1M beta header and sends the bare id, so the inner route plans both
+  forms (`sdkBridgeCandidatesForModel`). Only `claude-opus-5-5[1m]`,
+  `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` (`oneMillionContextBase`)
+  are permitted through their bare id and published at a 1M window. Family
+  rules and bare-id suppressions apply to them. A route that would send any
+  suffixed id directly (not bridged) answers 400
+  `model_suffix_requires_claude_code`.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` carries the client's `max_tokens`. It bounds
   each model call, not the turn: after a `max_tokens` stop Claude Code asks
   the model to continue under the same limit, and the client sees one reply

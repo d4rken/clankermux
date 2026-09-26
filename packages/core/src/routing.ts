@@ -1,8 +1,11 @@
-import type {
-	ModelPermissionSet,
-	ResolvedRoutingTarget,
-	RoutingModelFamily,
-	RoutingRule,
+import {
+	isOfficialAnthropicProvider,
+	type ModelPermissionSet,
+	oneMillionContextBase,
+	type ResolvedRoutingTarget,
+	type RoutingModelFamily,
+	type RoutingRule,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 
 export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
@@ -12,10 +15,14 @@ export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
 	"anthropic:fable",
 ];
 
-/** Anchored IDs only; quota classification deliberately uses a different helper. */
+/**
+ * Anchored IDs only; quota classification deliberately uses a different helper.
+ * A `[1m]` id is its bare id's family: `claude-opus-5-5[1m]` is anthropic:opus.
+ */
 export function getRoutingModelFamily(
-	model: string,
+	requested: string,
 ): RoutingModelFamily | null {
+	const model = sdkBridgeWireModel(requested);
 	const match =
 		/^claude-(opus|sonnet|haiku|fable|mythos)-\d+(?:[.-]\d+)*(?:-latest)?$/i.exec(
 			model,
@@ -68,19 +75,29 @@ export function resolveRoutingTarget(
 	return { upstreamModel: requestedModel, targetSource: "identity" };
 }
 
+/**
+ * On an official Anthropic account (see `sdkBridgeWireModel`):
+ *
+ *   lists claude-opus-5-5   ->  permits claude-opus-5-5[1m]
+ *   lists claude-haiku-4-5  ->  does not permit claude-haiku-4-5[1m]
+ */
 export function isModelPermitted(
 	permissions: ModelPermissionSet | null,
-	accountId: string,
+	account: { id: string; provider: string },
 	model: string,
 	winningRule: RoutingRule | null,
 ): boolean {
-	if (permissions?.manual_ids.includes(model)) return true;
+	const base = isOfficialAnthropicProvider(account.provider)
+		? oneMillionContextBase(model)
+		: null;
+	const ids = base ? [model, base] : [model];
+	if (ids.some((id) => permissions?.manual_ids.includes(id))) return true;
 	if (permissions && permissions.completeness !== "unknown")
-		return permissions.discovered_ids.includes(model);
+		return ids.some((id) => permissions.discovered_ids.includes(id));
 	return (
 		winningRule?.enabled === true &&
 		winningRule.pool_kind === "accounts" &&
-		winningRule.pool_account_ids?.includes(accountId) === true &&
+		winningRule.pool_account_ids?.includes(account.id) === true &&
 		winningRule.target_kind === "literal" &&
 		winningRule.target_model === model
 	);

@@ -8,6 +8,9 @@ import {
 	validateRoutingRule,
 } from "./routing";
 
+const A = { id: "a", provider: "anthropic-compatible" };
+const B = { id: "b", provider: "anthropic-compatible" };
+
 const rule = (patch: Partial<RoutingRule> = {}): RoutingRule => ({
 	id: "r",
 	name: "Experiment",
@@ -102,6 +105,72 @@ describe("routing policy", () => {
 			resolveRoutingTarget(rule({ target_kind: "literal" }), "claude-sonnet-5"),
 		).toThrow("Literal route requires a target model");
 	});
+	it("classifies a [1m] id by its bare id, and a family rule matches it", () => {
+		expect(getRoutingModelFamily("claude-opus-5-5[1m]")).toBe("anthropic:opus");
+		expect(getRoutingModelFamily("claude-fable-5-1[1m]")).toBe(
+			"anthropic:fable",
+		);
+		const family = rule({
+			match_model_kind: "family",
+			match_model_value: "anthropic:opus",
+		});
+		expect(matchRoutingRule([family], null, "claude-opus-5-5[1m]")).toBe(
+			family,
+		);
+		// Exact rules still compare the id as written.
+		const exact = rule({
+			match_model_kind: "exact",
+			match_model_value: "claude-opus-5-5",
+		});
+		expect(matchRoutingRule([exact], null, "claude-opus-5-5[1m]")).toBeNull();
+	});
+	it("permits a [1m] id on an official Anthropic account that lists the bare id", () => {
+		const listing = (ids: string[], source: "manual" | "discovered") => ({
+			completeness: "known-complete" as const,
+			discovered_ids: source === "discovered" ? ids : [],
+			manual_ids: source === "manual" ? ids : [],
+		});
+		for (const provider of ["anthropic", "claude-oauth", "claude-console-api"])
+			for (const source of ["manual", "discovered"] as const) {
+				const account = { id: "a", provider };
+				const bare = listing(["claude-opus-5-5"], source);
+				expect(
+					isModelPermitted(bare, account, "claude-opus-5-5[1m]", null),
+				).toBe(true);
+				expect(isModelPermitted(bare, account, "claude-opus-5-5", null)).toBe(
+					true,
+				);
+				expect(
+					isModelPermitted(bare, account, "claude-fable-5-1[1m]", null),
+				).toBe(false);
+				// Outside the measured 1M set the suffixed id is a literal of its own.
+				for (const [listed, model] of [
+					["claude-haiku-4-5", "claude-haiku-4-5[1m]"],
+					["claude-opus-5", "claude-opus-5[1m]"],
+					["claude-opus-5-5", "claude-opus-5-5[1M]"],
+				])
+					expect(
+						isModelPermitted(listing([listed], source), account, model, null),
+					).toBe(false);
+			}
+		// Anywhere else the suffixed id is a literal of its own.
+		for (const provider of [
+			"anthropic-compatible",
+			"openrouter",
+			"zai",
+			"codex",
+			"openai-compatible",
+		])
+			for (const source of ["manual", "discovered"] as const)
+				expect(
+					isModelPermitted(
+						listing(["claude-opus-5-5"], source),
+						{ id: "a", provider },
+						"claude-opus-5-5[1m]",
+						null,
+					),
+				).toBe(false);
+	});
 	it("only asserts an unknown exact account/model pair through the winning literal account rule", () => {
 		const assertion = rule({
 			pool_kind: "accounts",
@@ -109,30 +178,25 @@ describe("routing policy", () => {
 			target_kind: "literal",
 			target_model: "target",
 		});
-		expect(isModelPermitted(null, "a", "target", assertion)).toBe(true);
-		expect(isModelPermitted(null, "b", "target", assertion)).toBe(false);
-		expect(isModelPermitted(null, "a", "different", assertion)).toBe(false);
+		expect(isModelPermitted(null, A, "target", assertion)).toBe(true);
+		expect(isModelPermitted(null, B, "target", assertion)).toBe(false);
+		expect(isModelPermitted(null, A, "different", assertion)).toBe(false);
 		for (const bad of [
 			rule(),
 			rule({ target_kind: "literal", target_model: "target" }),
 			{ ...assertion, target_kind: "requested" as const },
 			{ ...assertion, enabled: false },
 		]) {
-			expect(isModelPermitted(null, "a", "target", bad)).toBe(false);
+			expect(isModelPermitted(null, A, "target", bad)).toBe(false);
 		}
 		const known = {
 			completeness: "known-empty" as const,
 			discovered_ids: [],
 			manual_ids: [],
 		};
-		expect(isModelPermitted(known, "a", "target", assertion)).toBe(false);
+		expect(isModelPermitted(known, A, "target", assertion)).toBe(false);
 		expect(
-			isModelPermitted(
-				{ ...known, manual_ids: ["target"] },
-				"a",
-				"target",
-				null,
-			),
+			isModelPermitted({ ...known, manual_ids: ["target"] }, A, "target", null),
 		).toBe(true);
 	});
 	it("validates tagged fields, bounded strings, and explicit family names", () => {

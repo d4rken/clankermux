@@ -40,8 +40,10 @@ import {
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import { PROVIDER_NAMES } from "@clankermux/types";
+import { isOfficialAnthropicProvider } from "@clankermux/types";
 import { getStreamForwardTotalTimeoutMs } from "./stream-timeouts";
+
+export { isOfficialAnthropicProvider };
 
 const log = new Logger("ProviderOverloadCooldown");
 
@@ -247,21 +249,6 @@ function normalizeUntil(
 }
 
 /**
- * Official Anthropic upstream in any of its provider spellings: OAuth
- * ("anthropic"), the legacy OAuth alias ("claude-oauth"), and Console API
- * key accounts ("claude-console-api"). All three hit api.anthropic.com and
- * share overload fate, so they collapse to one breaker key — and the SSE
- * sniffer uses this same predicate for its `overloaded_error` allow-list.
- */
-export function isOfficialAnthropicProvider(provider: string): boolean {
-	return (
-		provider === PROVIDER_NAMES.ANTHROPIC ||
-		provider === "claude-oauth" ||
-		provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
-	);
-}
-
-/**
  * THE canonical overload-attribution model: which model an attempt's 529s are
  * attributed to, and which bucket it is admitted against.
  *
@@ -284,6 +271,7 @@ export function resolveOverloadAttributionModel(
 	return logicalModel ?? candidateModel ?? null;
 }
 
+/** Every official Anthropic spelling shares one upstream, so one breaker key. */
 export function getProviderOverloadKey(provider: string): string {
 	return isOfficialAnthropicProvider(provider)
 		? ANTHROPIC_UPSTREAM_OVERLOAD_KEY

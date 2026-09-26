@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ClientModelMetadata, ModelCachePolicy } from "@clankermux/types";
+import type {
+	AliasReasoningEffort,
+	ClientModelMetadata,
+	ModelCachePolicy,
+} from "@clankermux/types";
 import {
 	reduceModelCachePolicies,
 	resolveClientModelMetadata,
@@ -58,6 +62,25 @@ const CATALOGUE = {
 				limit: { context: 1_000_000, output: 64_000 },
 			}),
 			"claude-haiku-4-5": entry({ limit: { context: 200_000, output: 8_192 } }),
+			"claude-opus-5-5": entry({
+				limit: { context: 1_000_000, output: 128_000 },
+				reasoning: true,
+				cost: {
+					input: 5,
+					output: 25,
+					tiers: [
+						{
+							tier: { type: "context", size: 200_000 },
+							input: 10,
+							output: 37.5,
+						},
+					],
+				},
+			}),
+			"claude-fable-5-1": entry({
+				limit: { context: 1_000_000, output: 128_000 },
+				reasoning: true,
+			}),
 		},
 	},
 	openrouter: {
@@ -233,6 +256,34 @@ describe("published model metadata", () => {
 		).toBeUndefined();
 	});
 
+	it("publishes the Claude family's efforts on official Anthropic routes", async () => {
+		await loadCatalogue();
+		const efforts = async (targetModel: string, providers: string[]) =>
+			(await resolveClientModelMetadata({ targetModel, providers }))
+				.supportedReasoningEfforts;
+		const full: AliasReasoningEffort[] = [
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		];
+		expect(await efforts("claude-opus-5-5", ["anthropic"])).toEqual(full);
+		expect(
+			await efforts("claude-fable-5-1", [
+				"anthropic",
+				"claude-oauth",
+				"claude-console-api",
+			]),
+		).toEqual(full);
+		// Haiku 4.5 takes no effort.
+		expect(await efforts("claude-haiku-4-5", ["anthropic"])).toBeUndefined();
+		// One route that cannot substantiate them drops them for the model.
+		expect(
+			await efforts("claude-opus-5-5", ["anthropic", "openrouter"]),
+		).toBeUndefined();
+	});
+
 	it("does not infer effort support for an unknown provider", async () => {
 		await loadCatalogue();
 		expect(
@@ -285,6 +336,66 @@ describe("published model metadata", () => {
 		});
 		expect(haiku.contextWindow).toBe(200_000);
 		expect(haiku.maxOutputTokens).toBe(8_192);
+	});
+
+	it("publishes 1M for a [1m] id on official Anthropic routes, the rest from the bare id", async () => {
+		await loadCatalogue();
+		for (const providers of [
+			["anthropic"],
+			["anthropic", "claude-console-api"],
+		]) {
+			const bare = await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5",
+				providers,
+			});
+			expect(bare.contextWindow).toBe(200_000);
+			expect(
+				await resolveClientModelMetadata({
+					targetModel: "claude-opus-5-5[1m]",
+					providers,
+				}),
+			).toEqual({ ...bare, contextWindow: 1_000_000 });
+		}
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["anthropic"],
+			}),
+		).toMatchObject({
+			contextWindow: 1_000_000,
+			maxOutputTokens: 128_000,
+			reasoning: true,
+			supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+			cost: {
+				input: 5,
+				output: 25,
+				tiers: [{ inputTokensAbove: 200_000, input: 10, output: 37.5 }],
+			},
+		});
+		// The legacy spelling has no catalogue entry of its own, but the window
+		// and the efforts hold for it.
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["claude-oauth"],
+			}),
+		).toEqual({
+			contextWindow: 1_000_000,
+			supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+		});
+		// Outside the measured 1M set the suffixed id is a literal nothing lists.
+		for (const providers of [["anthropic"], ["claude-oauth"]])
+			for (const targetModel of ["claude-haiku-4-5[1m]", "claude-opus-5[1m]"])
+				expect(
+					await resolveClientModelMetadata({ targetModel, providers }),
+				).toEqual({});
+		// Anywhere else the suffix is part of an id nothing publishes.
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["openrouter"],
+			}),
+		).toEqual({});
 	});
 
 	it("prefers the catalogue's input ceiling over its context figure", async () => {

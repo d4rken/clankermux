@@ -3,6 +3,7 @@
 import {
 	getDefaultEndpoint,
 	isKnownProvider,
+	isOfficialAnthropicProvider,
 	PROVIDER_CONFIG,
 	PROVIDER_NAMES,
 	type ProviderName,
@@ -17,6 +18,7 @@ import {
 export {
 	getDefaultEndpoint,
 	isKnownProvider,
+	isOfficialAnthropicProvider,
 	PROVIDER_CONFIG,
 	PROVIDER_NAMES,
 	type ProviderName,

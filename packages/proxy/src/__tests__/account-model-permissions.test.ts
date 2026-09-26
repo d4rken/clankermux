@@ -1055,7 +1055,7 @@ describe("grok-subscription model discovery", () => {
 		service: AccountModelPermissionService,
 		a: Account,
 		model: string,
-	) => isModelPermitted(await service.permissions(a), a.id, model, null);
+	) => isModelPermitted(await service.permissions(a), a, model, null);
 
 	it("reads the fixed chat-proxy catalogue with the OAuth bearer and the CLI identity", async () => {
 		const a = grok();
