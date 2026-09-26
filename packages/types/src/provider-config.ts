@@ -31,6 +31,19 @@ export function isKnownProvider(provider: string): provider is ProviderName {
 }
 
 /**
+ * Official Anthropic upstream in any of its provider spellings: OAuth
+ * ("anthropic"), the legacy OAuth alias ("claude-oauth"), and Console API
+ * key accounts ("claude-console-api"). All three hit api.anthropic.com.
+ */
+export function isOfficialAnthropicProvider(provider: string): boolean {
+	return (
+		provider === PROVIDER_NAMES.ANTHROPIC ||
+		provider === "claude-oauth" ||
+		provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
+	);
+}
+
+/**
  * Detailed provider configuration interface
  */
 export interface ProviderConfig {

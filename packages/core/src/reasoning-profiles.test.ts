@@ -27,13 +27,49 @@ it("requires matching adapter and model families", () => {
 	expect(getAliasReasoningEfforts("gpt-5.4-mini", "openai-compatible")).toEqual(
 		["low", "medium"],
 	);
-	expect(getAliasReasoningEfforts("claude-haiku-4-5", "anthropic")).toBeNull();
 	for (const provider of ["unknown", "qwen", "zai", "ollama", "anthropic"])
 		expect(getAliasReasoningEfforts("gpt-6-astra", provider)).toBeNull();
 	expect(getAliasReasoningEfforts("mystery", "codex")).toBeNull();
 	expect(resolveTargetReasoningProfile("gpt-6-astra", "unknown").status).toBe(
 		"unknown",
 	);
+});
+it("profiles Claude models on every official Anthropic provider", () => {
+	const full = ["low", "medium", "high", "xhigh", "max"];
+	for (const provider of ["anthropic", "claude-oauth", "claude-console-api"]) {
+		for (const model of [
+			"claude-opus-5-5",
+			"claude-fable-5-1",
+			"claude-sonnet-5",
+			"claude-opus-4-8",
+			"claude-sonnet-4-5-20250929",
+			"claude-opus-4-1-latest",
+			"claude-mythos-5",
+			"anthropic/claude-opus-5-5",
+		])
+			expect(resolveTargetReasoningProfile(model, provider)).toEqual({
+				status: "known",
+				efforts: full,
+			});
+		for (const model of ["claude-haiku-4-5", "claude-3-5-haiku-20241022"])
+			expect(getAliasReasoningEfforts(model, provider)).toEqual([
+				"low",
+				"medium",
+			]);
+	}
+});
+it("profiles a Claude model only on an official Anthropic provider", () => {
+	for (const provider of [
+		"anthropic-compatible",
+		"openrouter",
+		"zai",
+		"codex",
+		"openai-compatible",
+	])
+		expect(getAliasReasoningEfforts("claude-opus-5-5", provider)).toBeNull();
+	// Not a Claude model id, though it names a family.
+	for (const model of ["opus", "gpt-opus-5", "claude-gpt-6-astra"])
+		expect(getAliasReasoningEfforts(model, "anthropic")).toBeNull();
 });
 it("profiles GPT-5.6 with what the backend accepts, not the catalogue's max", () => {
 	// The 5.x backend rejects `max` (backend-params.ts), so the published list

@@ -58,6 +58,25 @@ const CATALOGUE = {
 				limit: { context: 1_000_000, output: 64_000 },
 			}),
 			"claude-haiku-4-5": entry({ limit: { context: 200_000, output: 8_192 } }),
+			"claude-opus-5-5": entry({
+				limit: { context: 1_000_000, output: 128_000 },
+				reasoning: true,
+				cost: {
+					input: 5,
+					output: 25,
+					tiers: [
+						{
+							tier: { type: "context", size: 200_000 },
+							input: 10,
+							output: 37.5,
+						},
+					],
+				},
+			}),
+			"claude-fable-5-1": entry({
+				limit: { context: 1_000_000, output: 128_000 },
+				reasoning: true,
+			}),
 		},
 	},
 	openrouter: {
@@ -230,6 +249,26 @@ describe("published model metadata", () => {
 					providers: ["codex", "openrouter"],
 				})
 			).supportedReasoningEfforts,
+		).toBeUndefined();
+	});
+
+	it("publishes the Claude family's efforts on official Anthropic routes", async () => {
+		await loadCatalogue();
+		const efforts = async (targetModel: string, providers: string[]) =>
+			(await resolveClientModelMetadata({ targetModel, providers }))
+				.supportedReasoningEfforts;
+		const full = ["low", "medium", "high", "xhigh", "max"];
+		expect(await efforts("claude-opus-5-5", ["anthropic"])).toEqual(full);
+		expect(
+			await efforts("claude-fable-5-1", ["anthropic", "claude-console-api"]),
+		).toEqual(full);
+		expect(await efforts("claude-haiku-4-5", ["anthropic"])).toEqual([
+			"low",
+			"medium",
+		]);
+		// One route that cannot substantiate them drops them for the model.
+		expect(
+			await efforts("claude-opus-5-5", ["anthropic", "openrouter"]),
 		).toBeUndefined();
 	});
 

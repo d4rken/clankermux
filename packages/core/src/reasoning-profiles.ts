@@ -1,8 +1,10 @@
 import {
 	ALIAS_REASONING_EFFORTS,
 	type AliasReasoningEffort,
+	isOfficialAnthropicProvider,
 } from "@clankermux/types";
 import { getModelFamily } from "./model-mappings";
+import { getRoutingModelFamily } from "./routing";
 
 const CLAUDE_EFFORTS: Record<string, readonly AliasReasoningEffort[]> = {
 	opus: ["low", "medium", "high", "xhigh", "max"],
@@ -112,8 +114,12 @@ export function resolveTargetReasoningProfile(
 	const gpt =
 		Object.hasOwn(GPT_EFFORTS, normalized) ||
 		["gpt-5.4-mini-2026-09-01", "gpt-6-astra-2026-09-03"].includes(normalized);
+	const claude =
+		isOfficialAnthropicProvider(provider) &&
+		getRoutingModelFamily(normalized) !== null;
 	const mapped =
-		(provider === "codex" || provider === "openai-compatible") && gpt;
+		((provider === "codex" || provider === "openai-compatible") && gpt) ||
+		claude;
 	if (!mapped) return { status: "unknown" };
 	const efforts = getModelReasoningEfforts(model);
 	return efforts ? { status: "known", efforts } : { status: "unknown" };
