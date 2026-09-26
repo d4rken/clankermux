@@ -147,6 +147,14 @@ function chainHoldsCalls(
 	return awaited.every((id) => found.has(id));
 }
 
+function lstatOrNull(path: string) {
+	try {
+		return lstatSync(path);
+	} catch {
+		return null;
+	}
+}
+
 /** A regular file's bytes, opened without following a symlink; null otherwise. */
 function readFileOrNull(path: string): Buffer | null {
 	let fd: number;
@@ -376,6 +384,42 @@ export class ReleasedParkStore {
 	}
 
 	/**
+	 * Delete a park's file, only through a path that passes
+	 * {@link acceptsPath}: removal must never follow a symlink an ancestor
+	 * was replaced with. A refused path is logged and left alone; a missing
+	 * file has nothing to delete.
+	 */
+	private removeParkFile(path: string): void {
+		if (this.acceptsPath(path)) {
+			removeTree(path);
+			return;
+		}
+		try {
+			lstatSync(path);
+		} catch {
+			return;
+		}
+		this.opts.log.warn(
+			`SDK bridge: not deleting ${path}: its path is not a released-parks file of this database reached without a symlink`,
+		);
+	}
+
+	/**
+	 * Whether this store's own directory is reached without a symlink below
+	 * the work root: the orphan sweep only lists and deletes inside it then.
+	 */
+	private ownDirIsSafe(): boolean {
+		try {
+			return (
+				lstatSync(dirname(this.dir)).isDirectory() &&
+				lstatSync(this.dir).isDirectory()
+			);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * A resume's copy of a park: the path checked again as at recovery, then
 	 * read once, the chain verified and written under the new id.
 	 */
@@ -460,7 +504,7 @@ export class ReleasedParkStore {
 					"its record could not be released (the lease or the turn moved on)",
 				);
 		} catch (error) {
-			removeTree(path);
+			this.removeParkFile(path);
 			await repo.delete(park.turnId, this.token).catch((e) => {
 				this.opts.log.warn(
 					`SDK bridge turn ${park.turnId}: could not delete its preparing record`,
@@ -601,7 +645,7 @@ export class ReleasedParkStore {
 			return false;
 		}
 		this.unindex(entry.park.turnId);
-		removeTree(entry.path);
+		this.removeParkFile(entry.path);
 		return true;
 	}
 
@@ -664,7 +708,7 @@ export class ReleasedParkStore {
 						return !this.entries.has(turnId);
 					}
 					this.unindex(turnId);
-					removeTree(entry.path);
+					this.removeParkFile(entry.path);
 					return true;
 				case "close":
 					if (
@@ -679,7 +723,7 @@ export class ReleasedParkStore {
 						return !this.entries.has(turnId);
 					}
 					this.unindex(turnId);
-					removeTree(entry.path);
+					this.removeParkFile(entry.path);
 					return true;
 				case "resync": {
 					if (!(await repo.holdsLease(this.token))) {
@@ -778,7 +822,7 @@ export class ReleasedParkStore {
 				))
 			)
 				throw new Error("the park lease moved on during recovery");
-			if (this.acceptsPath(park.sessionPath)) removeTree(park.sessionPath);
+			this.removeParkFile(park.sessionPath);
 		};
 		for (const park of await repo.list()) {
 			if (park.state === "preparing") {
@@ -837,10 +881,18 @@ export class ReleasedParkStore {
 			});
 			for (const id of park.awaitedToolUseIds) byToolId.set(id, park.turnId);
 		}
+		// Files no record names, in this store's own directory only, and only
+		// when it is reached without a symlink (a symlinked entry is unlinked,
+		// never followed).
 		let names: string[] = [];
-		try {
-			names = readdirSync(this.dir);
-		} catch {}
+		if (this.ownDirIsSafe())
+			try {
+				names = readdirSync(this.dir);
+			} catch {}
+		else if (lstatOrNull(this.dir))
+			this.opts.log.warn(
+				`SDK bridge: not sweeping ${this.dir}: it is not reached without a symlink`,
+			);
 		for (const name of names) {
 			const path = join(this.dir, name);
 			if (!kept.has(path)) removeTree(path);
