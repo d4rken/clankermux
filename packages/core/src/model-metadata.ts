@@ -6,8 +6,8 @@ import type {
 } from "@clankermux/types";
 import {
 	isOfficialAnthropicProvider,
+	oneMillionContextBase,
 	PROVIDER_NAMES,
-	sdkBridgeWireModel,
 } from "@clankermux/types";
 import { resolveModelMaxContextWindow } from "./model-mappings";
 import { type CatalogueLookupResult, lookupCatalogueEntry } from "./pricing";
@@ -25,8 +25,8 @@ type CatalogueEntry = NonNullable<CatalogueLookupResult["entry"]>;
  */
 const ANTHROPIC_REACHABLE_CONTEXT = 200_000;
 /**
- * The window of a `[1m]` id: Claude Code turns the suffix into the beta
- * header. Everything else is published from the bare id.
+ * The window of a 1M-context id (see `sdkBridgeWireModel`); everything else
+ * is published from the bare id.
  *
  *   claude-opus-5-5      -> 200_000
  *   claude-opus-5-5[1m]  -> 1_000_000
@@ -80,9 +80,10 @@ export async function resolveClientModelMetadata(
 		return {};
 	const candidates = await Promise.all(
 		providers.map(async (provider) => {
-			const model = isOfficialAnthropicProvider(provider)
-				? sdkBridgeWireModel(request.targetModel)
-				: request.targetModel;
+			const model =
+				(isOfficialAnthropicProvider(provider) &&
+					oneMillionContextBase(request.targetModel)) ||
+				request.targetModel;
 			const { entry } = await lookupCatalogueEntry(model, provider);
 			const candidate = candidateFor(model, provider, entry);
 			return model === request.targetModel

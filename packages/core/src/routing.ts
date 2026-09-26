@@ -1,10 +1,10 @@
 import {
 	isOfficialAnthropicProvider,
 	type ModelPermissionSet,
+	oneMillionContextBase,
 	type ResolvedRoutingTarget,
 	type RoutingModelFamily,
 	type RoutingRule,
-	sdkBridgeWireModel,
 } from "@clankermux/types";
 
 export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
@@ -71,10 +71,10 @@ export function resolveRoutingTarget(
 }
 
 /**
- * An official Anthropic account permits a `[1m]` id wherever it permits the
- * bare one: Claude Code sends the bare id with the 1M beta header.
+ * On an official Anthropic account (see `sdkBridgeWireModel`):
  *
- *   lists claude-opus-5-5  ->  permits claude-opus-5-5[1m]
+ *   lists claude-opus-5-5   ->  permits claude-opus-5-5[1m]
+ *   lists claude-haiku-4-5  ->  does not permit claude-haiku-4-5[1m]
  */
 export function isModelPermitted(
 	permissions: ModelPermissionSet | null,
@@ -82,9 +82,10 @@ export function isModelPermitted(
 	model: string,
 	winningRule: RoutingRule | null,
 ): boolean {
-	const ids = isOfficialAnthropicProvider(account.provider)
-		? [model, sdkBridgeWireModel(model)]
-		: [model];
+	const base = isOfficialAnthropicProvider(account.provider)
+		? oneMillionContextBase(model)
+		: null;
+	const ids = base ? [model, base] : [model];
 	if (ids.some((id) => permissions?.manual_ids.includes(id))) return true;
 	if (permissions && permissions.completeness !== "unknown")
 		return ids.some((id) => permissions.discovered_ids.includes(id));

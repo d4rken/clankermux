@@ -370,6 +370,14 @@ describe("published model metadata", () => {
 				tiers: [{ inputTokensAbove: 200_000, input: 10, output: 37.5 }],
 			},
 		});
+		// Outside the measured 1M set the suffixed id is a literal nothing lists.
+		for (const targetModel of ["claude-haiku-4-5[1m]", "claude-opus-5[1m]"])
+			expect(
+				await resolveClientModelMetadata({
+					targetModel,
+					providers: ["anthropic"],
+				}),
+			).toEqual({});
 		// Anywhere else the suffix is part of an id nothing publishes.
 		expect(
 			await resolveClientModelMetadata({

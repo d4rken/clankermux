@@ -75,9 +75,8 @@ export class SdkBridgeFieldError extends RoutingPolicyError {
 	}
 }
 /**
- * Every account left would have sent a `[1m]` id to Anthropic directly.
- * Anthropic serves no such id; only Claude Code, on the SDK bridge, turns
- * the suffix into the 1M beta header and sends the bare id.
+ * Every account left would have sent a `[1m]` id to Anthropic directly (see
+ * `sdkBridgeWireModel`).
  */
 export class ModelSuffixRouteError extends RoutingPolicyError {
 	override readonly code = "model_suffix_requires_claude_code";

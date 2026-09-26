@@ -83,9 +83,33 @@ export interface SdkBridgeRoutePlan {
  *
  *   "claude-fable-5-1[1m]" → "claude-fable-5-1"
  *   "claude-sonnet-5"      → "claude-sonnet-5"
+ *
+ * Anthropic serves no suffixed id, so only the SDK bridge can serve one: an
+ * official Anthropic account permits it through the bare id, discovery
+ * publishes it at a 1M window, and a direct send of it is refused.
  */
 export function sdkBridgeWireModel(upstreamModel: string): string {
 	return upstreamModel.replace(/\[1m\]$/i, "");
+}
+
+/** Measured to serve a 1M window on every plan through Claude Code. */
+const ONE_MILLION_CONTEXT_MODELS: ReadonlySet<string> = new Set([
+	"claude-opus-5-5",
+	"claude-fable-5-1",
+	"claude-sonnet-5",
+]);
+
+/**
+ * The bare id of a 1M-context id this proxy serves, else null:
+ *
+ *   "claude-opus-5-5[1m]"  → "claude-opus-5-5"
+ *   "claude-haiku-4-5[1m]" → null
+ *   "claude-opus-5-5"      → null
+ */
+export function oneMillionContextBase(model: string): string | null {
+	if (!model.endsWith("[1m]")) return null;
+	const base = model.slice(0, -"[1m]".length);
+	return ONE_MILLION_CONTEXT_MODELS.has(base) ? base : null;
 }
 
 /**

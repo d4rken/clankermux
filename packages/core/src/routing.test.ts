@@ -124,6 +124,15 @@ describe("routing policy", () => {
 				expect(
 					isModelPermitted(bare, account, "claude-fable-5-1[1m]", null),
 				).toBe(false);
+				// Outside the measured 1M set the suffixed id is a literal of its own.
+				for (const [listed, model] of [
+					["claude-haiku-4-5", "claude-haiku-4-5[1m]"],
+					["claude-opus-5", "claude-opus-5[1m]"],
+					["claude-opus-5-5", "claude-opus-5-5[1M]"],
+				])
+					expect(
+						isModelPermitted(listing([listed], source), account, model, null),
+					).toBe(false);
 			}
 		// Anywhere else the suffixed id is a literal of its own.
 		for (const provider of [
