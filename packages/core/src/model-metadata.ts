@@ -4,7 +4,11 @@ import type {
 	ClientModelCostTier,
 	ClientModelMetadata,
 } from "@clankermux/types";
-import { PROVIDER_NAMES } from "@clankermux/types";
+import {
+	isOfficialAnthropicProvider,
+	PROVIDER_NAMES,
+	sdkBridgeWireModel,
+} from "@clankermux/types";
 import { resolveModelMaxContextWindow } from "./model-mappings";
 import { type CatalogueLookupResult, lookupCatalogueEntry } from "./pricing";
 import { getAliasReasoningEfforts } from "./reasoning-profiles";
@@ -20,6 +24,14 @@ type CatalogueEntry = NonNullable<CatalogueLookupResult["entry"]>;
  * requests would be rejected for filling.
  */
 const ANTHROPIC_REACHABLE_CONTEXT = 200_000;
+/**
+ * The window of a `[1m]` id: Claude Code turns the suffix into the beta
+ * header. Everything else is published from the bare id.
+ *
+ *   claude-opus-5-5      -> 200_000
+ *   claude-opus-5-5[1m]  -> 1_000_000
+ */
+const ANTHROPIC_1M_CONTEXT = 1_000_000;
 
 const INPUT_MODALITIES = ["text", "image"] as const;
 type InputModality = (typeof INPUT_MODALITIES)[number];
@@ -68,11 +80,14 @@ export async function resolveClientModelMetadata(
 		return {};
 	const candidates = await Promise.all(
 		providers.map(async (provider) => {
-			const { entry } = await lookupCatalogueEntry(
-				request.targetModel,
-				provider,
-			);
-			return candidateFor(request.targetModel, provider, entry);
+			const model = isOfficialAnthropicProvider(provider)
+				? sdkBridgeWireModel(request.targetModel)
+				: request.targetModel;
+			const { entry } = await lookupCatalogueEntry(model, provider);
+			const candidate = candidateFor(model, provider, entry);
+			return model === request.targetModel
+				? candidate
+				: { ...candidate, contextWindow: ANTHROPIC_1M_CONTEXT };
 		}),
 	);
 	return reduceClientModelMetadata([...candidates, ...discoveredMetadata]);
@@ -116,10 +131,7 @@ function contextWindowFor(
 	if (provider === PROVIDER_NAMES.CODEX)
 		return tokenCount(resolveModelMaxContextWindow(targetModel));
 	const context = tokenCount(entry?.limit?.context);
-	if (
-		provider === PROVIDER_NAMES.ANTHROPIC ||
-		provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
-	)
+	if (isOfficialAnthropicProvider(provider))
 		return context === undefined
 			? undefined
 			: Math.min(context, ANTHROPIC_REACHABLE_CONTEXT);

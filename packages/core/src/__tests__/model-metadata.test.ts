@@ -326,6 +326,49 @@ describe("published model metadata", () => {
 		expect(haiku.maxOutputTokens).toBe(8_192);
 	});
 
+	it("publishes 1M for a [1m] id on official Anthropic routes, the rest from the bare id", async () => {
+		await loadCatalogue();
+		for (const providers of [
+			["anthropic"],
+			["anthropic", "claude-console-api"],
+		]) {
+			const bare = await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5",
+				providers,
+			});
+			expect(bare.contextWindow).toBe(200_000);
+			expect(
+				await resolveClientModelMetadata({
+					targetModel: "claude-opus-5-5[1m]",
+					providers,
+				}),
+			).toEqual({ ...bare, contextWindow: 1_000_000 });
+		}
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["anthropic"],
+			}),
+		).toMatchObject({
+			contextWindow: 1_000_000,
+			maxOutputTokens: 128_000,
+			reasoning: true,
+			supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+			cost: {
+				input: 5,
+				output: 25,
+				tiers: [{ inputTokensAbove: 200_000, input: 10, output: 37.5 }],
+			},
+		});
+		// Anywhere else the suffix is part of an id nothing publishes.
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["openrouter"],
+			}),
+		).toEqual({});
+	});
+
 	it("prefers the catalogue's input ceiling over its context figure", async () => {
 		await loadCatalogue();
 		const metadata = await resolveClientModelMetadata({
