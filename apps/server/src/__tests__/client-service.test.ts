@@ -1755,6 +1755,45 @@ describe("client service integration", () => {
 			).toBe(1_000_000);
 		});
 
+		it("withholds a Claude Code entry whose rule introduces a [1m] target", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "opus-to-1m",
+				name: "Opus to 1M",
+				match_model_kind: "family",
+				match_model_value: "anthropic:opus",
+				target_kind: "literal",
+				target_model: "claude-opus-5-5[1m]",
+			});
+			const draft = blank();
+			draft.application = "claude-code";
+			draft.catalogues.anthropic.models = [
+				"claude-opus-5-5",
+				"claude-opus-5-5[1m]",
+			].map((model) => ({
+				id: model,
+				displayName: model,
+				targetModel: model,
+				accountIds: null,
+			}));
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "anthropic");
+			// Claude Code sends both as claude-opus-5-5; the rule rewrites that to
+			// the suffixed id, which a direct send refuses with a 400.
+			for (const model of ["claude-opus-5-5", "claude-opus-5-5[1m]"])
+				expect([model, models[model]?.contextWindow]).toEqual([
+					model,
+					undefined,
+				]);
+		});
+
 		it("describes a [1m] entry from the family rule that routes it", async () => {
 			dbOps
 				.getAdapter()
