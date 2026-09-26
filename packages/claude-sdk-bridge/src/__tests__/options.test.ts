@@ -134,6 +134,18 @@ describe("query options", () => {
 		});
 	});
 
+	it("clamps the effort to what the planned model accepts", () => {
+		const effort = (model: string, level: "low" | "high" | "max") =>
+			buildQueryOptions({ ...base, model, effort: level }).effort;
+		expect(effort("claude-haiku-4-5", "max")).toBe("medium");
+		expect(effort("claude-haiku-4-5", "high")).toBe("medium");
+		expect(effort("claude-haiku-4-5", "low")).toBe("low");
+		expect(effort("claude-opus-5-5", "max")).toBe("max");
+		expect(effort("claude-fable-5-1[1m]", "max")).toBe("max");
+		// A model outside the Claude families: Claude Code gets it as asked.
+		expect(effort("primary-model", "max")).toBe("max");
+	});
+
 	it("sets the client's output limit only when it gave one", () => {
 		expect(
 			buildQueryOptions({ ...base, maxOutputTokens: 500 }).env

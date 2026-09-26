@@ -7,6 +7,7 @@ import type {
 	SpawnedProcess,
 	SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
+import { clampEffortToModel } from "@clankermux/core";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./tool-server";
 
 export interface WorkPaths {
@@ -81,6 +82,7 @@ export interface QueryOptionsInput {
 	toolNames: readonly string[];
 	toolServer: McpSdkServerConfigWithInstance | null;
 	systemPrompt: { append: string | null; excludeDynamicSections: boolean };
+	/** The client's effort; lowered to what `model` accepts. */
 	effort: EffortLevel | null;
 	/** From the turn's starting request; the child keeps it for the whole query. */
 	maxOutputTokens: number | null;
@@ -125,7 +127,14 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 			// the current policy's prompt rather than the one recorded first.
 			snapshot: false,
 		},
-		...(input.effort ? { effort: input.effort } : {}),
+		...(input.effort
+			? {
+					effort: clampEffortToModel(
+						input.model,
+						input.effort,
+					) as EffortLevel,
+				}
+			: {}),
 		...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
 		extraArgs: { "thinking-display": "summarized" },
 		includePartialMessages: true,
