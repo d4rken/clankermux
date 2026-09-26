@@ -414,6 +414,16 @@ describe("a [1m] id", () => {
 		expect(route.target(a)?.upstreamModel).toBe("claude-opus-5-5[1m]");
 	});
 
+	it("is refused on a direct send with a named 400", () => {
+		expect(() => oneM()).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "model_suffix_requires_claude_code",
+				message: expect.stringContaining('"claude-opus-5-5[1m]"'),
+			}),
+		);
+	});
+
 	it("is a literal no other provider permits", () => {
 		expect(() =>
 			oneM({ bridgesOfficialAnthropic: true, accounts: [c, o] }),

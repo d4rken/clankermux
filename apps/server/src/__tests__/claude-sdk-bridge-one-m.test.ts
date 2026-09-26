@@ -70,6 +70,25 @@ function post(gw: Gateway, path: string, body: Record<string, unknown>) {
 	});
 }
 
+/** A Claude Code request on the direct Anthropic mount. */
+function claudeCode(gw: Gateway, model: string) {
+	return fetch(`${gw.url}/wire/anthropic/v1/messages?beta=true`, {
+		method: "POST",
+		headers: {
+			"x-api-key": gw.apiKey,
+			"content-type": "application/json",
+			"anthropic-version": "2023-06-01",
+			"user-agent": "claude-cli/2.1.280 (external, cli)",
+		},
+		body: JSON.stringify({
+			model,
+			max_tokens: 64,
+			stream: true,
+			messages: [{ role: "user", content: "hello" }],
+		}),
+	});
+}
+
 function upstreamModels(since: number): unknown[] {
 	return mock.requests
 		.slice(since)
@@ -106,3 +125,28 @@ for (const endpoint of ["responses", "chat"] as const)
 			expect(upstreamModels(since)).toEqual([BARE]);
 		});
 	});
+
+describe("a [1m] id on a direct attempt", () => {
+	it("is refused with a named 400 before any upstream fetch", async () => {
+		const { gw, sdk } = await harness();
+		const since = mock.requests.length;
+		const response = await claudeCode(gw, ONE_M);
+		expect(response.status).toBe(400);
+		const body = (await response.json()) as {
+			error: { type: string; message: string };
+		};
+		expect(body.error.type).toBe("model_suffix_requires_claude_code");
+		expect(body.error.message).toContain(ONE_M);
+		expect(upstreamModels(since)).toEqual([]);
+		expect(sdk.queries).toEqual([]);
+	});
+
+	it("leaves a Claude Code request for the bare id alone", async () => {
+		const { gw } = await harness();
+		const since = mock.requests.length;
+		const response = await claudeCode(gw, BARE);
+		expect(response.status).toBe(200);
+		await response.text();
+		expect(upstreamModels(since)).toEqual([BARE]);
+	});
+});

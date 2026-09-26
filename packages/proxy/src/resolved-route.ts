@@ -8,14 +8,15 @@ import {
 	supportsChatIngress,
 	unsupportedChatField,
 } from "@clankermux/core";
-import type {
-	Account,
-	ChatRequirements,
-	ModelPermissionSet,
-	RequestMeta,
-	ResolvedRoutingTarget,
-	RoutingRule,
-	SdkBridgeRefusedField,
+import {
+	type Account,
+	type ChatRequirements,
+	type ModelPermissionSet,
+	type RequestMeta,
+	type ResolvedRoutingTarget,
+	type RoutingRule,
+	type SdkBridgeRefusedField,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 import { modelPermissionScope } from "./account-model-permissions";
 import { isOfficialAnthropicProvider } from "./provider-overload-cooldown";
@@ -71,6 +72,20 @@ export class SdkBridgeFieldError extends RoutingPolicyError {
 	constructor(refused: SdkBridgeRefusedField) {
 		super(refused.message);
 		this.param = refused.field;
+	}
+}
+/**
+ * Every account left would have sent a `[1m]` id to Anthropic directly.
+ * Anthropic serves no such id; only Claude Code, on the SDK bridge, turns
+ * the suffix into the 1M beta header and sends the bare id.
+ */
+export class ModelSuffixRouteError extends RoutingPolicyError {
+	override readonly code = "model_suffix_requires_claude_code";
+	override readonly statusCode = 400;
+	constructor(model: string) {
+		super(
+			`Model "${model}" is served only through the SDK bridge (Responses or Chat Completions on /wire/openai); Anthropic serves no model by that id`,
+		);
 	}
 }
 export interface AuthorizedTarget extends ResolvedRoutingTarget {
@@ -304,6 +319,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	let unsupportedProvider = false;
 	let unsupportedField: string | null = null;
 	let refusedByBridge: SdkBridgeRefusedField | null = null;
+	let refusedSuffix: string | null = null;
 	/** Accounts dropped because the upstream substituted the model on them. */
 	let substitutedExclusions = 0;
 	for (const account of input.accounts) {
@@ -389,6 +405,18 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			);
 			continue;
 		}
+		if (
+			input.bridgesOfficialAnthropic !== true &&
+			isOfficialAnthropicProvider(account.provider) &&
+			sdkBridgeWireModel(resolved.upstreamModel) !== resolved.upstreamModel
+		) {
+			refusedSuffix = resolved.upstreamModel;
+			exclude(
+				account,
+				`model "${resolved.upstreamModel}" is served only through the SDK bridge`,
+			);
+			continue;
+		}
 		targets.set(account.id, {
 			...resolved,
 			provider: account.provider,
@@ -398,34 +426,36 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	if (!targets.size) {
 		const error = refusedByBridge
 			? new SdkBridgeFieldError(refusedByBridge)
-			: unsupportedField
-				? new ChatCapabilityError(unsupportedField, input.requestedModel)
-				: // EVERY account that was dropped, was dropped because the provider
-					// substituted the model on it. Reporting that as a 403 permission
-					// problem would be both wrong and non-retryable, and it is the
-					// answer a client gets for the whole five-minute suppression
-					// window after the first request returned the 503.
-					//
-					// `priorExclusions` counts too: an account this call never even
-					// considered — excluded earlier by an API-key destination, say —
-					// is still a reason the pool is empty that has nothing to do with
-					// substitution, and ignoring it would claim a substitution
-					// diagnosis for a mixed-cause emptying.
-					substitutedExclusions > 0 &&
-						substitutedExclusions ===
-							exclusions.length + (input.priorExclusions?.size ?? 0)
-					? new ModelSubstitutionRouteError(
-							`Every destination for model "${input.requestedModel}" is held back because the provider answered as a different model. This clears on its own; retrying later may reach an account it does not substitute for.`,
-						)
-					: unsupportedProvider
-						? new RoutingPolicyError(
-								`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
+			: refusedSuffix
+				? new ModelSuffixRouteError(refusedSuffix)
+				: unsupportedField
+					? new ChatCapabilityError(unsupportedField, input.requestedModel)
+					: // EVERY account that was dropped, was dropped because the provider
+						// substituted the model on it. Reporting that as a 403 permission
+						// problem would be both wrong and non-retryable, and it is the
+						// answer a client gets for the whole five-minute suppression
+						// window after the first request returned the 503.
+						//
+						// `priorExclusions` counts too: an account this call never even
+						// considered — excluded earlier by an API-key destination, say —
+						// is still a reason the pool is empty that has nothing to do with
+						// substitution, and ignoring it would claim a substitution
+						// diagnosis for a mixed-cause emptying.
+						substitutedExclusions > 0 &&
+							substitutedExclusions ===
+								exclusions.length + (input.priorExclusions?.size ?? 0)
+						? new ModelSubstitutionRouteError(
+								`Every destination for model "${input.requestedModel}" is held back because the provider answered as a different model. This clears on its own; retrying later may reach an account it does not substitute for.`,
 							)
-						: new RoutingPolicyError(
-								`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
-									[...(input.priorExclusions?.values() ?? []), ...exclusions],
-								)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
-							);
+						: unsupportedProvider
+							? new RoutingPolicyError(
+									`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
+								)
+							: new RoutingPolicyError(
+									`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
+										[...(input.priorExclusions?.values() ?? []), ...exclusions],
+									)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
+								);
 		error.routeSnapshot = new ResolvedRoute(input, winning, targets).snapshot;
 		error.ruleId = winning?.id ?? null;
 		if (input.alias) return new ResolvedRoute(input, winning, targets, error);
