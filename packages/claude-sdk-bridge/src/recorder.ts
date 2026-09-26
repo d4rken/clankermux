@@ -29,8 +29,17 @@ export class TurnRecorder {
 		 * The park lease token, for a turn a released park owns: every write,
 		 * queued ones included, applies only while it holds the lease.
 		 */
-		private readonly fence?: string,
+		private fence?: string,
 	) {}
+
+	/**
+	 * Fence this turn's writes from now on: the turn is becoming a park's.
+	 * Each write reads the token when it runs, so writes already queued are
+	 * fenced too.
+	 */
+	setFence(token: string): void {
+		this.fence = token;
+	}
 
 	private enqueue(what: string, write: () => Promise<void>): Promise<void> {
 		this.chain = this.chain.then(write).catch((error) => {

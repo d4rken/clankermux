@@ -736,6 +736,14 @@ export class LiveQuery {
 		};
 	}
 
+	/**
+	 * The turn is becoming a released park's: its row's writes, queued ones
+	 * included, apply from now on only under the park lease `token`.
+	 */
+	fenceTurn(token: string): void {
+		this.init.recorder.setFence(token);
+	}
+
 	/** The session is stored: the turn lives on in its released park, not here. */
 	completeRelease(): void {
 		if (this.state !== "releasing") return;

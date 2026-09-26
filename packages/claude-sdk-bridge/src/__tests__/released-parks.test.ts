@@ -1638,10 +1638,16 @@ describe("the lease as the only authority", () => {
 		// The lease goes (as dispose gives it up) while markReleased waits.
 		await h.parkRepo.releaseLease(h.parkRepo.lease?.token as string);
 		letGo();
-		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 5_000);
+		await waitFor(
+			() => h.bridge.status().counters.releaseFailures === 1,
+			5_000,
+		);
+		await Bun.sleep(50);
 		// Refused: never released. Its cleanup is refused too, so the record
-		// stays `preparing` for the next holder's recovery to end.
+		// stays `preparing` for the next holder's recovery to end, and the
+		// turn row (fenced from the release on) is left to that recovery.
 		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("preparing");
+		expect(h.repo.turns.get(p.turnId)?.status).toBe("running");
 		expect(parkFiles(h)).toEqual([]);
 		await h.bridge.dispose();
 	});
@@ -1930,6 +1936,11 @@ describe("second review fixes", () => {
 		const moved = `${parksDir}-moved`;
 		renameSync(parksDir, moved);
 		symlinkSync(moved, parksDir);
+		const target = String(parkRepo.parks.get(p.turnId)?.sessionPath).replace(
+			parksDir,
+			moved,
+		);
+		expect(existsSync(target)).toBe(true);
 		const response = answer(b, p, results(p));
 		const q2 = await b.sdk.next();
 		// Not resumed through the link: a flattened rebuild instead.
@@ -1940,6 +1951,37 @@ describe("second review fixes", () => {
 			resultMessage(),
 		);
 		expect((await reply(response)).status).toBe(200);
+		// The park's record is gone, but nothing was deleted through the link.
+		await waitFor(() => !parkRepo.parks.has(p.turnId), 3_000);
+		expect(existsSync(target)).toBe(true);
+	});
+
+	it("fences the original turn from its first release on, queued writes included", async () => {
+		const h = await releaseHarness();
+		let letGo!: () => void;
+		h.parkRepo.hold.markReleased = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const p = await parkTurn(h);
+		await waitFor(() => h.parkRepo.calls.includes("markReleased"), 5_000);
+		// Another process takes the lease while the release waits.
+		await h.parkRepo.acquireLease(
+			{ dir: "/elsewhere", pid: 1, startTime: null, token: "other", at: 1 },
+			() => true,
+		);
+		const roundsBefore = h.repo.turns.get(p.turnId)?.counters.toolRounds;
+		letGo();
+		await waitFor(
+			() => h.bridge.status().counters.releaseFailures === 1,
+			5_000,
+		);
+		await Bun.sleep(50);
+		// The failed release's finish, from the turn's original recorder,
+		// changed nothing: the new holder decides this turn.
+		const turn = h.repo.turns.get(p.turnId);
+		expect(turn?.status).toBe("running");
+		expect(turn?.finishedAt).toBeUndefined();
+		expect(turn?.counters.toolRounds).toBe(roundsBefore);
 	});
 
 	it("answers 503 for unmatched results while it recovers after another holder exits", async () => {

@@ -703,6 +703,9 @@ export function createClaudeSdkBridge(
 				await parks.forget(previous);
 			}
 			if (abandoned.has(live.turnId)) return;
+			// From the first durable park write on, the turn is the park's: its
+			// original recorder, and whatever it has queued, is fenced.
+			live.fenceTurn(parks.token);
 			const at = now();
 			await parks.store(
 				{
