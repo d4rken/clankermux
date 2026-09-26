@@ -39,6 +39,7 @@ import {
 	useSdkBridgeTurn,
 } from "../hooks/queries";
 import { useRequestStream } from "../hooks/useRequestStream";
+import { useSdkBridgeTurnParam } from "../hooks/useSdkBridgeTurnParam";
 import { decodeBase64Utf8 } from "../lib/base64";
 import {
 	hasAttributionMetadata,
@@ -355,28 +356,7 @@ export function RequestsTab() {
 		);
 	}, [setSearchParams]);
 
-	/** The open SDK bridge turn, pushed and replaced like `request` above. */
-	const turnParam = searchParams.get("turn") || null;
-	const openTurn = useCallback(
-		(id: string) => {
-			setSearchParams((prev) => {
-				const next = new URLSearchParams(prev);
-				next.set("turn", id);
-				return next;
-			});
-		},
-		[setSearchParams],
-	);
-	const closeTurn = useCallback(() => {
-		setSearchParams(
-			(prev) => {
-				const next = new URLSearchParams(prev);
-				next.delete("turn");
-				return next;
-			},
-			{ replace: true },
-		);
-	}, [setSearchParams]);
+	const { turnId: turnParam, openTurn, closeTurn } = useSdkBridgeTurnParam();
 
 	const [statusCategory, setStatusCategory] = useState<StatusCategory>("all");
 	const [dateFrom, setDateFrom] = useState<string>("");

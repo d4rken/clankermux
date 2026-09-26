@@ -82,6 +82,9 @@ export const queryKeys = {
 		[...queryKeys.all, "requests", "by-id", { id }] as const,
 	requestProjects: () => [...queryKeys.all, "requests", "projects"] as const,
 	// An SDK bridge turn, by turn id or by a leg's request id.
+	// Keyed by range alone: the endpoint takes no filters.
+	sdkBridgeHealth: (range?: string) =>
+		[...queryKeys.all, "sdk-bridge-health", { range }] as const,
 	sdkBridgeTurn: (id: string) =>
 		[...queryKeys.all, "sdk-bridge-turns", { id }] as const,
 	// Options for the analytics filter dropdowns. Unkeyed: the lists are global

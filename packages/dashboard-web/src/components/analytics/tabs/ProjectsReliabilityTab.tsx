@@ -1,17 +1,20 @@
 import type { AnalyticsSection } from "@clankermux/types";
 import { useEffect, useState } from "react";
-import { useStopsHistory } from "../../../hooks/queries";
+import { useSdkBridgeHealth, useStopsHistory } from "../../../hooks/queries";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
+import { useSdkBridgeTurnParam } from "../../../hooks/useSdkBridgeTurnParam";
 import {
 	dataAvailability,
 	staleAgeLabel,
 } from "../../../lib/data-availability";
 import { subscribePoolClock } from "../../../lib/pool-clock";
+import { SdkBridgeTurnDialog } from "../../SdkBridgeTurnDialog";
 import {
 	AnalyticsControls,
 	MissingSectionsNotice,
 	ProjectAnalytics,
 	RoutingAnalyticsPanel,
+	SdkBridgeHealthCard,
 	StopsHistoryCard,
 	ToolErrorsPanel,
 } from "..";
@@ -29,8 +32,8 @@ const PROJECTS_SECTIONS: readonly AnalyticsSection[] = [
 
 /**
  * Projects & reliability view. Owns the per-project breakdown, routing
- * analytics, tool-error analytics, and the record of what actually blocked a
- * request.
+ * analytics, tool-error analytics, the record of what actually blocked a
+ * request, and the Agent SDK bridge's turns.
  */
 export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 	const {
@@ -65,6 +68,12 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 	const stopsUnavailable = stopsAvailability.state === "unavailable";
 	const stopsPending = stopsLoading && !stops;
 
+	// Same three states as the stops card, for its own read.
+	const bridgeQuery = useSdkBridgeHealth(range);
+	const { data: bridge, isLoading: bridgeLoading } = bridgeQuery;
+	const bridgeAvailability = dataAvailability(bridgeQuery, bridgeLoading);
+	const { turnId, openTurn, closeTurn } = useSdkBridgeTurnParam();
+
 	// The SHARED 30s clock every quota surface reads, not a private interval:
 	// a second registered interval displaces the first (see lib/pool-clock), and
 	// a bare setInterval here would let this card's ages drift against the ones
@@ -77,6 +86,10 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 	const stopsStaleNote =
 		stopsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(stopsAvailability.lastUpdatedAt, now)}`
+			: undefined;
+	const bridgeStaleNote =
+		bridgeAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(bridgeAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
 	return (
@@ -99,11 +112,12 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				}}
 				refresh={{
 					loading,
-					// Both reads on this tab, or the refresh would leave the stops card
+					// Every read on this tab, or the refresh would leave a card
 					// showing figures from before the click.
 					onRefresh: () => {
 						refetch();
 						void stopsQuery.refetch();
+						void bridgeQuery.refetch();
 					},
 				}}
 			/>
@@ -140,6 +154,18 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				staleNote={stopsStaleNote}
 			/>
 
+			<SdkBridgeHealthCard
+				data={bridge}
+				loading={bridgeLoading && !bridge}
+				unavailableReason={
+					bridgeAvailability.state === "unavailable"
+						? "Agent SDK bridge data unavailable"
+						: undefined
+				}
+				staleNote={bridgeStaleNote}
+				onOpenTurn={openTurn}
+			/>
+
 			{/* Tool Errors */}
 			<ToolErrorsPanel
 				key={JSON.stringify([range, filters])}
@@ -148,6 +174,7 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				loading={loading}
 				timeRange={range}
 			/>
+			{turnId && <SdkBridgeTurnDialog lookupId={turnId} onClose={closeTurn} />}
 		</div>
 	);
 }

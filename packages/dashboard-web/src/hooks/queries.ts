@@ -547,6 +547,20 @@ export const useModelSubstitutions = (range: string) => {
 	return useQuery(modelSubstitutionsQueryOptions(range));
 };
 
+/** Agent SDK bridge turns in the range, at the history reads' cadence. */
+export const sdkBridgeHealthQueryOptions = (range: string) => ({
+	queryKey: queryKeys.sdkBridgeHealth(range),
+	queryFn: () => api.getSdkBridgeHealth(range),
+	staleTime: 45000,
+	refetchInterval: 60000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const useSdkBridgeHealth = (range: string) => {
+	return useQuery(sdkBridgeHealthQueryOptions(range));
+};
+
 /**
  * Precomputed quota-drift analysis for the Analytics "Quota" tab.
  *

@@ -19,15 +19,16 @@ export type SdkBridgeTurnStatus =
 	| "shutdown"
 	| "rejected";
 
+// Key order is display order: outcomes first, open turns last.
 const TURN_STATUS_SET = {
-	running: true,
-	released: true,
 	completed: true,
 	failed: true,
-	aborted: true,
 	timed_out: true,
-	shutdown: true,
 	rejected: true,
+	aborted: true,
+	shutdown: true,
+	running: true,
+	released: true,
 } satisfies Record<SdkBridgeTurnStatus, true>;
 
 export const SDK_BRIDGE_TURN_STATUSES = Object.keys(
