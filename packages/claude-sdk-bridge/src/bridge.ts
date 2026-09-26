@@ -615,6 +615,7 @@ export function createClaudeSdkBridge(
 		const digests = messageDigests(turn.history);
 		const current = claim?.current ?? null;
 		const reason = classifyRebuild(current, digests, accountId);
+		// Matching history resumes even on another account; the change is still recorded.
 		if (current && sameDigests(current.digests, digests))
 			return {
 				mode: "resume",
