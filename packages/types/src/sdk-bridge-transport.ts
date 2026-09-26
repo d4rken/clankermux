@@ -187,6 +187,17 @@ export function sdkBridgeSideRequestMode(headers: Headers): string | null {
 	return sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER) ?? "";
 }
 
+/**
+ * Tool results the bridge cannot place yet: it is still recovering the
+ * released parks an earlier process left, and these may belong to one. The
+ * caller answers 503 with this Retry-After instead of starting a fresh turn.
+ */
+export interface SdkBridgeContinuationUnavailable {
+	unavailable: string;
+	/** Seconds. */
+	retryAfter: string;
+}
+
 export interface SdkBridgeTransport {
 	availability(): SdkBridgeAvailability;
 	/**
@@ -210,7 +221,10 @@ export interface SdkBridgeTransport {
 	findContinuation(
 		toolUseIds: readonly string[],
 		caller: { apiKeyId: string | null; model: string },
-	): { turnId: string; ownerApiKeyId: string | null } | null;
+	):
+		| { turnId: string; ownerApiKeyId: string | null }
+		| SdkBridgeContinuationUnavailable
+		| null;
 	continueTurn(input: {
 		turnId: string;
 		request: Request;

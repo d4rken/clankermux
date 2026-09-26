@@ -296,6 +296,16 @@ export async function continueParkedSdkBridgeTurn(input: {
 		model: requestMeta.requestedModel ?? "",
 	});
 	if (!parked) return null;
+	// Results that may belong to a park the bridge is still recovering: a
+	// fresh turn would rebuild a conversation that is about to resume.
+	if ("unavailable" in parked)
+		return Response.json(
+			{
+				type: "error",
+				error: { type: "sdk_bridge_unavailable", message: parked.unavailable },
+			},
+			{ status: 503, headers: { "retry-after": parked.retryAfter } },
+		);
 	// The bridge refuses another key's continuation itself, recording the leg.
 	try {
 		return await bridge.continueTurn({
