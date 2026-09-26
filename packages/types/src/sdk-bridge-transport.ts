@@ -22,6 +22,16 @@ export interface SdkBridgeCounters {
 	rebuilds: number;
 	/** Side requests started; each also counts in `turnsStarted`. */
 	sideRequests: number;
+	/** Parked queries whose process stopped and whose session was stored. */
+	released: number;
+	/** Releases begun that could not store the session; their turns failed. */
+	releaseFailures: number;
+	/** Parked queries kept parked instead (ceiling, no directory ownership). */
+	releasesRefused: number;
+	/** Released parks resumed by their client's results. */
+	releasedResumes: number;
+	/** Released parks whose results never came. */
+	releasedExpired: number;
 }
 
 /** The bridge's live state, as `/api/system/status` reports it. */
@@ -35,6 +45,12 @@ export interface SdkBridgeStatus {
 	counters: SdkBridgeCounters;
 	/** Highest per-process peak RSS observed (VmHWM); null where unmeasurable. */
 	peakRssBytes: number | null;
+	/** Released parks waiting for their client, with no process. */
+	releasedParks: number;
+	/** Session files on disk at the last maintenance pass; null before one. */
+	sessionBytes: number | null;
+	/** Why parked queries are not being released now; null while they are. */
+	releaseBlocked: string | null;
 }
 
 export interface SdkBridgeRouteCandidate {
@@ -171,6 +187,17 @@ export function sdkBridgeSideRequestMode(headers: Headers): string | null {
 	return sdkBridgeHeaderToken(headers, SDK_BRIDGE_SIDE_REQUEST_HEADER) ?? "";
 }
 
+/**
+ * Tool results the bridge cannot place yet: it is still recovering the
+ * released parks an earlier process left, and these may belong to one. The
+ * caller answers 503 with this Retry-After instead of starting a fresh turn.
+ */
+export interface SdkBridgeContinuationUnavailable {
+	unavailable: string;
+	/** Seconds. */
+	retryAfter: string;
+}
+
 export interface SdkBridgeTransport {
 	availability(): SdkBridgeAvailability;
 	/**
@@ -194,7 +221,10 @@ export interface SdkBridgeTransport {
 	findContinuation(
 		toolUseIds: readonly string[],
 		caller: { apiKeyId: string | null; model: string },
-	): { turnId: string; ownerApiKeyId: string | null } | null;
+	):
+		| { turnId: string; ownerApiKeyId: string | null }
+		| SdkBridgeContinuationUnavailable
+		| null;
 	continueTurn(input: {
 		turnId: string;
 		request: Request;

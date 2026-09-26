@@ -110,6 +110,7 @@ import {
 	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { RoutingRepository } from "./repositories/routing.repository";
+import { SdkBridgeReleasedParkRepository } from "./repositories/sdk-bridge-released-park.repository";
 import { SdkBridgeTurnRepository } from "./repositories/sdk-bridge-turn.repository";
 import { SessionAffinityPinRepository } from "./repositories/session-affinity-pin.repository";
 import { StatsRepository } from "./repositories/stats.repository";
@@ -598,6 +599,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	readonly routing: RoutingRepository;
 	readonly modelAliases: ModelAliasRepository;
 	readonly sdkBridgeTurns: SdkBridgeTurnRepository;
+	/** Not wrapped in `retrying`: its transitions must fail loudly, once. */
+	readonly sdkBridgeReleasedParks: SdkBridgeReleasedParkRepository;
 	private accounts: AccountRepository;
 	private requests: RequestRepository;
 	private oauth: OAuthRepository;
@@ -720,6 +723,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.sdkBridgeTurns = retrying(
 			new SdkBridgeTurnRepository(this.adapter),
 			"sdkBridgeTurns",
+		);
+		this.sdkBridgeReleasedParks = new SdkBridgeReleasedParkRepository(
+			this.adapter,
 		);
 		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
 		this.requests = retrying(new RequestRepository(this.adapter), "requests");

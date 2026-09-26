@@ -144,6 +144,7 @@ import {
 import {
 	installSdkBridge,
 	type SdkBridgeWiring,
+	sdkBridgeParkNamespace,
 } from "./claude-sdk-bridge-wiring";
 import { ClientService } from "./client-service";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
@@ -1332,6 +1333,8 @@ export default async function startServer(options?: {
 		proxyContext,
 		config,
 		turnRepo: dbOps.sdkBridgeTurns,
+		parkRepo: dbOps.sdkBridgeReleasedParks,
+		parkNamespace: sdkBridgeParkNamespace(dbOps.getResolvedDbPath()),
 	});
 	sdkBridge = bridgeWiring;
 	// The graceful path disposes it explicitly after the HTTP drain; this covers
@@ -2281,10 +2284,12 @@ async function handleGracefulShutdown(signal: string) {
 			);
 		}
 
-		// No new bridged turns from here on, and parked ones end now: their
-		// client's tool results would have to arrive through a listener that is
-		// stopping. Turns still running finish during the drain; their Claude
-		// Code model calls use the bridge's own loopback listener.
+		// No new bridged turns from here on. Parked ones are released: their
+		// sessions wait on disk and the client's tool results resume them after
+		// the restart (one that cannot be released ends now). Turns still
+		// running finish during the drain, and any that park then are released
+		// too; their Claude Code model calls use the bridge's own loopback
+		// listener.
 		sdkBridge?.beginShutdown();
 
 		// Stop accepting new connections and wait for in-flight HTTP requests

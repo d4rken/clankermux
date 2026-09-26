@@ -746,7 +746,8 @@ type SdkBridgeTurnQuery = { state: { data?: SdkBridgeTurnView | null } };
  * An SDK bridge turn, by turn id or by a leg's request id; null when neither
  * exists. The turn row can land after its request is listed, so "not found"
  * is asked again every 2 s for 60 s from `lookupStartedAt`, and never served
- * from cache. A running turn keeps changing, so it is refetched while open.
+ * from cache. A running turn keeps changing, so it is refetched while open;
+ * a released one, waiting for its client, less often.
  */
 export const sdkBridgeTurnQueryOptions = (
 	id: string,
@@ -760,7 +761,10 @@ export const sdkBridgeTurnQueryOptions = (
 	refetchInterval: (query: SdkBridgeTurnQuery): number | false => {
 		const data = query.state.data;
 		if (data === null) return now() - lookupStartedAt < 60_000 ? 2_000 : false;
-		return data?.turn.status === "running" ? 5_000 : false;
+		if (data?.turn.status === "running") return 5_000;
+		// Released: parked with no process, possibly for hours, until the
+		// client's tool results resume it or it expires.
+		return data?.turn.status === "released" ? 30_000 : false;
 	},
 	retry: shouldRetryDashboardQuery,
 });

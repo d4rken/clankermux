@@ -1137,7 +1137,9 @@ export function ensureSchema(db: Database): void {
 			sdk_cache_creation_input_tokens INTEGER,
 			ignored_fields TEXT,
 			system_prompt_detail TEXT,
-			kind TEXT NOT NULL DEFAULT 'turn'
+			kind TEXT NOT NULL DEFAULT 'turn',
+			owner_pid INTEGER,
+			owner_start_time TEXT
 		)
 	`);
 	db.run(
@@ -1169,6 +1171,54 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
 	);
+
+	// Which bridge process may act on sdk_bridge_released_parks: at most one
+	// row, the lease, naming its holder's token, pid and start time (whether it
+	// still runs) and its released-parks directory (for diagnosis). Every
+	// write to a park, or to a turn a park owns, applies only while its
+	// token holds this row; another process takes it only once the holder is
+	// dead.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_park_lease (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			dir TEXT NOT NULL,
+			pid INTEGER NOT NULL,
+			start_time TEXT,
+			token TEXT NOT NULL,
+			acquired_at INTEGER NOT NULL
+		)
+	`);
+
+	// A bridged turn parked on the client's tool calls whose Claude Code process
+	// was stopped: its session file lives in the bridge's released-parks
+	// directory and the client's results resume it, across restarts. One row
+	// per turn; `descriptor` is the bridge's immutable resume descriptor (JSON)
+	// and `awaited_tool_use_ids` a JSON array. Not a foreign key: the cleanup
+	// worker keeps a turn while its park exists, and a park outlives nothing
+	// but its own file.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS sdk_bridge_released_parks (
+			turn_id TEXT PRIMARY KEY,
+			state TEXT NOT NULL
+				CHECK (state IN ('preparing','released','claimed','consumed')),
+			owner_api_key_id TEXT,
+			conversation_key_hash TEXT,
+			session_id TEXT NOT NULL,
+			session_path TEXT NOT NULL,
+			resume_at TEXT NOT NULL,
+			awaited_tool_use_ids TEXT NOT NULL,
+			requested_model TEXT NOT NULL,
+			descriptor TEXT NOT NULL,
+			active_ms INTEGER NOT NULL,
+			parked_since INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			file_bytes INTEGER NOT NULL,
+			claim_owner TEXT,
+			claim_id TEXT,
+			claimed_at INTEGER,
+			created_at INTEGER NOT NULL
+		)
+	`);
 
 	// Performance indexes (covering/partial indexes for hot query paths)
 	// Routing policy is additive: retired combo/mapping storage remains inert.
@@ -2024,6 +2074,18 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "sdk_bridge_turns",
 		column: "kind",
 		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN kind TEXT NOT NULL DEFAULT 'turn'",
+	},
+	// The process running the turn (pid, /proc start time): a turn left open
+	// is closed only once that process is gone. NULL on rows written before.
+	{
+		table: "sdk_bridge_turns",
+		column: "owner_pid",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN owner_pid INTEGER",
+	},
+	{
+		table: "sdk_bridge_turns",
+		column: "owner_start_time",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN owner_start_time TEXT",
 	},
 ];
 

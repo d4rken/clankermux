@@ -4,11 +4,13 @@ import {
 	constants,
 	fchmodSync,
 	fstatSync,
+	fsyncSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmdirSync,
 	type Stats,
 	unlinkSync,
@@ -73,6 +75,18 @@ export function writePrivateFile(path: string, data: string): void {
 	const fd = openPrivate(path, constants.O_TRUNC);
 	try {
 		writeAll(fd, data);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** Replace a file's content with `bytes`; private, never through a symlink. */
+export function writePrivateBytes(path: string, bytes: Uint8Array): void {
+	const fd = openPrivate(path, constants.O_TRUNC);
+	try {
+		let offset = 0;
+		while (offset < bytes.length)
+			offset += writeSync(fd, bytes, offset, bytes.length - offset);
 	} finally {
 		closeSync(fd);
 	}
@@ -173,8 +187,11 @@ function ownerAlive(owner: GenerationOwner): boolean {
 }
 
 function readOwner(dir: string): GenerationOwner | null {
+	return readOwnerFile(join(dir, OWNER_FILE));
+}
+
+function readOwnerFile(path: string): GenerationOwner | null {
 	try {
-		const path = join(dir, OWNER_FILE);
 		if (!lstatSync(path).isFile()) return null;
 		const parsed = JSON.parse(
 			readFileSync(path, "utf8"),
@@ -239,4 +256,60 @@ export function sweepGenerations(
 		removed.push(name);
 	}
 	return removed;
+}
+
+/** Whether the process a lock or generation names still runs (same start time). */
+export function ownerRunning(owner: {
+	pid: number;
+	startTime: string | null;
+}): boolean {
+	return ownerAlive(owner);
+}
+
+/**
+ * Write `bytes` to `dir/name` so that a crash leaves either nothing or the
+ * whole file: a private temp file in the same directory, synced, then
+ * renamed over the name. Returns the bytes written.
+ */
+export function publishFileAtomically(
+	dir: string,
+	name: string,
+	bytes: Uint8Array,
+	tempName: string,
+): number {
+	const temp = join(dir, tempName);
+	const fd = openSync(
+		temp,
+		constants.O_WRONLY |
+			constants.O_CREAT |
+			constants.O_EXCL |
+			constants.O_NOFOLLOW,
+		PRIVATE_FILE_MODE,
+	);
+	try {
+		let offset = 0;
+		while (offset < bytes.length)
+			offset += writeSync(fd, bytes, offset, bytes.length - offset);
+		fsyncSync(fd);
+	} catch (error) {
+		closeSync(fd);
+		removeTree(temp);
+		throw error;
+	}
+	closeSync(fd);
+	try {
+		renameSync(temp, join(dir, name));
+	} catch (error) {
+		removeTree(temp);
+		throw error;
+	}
+	try {
+		const dirFd = openSync(dir, constants.O_RDONLY);
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+	} catch {}
+	return bytes.length;
 }

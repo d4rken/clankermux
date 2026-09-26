@@ -4,8 +4,14 @@
 // `requests` rows carrying `sdk_bridge_turn_id`; token and cost truth lives
 // there and is summed at read time, never copied onto the turn.
 
+/**
+ * `released`: parked on the client's tool calls with no Claude Code process;
+ * its session is stored in `sdk_bridge_released_parks` until the results
+ * resume it or the park expires.
+ */
 export type SdkBridgeTurnStatus =
 	| "running"
+	| "released"
 	| "completed"
 	| "failed"
 	| "aborted"
@@ -148,7 +154,11 @@ export type SdkBridgeTurnInsert = Pick<
 			| "ignoredFields"
 			| "systemPromptDetail"
 		>
-	>;
+	> & {
+		/** The process running the turn: pid and its /proc start time. */
+		ownerPid?: number | null;
+		ownerStartTime?: string | null;
+	};
 
 /** Terminal facts written once the turn ends. */
 export type SdkBridgeTurnFinish = Pick<SdkBridgeTurn, "finishedAt" | "status"> &
@@ -263,3 +273,63 @@ export interface SdkBridgeTurnView extends SdkBridgeTurnDetail {
 }
 
 export const SDK_BRIDGE_TURN_VIEW_MAX_INNER = 200;
+
+/**
+ * A released park's lifecycle. `preparing`: the record exists, its session file
+ * may not yet; `released`: file published, waiting for the client; `claimed`:
+ * a resume holds it and has made no model call; `consumed`: the resumed query
+ * made a model call, so the park can never be resumed again.
+ */
+export type SdkBridgeReleasedParkState =
+	| "preparing"
+	| "released"
+	| "claimed"
+	| "consumed";
+
+/** One row of `sdk_bridge_released_parks`. */
+export interface SdkBridgeReleasedPark {
+	turnId: string;
+	state: SdkBridgeReleasedParkState;
+	ownerApiKeyId: string | null;
+	conversationKeyHash: string | null;
+	/** The Claude Code session id the stored transcript carries. */
+	sessionId: string;
+	/**
+	 * Absolute path of the stored session, inside a released-parks directory
+	 * of this database (any work root): recovery reads it where it is.
+	 */
+	sessionPath: string;
+	/** Uuid of the transcript entry a resume continues from. */
+	resumeAt: string;
+	/** The tool_use ids the client must answer, each exactly once. */
+	awaitedToolUseIds: string[];
+	/** The model the client named, as it named it. */
+	requestedModel: string;
+	/** The bridge's immutable resume descriptor, as JSON. */
+	descriptor: string;
+	/** Active (not parked) time the turn has used. */
+	activeMs: number;
+	parkedSince: number;
+	expiresAt: number;
+	fileBytes: number;
+	claimOwner: string | null;
+	/** The current claim's generation: an unclaim names the claim it undoes. */
+	claimId: string | null;
+	claimedAt: number | null;
+	createdAt: number;
+}
+
+export type SdkBridgeReleasedParkInsert = Omit<
+	SdkBridgeReleasedPark,
+	"state" | "claimOwner" | "claimId" | "claimedAt"
+>;
+
+/** The one row of `sdk_bridge_park_lease`: who may act on released parks. */
+export interface SdkBridgeParkLease {
+	/** The holder's released-parks directory. */
+	dir: string;
+	pid: number;
+	startTime: string | null;
+	token: string;
+	at: number;
+}

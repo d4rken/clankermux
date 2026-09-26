@@ -176,8 +176,16 @@ describe("system status handler — SDK bridge", () => {
 					resumes: 0,
 					rebuilds: 0,
 					sideRequests: 0,
+					released: 0,
+					releaseFailures: 0,
+					releasesRefused: 0,
+					releasedResumes: 0,
+					releasedExpired: 0,
 				},
 				peakRssBytes: null,
+				releasedParks: 0,
+				sessionBytes: null,
+				releaseBlocked: null,
 			}),
 		});
 		const body = (await (await handler()).json()) as SystemStatusResponse;

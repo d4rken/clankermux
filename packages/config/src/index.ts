@@ -89,6 +89,9 @@ export interface ConfigData {
 	usage_throttling_weekly_enabled?: boolean;
 	sdk_bridge_max_processes?: number;
 	sdk_bridge_parked_timeout_ms?: number;
+	sdk_bridge_park_release_ms?: number;
+	sdk_bridge_released_park_ttl_ms?: number;
+	sdk_bridge_session_bytes_ceiling?: number;
 	sdk_bridge_turn_deadline_ms?: number;
 	sdk_bridge_max_history_bytes?: number;
 	sdk_bridge_max_tools?: number;
@@ -713,7 +716,48 @@ export class Config extends EventEmitter {
 		);
 	}
 
-	/** Wall-clock budget of one bridged turn, all its legs together. */
+	/**
+	 * How long a parked bridged turn keeps its Claude Code process before it
+	 * is released: the process stops and the session waits on disk for the
+	 * client's tool results.
+	 */
+	getSdkBridgeParkReleaseMs(): number {
+		return this.boundedInteger(
+			"sdk_bridge_park_release_ms",
+			2 * 60_000,
+			5_000,
+			2 * 60 * 60_000,
+		);
+	}
+
+	/** How long a released park waits for its client's tool results. */
+	getSdkBridgeReleasedParkTtlMs(): number {
+		return this.boundedInteger(
+			"sdk_bridge_released_park_ttl_ms",
+			24 * 60 * 60_000,
+			10 * 60_000,
+			7 * 24 * 60 * 60_000,
+		);
+	}
+
+	/**
+	 * Soft ceiling on the bridge's session files. Above it idle conversations
+	 * are evicted; when active and released sessions alone exceed it, parked
+	 * turns stop being released.
+	 */
+	getSdkBridgeSessionBytesCeiling(): number {
+		return this.boundedInteger(
+			"sdk_bridge_session_bytes_ceiling",
+			2 * 1024 * 1024 * 1024,
+			64 * 1024 * 1024,
+			1024 * 1024 * 1024 * 1024,
+		);
+	}
+
+	/**
+	 * Active-time budget of one bridged turn, all its legs together; time
+	 * parked or released waiting for tool results is not counted.
+	 */
 	getSdkBridgeTurnDeadlineMs(): number {
 		return this.boundedInteger(
 			"sdk_bridge_turn_deadline_ms",
@@ -853,6 +897,9 @@ export class Config extends EventEmitter {
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
 			sdk_bridge_max_processes: this.getSdkBridgeMaxProcesses(),
 			sdk_bridge_parked_timeout_ms: this.getSdkBridgeParkedTimeoutMs(),
+			sdk_bridge_park_release_ms: this.getSdkBridgeParkReleaseMs(),
+			sdk_bridge_released_park_ttl_ms: this.getSdkBridgeReleasedParkTtlMs(),
+			sdk_bridge_session_bytes_ceiling: this.getSdkBridgeSessionBytesCeiling(),
 			sdk_bridge_turn_deadline_ms: this.getSdkBridgeTurnDeadlineMs(),
 			sdk_bridge_max_history_bytes: this.getSdkBridgeMaxHistoryBytes(),
 			sdk_bridge_max_tools: this.getSdkBridgeMaxTools(),

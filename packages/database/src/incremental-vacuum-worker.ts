@@ -668,12 +668,14 @@ async function runCleanup(
 
 		// SDK bridge turns age out on the request cutoff; their legs cascade. Runs
 		// before the orphan-attempt pass so the attempts of the legs it removes
-		// go on this same tick.
+		// go on this same tick. A turn still open (running, or released and
+		// waiting for its client, possibly for a day) or owning a released park
+		// is kept whatever its age.
 		if (requestCutoff !== null) {
 			await deleteBatched(
 				db,
 				"sdk_bridge_turns",
-				"started_at < ?",
+				"started_at < ? AND status NOT IN ('running','released') AND NOT EXISTS(SELECT 1 FROM sdk_bridge_released_parks WHERE sdk_bridge_released_parks.turn_id=sdk_bridge_turns.id)",
 				requestCutoff,
 			);
 		}

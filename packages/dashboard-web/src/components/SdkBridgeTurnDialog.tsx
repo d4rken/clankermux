@@ -51,6 +51,7 @@ export function SdkBridgeTurnChip({ onOpen }: { onOpen: () => void }) {
 
 const STATUS_LABEL: Record<SdkBridgeTurnStatus, string> = {
 	running: "Running",
+	released: "Waiting for tool results",
 	completed: "Completed",
 	failed: "Failed",
 	aborted: "Aborted",
@@ -84,7 +85,7 @@ function statusVariant(
 	status: SdkBridgeTurnStatus,
 ): "success" | "warning" | "destructive" | "secondary" {
 	if (status === "completed") return "success";
-	if (status === "running") return "secondary";
+	if (status === "running" || status === "released") return "secondary";
 	if (status === "aborted" || status === "shutdown") return "warning";
 	return "destructive";
 }

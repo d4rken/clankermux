@@ -19,6 +19,9 @@ export function SdkBridgeStatusLine({ status }: { status: SdkBridgeStatus }) {
 		? [
 				`${status.live} live`,
 				`${status.parked} parked`,
+				...(status.releasedParks > 0
+					? [`${status.releasedParks} released`]
+					: []),
 				`cap ${status.cap}`,
 				...(status.peakRssBytes != null
 					? [`peak ${formatBytes(status.peakRssBytes)}`]
@@ -44,6 +47,11 @@ export function SdkBridgeStatusLine({ status }: { status: SdkBridgeStatus }) {
 			{parts.length > 0 && (
 				<span className="text-muted-foreground tabular-nums">
 					{parts.join(" · ")}
+				</span>
+			)}
+			{available && status.releaseBlocked && (
+				<span className="text-warning-strong">
+					Not releasing parked turns: {status.releaseBlocked}
 				</span>
 			)}
 		</div>

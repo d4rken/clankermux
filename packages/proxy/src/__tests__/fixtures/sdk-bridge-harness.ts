@@ -38,7 +38,7 @@ export interface FakeBridge extends SdkBridgeTransport {
 	}>;
 	/** What startTurn answers; throwing is how a test models infrastructure failure. */
 	respond: (plan: SdkBridgeRoutePlan) => Response | Promise<Response>;
-	continuation: { turnId: string; ownerApiKeyId: string | null } | null;
+	continuation: ReturnType<SdkBridgeTransport["findContinuation"]>;
 	lookups: string[][];
 	lookupCallers: Array<{ apiKeyId: string | null; model: string }>;
 }

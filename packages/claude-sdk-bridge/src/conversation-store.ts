@@ -184,6 +184,30 @@ export class ConversationStore {
 		return this.records.get(key)?.current ?? null;
 	}
 
+	/**
+	 * Settled sessions no turn holds or is settling, least recently used
+	 * first: what a byte ceiling may evict without touching a live turn.
+	 */
+	idleSessions(): Array<{ key: string; sessionId: string; lastUsed: number }> {
+		return [...this.records.entries()]
+			.filter(([, r]) => r.current && !r.busy && !r.pending)
+			.map(([key, r]) => ({
+				key,
+				sessionId: (r.current as StoredSession).sessionId,
+				lastUsed: r.lastUsed,
+			}))
+			.sort((a, b) => a.lastUsed - b.lastUsed);
+	}
+
+	/** Forget an idle conversation and discard its session; false when it is in use. */
+	evict(key: string): boolean {
+		const record = this.records.get(key);
+		if (!record || record.busy || record.pending) return false;
+		this.records.delete(key);
+		if (record.current) this.opts.onDiscard(record.current.sessionId);
+		return true;
+	}
+
 	private settle(
 		record: ConversationRecord,
 		session: StoredSession,

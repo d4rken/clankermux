@@ -56,6 +56,8 @@ describe("sdkBridgeTurnQueryOptions", () => {
 		const options = sdkBridgeTurnQueryOptions("t", startedAt, at(600_000));
 		expect(options.refetchInterval(query(view("running")))).toBe(5_000);
 		expect(options.refetchInterval(query(view("completed")))).toBe(false);
+		// Released, waiting for the client's tool results: not over yet.
+		expect(options.refetchInterval(query(view("released")))).toBe(30_000);
 		// Still loading: the fetch in flight decides.
 		expect(options.refetchInterval(query(undefined))).toBe(false);
 	});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
 import {
 	installSdkBridge,
 	sdkBridgeLimitsFromConfig,
+	sdkBridgeParkNamespace,
 	sdkBridgeWorkRoot,
 } from "../claude-sdk-bridge-wiring";
 
@@ -42,7 +43,7 @@ const turnRepo = {
 };
 
 /** A bridge module whose factory records the dependencies it was built with. */
-function fakeModule() {
+function fakeModule(ready: Promise<void> = Promise.resolve()) {
 	const built: ClaudeSdkBridgeDeps[] = [];
 	let disposals = 0;
 	let shutdowns = 0;
@@ -50,6 +51,7 @@ function fakeModule() {
 		createClaudeSdkBridge(deps: ClaudeSdkBridgeDeps) {
 			built.push(deps);
 			return {
+				ready: () => ready,
 				availability: () => ({ state: "available" as const }),
 				startTurn: async () => new Response("turn"),
 				continueTurn: async () => new Response("continue"),
@@ -127,6 +129,23 @@ describe("sdkBridgeWorkRoot", () => {
 	});
 });
 
+describe("sdkBridgeParkNamespace", () => {
+	it("names a database by its real path, so a link to it is the same database", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cmx-park-ns-"));
+		try {
+			const db = join(dir, "a.db");
+			writeFileSync(db, "");
+			symlinkSync(db, join(dir, "link.db"));
+			const ns = sdkBridgeParkNamespace(db);
+			expect(ns).toMatch(/^[0-9a-f]{16}$/);
+			expect(sdkBridgeParkNamespace(join(dir, "link.db"))).toBe(ns);
+			expect(sdkBridgeParkNamespace(join(dir, "b.db"))).not.toBe(ns);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("installSdkBridge", () => {
 	it("installs the bridge on the proxy context", async () => {
 		await withConfig(null, async (config) => {
@@ -143,6 +162,36 @@ describe("installSdkBridge", () => {
 			expect(fake.built[0]?.workRoot).toBe("/tmp/cmx-work");
 			expect(fake.built[0]?.turnRepo).toBe(turnRepo);
 			expect(wiring.status().cap).toBe(8);
+		});
+	});
+
+	it("exposes the transport only once released parks are recovered, and hands the bridge the park repository", async () => {
+		await withConfig(null, async (config) => {
+			let recovered!: () => void;
+			const fake = fakeModule(
+				new Promise<void>((resolve) => {
+					recovered = resolve;
+				}),
+			);
+			const proxyContext = {} as ProxyContext;
+			const parkRepo = {} as never;
+			const installing = installSdkBridge({
+				proxyContext,
+				config,
+				turnRepo,
+				parkRepo,
+				parkNamespace: "0123456789abcdef",
+				workRoot: "/tmp/cmx-work",
+				load: fake.load,
+			});
+			await Bun.sleep(20);
+			expect(fake.built).toHaveLength(1);
+			expect(fake.built[0]?.parkRepo).toBe(parkRepo);
+			expect(fake.built[0]?.parkNamespace).toBe("0123456789abcdef");
+			expect(proxyContext.sdkBridge).toBeUndefined();
+			recovered();
+			const wiring = await installing;
+			expect(proxyContext.sdkBridge).toBe(wiring.transport);
 		});
 	});
 

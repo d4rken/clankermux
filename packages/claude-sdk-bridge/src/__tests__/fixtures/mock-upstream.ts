@@ -9,6 +9,7 @@
 //   anything else                           -> text "echo: <last user text>"
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
+//   last user text contains "THINK"         -> a signed thinking block before the rest
 //   a tools[].name outside ^[a-zA-Z0-9_-]{1,64}$ -> the API's 400
 //
 // Usage reports prompt caching the way the API does it: a cache_control
@@ -194,6 +195,13 @@ function script(
 		content.push({ type: "text", text: `echo: ${text.slice(-200)}` });
 	}
 
+	if (toolResults.length === 0 && /THINK/.test(text))
+		content.unshift({
+			type: "thinking",
+			thinking: "mock reasoning",
+			signature: `sig_mock_${toolSeq}`,
+		});
+
 	const stopReason = content.some((b) => b.type === "tool_use")
 		? "tool_use"
 		: /MAXTOK/.test(text)
@@ -219,7 +227,23 @@ function script(
 		},
 	});
 	content.forEach((block, index) => {
-		if (block.type === "text") {
+		if (block.type === "thinking") {
+			out += sse("content_block_start", {
+				type: "content_block_start",
+				index,
+				content_block: { type: "thinking", thinking: "", signature: "" },
+			});
+			out += sse("content_block_delta", {
+				type: "content_block_delta",
+				index,
+				delta: { type: "thinking_delta", thinking: block.thinking },
+			});
+			out += sse("content_block_delta", {
+				type: "content_block_delta",
+				index,
+				delta: { type: "signature_delta", signature: block.signature },
+			});
+		} else if (block.type === "text") {
 			out += sse("content_block_start", {
 				type: "content_block_start",
 				index,

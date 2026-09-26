@@ -39,6 +39,7 @@ import {
 	READ_TOOL,
 	resultMessage,
 	streamedMessage,
+	turnIdOf,
 	waitFor,
 } from "./fixtures/fake-sdk";
 import {
@@ -806,8 +807,12 @@ describe("parked tool calls", () => {
 			it(`continues a turn that started on "${model}" with the same name`, async () => {
 				const { h, t } = await parked(model);
 				expect(
-					h.bridge.findContinuation(["toolu_1"], { apiKeyId: "key-1", model })
-						?.turnId,
+					turnIdOf(
+						h.bridge.findContinuation(["toolu_1"], {
+							apiKeyId: "key-1",
+							model,
+						}),
+					),
 				).toBe(t.plan.turnId);
 				const call = t.query.callTool("toolu_1", "read");
 				const c = continueTurn(h, t.plan.turnId, results, { model });
@@ -855,7 +860,7 @@ describe("parked tool calls", () => {
 		it("leaves another key's results to the refusal, whatever model they name", async () => {
 			const { h, t } = await parked("sonnet");
 			const caller = { apiKeyId: "key-2", model: "opus" };
-			expect(h.bridge.findContinuation(["toolu_1"], caller)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["toolu_1"], caller))).toBe(
 				t.plan.turnId,
 			);
 			const c = continueTurn(h, t.plan.turnId, results, caller);
@@ -890,7 +895,7 @@ describe("parked tool calls", () => {
 				],
 			};
 			const caller = { apiKeyId: "key-1", model: "opus" };
-			expect(h.bridge.findContinuation(["toolu_a"], caller)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["toolu_a"], caller))).toBe(
 				t.plan.turnId,
 			);
 			const c = continueTurn(h, t.plan.turnId, partial, caller);
@@ -1053,7 +1058,7 @@ describe("parked tool calls", () => {
 		it("select a parked turn only by the calls it waits on now", async () => {
 			const h = harness();
 			const { t } = await parkedTwice(h);
-			expect(h.bridge.findContinuation(["r2-b"], CALLER)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["r2-b"], CALLER))).toBe(
 				t.plan.turnId,
 			);
 			expect(h.bridge.findContinuation(["r1"], CALLER)).toBeNull();
@@ -1078,6 +1083,35 @@ describe("parked tool calls", () => {
 				kind: "continue",
 				httpStatus: 409,
 			});
+			expect(h.bridge.status().parked).toBe(1);
+		});
+
+		it("results that repeat an awaited id or add one it does not wait on get 409", async () => {
+			const h = harness();
+			const { t, round1, r2 } = await parkedTwice(h);
+			for (const ids of [
+				["r2-a", "r2-b", "r2-b"],
+				["r2-a", "r2-b", "r2-c"],
+			]) {
+				const c = continueTurn(h, t.plan.turnId, {
+					tools,
+					messages: [
+						...round1,
+						{ role: "assistant", content: r2.content },
+						{
+							role: "user",
+							content: ids.map((id) => ({
+								type: "tool_result",
+								tool_use_id: id,
+								content: id,
+							})),
+						},
+					],
+				});
+				const res = await c.response;
+				expect(res.status).toBe(409);
+				expect(await res.text()).toContain("stale tool results");
+			}
 			expect(h.bridge.status().parked).toBe(1);
 		});
 

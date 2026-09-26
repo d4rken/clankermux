@@ -861,6 +861,23 @@ describe("SDK bridge continuations", () => {
 		expect(bridge.starts).toHaveLength(1);
 	});
 
+	it("answer 503 with Retry-After, and route nowhere, while the bridge recovers its released turns", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+		bridge.continuation = {
+			unavailable: "The SDK bridge is still recovering turns",
+			retryAfter: "5",
+		};
+
+		const { response, text } = await run(flooredRequest(toolResults), h.ctx);
+
+		expect(response.status).toBe(503);
+		expect(response.headers.get("retry-after")).toBe("5");
+		expect(JSON.parse(text).error.message).toContain("recovering");
+		expect(bridge.continues).toEqual([]);
+		expect(bridge.starts).toEqual([]);
+		expect(routingAttempts(h.ctx)).toEqual([]);
+	});
+
 	it("are never looked up for an unfloored request", async () => {
 		const { bridge, h } = await withContinuation(KEY);
 

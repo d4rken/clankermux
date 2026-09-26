@@ -6,6 +6,10 @@ import type {
 	SdkBridgeTurnInsert,
 } from "@clankermux/types";
 import type { BridgeLog, SdkBridgeTurnRepo } from "./types";
+import { processStartTime } from "./work-dirs";
+
+/** This process, as turn rows name their owner. */
+const OWNER = { pid: process.pid, startTime: processStartTime(process.pid) };
 
 /**
  * Turn and leg rows. Writes are chained per turn so a finish never overtakes
@@ -21,7 +25,21 @@ export class TurnRecorder {
 		private readonly repo: SdkBridgeTurnRepo,
 		private readonly log: BridgeLog,
 		readonly turnId: string,
+		/**
+		 * The park lease token, for a turn a released park owns: every write,
+		 * queued ones included, applies only while it holds the lease.
+		 */
+		private fence?: string,
 	) {}
+
+	/**
+	 * Fence this turn's writes from now on: the turn is becoming a park's.
+	 * Each write reads the token when it runs, so writes already queued are
+	 * fenced too.
+	 */
+	setFence(token: string): void {
+		this.fence = token;
+	}
 
 	private enqueue(what: string, write: () => Promise<void>): Promise<void> {
 		this.chain = this.chain.then(write).catch((error) => {
@@ -30,9 +48,15 @@ export class TurnRecorder {
 		return this.chain;
 	}
 
+	/** The row names this process as the turn's owner (pid and start time). */
 	insertTurn(turn: Omit<SdkBridgeTurnInsert, "id">): Promise<void> {
 		return this.enqueue("insertTurn", () =>
-			this.repo.insertTurn({ ...turn, id: this.turnId }),
+			this.repo.insertTurn({
+				...turn,
+				id: this.turnId,
+				ownerPid: OWNER.pid,
+				ownerStartTime: OWNER.startTime,
+			}),
 		);
 	}
 
@@ -42,7 +66,10 @@ export class TurnRecorder {
 		startedAt: number,
 	): Promise<void> {
 		return this.enqueue("insertLeg", () =>
-			this.repo.insertLeg({ id, turnId: this.turnId, kind, startedAt }),
+			this.repo.insertLeg(
+				{ id, turnId: this.turnId, kind, startedAt },
+				this.fence,
+			),
 		);
 	}
 
@@ -50,20 +77,22 @@ export class TurnRecorder {
 	finishLeg(id: string, finish: SdkBridgeLegFinish): Promise<void> {
 		if (this.finishedLegs.has(id)) return this.chain;
 		this.finishedLegs.add(id);
-		return this.enqueue("finishLeg", () => this.repo.finishLeg(id, finish));
+		return this.enqueue("finishLeg", () =>
+			this.repo.finishLeg(id, finish, this.fence),
+		);
 	}
 
 	finishTurn(finish: SdkBridgeTurnFinish): Promise<void> {
 		if (this.turnFinished) return this.chain;
 		this.turnFinished = true;
 		return this.enqueue("finishTurn", () =>
-			this.repo.finishTurn(this.turnId, finish),
+			this.repo.finishTurn(this.turnId, finish, this.fence),
 		);
 	}
 
 	bump(delta: SdkBridgeTurnCounterDelta): Promise<void> {
 		return this.enqueue("bumpTurnCounters", () =>
-			this.repo.bumpTurnCounters(this.turnId, delta),
+			this.repo.bumpTurnCounters(this.turnId, delta, this.fence),
 		);
 	}
 

@@ -60,20 +60,104 @@ pipeline. The client keeps executing its own tools.
   a user message after them) holds `tool_result` ids a live query waits on
   *now* goes straight to that query (`continueParkedSdkBridgeTurn`), before
   any route is built. The bridge refuses, with one `continue` leg recorded
-  each: another key's turn (409), ids that do not cover every awaited call or
-  that an earlier round handed out (409 "stale tool results"), shutdown (503).
+  each: another key's turn (409), ids that do not name every awaited call
+  exactly once, name one it does not wait on, or that an earlier round
+  handed out (409 "stale tool results"), shutdown (503). The same holds for
+  a released park (below).
+- **Released parks.** Parked for `sdk_bridge_park_release_ms` (2 min), a
+  query is released instead of held: token revoked, process group SIGTERMed
+  (SIGKILL after the grace), and only then the parked MCP handlers closed.
+  Never `interrupt()`, `close()` or an MCP answer while the child lives:
+  each writes a synthetic result into the transcript, and a later plain
+  resume of that session carries it instead of the real one. The session
+  file moves to `<workRoot>/released-parks/` (temp + fsync + rename) and a
+  `sdk_bridge_released_parks` row records it (`preparing` → `released` →
+  `claimed` → `consumed`) with an immutable resume descriptor; the turn row
+  reads `released`. The client's results claim it (a second claimant gets
+  409 stale), fork it under a new id and run Claude Code with `resume` +
+  `resumeSessionAt` at the last envelope of the message that made the calls
+  (envelopes arrive after `message_stop`), the final user message as one
+  prompt. The listener writes `consumed` before the first model call goes
+  out. A gone session file falls back to a flattened dead continuation.
+  Parks survive restarts. The database lease (`sdk_bridge_park_lease`, one
+  row) is the only authority over them: taken only when free, already this
+  process's token, or its holder's process gone (pid and /proc start
+  time). Every write to a park or to a turn a park owns carries the lease
+  token in the same statement or transaction and changes nothing without
+  it, so whatever a process still has in flight after losing the lease
+  (declared dead, or dispose) is harmless. That includes the turn row's
+  own writes: the original turn's `TurnRecorder` is fenced right before
+  its first release writes the park (writes it already queued included,
+  since each reads the token when it runs), and a resumed turn's recorder
+  and the refusal legs of a released one carry the token from the start;
+  they pass it to `finishTurn`, `bumpTurnCounters`, `insertLeg` and
+  `finishLeg`. Ordinary turns pass none and are never fenced. Each claim has a generation (`claim_id`), and an unclaim or a
+  consumed mark names the one it belongs to, so a late unclaim of an
+  earlier claim never releases a newer one. Refused or failed writes leave
+  the park `reconciling` (indexed, not claimable) and the maintenance pass
+  retries them, one pass at a time and one write per park at a time, until
+  the database agrees; a park is `released` locally only after a
+  confirmed write. New files go to
+  `released-parks/<sha256(realpath(db))[:16]>` under the holder's work
+  root, and each record stores its file's absolute path, so a new holder
+  on another work root recovers them where they are. A path is accepted
+  only as `<root>/released-parks/<namespace>/<uuid>.jsonl` with no symlink
+  anywhere on its chain: the root is this process's own work root or one
+  whose real path is itself, and `released-parks`, the namespace directory
+  and the file are each checked with lstat. The check runs at recovery,
+  again when a resume claims the park, and before any park file is deleted
+  (close, forget, expiry, a failed publish): a refused path is logged and
+  left alone, only its record goes. The orphan sweep lists this process's
+  own directory only when it too is reached without a symlink.
+  Recovery runs before `installSdkBridge` exposes the transport, bounded
+  by `recoveryStartupMs` (each DB call with a short busy-retry budget);
+  it builds the index privately and publishes it only when every row was
+  handled. Preparing and consumed records and unusable ones (size or resume
+  point wrong; the full chain is checked when a resume claims the park)
+  end their turns, and a file goes only after its close is confirmed.
+  Stale claims return to `released`. Every recovery attempt, the ones the
+  maintenance pass starts after another holder exits included, raises the
+  "recovering" barrier before its first await and lowers it only once the
+  new index is published or the lease is found to be another's: meanwhile
+  the bridge is unavailable and tool results that match no live query
+  answer 503 with Retry-After (also through the proxy). While another live
+  process holds the lease, each maintenance tick's lease check raises it
+  for that one database call. Any database failure fails the attempt, which
+  is retried with backoff. Turn rows record their owning process, and
+  only turns whose process is gone are closed. Everything from a resume's
+  claim to its launch is one sequence with one rollback; a resume that
+  ends before its first model call gives the park back (after waiting for
+  a consumed mark in flight). Parks expire after
+  `sdk_bridge_released_park_ttl_ms` (24 h, `timed_out`). Shutdown releases
+  parked turns, including ones that park during the drain, and dispose
+  drains outstanding park writes before giving the lease up.
+- **Known conditions of released parks.** A development database created
+  at the unshipped `2523c6d7` schema (`sdk_bridge_released_parks` with
+  `session_file`, no `claim_id`) has to be reset: that table is created
+  with `CREATE TABLE IF NOT EXISTS`, so its columns never change in place.
+  Turn rows written before `owner_pid` existed count as owned by a dead
+  process and are closed by the next lease holder; that assumes upgrades
+  are sequential (a production restart drains the old version before the
+  new one starts), never two versions running on one database at once.
 - **Dead continuations.** Tool results no live query holds, sent with the
   assistant message that made the calls, start a new query with
   `rebuild_reason = dead_continuation`: the history and the results are
   flattened into the prompt. Never a transcript: resuming a transcript that
   ends in tool calls, Claude Code drops the calls as interrupted and the
   results with them ("No response requested." / "(no content)" upstream).
+  `resumeSessionAt` avoids that only for Claude Code's own transcript (a
+  released park); a synthetic one is refused at that point ("No message
+  found with message.uuid").
 - **Text sent with tool results** goes to Claude Code before the results,
   while it still waits on the MCP calls; it then sends it after them in the
   same model request. Sent after the results, it became a turn of its own
   whose answer reached nobody.
 - **Superseding.** A new start turn of a conversation whose query is parked
-  on tool calls tears that query down (`aborted`, "superseded").
+  on tool calls tears that query down (`aborted`, "superseded"), and ends
+  its released parks the same way.
+- **Deadline.** `sdk_bridge_turn_deadline_ms` is an active-time budget:
+  parked and released time is not counted, and each resume moves the inner
+  `deadlineAt` to what is left.
 - **Accounting.** `sdk_bridge_turns` (one per Claude Code query) and
   `sdk_bridge_turn_legs` (one per outer HTTP request; the leg id is the
   client's `x-clankermux-request-id`). Legs have no `requests` row.
@@ -300,8 +384,18 @@ still refused, and stale or partial ones keep their own 409.
 
 Measured 220–270 MB RSS per Claude Code child (about 220 MB each with four
 turns parked).
-`sdk_bridge_max_processes` defaults to 8; parked queries count against it.
-`/api/system/status` reports live, parked, cap and peak RSS (VmHWM).
+`sdk_bridge_max_processes` defaults to 8; parked queries count against it,
+released ones do not (a resume needs a free slot, else 529).
+`/api/system/status` reports live, parked, released, cap and peak RSS
+(VmHWM), the session bytes and why parked turns are not being released.
+
+Session files (generation sessions and released parks) are held under
+`sdk_bridge_session_bytes_ceiling` (2 GiB, soft) by a periodic pass that
+evicts idle conversations, least recently used first. When live and
+released sessions alone exceed it, parked turns stay parked under the
+parked timeout instead of being released; new turns are never refused. The
+DB cleanup worker never deletes a `running`/`released` turn or one a park
+still owns.
 
 ## Tests
 

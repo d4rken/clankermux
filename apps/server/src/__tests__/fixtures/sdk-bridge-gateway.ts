@@ -92,6 +92,8 @@ export async function startGateway(opts: {
 	models: readonly string[];
 	/** Bridge dependencies the test injects (fake query, timings, limits). */
 	bridge?: Partial<ClaudeSdkBridgeDeps>;
+	/** Release parked turns into the gateway's own database. */
+	releasedParks?: boolean;
 }): Promise<Gateway> {
 	const blockedEgress: string[] = [];
 	const restoreFetch = guardEgress(blockedEgress);
@@ -172,6 +174,12 @@ export async function startGateway(opts: {
 		proxyContext,
 		config,
 		turnRepo: dbOps.sdkBridgeTurns,
+		...(opts.releasedParks
+			? {
+					parkRepo: dbOps.sdkBridgeReleasedParks,
+					parkNamespace: "gateway",
+				}
+			: {}),
 		workRoot: join(opts.root, "claude-agent-sdk"),
 		...(opts.bridge ? { overrides: opts.bridge } : {}),
 	});

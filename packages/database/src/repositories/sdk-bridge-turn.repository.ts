@@ -161,6 +161,21 @@ function toLeg(row: LegRow): SdkBridgeTurnLeg {
 }
 
 /**
+ * A write to a park-owned turn carries the park lease token (`fence`) and
+ * applies only while that token holds the lease, in the same statement; a
+ * write with no token (an ordinary turn) is never fenced.
+ */
+const FENCED = `(? IS NULL OR EXISTS (
+	SELECT 1 FROM sdk_bridge_park_lease WHERE id = 1 AND token = ?
+))`;
+
+function fenceParams(
+	fence: string | undefined,
+): [string | null, string | null] {
+	return [fence ?? null, fence ?? null];
+}
+
+/**
  * Repository for `sdk_bridge_turns` and `sdk_bridge_turn_legs`. Retention is the
  * cleanup worker's (request-retention cutoff; legs cascade), so there is no
  * prune method here.
@@ -173,8 +188,9 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				model, client_harness, client_user_agent, project,
 				conversation_key_hash, cc_session_id, history_mode, rebuild_reason,
 				system_prompt_policy, system_prompt_detail, ignored_fields,
+				owner_pid, owner_start_time,
 				leg_count, tool_round_count, inner_call_count, inner_error_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
 			[
 				turn.id,
 				turn.kind ?? "turn",
@@ -196,6 +212,8 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 					? JSON.stringify(turn.systemPromptDetail)
 					: null,
 				turn.ignoredFields?.length ? JSON.stringify(turn.ignoredFields) : null,
+				turn.ownerPid ?? null,
+				turn.ownerStartTime ?? null,
 			],
 		);
 	}
@@ -204,7 +222,11 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	 * Write the turn's terminal facts. `ccSessionId` COALESCEs so a session id
 	 * learned at admission (resume) survives a finish that does not repeat it.
 	 */
-	async finishTurn(id: string, finish: SdkBridgeTurnFinish): Promise<void> {
+	async finishTurn(
+		id: string,
+		finish: SdkBridgeTurnFinish,
+		fence?: string,
+	): Promise<void> {
 		await this.run(
 			`UPDATE sdk_bridge_turns SET
 				finished_at = ?,
@@ -222,7 +244,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				sdk_output_tokens = ?,
 				sdk_cache_read_input_tokens = ?,
 				sdk_cache_creation_input_tokens = ?
-			WHERE id = ?`,
+			WHERE id = ? AND ${FENCED}`,
 			[
 				finish.finishedAt,
 				finish.status,
@@ -241,6 +263,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				finish.sdkCacheReadInputTokens ?? null,
 				finish.sdkCacheCreationInputTokens ?? null,
 				id,
+				...fenceParams(fence),
 			],
 		);
 	}
@@ -249,18 +272,20 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	async bumpTurnCounters(
 		id: string,
 		delta: SdkBridgeTurnCounterDelta,
+		fence?: string,
 	): Promise<void> {
 		await this.run(
 			`UPDATE sdk_bridge_turns SET
 				tool_round_count = tool_round_count + ?,
 				inner_call_count = inner_call_count + ?,
 				inner_error_count = inner_error_count + ?
-			WHERE id = ?`,
+			WHERE id = ? AND ${FENCED}`,
 			[
 				delta.toolRounds ?? 0,
 				delta.innerCalls ?? 0,
 				delta.innerErrors ?? 0,
 				id,
+				...fenceParams(fence),
 			],
 		);
 	}
@@ -269,9 +294,17 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	 * Insert a leg and count it on its turn in one transaction. Throws when the
 	 * turn does not exist (foreign key).
 	 */
-	async insertLeg(leg: SdkBridgeLegInsert): Promise<void> {
+	async insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<void> {
 		await this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
+			if (fence !== undefined) {
+				const held = db
+					.query(`SELECT ${FENCED} AS held`)
+					.get(...(fenceParams(fence) as [string, string])) as {
+					held: number;
+				} | null;
+				if (held?.held !== 1) return;
+			}
 			db.run(
 				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at)
 				VALUES (?, ?, ?, ?)`,
@@ -284,7 +317,11 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 		});
 	}
 
-	async finishLeg(id: string, finish: SdkBridgeLegFinish): Promise<void> {
+	async finishLeg(
+		id: string,
+		finish: SdkBridgeLegFinish,
+		fence?: string,
+	): Promise<void> {
 		await this.run(
 			`UPDATE sdk_bridge_turn_legs SET
 				finished_at = ?,
@@ -294,7 +331,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				error_type = ?,
 				error_message = ?,
 				tool_use_ids = ?
-			WHERE id = ?`,
+			WHERE id = ? AND ${FENCED}`,
 			[
 				finish.finishedAt,
 				finish.httpStatus ?? null,
@@ -304,6 +341,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				finish.errorMessage ?? null,
 				finish.toolUseIds ? JSON.stringify(finish.toolUseIds) : null,
 				id,
+				...fenceParams(fence),
 			],
 		);
 	}

@@ -35,11 +35,27 @@ function ids(dbPath: string, table: string): string[] {
 	);
 }
 
-function insertTurn(db: Database, id: string, startedAt: number): void {
+function insertTurn(
+	db: Database,
+	id: string,
+	startedAt: number,
+	status = "completed",
+): void {
 	db.run(
 		`INSERT INTO sdk_bridge_turns (id, started_at, status, history_mode, system_prompt_policy)
-		 VALUES (?, ?, 'completed', 'fresh', 'drop')`,
-		[id, startedAt],
+		 VALUES (?, ?, ?, 'fresh', 'drop')`,
+		[id, startedAt, status],
+	);
+}
+
+function insertPark(db: Database, turnId: string, state: string): void {
+	db.run(
+		`INSERT INTO sdk_bridge_released_parks (
+			turn_id, state, session_id, session_path, resume_at,
+			awaited_tool_use_ids, requested_model, descriptor, active_ms,
+			parked_since, expires_at, file_bytes, created_at
+		) VALUES (?, ?, 's', 'f', 'u', '[]', 'm', '{}', 0, 0, 0, 0, 0)`,
+		[turnId, state],
 	);
 }
 
@@ -172,5 +188,26 @@ describe("cleanup worker: SDK bridge turns", () => {
 		await runCleanup(dbPath, 30 * DAY);
 
 		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["leg-kept"]);
+	});
+
+	it("never prunes an open turn, or one a released park still owns", async () => {
+		const old = Date.now() - 10 * DAY;
+		withDb(dbPath, (db) => {
+			insertTurn(db, "turn-done", old);
+			insertTurn(db, "turn-running", old, "running");
+			insertTurn(db, "turn-released", old, "released");
+			insertPark(db, "turn-released", "released");
+			// Closed on its row, but its park is being resumed right now.
+			insertTurn(db, "turn-claimed", old, "failed");
+			insertPark(db, "turn-claimed", "claimed");
+		});
+
+		await runCleanup(dbPath, 7 * DAY);
+
+		expect(ids(dbPath, "sdk_bridge_turns")).toEqual([
+			"turn-claimed",
+			"turn-released",
+			"turn-running",
+		]);
 	});
 });
