@@ -414,6 +414,54 @@ describe("a [1m] id", () => {
 		expect(route.target(a)?.upstreamModel).toBe("claude-opus-5-5[1m]");
 	});
 
+	it("matches a family rule, which pools its accounts", () => {
+		const b = account("b", "anthropic");
+		const route = oneM({
+			accounts: [a, b, c, o],
+			permissions: new Map([
+				["a", bare],
+				["b", bare],
+				["c", bare],
+				["o", bare],
+			]),
+			bridgesOfficialAnthropic: true,
+			rules: [
+				{
+					...rule,
+					match_model_kind: "family",
+					match_model_value: "anthropic:opus",
+					pool_kind: "accounts",
+					pool_provider: null,
+					pool_account_ids: ["a"],
+					target_kind: "requested",
+					target_model: null,
+				},
+			],
+		});
+		expect(route.accountIds()).toEqual(["a"]);
+		expect(route.target(a)?.upstreamModel).toBe("claude-opus-5-5[1m]");
+	});
+
+	it("is rewritten by a family rule's literal target", () => {
+		const route = oneM({
+			bridgesOfficialAnthropic: true,
+			permissions: new Map([
+				["a", bare],
+				["c", known],
+				["o", known],
+			]),
+			rules: [
+				{
+					...rule,
+					match_model_kind: "family",
+					match_model_value: "anthropic:opus",
+				},
+			],
+		});
+		expect(route.accountIds()).toEqual(["c"]);
+		expect(route.target(c)?.upstreamModel).toBe("gpt-6-astra");
+	});
+
 	it("is refused on a direct send with a named 400", () => {
 		expect(() => oneM()).toThrow(
 			expect.objectContaining({

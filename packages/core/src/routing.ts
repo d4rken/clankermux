@@ -5,6 +5,7 @@ import {
 	type ResolvedRoutingTarget,
 	type RoutingModelFamily,
 	type RoutingRule,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 
 export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
@@ -14,10 +15,14 @@ export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
 	"anthropic:fable",
 ];
 
-/** Anchored IDs only; quota classification deliberately uses a different helper. */
+/**
+ * Anchored IDs only; quota classification deliberately uses a different helper.
+ * A `[1m]` id is its bare id's family: `claude-opus-5-5[1m]` is anthropic:opus.
+ */
 export function getRoutingModelFamily(
-	model: string,
+	requested: string,
 ): RoutingModelFamily | null {
+	const model = sdkBridgeWireModel(requested);
 	const match =
 		/^claude-(opus|sonnet|haiku|fable|mythos)-\d+(?:[.-]\d+)*(?:-latest)?$/i.exec(
 			model,

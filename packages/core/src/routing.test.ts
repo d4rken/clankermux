@@ -105,6 +105,25 @@ describe("routing policy", () => {
 			resolveRoutingTarget(rule({ target_kind: "literal" }), "claude-sonnet-5"),
 		).toThrow("Literal route requires a target model");
 	});
+	it("classifies a [1m] id by its bare id, and a family rule matches it", () => {
+		expect(getRoutingModelFamily("claude-opus-5-5[1m]")).toBe("anthropic:opus");
+		expect(getRoutingModelFamily("claude-fable-5-1[1m]")).toBe(
+			"anthropic:fable",
+		);
+		const family = rule({
+			match_model_kind: "family",
+			match_model_value: "anthropic:opus",
+		});
+		expect(matchRoutingRule([family], null, "claude-opus-5-5[1m]")).toBe(
+			family,
+		);
+		// Exact rules still compare the id as written.
+		const exact = rule({
+			match_model_kind: "exact",
+			match_model_value: "claude-opus-5-5",
+		});
+		expect(matchRoutingRule([exact], null, "claude-opus-5-5[1m]")).toBeNull();
+	});
 	it("permits a [1m] id on an official Anthropic account that lists the bare id", () => {
 		const listing = (ids: string[], source: "manual" | "discovered") => ({
 			completeness: "known-complete" as const,

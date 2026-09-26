@@ -1690,6 +1690,41 @@ describe("client service integration", () => {
 			});
 		});
 
+		it("describes a [1m] entry from the family rule that routes it", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "opus-to-astra",
+				name: "Opus to Astra",
+				match_model_kind: "family",
+				match_model_value: "anthropic:opus",
+				target_kind: "literal",
+				target_model: "gpt-6-astra",
+			});
+			const draft = blank();
+			draft.catalogues.openai.models = [
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "openai");
+			// The rule sends it to gpt-6-astra, so that is what it describes.
+			expect(models["claude-opus-5-5[1m]"]).toMatchObject({
+				contextWindow: 872_000,
+				supportedReasoningEfforts: ALIAS_EFFORTS,
+			});
+		});
+
 		it("advertises the fixed alias effort range in every format, whatever the targets accept", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["gpt-5.4-mini", "gpt-6-future"]);
