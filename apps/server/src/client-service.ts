@@ -71,9 +71,11 @@ import {
 	globalDeltaFromList,
 	globalEntry,
 	isKnownProvider,
+	isOfficialAnthropicProvider,
 	NodeCryptoUtils,
 	type RoutingRule,
 	sameGlobalEntry,
+	sdkBridgeWireModel,
 	toApiKeyResponse,
 } from "@clankermux/types";
 import {
@@ -722,6 +724,7 @@ export class ClientService {
 				key,
 				profile.catalogues[format].models,
 				format,
+				profile.application,
 			),
 			{ models: {}, catalogueLoaded: false, catalogueStale: false },
 			MODEL_METADATA_BUDGET_MS,
@@ -740,7 +743,12 @@ export class ClientService {
 		},
 		models: ClientModel[],
 		format: ClientFormat,
+		application: ClientProfile["application"],
 	): Promise<ClientModelMetadataResponse> {
+		// Such a client reaches official Anthropic accounts directly, where a
+		// `[1m]` id is refused; Claude Code sends the bare id itself.
+		const directAnthropic =
+			format === "anthropic" && application !== "claude-code";
 		const rules = await this.deps.dbOps.routing.listRules();
 		const accounts = await this.accounts({
 			accountId: key.pinnedAccountId,
@@ -820,6 +828,12 @@ export class ClientService {
 							if (
 								winning?.pool_kind === "provider" &&
 								account.provider !== winning.pool_provider
+							)
+								continue;
+							if (
+								directAnthropic &&
+								isOfficialAnthropicProvider(account.provider) &&
+								sdkBridgeWireModel(target) !== target
 							)
 								continue;
 							const permission = permissions.get(account.id) ?? null;
@@ -1025,7 +1039,13 @@ export class ClientService {
 		const metadata =
 			includeMetadata || aliasModels.size > 0
 				? await catalogueWithin(
-						this.resolveModelMetadata(id, key, catalogue.models, format),
+						this.resolveModelMetadata(
+							id,
+							key,
+							catalogue.models,
+							format,
+							profile.application,
+						),
 						{ models: {}, catalogueLoaded: false, catalogueStale: false },
 						WIRE_METADATA_BUDGET_MS,
 					)

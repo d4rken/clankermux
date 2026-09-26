@@ -1692,6 +1692,69 @@ describe("client service integration", () => {
 			});
 		});
 
+		it("withholds a [1m] entry from an Anthropic-format catalogue only Claude Code can use", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			const alias = await dbOps.modelAliases.save({
+				id: "alias:long",
+				displayName: "Long",
+				revision: 0,
+				targets: [
+					{ model: "claude-opus-5-5[1m]", accountIds: null },
+					{ model: "gpt-6-astra", accountIds: null },
+				],
+			});
+			const entries = [
+				{
+					id: "claude-opus-5-5[1m]",
+					displayName: "Opus 1M",
+					targetModel: "claude-opus-5-5[1m]",
+					accountIds: null,
+				},
+				{
+					id: "claude-long",
+					displayName: "Long",
+					targetModel: alias.id,
+					accountIds: null,
+				},
+			];
+			const oneM = async (application: "generic" | "claude-code") => {
+				const draft = blank();
+				draft.name = application;
+				draft.application = application;
+				draft.catalogues.anthropic.models = entries;
+				if (application === "generic") draft.catalogues.openai.models = entries;
+				return (await create(draft)).client.apiKeyId;
+			};
+			const generic = await oneM("generic");
+			// Its /wire/anthropic requests for the id answer 400
+			// model_suffix_requires_claude_code, so it has no route at all...
+			const direct = (await service.modelMetadata(generic, "anthropic")).models;
+			expect(direct["claude-opus-5-5[1m]"]).not.toHaveProperty("contextWindow");
+			// ...and the alias is described by the one target it can reach.
+			expect(direct["claude-long"]?.cost).toMatchObject({
+				input: 10,
+				output: 50,
+			});
+			// The same client's OpenAI-format requests are bridged.
+			const bridged = (await service.modelMetadata(generic, "openai")).models;
+			expect(bridged["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
+			// Two rate cards that disagree publish none.
+			expect(bridged["claude-long"]).not.toHaveProperty("cost");
+			// Claude Code resolves the suffix itself.
+			const claudeCode = await oneM("claude-code");
+			expect(
+				(await service.modelMetadata(claudeCode, "anthropic")).models[
+					"claude-opus-5-5[1m]"
+				]?.contextWindow,
+			).toBe(1_000_000);
+		});
+
 		it("describes a [1m] entry from the family rule that routes it", async () => {
 			dbOps
 				.getAdapter()
