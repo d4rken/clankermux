@@ -5,6 +5,7 @@ import {
 	aliasEffortClampsToClaudeFamily,
 	aliasEffortReachesProvider,
 	clampEffortToModel,
+	claudeModelTakesEffort,
 	getAliasReasoningEfforts,
 	resolveTargetReasoningProfile,
 } from "./reasoning-profiles";
@@ -35,7 +36,42 @@ it("requires matching adapter and model families", () => {
 		"unknown",
 	);
 });
-it("profiles Claude models on every official Anthropic provider", () => {
+it("knows which Claude models take an effort: Opus 4.5, and 4.6 on", () => {
+	for (const model of [
+		"claude-opus-4-5",
+		"claude-opus-4-5-20251101",
+		"claude-opus-4-6",
+		"claude-sonnet-4-6",
+		"claude-opus-4-8",
+		"claude-opus-5",
+		"claude-opus-5-5",
+		"claude-opus-5-5[1m]",
+		"claude-fable-5-1",
+		"claude-mythos-5",
+		"claude-sonnet-5",
+		"claude-sonnet-5-20260101",
+		"claude-haiku-5",
+		"anthropic/claude-opus-5-5",
+	])
+		expect([model, claudeModelTakesEffort(model)]).toEqual([model, true]);
+	for (const model of [
+		"claude-haiku-4-5",
+		"claude-sonnet-4-5",
+		"claude-sonnet-4-5-20250929",
+		"claude-opus-4-1",
+		"claude-opus-4-1-latest",
+		"claude-opus-4",
+		"claude-3-5-haiku-20241022",
+		"claude-3-7-sonnet-20250219",
+		"claude-3-opus-20240229",
+		// Outside the measured 1M set a suffixed id is a literal of its own.
+		"claude-opus-5[1m]",
+		"opus",
+		"gpt-6-astra",
+	])
+		expect([model, claudeModelTakesEffort(model)]).toEqual([model, false]);
+});
+it("profiles Claude models that take an effort on every official Anthropic provider", () => {
 	const full: AliasReasoningEffort[] = [
 		"low",
 		"medium",
@@ -49,8 +85,8 @@ it("profiles Claude models on every official Anthropic provider", () => {
 			"claude-fable-5-1",
 			"claude-sonnet-5",
 			"claude-opus-4-8",
-			"claude-sonnet-4-5-20250929",
-			"claude-opus-4-1-latest",
+			"claude-opus-4-5",
+			"claude-sonnet-4-6",
 			"claude-mythos-5",
 			"anthropic/claude-opus-5-5",
 		])
@@ -58,11 +94,13 @@ it("profiles Claude models on every official Anthropic provider", () => {
 				status: "known",
 				efforts: full,
 			});
-		for (const model of ["claude-haiku-4-5", "claude-3-5-haiku-20241022"])
-			expect(getAliasReasoningEfforts(model, provider)).toEqual([
-				"low",
-				"medium",
-			]);
+		for (const model of [
+			"claude-haiku-4-5",
+			"claude-3-5-haiku-20241022",
+			"claude-sonnet-4-5-20250929",
+			"claude-opus-4-1-latest",
+		])
+			expect(getAliasReasoningEfforts(model, provider)).toBeNull();
 	}
 });
 it("profiles a Claude model only on an official Anthropic provider", () => {

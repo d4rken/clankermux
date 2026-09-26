@@ -1662,8 +1662,10 @@ describe("client service integration", () => {
 			});
 			expect(models["claude-haiku-4-5"]).toMatchObject({
 				contextWindow: 200_000,
-				supportedReasoningEfforts: ["low", "medium"],
 			});
+			expect(models["claude-haiku-4-5"]).not.toHaveProperty(
+				"supportedReasoningEfforts",
+			);
 			const enriched = await (await service.wire(id, "openai", true)).json();
 			expect(
 				Object.fromEntries(
@@ -1686,7 +1688,7 @@ describe("client service integration", () => {
 			).toEqual({
 				"claude-opus-5-5": [200_000, 5],
 				"claude-opus-5-5[1m]": [1_000_000, 5],
-				"claude-haiku-4-5": [200_000, 2],
+				"claude-haiku-4-5": [200_000, undefined],
 			});
 		});
 

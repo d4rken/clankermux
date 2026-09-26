@@ -272,10 +272,8 @@ describe("published model metadata", () => {
 		expect(
 			await efforts("claude-fable-5-1", ["anthropic", "claude-console-api"]),
 		).toEqual(full);
-		expect(await efforts("claude-haiku-4-5", ["anthropic"])).toEqual([
-			"low",
-			"medium",
-		]);
+		// Haiku 4.5 takes no effort.
+		expect(await efforts("claude-haiku-4-5", ["anthropic"])).toBeUndefined();
 		// One route that cannot substantiate them drops them for the model.
 		expect(
 			await efforts("claude-opus-5-5", ["anthropic", "openrouter"]),
