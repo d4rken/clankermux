@@ -85,24 +85,40 @@ pipeline. The client keeps executing its own tools.
   time). Every write to a park or to a turn a park owns carries the lease
   token in the same statement or transaction and changes nothing without
   it, so whatever a process still has in flight after losing the lease
-  (declared dead, or dispose) is harmless. Refused or failed writes leave
+  (declared dead, or dispose) is harmless. That includes the turn row's
+  own writes: a resumed turn's `TurnRecorder`, and the refusal legs of a
+  released one, pass the token to `finishTurn`, `bumpTurnCounters`,
+  `insertLeg` and `finishLeg`; ordinary turns pass none and are never
+  fenced. Each claim has a generation (`claim_id`), and an unclaim or a
+  consumed mark names the one it belongs to, so a late unclaim of an
+  earlier claim never releases a newer one. Refused or failed writes leave
   the park `reconciling` (indexed, not claimable) and the maintenance pass
-  retries them until the database agrees; a park is `released` locally
-  only after a confirmed write. New files go to
+  retries them, one pass at a time and one write per park at a time, until
+  the database agrees; a park is `released` locally only after a
+  confirmed write. New files go to
   `released-parks/<sha256(realpath(db))[:16]>` under the holder's work
   root, and each record stores its file's absolute path, so a new holder
-  on another work root recovers them where they are (only paths inside a
-  released-parks directory of this database, never through a symlink).
+  on another work root recovers them where they are. A path is accepted
+  only as `<root>/released-parks/<namespace>/<uuid>.jsonl` with no symlink
+  anywhere on its chain: the root is this process's own work root or one
+  whose real path is itself, and `released-parks`, the namespace directory
+  and the file are each checked with lstat. The check runs at recovery and
+  again when a resume claims the park.
   Recovery runs before `installSdkBridge` exposes the transport, bounded
   by `recoveryStartupMs` (each DB call with a short busy-retry budget);
   it builds the index privately and publishes it only when every row was
   handled. Preparing and consumed records and unusable ones (size or resume
   point wrong; the full chain is checked when a resume claims the park)
   end their turns, and a file goes only after its close is confirmed.
-  Stale claims return to `released`. Any database failure fails the
-  attempt: the bridge stays "recovering" (unavailable; tool results that
-  match no live query answer 503 with Retry-After, also through the proxy)
-  and retries with backoff. Turn rows record their owning process, and
+  Stale claims return to `released`. Every recovery attempt, the ones the
+  maintenance pass starts after another holder exits included, raises the
+  "recovering" barrier before its first await and lowers it only once the
+  new index is published or the lease is found to be another's: meanwhile
+  the bridge is unavailable and tool results that match no live query
+  answer 503 with Retry-After (also through the proxy). While another live
+  process holds the lease, each maintenance tick's lease check raises it
+  for that one database call. Any database failure fails the attempt, which
+  is retried with backoff. Turn rows record their owning process, and
   only turns whose process is gone are closed. Everything from a resume's
   claim to its launch is one sequence with one rollback; a resume that
   ends before its first model call gives the park back (after waiting for
@@ -110,6 +126,14 @@ pipeline. The client keeps executing its own tools.
   `sdk_bridge_released_park_ttl_ms` (24 h, `timed_out`). Shutdown releases
   parked turns, including ones that park during the drain, and dispose
   drains outstanding park writes before giving the lease up.
+- **Known conditions of released parks.** A development database created
+  at the unshipped `2523c6d7` schema (`sdk_bridge_released_parks` with
+  `session_file`, no `claim_id`) has to be reset: that table is created
+  with `CREATE TABLE IF NOT EXISTS`, so its columns never change in place.
+  Turn rows written before `owner_pid` existed count as owned by a dead
+  process and are closed by the next lease holder; that assumes upgrades
+  are sequential (a production restart drains the old version before the
+  new one starts), never two versions running on one database at once.
 - **Dead continuations.** Tool results no live query holds, sent with the
   assistant message that made the calls, start a new query with
   `rebuild_reason = dead_continuation`: the history and the results are
