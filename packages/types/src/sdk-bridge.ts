@@ -154,7 +154,11 @@ export type SdkBridgeTurnInsert = Pick<
 			| "ignoredFields"
 			| "systemPromptDetail"
 		>
-	>;
+	> & {
+		/** The process running the turn: pid and its /proc start time. */
+		ownerPid?: number | null;
+		ownerStartTime?: string | null;
+	};
 
 /** Terminal facts written once the turn ends. */
 export type SdkBridgeTurnFinish = Pick<SdkBridgeTurn, "finishedAt" | "status"> &
@@ -290,8 +294,11 @@ export interface SdkBridgeReleasedPark {
 	conversationKeyHash: string | null;
 	/** The Claude Code session id the stored transcript carries. */
 	sessionId: string;
-	/** File name inside the bridge's released-parks directory. */
-	sessionFile: string;
+	/**
+	 * Absolute path of the stored session, inside a released-parks directory
+	 * of this database (any work root): recovery reads it where it is.
+	 */
+	sessionPath: string;
 	/** Uuid of the transcript entry a resume continues from. */
 	resumeAt: string;
 	/** The tool_use ids the client must answer, each exactly once. */

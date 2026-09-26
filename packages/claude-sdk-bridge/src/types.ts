@@ -36,33 +36,56 @@ export interface SdkBridgeTurnRepo {
 }
 
 /**
- * `SdkBridgeReleasedParkRepository`: released parks' durable state. Every
- * method throws on failure; a transition resolves false when the park was not
- * in the state it leaves.
+ * `SdkBridgeReleasedParkRepository`: released parks' durable state and the
+ * lease that fences it. Every write names the lease token it acts under and
+ * resolves false, changing nothing, unless that token holds the lease (and,
+ * for a transition, the park is in the state it leaves). Failures throw.
  */
 export interface SdkBridgeParkRepo {
-	insertPreparing(park: SdkBridgeReleasedParkInsert): Promise<void>;
-	list(): Promise<SdkBridgeReleasedPark[]>;
-	markReleased(
-		turnId: string,
-		file: { sessionFile: string; fileBytes: number },
-	): Promise<boolean>;
-	claim(turnId: string, owner: string, at: number): Promise<boolean>;
-	unclaim(turnId: string, owner: string | null): Promise<boolean>;
-	markConsumed(turnId: string, owner: string): Promise<boolean>;
-	delete(turnId: string): Promise<void>;
-	closeTurn(turnId: string, finish: SdkBridgeTurnFinish): Promise<void>;
-	closeOpenTurnsWithoutPark(
-		startedBefore: number,
-		finish: SdkBridgeTurnFinish,
-	): Promise<number>;
-	/** Take the database's lease on released parks; see the repository. */
+	/** Free, already this token's, or its holder's process gone. */
 	acquireLease(
 		lease: SdkBridgeParkLease,
 		holderDead: (held: SdkBridgeParkLease) => boolean,
 	): Promise<boolean>;
 	holdsLease(token: string): Promise<boolean>;
 	releaseLease(token: string): Promise<void>;
+	insertPreparing(
+		park: SdkBridgeReleasedParkInsert,
+		token: string,
+	): Promise<boolean>;
+	find(turnId: string): Promise<SdkBridgeReleasedPark | null>;
+	list(): Promise<SdkBridgeReleasedPark[]>;
+	markReleased(
+		turnId: string,
+		file: { sessionPath: string; fileBytes: number },
+		token: string,
+	): Promise<boolean>;
+	claim(
+		turnId: string,
+		token: string,
+		at: number,
+		owner: { pid: number; startTime: string | null },
+	): Promise<boolean>;
+	unclaim(
+		turnId: string,
+		token: string,
+		opts?: { anyClaimant?: boolean },
+	): Promise<boolean>;
+	markConsumed(turnId: string, token: string): Promise<boolean>;
+	delete(turnId: string, token: string): Promise<boolean>;
+	closeTurn(
+		turnId: string,
+		finish: SdkBridgeTurnFinish,
+		token: string,
+	): Promise<boolean>;
+	closeOpenTurnsWithoutPark(
+		startedBefore: number,
+		finish: SdkBridgeTurnFinish,
+		token: string,
+		ownerDead: (owner: { pid: number; startTime: string | null }) => boolean,
+	): Promise<number>;
+	/** The same repository with a short busy-retry budget, for startup recovery. */
+	withBusyRetryBudget?(ms: number): SdkBridgeParkRepo;
 }
 
 export interface BridgeLog {
@@ -134,6 +157,13 @@ export interface SdkBridgeTiming {
 	releaseDrainMs: number;
 	/** First wait before retrying a failed recovery; it doubles up to 5 min. */
 	recoveryRetryMs: number;
+	/**
+	 * How long `ready()` waits for the first recovery before the bridge
+	 * opens as "recovering" and carries on in the background.
+	 */
+	recoveryStartupMs: number;
+	/** Busy-retry budget of each database call during recovery. */
+	recoveryBusyRetryMs: number;
 }
 
 export const DEFAULT_SDK_BRIDGE_TIMING: SdkBridgeTiming = {
@@ -145,6 +175,8 @@ export const DEFAULT_SDK_BRIDGE_TIMING: SdkBridgeTiming = {
 	maintenanceIntervalMs: 60_000,
 	releaseDrainMs: 15_000,
 	recoveryRetryMs: 5_000,
+	recoveryStartupMs: 10_000,
+	recoveryBusyRetryMs: 2_000,
 };
 
 export interface ClaudeSdkBridgeDeps {

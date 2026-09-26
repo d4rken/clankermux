@@ -1137,7 +1137,9 @@ export function ensureSchema(db: Database): void {
 			sdk_cache_creation_input_tokens INTEGER,
 			ignored_fields TEXT,
 			system_prompt_detail TEXT,
-			kind TEXT NOT NULL DEFAULT 'turn'
+			kind TEXT NOT NULL DEFAULT 'turn',
+			owner_pid INTEGER,
+			owner_start_time TEXT
 		)
 	`);
 	db.run(
@@ -1171,11 +1173,11 @@ export function ensureSchema(db: Database): void {
 	);
 
 	// Which bridge process may act on sdk_bridge_released_parks: at most one
-	// row, naming the released-parks directory (work root and database
-	// namespace) of its holder, whose pid and start time say whether it still
-	// runs. A process on another directory takes it only once its holder is
-	// dead, so two servers sharing one database never recover each other's
-	// parks.
+	// row, the lease, naming its holder's token, pid and start time (whether it
+	// still runs) and its released-parks directory (for diagnosis). Every
+	// write to a park, or to a turn a park owns, applies only while its
+	// token holds this row; another process takes it only once the holder is
+	// dead.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS sdk_bridge_park_lease (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1202,7 +1204,7 @@ export function ensureSchema(db: Database): void {
 			owner_api_key_id TEXT,
 			conversation_key_hash TEXT,
 			session_id TEXT NOT NULL,
-			session_file TEXT NOT NULL,
+			session_path TEXT NOT NULL,
 			resume_at TEXT NOT NULL,
 			awaited_tool_use_ids TEXT NOT NULL,
 			requested_model TEXT NOT NULL,
@@ -2071,6 +2073,18 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "sdk_bridge_turns",
 		column: "kind",
 		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN kind TEXT NOT NULL DEFAULT 'turn'",
+	},
+	// The process running the turn (pid, /proc start time): a turn left open
+	// is closed only once that process is gone. NULL on rows written before.
+	{
+		table: "sdk_bridge_turns",
+		column: "owner_pid",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN owner_pid INTEGER",
+	},
+	{
+		table: "sdk_bridge_turns",
+		column: "owner_start_time",
+		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN owner_start_time TEXT",
 	},
 ];
 

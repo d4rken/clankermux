@@ -6,6 +6,7 @@ import {
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeAvailability,
 	SdkBridgeCapacityError,
+	type SdkBridgeContinuationUnavailable,
 	type SdkBridgeCounters,
 	type SdkBridgeHistoryMode,
 	type SdkBridgeInnerContext,
@@ -57,6 +58,7 @@ import { PromptStream } from "./prompt-stream";
 import { TurnRecorder } from "./recorder";
 import {
 	forkVerifiedTranscript,
+	LeaseHeldElsewhere,
 	type ReleasedEntry,
 	ReleasedParkStore,
 	type ResumeDescriptor,
@@ -101,12 +103,16 @@ import {
 import {
 	claimGeneration,
 	ensurePrivateDir,
+	ownerRunning,
 	removeTree,
 	sweepGenerations,
 } from "./work-dirs";
 
 /** The longest wait between two attempts at recovering released parks. */
 const RECOVERY_RETRY_MAX_MS = 5 * 60_000;
+
+const LEASE_ELSEWHERE =
+	"another running process on this database owns its released parks";
 
 /** Claude Code version the bundled binary reports; written into rebuilt transcripts. */
 const CLAUDE_CODE_VERSION = "2.1.280";
@@ -297,31 +303,26 @@ export function createClaudeSdkBridge(
 	// on disk under the work root and their records in the database, so the
 	// client's results resume them, across restarts too.
 	let parks: ReleasedParkStore | null = null;
+	/** Why parked turns are not released at all: no repository, or another holder. */
 	let parksOffReason: string | null = deps.parkRepo
 		? null
 		: "no released-park repository";
-	if (!unavailableReason && deps.parkRepo) {
-		parks = new ReleasedParkStore({
-			workRoot: deps.workRoot,
-			repo: deps.parkRepo,
-			log,
-			now,
-			owner: generationId,
-			namespace: deps.parkNamespace ?? "default",
-		});
+	if (!unavailableReason && deps.parkRepo)
 		try {
-			if (!parks.acquire()) {
-				parksOffReason =
-					"another running process owns the released-parks directory";
-				log.warn(
-					`SDK bridge: ${parksOffReason}; parked turns will not be released`,
-				);
-			}
+			parks = new ReleasedParkStore({
+				workRoot: deps.workRoot,
+				repo: deps.parkRepo,
+				recoveryRepo: deps.parkRepo.withBusyRetryBudget?.(
+					timing.recoveryBusyRetryMs,
+				),
+				log,
+				now,
+				namespace: deps.parkNamespace ?? "default",
+			});
 		} catch (error) {
-			parksOffReason = `the released-parks directory is unusable (${errorSummary(error)})`;
+			parksOffReason = `released parks are unusable (${errorSummary(error)})`;
 			log.warn(`SDK bridge: ${parksOffReason}`);
 		}
-	}
 	/** The session byte ceiling is reached by sessions nothing may evict. */
 	let ceilingBlocked = false;
 	let sessionBytes: number | null = null;
@@ -334,27 +335,31 @@ export function createClaudeSdkBridge(
 	/** Live queries resumed from a released park, by turn id. */
 	const resumedFrom = new Map<string, ReleasedEntry>();
 
-	/**
-	 * Set while released parks an earlier process left are not recovered:
-	 * the bridge is unavailable until they are, since results for a park it
-	 * has not indexed would look dead and start a flattened rebuild.
-	 */
-	let recovering: string | null = null;
-	let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Park writes running in the background (unclaims, forgets, retries); dispose drains them. */
+	const parkWork = new Set<Promise<unknown>>();
+	const track = (work: Promise<unknown>): void => {
+		parkWork.add(work);
+		void work
+			.catch(() => {})
+			.finally(() => {
+				parkWork.delete(work);
+			});
+	};
 
+	/**
+	 * Set until the released parks an earlier process left are recovered.
+	 * Meanwhile the bridge is unavailable, and tool results matching no live
+	 * query answer 503: a park not indexed yet would look dead and its
+	 * results would start a flattened rebuild.
+	 */
+	let recovering: string | null = parks ? "recovering released parks" : null;
+	let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+	let recoveryRun: Promise<boolean> | null = null;
+
+	/** One recovery attempt; false when it failed and must be retried. */
 	async function recoverParks(): Promise<boolean> {
-		if (!parks?.owned || !deps.parkRepo) return true;
+		if (!parks || !deps.parkRepo) return true;
 		try {
-			if (!(await parks.takeLease())) {
-				// Another server on this database: its parks are its own.
-				recovering = null;
-				parksOffReason =
-					"another running process on this database owns its released parks";
-				log.warn(
-					`SDK bridge: ${parksOffReason}; parked turns will not be released`,
-				);
-				return true;
-			}
 			const kept = await parks.recover({
 				preparing: bridgeErrors.bridgeRestarted("while this turn was released"),
 				consumed: bridgeErrors.bridgeRestarted(
@@ -366,27 +371,47 @@ export function createClaudeSdkBridge(
 				expired: bridgeErrors.releasedParkExpired(limits().releasedParkTtlMs),
 			});
 			recovering = null;
+			if (parksOffReason === LEASE_ELSEWHERE) parksOffReason = null;
 			if (kept)
 				log.info(
 					`SDK bridge: ${kept} released park${kept === 1 ? "" : "s"} recovered`,
 				);
 		} catch (error) {
+			recovering = null;
+			if (error instanceof LeaseHeldElsewhere) {
+				// Another live server on this database: its parks are its own. The
+				// maintenance pass asks again, in case it goes away.
+				if (parksOffReason !== LEASE_ELSEWHERE)
+					log.warn(
+						`SDK bridge: ${LEASE_ELSEWHERE}; parked turns will not be released`,
+					);
+				parksOffReason = LEASE_ELSEWHERE;
+				return true;
+			}
 			recovering = `recovering released parks (${errorSummary(error)})`;
 			log.error(`SDK bridge: ${recovering}`, error);
 			return false;
 		}
 		try {
 			const error = bridgeErrors.bridgeRestarted("while this turn ran");
-			const closed = await deps.parkRepo.closeOpenTurnsWithoutPark(createdAt, {
-				finishedAt: now(),
-				status: "failed",
-				httpStatus: error.status,
-				errorType: error.type,
-				errorMessage: error.message,
-			});
+			const closed = await (
+				deps.parkRepo.withBusyRetryBudget?.(timing.recoveryBusyRetryMs) ??
+				deps.parkRepo
+			).closeOpenTurnsWithoutPark(
+				createdAt,
+				{
+					finishedAt: now(),
+					status: "failed",
+					httpStatus: error.status,
+					errorType: error.type,
+					errorMessage: error.message,
+				},
+				parks.token,
+				(owner) => !ownerRunning(owner),
+			);
 			if (closed)
 				log.info(
-					`SDK bridge: ${closed} turn${closed === 1 ? "" : "s"} an earlier process left open closed`,
+					`SDK bridge: ${closed} turn${closed === 1 ? "" : "s"} whose process is gone closed`,
 				);
 		} catch (error) {
 			log.warn("SDK bridge: could not close turns left open", error);
@@ -394,19 +419,46 @@ export function createClaudeSdkBridge(
 		return true;
 	}
 
+	/** At most one recovery at a time. */
+	function runRecovery(): Promise<boolean> {
+		recoveryRun ??= recoverParks().finally(() => {
+			recoveryRun = null;
+		});
+		return recoveryRun;
+	}
+
 	/** Retry a failed recovery, doubling the wait up to five minutes. */
 	function retryRecovery(delay: number): void {
+		if (shuttingDown) return;
 		recoveryTimer = setTimeout(async () => {
 			recoveryTimer = null;
 			if (shuttingDown) return;
-			if (!(await recoverParks()))
+			if (!(await runRecovery()))
 				retryRecovery(Math.min(delay * 2, RECOVERY_RETRY_MAX_MS));
 		}, delay);
 		recoveryTimer.unref?.();
 	}
 
+	/**
+	 * Settles once the first recovery is done, or after recoveryStartupMs:
+	 * startup never waits out a long database lock. A slow attempt carries on
+	 * in the background, the bridge meanwhile "recovering".
+	 */
 	const ready: Promise<void> = (async () => {
-		if (!(await recoverParks())) retryRecovery(timing.recoveryRetryMs);
+		if (!parks) return;
+		const first = runRecovery();
+		const outcome = await Promise.race([
+			first,
+			Bun.sleep(timing.recoveryStartupMs).then(() => "slow" as const),
+		]);
+		if (outcome === "slow") {
+			log.warn(
+				"SDK bridge: released-park recovery is taking longer than startup allows; carrying on in the background",
+			);
+			void first.then((ok) => {
+				if (!ok) retryRecovery(timing.recoveryRetryMs);
+			});
+		} else if (!outcome) retryRecovery(timing.recoveryRetryMs);
 	})();
 
 	const listener = new InnerListener({
@@ -572,7 +624,8 @@ export function createClaudeSdkBridge(
 	/** Why a parked query is not released now; null when it may be. */
 	function releaseRefusal(): string | null {
 		if (parksOffReason) return parksOffReason;
-		if (!parks?.usable) return recovering ?? "released parks are unavailable";
+		if (recovering) return recovering;
+		if (!parks?.usable) return "released parks are unavailable";
 		if (ceilingBlocked)
 			return "session files have reached sdk_bridge_session_bytes_ceiling";
 		return null;
@@ -673,14 +726,11 @@ export function createClaudeSdkBridge(
 		error: BridgeError,
 		status: "aborted" | "timed_out" | "failed",
 	): Promise<void> {
-		return (
-			parks?.close(entry, error, status).catch((e) => {
-				log.error(
-					`SDK bridge turn ${entry.park.turnId}: could not end its released park`,
-					e,
-				);
-			}) ?? Promise.resolve()
-		);
+		if (!parks) return Promise.resolve();
+		// Refused or failed, the close is pending and the maintenance pass retries it.
+		const work = parks.close(entry, error, status).then(() => {});
+		track(work);
+		return work;
 	}
 
 	function expirePark(entry: ReleasedEntry): Promise<void> {
@@ -720,6 +770,11 @@ export function createClaudeSdkBridge(
 			for (const entry of parks.all())
 				if (entry.state === "released" && entry.park.expiresAt <= now())
 					void expirePark(entry);
+		// Writes the database has not confirmed yet, until it does.
+		if (parks?.usable && !recoveryRun) track(parks.reconcile());
+		// Another server held the lease: it may have gone since.
+		if (parks && parksOffReason === LEASE_ELSEWHERE && !recoveryRun)
+			void runRecovery();
 		const ceiling = limits().sessionBytesCeiling;
 		let total = sessionFileBytes() + (parks?.totalBytes() ?? 0);
 		if (total > ceiling)
@@ -990,25 +1045,20 @@ export function createClaudeSdkBridge(
 				const resumed = resumedFrom.get(closed.turnId);
 				if (resumed && parks) {
 					resumedFrom.delete(closed.turnId);
-					if (!closed.keptOpen)
-						void parks.forget(resumed).catch((error) => {
-							log.error(
-								`SDK bridge turn ${closed.turnId}: could not delete its spent released park`,
-								error,
-							);
-						});
-					else
-						void parks
-							.unclaim(resumed)
-							.catch((error) => {
-								log.error(
-									`SDK bridge turn ${closed.turnId}: could not give its claim back`,
-									error,
-								);
-							})
-							.finally(() => {
-								resumed.state = "released";
-							});
+					const store = parks;
+					track(
+						(async () => {
+							// A consumed mark still in flight decides the park's fate.
+							await resumed.consuming?.catch(() => {});
+							if (resumed.consumed) {
+								// Spent after all: the turn it kept open ends now.
+								if (closed.keptOpen) closed.finishKeptOpenTurn();
+								await store.forget(resumed);
+							} else if (closed.keptOpen) await store.unclaim(resumed);
+							// Its budget was spent: the turn ended, so does the park.
+							else await store.forget(resumed);
+						})(),
+					);
 				}
 				void closed.done.then((ok) => {
 					if (ok) counters.turnsCompleted++;
@@ -1582,6 +1632,8 @@ export function createClaudeSdkBridge(
 			if (!live || live.closed) {
 				const entry = parks?.get(input.turnId);
 				if (entry) return await continueReleased(entry, input, startedAt);
+				// Not recovered yet: it may be a park that is not indexed.
+				if (recovering) return refuse(bridgeErrors.recovering());
 			}
 			if (!live || live.closed || !live.awaitingClient)
 				return refuse(bridgeErrors.deadTurn());
@@ -1657,7 +1709,10 @@ export function createClaudeSdkBridge(
 	function findContinuation(
 		toolUseIds: readonly string[],
 		caller: { apiKeyId: string | null; model: string },
-	): { turnId: string; ownerApiKeyId: string | null } | null {
+	):
+		| { turnId: string; ownerApiKeyId: string | null }
+		| SdkBridgeContinuationUnavailable
+		| null {
 		for (const live of lives.values()) {
 			if (live.closed) continue;
 			const awaiting = live.awaitingToolUseIds;
@@ -1677,6 +1732,12 @@ export function createClaudeSdkBridge(
 			}
 			return { turnId: live.turnId, ownerApiKeyId: live.ownerApiKeyId };
 		}
+		// Not recovered yet: these may be a park's that is not indexed.
+		if (recovering)
+			return {
+				unavailable: bridgeErrors.recovering().message,
+				retryAfter: String(bridgeErrors.recovering().retryAfter),
+			};
 		const entry = parks?.lookup(toolUseIds);
 		if (!entry) return null;
 		const { park } = entry;
@@ -1796,22 +1857,20 @@ export function createClaudeSdkBridge(
 			claim?.release();
 			claim = null;
 			abandonLaunch(taken, sessionId);
-			if (dbClaimed)
-				await store.unclaim(entry).catch((error) => {
-					log.error(
-						`SDK bridge turn ${turnId}: could not give its claim back`,
-						error,
-					);
-				});
-			// Whatever the database says, it is resumable (or expirable) here.
-			entry.state = "released";
+			// Released locally only once the database agrees; otherwise the
+			// entry stays reconciling and the maintenance pass retries.
+			if (dbClaimed) await store.unclaim(entry);
+			else entry.state = "released";
 		};
+		// One recorder for the turn's writes from here, the leg's included, so
+		// the leg's finish is always chained behind its insert.
+		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
 		let live: LiveQuery;
 		try {
 			try {
 				dbClaimed = await store.claim(entry);
 			} catch (error) {
-				entry.state = "released";
+				// The store left it reconciling: the database is read back first.
 				log.error(
 					`SDK bridge turn ${turnId}: could not claim its released park`,
 					error,
@@ -1915,7 +1974,7 @@ export function createClaudeSdkBridge(
 				claim,
 				convKey,
 				sideRequest: false,
-				recorder: new TurnRecorder(deps.turnRepo, log, turnId),
+				recorder,
 				startedAt: descriptor.turnStartedAt,
 				descriptor,
 				resume: { entry },
@@ -1940,7 +1999,6 @@ export function createClaudeSdkBridge(
 		turnToolIds.set(turnId, ids);
 		counters.continuations++;
 		counters.releasedResumes++;
-		const recorder = new TurnRecorder(deps.turnRepo, log, turnId);
 		void recorder.insertLeg(meta.legId, "continue", startedAt);
 		void recorder.bump({ toolRounds: 1 });
 		const leg = newLeg(
@@ -1991,6 +2049,13 @@ export function createClaudeSdkBridge(
 			Bun.sleep(2_000),
 		]);
 		spawner.killAll("SIGKILL");
+		// Unclaims, forgets and retries still running, and a recovery attempt,
+		// get the same drain; after the lease goes, whatever is left of them
+		// changes no row.
+		await Promise.race([
+			Promise.allSettled([...parkWork, ...(recoveryRun ? [recoveryRun] : [])]),
+			Bun.sleep(timing.releaseDrainMs),
+		]);
 		await parks?.dispose();
 		if (generationRoot) removeTree(generationRoot);
 	}

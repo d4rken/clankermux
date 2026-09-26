@@ -1,6 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+	closeSync,
+	constants,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+} from "node:fs";
+import { basename, dirname, isAbsolute, join, normalize } from "node:path";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import type {
 	ProjectAttributionSource,
@@ -15,12 +23,10 @@ import type { SystemPromptDecision } from "./system-prompt-policy";
 import type { ClientTool } from "./turn-request";
 import type { BridgeLog, SdkBridgeParkRepo } from "./types";
 import {
-	acquireOwnerLock,
 	ensurePrivateDir,
 	ownerRunning,
 	processStartTime,
 	publishFileAtomically,
-	releaseOwnerLock,
 	removeTree,
 	writePrivateBytes,
 } from "./work-dirs";
@@ -43,20 +49,39 @@ export interface ResumeDescriptor {
 	turnStartedAt: number;
 }
 
+/** A transition the database has not confirmed yet, retried until it does. */
+export type PendingParkWrite =
+	| { kind: "unclaim" }
+	| { kind: "forget" }
+	| {
+			kind: "close";
+			error: BridgeError;
+			status: SdkBridgeTurnFinish["status"];
+	  }
+	/** What the database holds is unknown (a failed claim): read it back. */
+	| { kind: "resync" };
+
 /** A released park as the bridge holds it in memory. */
 export interface ReleasedEntry {
 	park: SdkBridgeReleasedPark;
 	descriptor: ResumeDescriptor;
-	/** `claimed` from the synchronous claim on, whatever the database says yet. */
-	state: "released" | "claimed";
+	/**
+	 * `released`: resumable. `claimed`: a resume holds it (from the
+	 * synchronous claim on). `reconciling`: a transition failed or is not
+	 * confirmed; not claimable until the background retry settles it.
+	 */
+	state: "released" | "claimed" | "reconciling";
+	/** Set with `reconciling`: what the retry must get the database to agree to. */
+	pending: PendingParkWrite | null;
 	/** The resumed query made its first model call: the park is spent. */
 	consumed: boolean;
+	/** The consumed mark in flight; a close waits for it before deciding. */
+	consuming: Promise<void> | null;
 	/** A new turn of the conversation arrived while it was being claimed. */
 	superseded?: boolean;
 	path: string;
 }
 
-const LOCK_FILE = "owner.lock";
 const NAMESPACE = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 
@@ -116,12 +141,21 @@ function chainHoldsCalls(
 	return awaited.every((id) => found.has(id));
 }
 
+/** A regular file's bytes, opened without following a symlink; null otherwise. */
 function readFileOrNull(path: string): Buffer | null {
+	let fd: number;
 	try {
-		if (!lstatSync(path).isFile()) return null;
-		return readFileSync(path);
+		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
 	} catch {
 		return null;
+	}
+	try {
+		if (!fstatSync(fd).isFile()) return null;
+		return readFileSync(fd);
+	} catch {
+		return null;
+	} finally {
+		closeSync(fd);
 	}
 }
 
@@ -168,41 +202,52 @@ function fileLooksWhole(
 	bytes: number,
 	resumeAt: string,
 ): boolean {
-	try {
-		const stat = lstatSync(path);
-		if (!stat.isFile() || stat.size !== bytes) return false;
-		return readFileSync(path).includes(`"uuid":"${resumeAt}"`);
-	} catch {
-		return false;
-	}
+	const content = readFileOrNull(path);
+	return (
+		content !== null &&
+		content.length === bytes &&
+		content.includes(`"uuid":"${resumeAt}"`)
+	);
 }
 
 /**
- * Released parks: session files under a directory of the work root that
- * generation cleanup never touches, and their records in the database. One
- * bridge process owns the directory at a time (a lock file); a bridge
- * without the lock releases nothing and resumes nothing.
+ * Released parks: session files in `<workRoot>/released-parks/<namespace>`
+ * (the namespace names the database) and their records in the database.
  *
- * The in-memory index mirrors the records this process may act on. Claims
- * are taken here synchronously first, so two requests racing for one park
- * never both reach the database.
+ * The database lease is the only authority. This store takes it under its
+ * own token, and every durable write goes through a repository method that
+ * applies only while that token holds the lease: once the lease has moved on
+ * (this process declared dead) or been given up (dispose), whatever is
+ * still in flight changes nothing. A refused or failed write leaves the
+ * entry `reconciling` with the write pending, and {@link reconcile} retries
+ * it until the database agrees; the entry turns `released` locally only
+ * after a confirmed success.
+ *
+ * Records store the absolute path of their file, so the lease holder
+ * recovers parks whose files another work root wrote; only paths inside a
+ * released-parks directory of this database are accepted, never through a
+ * symlink.
  */
 export class ReleasedParkStore {
 	readonly dir: string;
-	private readonly lockPath: string;
-	private readonly lockToken = randomBytes(12).toString("hex");
-	private held = false;
-	private readonly entries = new Map<string, ReleasedEntry>();
-	private readonly byToolId = new Map<string, string>();
+	/** The lease token, and the claim owner of this process's claims. */
+	readonly token = randomBytes(16).toString("hex");
+	private leased = false;
+	private entries = new Map<string, ReleasedEntry>();
+	private byToolId = new Map<string, string>();
+	private readonly owner = {
+		pid: process.pid,
+		startTime: processStartTime(process.pid),
+	};
 
 	constructor(
 		private readonly opts: {
 			workRoot: string;
 			repo: SdkBridgeParkRepo;
+			/** The same repository with a short busy-retry budget, for startup. */
+			recoveryRepo?: SdkBridgeParkRepo;
 			log: BridgeLog;
 			now: () => number;
-			/** This process's claim owner, fencing its claims from a later one's. */
-			owner: string;
 			/** The database's own subdirectory ({@link ClaudeSdkBridgeDeps.parkNamespace}). */
 			namespace: string;
 		},
@@ -210,23 +255,19 @@ export class ReleasedParkStore {
 		if (!NAMESPACE.test(opts.namespace))
 			throw new Error(`Invalid released-park namespace ${opts.namespace}`);
 		this.dir = join(opts.workRoot, "released-parks", opts.namespace);
-		this.lockPath = join(this.dir, LOCK_FILE);
 	}
 
-	private leased = false;
-
 	/**
-	 * Take the database's lease for this directory: recovery and every
-	 * transition act on the whole table, so only one directory's owner may.
-	 * False when a live process on another directory holds it.
+	 * Take the lease (free, already ours, or its holder's process gone).
+	 * False when another live process holds it.
 	 */
-	async takeLease(): Promise<boolean> {
-		this.leased = await this.opts.repo.acquireLease(
+	async takeLease(repo: SdkBridgeParkRepo = this.opts.repo): Promise<boolean> {
+		this.leased = await repo.acquireLease(
 			{
 				dir: this.dir,
-				pid: process.pid,
-				startTime: processStartTime(process.pid),
-				token: this.lockToken,
+				pid: this.owner.pid,
+				startTime: this.owner.startTime,
+				token: this.token,
 				at: this.opts.now(),
 			},
 			(held) => !ownerRunning(held),
@@ -234,33 +275,21 @@ export class ReleasedParkStore {
 		return this.leased;
 	}
 
-	/** The directory lock and the database lease are both this process's. */
+	/** This process holds the lease, as far as it knows. */
 	get usable(): boolean {
-		return this.held && this.leased;
+		return this.leased;
 	}
 
-	/** Take the directory for this process; false when a live process holds it. */
-	acquire(): boolean {
-		ensurePrivateDir(this.dir);
-		this.held = acquireOwnerLock(this.lockPath, this.lockToken);
-		return this.held;
-	}
-
-	get owned(): boolean {
-		return this.held;
-	}
-
+	/** Give the lease up: from here every write of this store is refused. */
 	async dispose(): Promise<void> {
 		if (this.leased)
-			await this.opts.repo.releaseLease(this.lockToken).catch((error) => {
+			await this.opts.repo.releaseLease(this.token).catch((error) => {
 				this.opts.log.warn(
 					"SDK bridge: could not give the park lease up",
 					error,
 				);
 			});
 		this.leased = false;
-		if (this.held) releaseOwnerLock(this.lockPath, this.lockToken);
-		this.held = false;
 		this.entries.clear();
 		this.byToolId.clear();
 	}
@@ -277,7 +306,7 @@ export class ReleasedParkStore {
 		return this.entries.get(turnId);
 	}
 
-	/** The park waiting on any of `ids`, claimed or not. */
+	/** The park waiting on any of `ids`, whatever its state. */
 	lookup(ids: readonly string[]): ReleasedEntry | null {
 		for (const id of ids) {
 			const turnId = this.byToolId.get(id);
@@ -311,57 +340,82 @@ export class ReleasedParkStore {
 			if (this.byToolId.get(id) === turnId) this.byToolId.delete(id);
 	}
 
-	private pathOf(sessionFile: string): string {
-		if (!SESSION_FILE.test(sessionFile))
-			throw new Error(`Invalid released session file ${sessionFile}`);
-		return join(this.dir, sessionFile);
+	/**
+	 * Whether a recorded path is one of this database's park files: absolute,
+	 * normalized, `<root>/released-parks/<namespace>/<uuid>.jsonl`, and
+	 * neither the file nor its two directories a symlink.
+	 */
+	acceptsPath(path: string): boolean {
+		if (!isAbsolute(path) || normalize(path) !== path) return false;
+		if (!SESSION_FILE.test(basename(path))) return false;
+		const ns = dirname(path);
+		const parks = dirname(ns);
+		if (basename(ns) !== this.opts.namespace) return false;
+		if (basename(parks) !== "released-parks") return false;
+		try {
+			return (
+				lstatSync(path).isFile() &&
+				lstatSync(ns).isDirectory() &&
+				lstatSync(parks).isDirectory()
+			);
+		} catch {
+			return false;
+		}
+	}
+
+	private reconcileLater(entry: ReleasedEntry, pending: PendingParkWrite) {
+		entry.state = "reconciling";
+		entry.pending = pending;
 	}
 
 	/**
 	 * Record, publish and release a park: a `preparing` record, the session
-	 * copied to the directory atomically, then `released`. A failure at any
-	 * step removes what it wrote and throws; the turn is then the caller's to
+	 * copied into this store's directory atomically, then `released`. Each
+	 * write is refused without the lease; a refusal or failure at any step
+	 * removes what was written and throws, and the turn is the caller's to
 	 * end.
 	 */
 	async store(
-		park: Omit<SdkBridgeReleasedParkInsert, "sessionFile" | "fileBytes">,
+		park: Omit<SdkBridgeReleasedParkInsert, "sessionPath" | "fileBytes">,
 		descriptor: ResumeDescriptor,
 		source: string,
 		/** Checked between the steps: the release was given up (dispose). */
 		abandoned: () => boolean = () => false,
 	): Promise<ReleasedEntry> {
-		if (!this.usable)
-			throw new Error("the released-parks directory or lease is not ours");
-		const stopIfAbandoned = () => {
-			if (abandoned()) throw new Error("the release was given up");
-		};
-		const sessionFile = `${park.sessionId}.jsonl`;
-		const path = this.pathOf(sessionFile);
-		await this.opts.repo.insertPreparing({
-			...park,
-			sessionFile,
-			fileBytes: 0,
-		});
+		if (!this.leased) throw new Error("the park lease is not this process's");
+		const repo = this.opts.repo;
+		const path = join(this.dir, `${park.sessionId}.jsonl`);
+		if (
+			!(await repo.insertPreparing(
+				{ ...park, sessionPath: path, fileBytes: 0 },
+				this.token,
+			))
+		)
+			throw new Error("the park lease is not this process's");
 		let fileBytes: number;
 		try {
-			stopIfAbandoned();
+			if (abandoned()) throw new Error("the release was given up");
+			ensurePrivateDir(this.dir);
 			fileBytes = publishFileAtomically(
 				this.dir,
-				sessionFile,
+				basename(path),
 				readFileSync(source),
 				`.tmp-${randomBytes(8).toString("hex")}`,
 			);
-			stopIfAbandoned();
+			if (abandoned()) throw new Error("the release was given up");
 			if (
-				!(await this.opts.repo.markReleased(park.turnId, {
-					sessionFile,
-					fileBytes,
-				}))
+				!(await repo.markReleased(
+					park.turnId,
+					{ sessionPath: path, fileBytes },
+					this.token,
+				))
 			)
-				throw new Error("its record left the preparing state");
+				throw new Error(
+					"its record could not be released (the lease or the turn moved on)",
+				);
 		} catch (error) {
 			removeTree(path);
-			await this.opts.repo.delete(park.turnId).catch((e) => {
+			await repo.delete(park.turnId, this.token).catch((e) => {
 				this.opts.log.warn(
 					`SDK bridge turn ${park.turnId}: could not delete its preparing record`,
 					e,
@@ -372,7 +426,7 @@ export class ReleasedParkStore {
 		const entry: ReleasedEntry = {
 			park: {
 				...park,
-				sessionFile,
+				sessionPath: path,
 				fileBytes,
 				state: "released",
 				claimOwner: null,
@@ -380,7 +434,9 @@ export class ReleasedParkStore {
 			},
 			descriptor,
 			state: "released",
+			pending: null,
 			consumed: false,
+			consuming: null,
 			path,
 		};
 		this.index(entry);
@@ -390,7 +446,7 @@ export class ReleasedParkStore {
 	/**
 	 * Take a park for one resume. The in-memory claim is synchronous, so a
 	 * second claimant in this process sees it taken at once; the database
-	 * claim then fences it across processes. False when either was taken.
+	 * claim then fences it. False when it is not resumable here now.
 	 */
 	takeLocal(entry: ReleasedEntry): boolean {
 		if (entry.state !== "released" || !this.entries.has(entry.park.turnId))
@@ -399,140 +455,211 @@ export class ReleasedParkStore {
 		return true;
 	}
 
+	/**
+	 * The database claim. False (or a throw) leaves the entry reconciling:
+	 * what the database holds is read back before it is claimable again.
+	 */
 	async claim(entry: ReleasedEntry): Promise<boolean> {
+		let ok: boolean;
 		try {
-			if (
-				await this.opts.repo.claim(
-					entry.park.turnId,
-					this.opts.owner,
-					this.opts.now(),
-				)
-			)
-				return true;
+			ok = await this.opts.repo.claim(
+				entry.park.turnId,
+				this.token,
+				this.opts.now(),
+				this.owner,
+			);
 		} catch (error) {
-			entry.state = "released";
+			this.reconcileLater(entry, { kind: "resync" });
 			throw error;
 		}
-		// Not in `released` any more in the database: nothing here can resume it.
-		this.unindex(entry.park.turnId);
-		return false;
+		if (!ok) this.reconcileLater(entry, { kind: "resync" });
+		return ok;
 	}
 
-	/** A claim whose resume never made a model call goes back. */
-	async unclaim(entry: ReleasedEntry): Promise<void> {
-		if (entry.consumed) return;
-		await this.opts.repo.unclaim(entry.park.turnId, this.opts.owner);
-		entry.state = "released";
+	/**
+	 * Give a claim back. Released locally only once the database agrees;
+	 * otherwise it stays reconciling and the retry keeps trying.
+	 */
+	async unclaim(entry: ReleasedEntry): Promise<boolean> {
+		if (entry.consumed) return false;
+		let ok = false;
+		try {
+			ok = await this.opts.repo.unclaim(entry.park.turnId, this.token);
+		} catch (error) {
+			this.opts.log.warn(
+				`SDK bridge turn ${entry.park.turnId}: could not give its claim back`,
+				error,
+			);
+		}
+		if (ok) {
+			entry.state = "released";
+			entry.pending = null;
+		} else this.reconcileLater(entry, { kind: "unclaim" });
+		return ok;
 	}
 
-	/** Before the resumed query's first model call: the park can never resume again. */
-	async consume(entry: ReleasedEntry): Promise<void> {
-		if (entry.consumed) return;
-		if (
-			!(await this.opts.repo.markConsumed(entry.park.turnId, this.opts.owner))
-		)
-			throw new Error("the park is no longer claimed by this process");
-		entry.consumed = true;
+	/**
+	 * Before the resumed query's first model call: the park can never resume
+	 * again. The promise stays on the entry while it runs, so a close can
+	 * wait for it before deciding the park's fate.
+	 */
+	consume(entry: ReleasedEntry): Promise<void> {
+		if (entry.consumed) return Promise.resolve();
+		const consuming = (async () => {
+			if (!(await this.opts.repo.markConsumed(entry.park.turnId, this.token)))
+				throw new Error("the park is no longer this process's claim");
+			entry.consumed = true;
+		})();
+		entry.consuming = consuming;
+		return consuming;
 	}
 
-	/** Forget a park its resumed turn no longer needs: record and file. */
-	async forget(entry: ReleasedEntry): Promise<void> {
+	/**
+	 * Forget a park its resumed turn no longer needs: the record, then the
+	 * file (only once the record is gone).
+	 */
+	async forget(entry: ReleasedEntry): Promise<boolean> {
+		let ok = false;
+		try {
+			ok = await this.opts.repo.delete(entry.park.turnId, this.token);
+		} catch (error) {
+			this.opts.log.warn(
+				`SDK bridge turn ${entry.park.turnId}: could not delete its park`,
+				error,
+			);
+		}
+		if (!ok) {
+			this.reconcileLater(entry, { kind: "forget" });
+			return false;
+		}
 		this.unindex(entry.park.turnId);
 		removeTree(entry.path);
-		await this.opts.repo.delete(entry.park.turnId);
+		return true;
 	}
 
-	/** End a park's turn (expiry, supersession, an unusable file) and forget it. */
+	/**
+	 * End a park's turn (expiry, supersession, an unusable file) and forget
+	 * it. It stops being claimable at once; the file goes only after the
+	 * close is confirmed, and a refused close is retried.
+	 */
 	async close(
 		entry: ReleasedEntry,
 		error: BridgeError,
 		status: SdkBridgeTurnFinish["status"],
-	): Promise<void> {
-		this.unindex(entry.park.turnId);
-		removeTree(entry.path);
+	): Promise<boolean> {
+		this.reconcileLater(entry, { kind: "close", error, status });
+		return this.runPending(entry);
+	}
+
+	private finishOf(
+		entry: ReleasedEntry,
+		error: BridgeError,
+		status: SdkBridgeTurnFinish["status"],
+	): SdkBridgeTurnFinish {
 		const now = this.opts.now();
-		await this.opts.repo.closeTurn(entry.park.turnId, {
+		return {
 			finishedAt: now,
 			status,
 			httpStatus: error.status,
 			errorType: error.type,
 			errorMessage: error.message,
 			durationMs: now - entry.descriptor.turnStartedAt,
-		});
+		};
+	}
+
+	/** One attempt at an entry's pending write; true once it is settled. */
+	private async runPending(entry: ReleasedEntry): Promise<boolean> {
+		const pending = entry.pending;
+		if (!pending) return true;
+		const repo = this.opts.repo;
+		const turnId = entry.park.turnId;
+		try {
+			switch (pending.kind) {
+				case "unclaim": {
+					if (await repo.unclaim(turnId, this.token)) {
+						entry.state = "released";
+						entry.pending = null;
+						return true;
+					}
+					// Refused: read back what the database holds instead.
+					entry.pending = { kind: "resync" };
+					return this.runPending(entry);
+				}
+				case "forget":
+					if (!(await repo.delete(turnId, this.token))) {
+						if (!(await repo.holdsLease(this.token))) this.unindex(turnId);
+						return !this.entries.has(turnId);
+					}
+					this.unindex(turnId);
+					removeTree(entry.path);
+					return true;
+				case "close":
+					if (
+						!(await repo.closeTurn(
+							turnId,
+							this.finishOf(entry, pending.error, pending.status),
+							this.token,
+						))
+					) {
+						// Without the lease the park is not this process's to end.
+						if (!(await repo.holdsLease(this.token))) this.unindex(turnId);
+						return !this.entries.has(turnId);
+					}
+					this.unindex(turnId);
+					removeTree(entry.path);
+					return true;
+				case "resync": {
+					if (!(await repo.holdsLease(this.token))) {
+						this.unindex(turnId);
+						return true;
+					}
+					const row = await repo.find(turnId);
+					if (!row) {
+						this.unindex(turnId);
+						return true;
+					}
+					if (row.state === "released") {
+						entry.state = "released";
+						entry.pending = null;
+						return true;
+					}
+					if (row.state === "claimed" && row.claimOwner === this.token) {
+						entry.pending = { kind: "unclaim" };
+						return this.runPending(entry);
+					}
+					// Claimed elsewhere or spent: not this process's to resume.
+					this.unindex(turnId);
+					return true;
+				}
+			}
+		} catch (error) {
+			this.opts.log.warn(
+				`SDK bridge turn ${turnId}: park write still pending (${errorSummary(error)})`,
+			);
+			return false;
+		}
 	}
 
 	/**
-	 * One record at startup: its entry when it stays resumable, null when it
-	 * was ended. A throw (a failed transition) leaves the caller to end it.
+	 * Retry every pending write (the maintenance pass). Entries a resume is
+	 * using right now are left alone.
 	 */
-	private async recoverOne(
-		park: SdkBridgeReleasedPark,
-		errors: {
-			preparing: BridgeError;
-			consumed: BridgeError;
-			unusable: BridgeError;
-			expired: BridgeError;
-		},
-		now: number,
-		end: (
-			park: SdkBridgeReleasedPark,
-			error: BridgeError,
-			status: SdkBridgeTurnFinish["status"],
-		) => Promise<void>,
-	): Promise<ReleasedEntry | null> {
-		if (park.state === "preparing") {
-			await end(park, errors.preparing, "failed");
-			return null;
-		}
-		if (park.state === "consumed") {
-			await end(park, errors.consumed, "failed");
-			return null;
-		}
-		// Claims are this lock's alone, and no model call followed them.
-		if (park.state === "claimed")
-			if (!(await this.opts.repo.unclaim(park.turnId, null)))
-				throw new Error("its stale claim could not be taken back");
-		if (park.expiresAt <= now) {
-			await end(park, errors.expired, "timed_out");
-			return null;
-		}
-		let path: string;
-		let descriptor: ResumeDescriptor;
-		try {
-			path = this.pathOf(park.sessionFile);
-			descriptor = JSON.parse(park.descriptor) as ResumeDescriptor;
-			if (descriptor.v !== 1) throw new Error("unknown descriptor version");
-			if (!park.awaitedToolUseIds.length) throw new Error("it awaits no call");
-		} catch (error) {
-			this.opts.log.warn(
-				`SDK bridge turn ${park.turnId}: released park unusable (${errorSummary(error)})`,
-			);
-			await end(park, errors.unusable, "failed");
-			return null;
-		}
-		// Cheap at startup: the whole chain is checked when a resume claims it.
-		if (!fileLooksWhole(path, park.fileBytes, park.resumeAt)) {
-			this.opts.log.warn(
-				`SDK bridge turn ${park.turnId}: released session missing or truncated`,
-			);
-			await end(park, errors.unusable, "failed");
-			return null;
-		}
-		return {
-			park: { ...park, state: "released", claimOwner: null, claimedAt: null },
-			descriptor,
-			state: "released",
-			consumed: false,
-			path,
-		};
+	async reconcile(): Promise<void> {
+		for (const entry of this.all())
+			if (entry.state === "reconciling") await this.runPending(entry);
 	}
 
 	/**
 	 * Bring the directory and the records into agreement after a restart,
-	 * before any request can see them: unfinished releases and spent resumes
-	 * end their turns, stale claims go back to `released`, records whose file
-	 * is missing or unusable end theirs, and files no record names go.
-	 * Returns the parks kept.
+	 * before any request can see them, under the lease. The index is built
+	 * privately and published only when every row was handled: preparing and
+	 * consumed records end their turns, stale claims go back to `released`,
+	 * unusable records (no calls, a bad descriptor, a file that is missing,
+	 * the wrong size or without its resume point) end theirs, and files in
+	 * this store's directory that no record names go. A file is deleted only
+	 * after its turn's close is confirmed. Any database failure or refusal
+	 * fails the attempt, leaving everything for the next one. Returns the
+	 * parks kept.
 	 */
 	async recover(errors: {
 		preparing: BridgeError;
@@ -540,8 +667,11 @@ export class ReleasedParkStore {
 		unusable: BridgeError;
 		expired: BridgeError;
 	}): Promise<number> {
-		const repo = this.opts.repo;
+		const repo = this.opts.recoveryRepo ?? this.opts.repo;
+		if (!(await this.takeLease(repo))) throw new LeaseHeldElsewhere();
 		const now = this.opts.now();
+		const entries = new Map<string, ReleasedEntry>();
+		const byToolId = new Map<string, string>();
 		const kept = new Set<string>();
 		const end = async (
 			park: SdkBridgeReleasedPark,
@@ -553,47 +683,90 @@ export class ReleasedParkStore {
 				startedAt = (JSON.parse(park.descriptor) as ResumeDescriptor)
 					.turnStartedAt;
 			} catch {}
-			try {
-				removeTree(this.pathOf(park.sessionFile));
-			} catch {}
-			await repo.closeTurn(park.turnId, {
-				finishedAt: now,
-				status,
-				httpStatus: error.status,
-				errorType: error.type,
-				errorMessage: error.message,
-				durationMs: now - startedAt,
-			});
+			if (
+				!(await repo.closeTurn(
+					park.turnId,
+					{
+						finishedAt: now,
+						status,
+						httpStatus: error.status,
+						errorType: error.type,
+						errorMessage: error.message,
+						durationMs: now - startedAt,
+					},
+					this.token,
+				))
+			)
+				throw new Error("the park lease moved on during recovery");
+			if (this.acceptsPath(park.sessionPath)) removeTree(park.sessionPath);
 		};
-		// A retry starts from the records again, never from a partial index.
-		this.entries.clear();
-		this.byToolId.clear();
 		for (const park of await repo.list()) {
-			try {
-				const entry = await this.recoverOne(park, errors, now, end);
-				if (entry) {
-					kept.add(park.sessionFile);
-					this.index(entry);
-				}
-			} catch (error) {
-				this.opts.log.warn(
-					`SDK bridge turn ${park.turnId}: released park not recoverable (${errorSummary(error)})`,
-				);
-				try {
-					await end(park, errors.unusable, "failed");
-				} catch (endError) {
-					// Its record stays, so its file does too, for a later start.
-					kept.add(park.sessionFile);
-					this.opts.log.error(
-						`SDK bridge turn ${park.turnId}: could not end its unrecoverable park`,
-						endError,
-					);
-				}
+			if (park.state === "preparing") {
+				await end(park, errors.preparing, "failed");
+				continue;
 			}
+			if (park.state === "consumed") {
+				await end(park, errors.consumed, "failed");
+				continue;
+			}
+			// Claims found at startup are stale: no model call followed them.
+			if (park.state === "claimed")
+				if (
+					!(await repo.unclaim(park.turnId, this.token, { anyClaimant: true }))
+				)
+					throw new Error(`the stale claim of turn ${park.turnId} was refused`);
+			if (park.expiresAt <= now) {
+				await end(park, errors.expired, "timed_out");
+				continue;
+			}
+			let descriptor: ResumeDescriptor | null = null;
+			try {
+				descriptor = JSON.parse(park.descriptor) as ResumeDescriptor;
+				if (descriptor.v !== 1) descriptor = null;
+			} catch {}
+			// Cheap at startup: the whole chain is checked when a resume claims it.
+			if (
+				!descriptor ||
+				!park.awaitedToolUseIds.length ||
+				!this.acceptsPath(park.sessionPath) ||
+				!fileLooksWhole(park.sessionPath, park.fileBytes, park.resumeAt)
+			) {
+				this.opts.log.warn(
+					`SDK bridge turn ${park.turnId}: released park unusable`,
+				);
+				await end(park, errors.unusable, "failed");
+				continue;
+			}
+			kept.add(park.sessionPath);
+			entries.set(park.turnId, {
+				park: { ...park, state: "released", claimOwner: null, claimedAt: null },
+				descriptor,
+				state: "released",
+				pending: null,
+				consumed: false,
+				consuming: null,
+				path: park.sessionPath,
+			});
+			for (const id of park.awaitedToolUseIds) byToolId.set(id, park.turnId);
 		}
-		for (const name of readdirSync(this.dir))
-			if (!name.startsWith(LOCK_FILE) && !kept.has(name))
-				removeTree(join(this.dir, name));
-		return kept.size;
+		let names: string[] = [];
+		try {
+			names = readdirSync(this.dir);
+		} catch {}
+		for (const name of names) {
+			const path = join(this.dir, name);
+			if (!kept.has(path)) removeTree(path);
+		}
+		this.entries = entries;
+		this.byToolId = byToolId;
+		return entries.size;
+	}
+}
+
+/** Another live process holds the park lease: this one releases nothing. */
+export class LeaseHeldElsewhere extends Error {
+	constructor() {
+		super("another running process on this database holds the park lease");
+		this.name = "LeaseHeldElsewhere";
 	}
 }

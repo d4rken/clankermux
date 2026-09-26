@@ -472,12 +472,16 @@ export interface TurnRow extends Record<string, unknown> {
 export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 	turns: Map<string, TurnRow>;
 	legs: Map<string, Record<string, unknown>>;
+	/** The next insertLeg waits for this first. */
+	legInsertHold: { next: Promise<void> | null };
 } {
 	const turns = new Map<string, TurnRow>();
 	const legs = new Map<string, Record<string, unknown>>();
+	const legInsertHold: { next: Promise<void> | null } = { next: null };
 	return {
 		turns,
 		legs,
+		legInsertHold,
 		async insertTurn(turn: SdkBridgeTurnInsert) {
 			turns.set(turn.id, {
 				...turn,
@@ -498,6 +502,11 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			turn.counters.innerErrors += delta.innerErrors ?? 0;
 		},
 		async insertLeg(leg: SdkBridgeLegInsert) {
+			const wait = legInsertHold.next;
+			if (wait) {
+				legInsertHold.next = null;
+				await wait;
+			}
 			const turn = turns.get(leg.turnId);
 			if (!turn) throw new Error(`FOREIGN KEY: no turn ${leg.turnId}`);
 			if (legs.has(leg.id)) throw new Error(`UNIQUE: leg ${leg.id}`);
@@ -513,25 +522,27 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 }
 
 /**
- * `sdk_bridge_released_parks` in memory, moving the turn rows' status the way
- * the repository's transactions do. `failNext` makes one method throw once.
+ * `sdk_bridge_released_parks` and its lease in memory, with the
+ * repository's fencing: every write applies only while its token holds the
+ * lease, and moves the turn rows the way the repository's transactions do.
+ * `failNext` makes one method throw once; `hold` makes its next call wait.
  */
 export function memoryParkRepo(
 	turns: Map<string, TurnRow>,
 ): SdkBridgeParkRepo & {
 	parks: Map<string, SdkBridgeReleasedPark>;
 	failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>>;
-	/** The next call of a method waits for this promise first. */
 	hold: Partial<Record<keyof SdkBridgeParkRepo, Promise<void>>>;
 	calls: string[];
 	/** Stands in for the database's identity: its released-parks subdirectory. */
 	namespace: string;
-	lease: SdkBridgeParkLease | null;
+	readonly lease: SdkBridgeParkLease | null;
 } {
 	const parks = new Map<string, SdkBridgeReleasedPark>();
 	const failNext: Partial<Record<keyof SdkBridgeParkRepo, Error>> = {};
 	const hold: Partial<Record<keyof SdkBridgeParkRepo, Promise<void>>> = {};
 	const calls: string[] = [];
+	let lease: SdkBridgeParkLease | null = null;
 	const check = async (name: keyof SdkBridgeParkRepo) => {
 		calls.push(name);
 		const wait = hold[name];
@@ -545,11 +556,12 @@ export function memoryParkRepo(
 			throw error;
 		}
 	};
-	const setStatus = (id: string, status: string) => {
+	const leased = (token: string) => lease?.token === token;
+	const turnOpen = (id: string) => !turns.get(id)?.finishedAt;
+	const setTurn = (id: string, fields: Record<string, unknown>) => {
 		const turn = turns.get(id);
-		if (turn) turn.status = status;
+		if (turn) Object.assign(turn, fields);
 	};
-	let lease: SdkBridgeParkLease | null = null;
 	return {
 		parks,
 		failNext,
@@ -561,24 +573,20 @@ export function memoryParkRepo(
 		},
 		async acquireLease(candidate, holderDead) {
 			await check("acquireLease");
-			if (
-				lease &&
-				lease.token !== candidate.token &&
-				lease.dir !== candidate.dir &&
-				!holderDead(lease)
-			)
+			if (lease && lease.token !== candidate.token && !holderDead(lease))
 				return false;
 			lease = { ...candidate };
 			return true;
 		},
 		async holdsLease(token) {
-			return lease?.token === token;
+			return leased(token);
 		},
 		async releaseLease(token) {
-			if (lease?.token === token) lease = null;
+			if (leased(token)) lease = null;
 		},
-		async insertPreparing(park) {
+		async insertPreparing(park, token) {
 			await check("insertPreparing");
+			if (!leased(token)) return false;
 			if (parks.has(park.turnId)) throw new Error("UNIQUE: park");
 			parks.set(park.turnId, {
 				...park,
@@ -586,76 +594,100 @@ export function memoryParkRepo(
 				claimOwner: null,
 				claimedAt: null,
 			});
+			return true;
+		},
+		async find(turnId) {
+			await check("find");
+			const park = parks.get(turnId);
+			return park ? { ...park } : null;
 		},
 		async list() {
 			await check("list");
 			return [...parks.values()].map((p) => ({ ...p }));
 		},
-		async markReleased(turnId, file) {
+		async markReleased(turnId, file, token) {
 			await check("markReleased");
 			const park = parks.get(turnId);
-			if (park?.state !== "preparing" || turns.get(turnId)?.finishedAt)
+			if (park?.state !== "preparing" || !turnOpen(turnId) || !leased(token))
 				return false;
 			Object.assign(park, file, { state: "released" });
-			setStatus(turnId, "released");
+			setTurn(turnId, { status: "released" });
 			return true;
 		},
-		async claim(turnId, owner, at) {
+		async claim(turnId, token, at, owner) {
 			await check("claim");
 			const park = parks.get(turnId);
-			if (park?.state !== "released" || turns.get(turnId)?.finishedAt)
+			if (park?.state !== "released" || !turnOpen(turnId) || !leased(token))
 				return false;
 			Object.assign(park, {
 				state: "claimed",
-				claimOwner: owner,
+				claimOwner: token,
 				claimedAt: at,
 			});
-			setStatus(turnId, "running");
+			setTurn(turnId, {
+				status: "running",
+				ownerPid: owner.pid,
+				ownerStartTime: owner.startTime,
+			});
 			return true;
 		},
-		async unclaim(turnId, owner) {
+		async unclaim(turnId, token, opts = {}) {
 			await check("unclaim");
 			const park = parks.get(turnId);
-			if (park?.state !== "claimed") return false;
-			if (owner !== null && park.claimOwner !== owner) return false;
+			if (park?.state !== "claimed" || !leased(token)) return false;
+			if (!opts.anyClaimant && park.claimOwner !== token) return false;
 			Object.assign(park, {
 				state: "released",
 				claimOwner: null,
 				claimedAt: null,
 			});
-			setStatus(turnId, "released");
+			if (turnOpen(turnId)) setTurn(turnId, { status: "released" });
 			return true;
 		},
-		async markConsumed(turnId, owner) {
+		async markConsumed(turnId, token) {
 			await check("markConsumed");
 			const park = parks.get(turnId);
-			if (park?.state !== "claimed" || park.claimOwner !== owner) return false;
+			if (park?.state !== "claimed" || park.claimOwner !== token) return false;
+			if (!leased(token)) return false;
 			park.state = "consumed";
 			return true;
 		},
-		async delete(turnId) {
+		async delete(turnId, token) {
 			await check("delete");
-			parks.delete(turnId);
+			if (!leased(token)) return false;
+			return parks.delete(turnId);
 		},
-		async closeTurn(turnId, finish) {
+		async closeTurn(turnId, finish, token) {
 			await check("closeTurn");
+			if (!leased(token)) return false;
 			parks.delete(turnId);
-			const turn = turns.get(turnId);
-			if (turn && !turn.finishedAt) Object.assign(turn, finish);
+			if (turnOpen(turnId)) setTurn(turnId, { ...finish });
+			return true;
 		},
-		async closeOpenTurnsWithoutPark(before, finish) {
+		async closeOpenTurnsWithoutPark(before, finish, token, ownerDead) {
 			await check("closeOpenTurnsWithoutPark");
+			if (!leased(token)) return 0;
 			let n = 0;
-			for (const turn of turns.values())
+			for (const turn of turns.values()) {
 				if (
-					(turn.status === "running" || turn.status === "released") &&
-					!turn.finishedAt &&
-					Number(turn.startedAt) < before &&
-					!parks.has(turn.id)
-				) {
-					Object.assign(turn, finish);
-					n++;
-				}
+					(turn.status !== "running" && turn.status !== "released") ||
+					turn.finishedAt ||
+					Number(turn.startedAt) >= before ||
+					parks.has(turn.id)
+				)
+					continue;
+				const pid = turn.ownerPid as number | null | undefined;
+				if (
+					pid != null &&
+					!ownerDead({
+						pid,
+						startTime: (turn.ownerStartTime as string | null) ?? null,
+					})
+				)
+					continue;
+				Object.assign(turn, finish);
+				n++;
+			}
 			return n;
 		},
 	};
@@ -851,6 +883,13 @@ export function foldReply(events: SseEvent[]): {
 		delete block._json;
 	}
 	return { content, stop, errors: events.filter((e) => e.event === "error") };
+}
+
+/** The turn a continuation lookup found; undefined for none or "recovering". */
+export function turnIdOf(
+	found: ReturnType<ClaudeSdkBridge["findContinuation"]>,
+): string | undefined {
+	return found && "turnId" in found ? found.turnId : undefined;
 }
 
 export async function waitFor(check: () => boolean, ms = 2_000): Promise<void> {

@@ -5,7 +5,6 @@ import {
 	fchmodSync,
 	fstatSync,
 	fsyncSync,
-	linkSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
@@ -265,95 +264,6 @@ export function ownerRunning(owner: {
 	startTime: string | null;
 }): boolean {
 	return ownerAlive(owner);
-}
-
-/**
- * Take the lock file at `path` for this process, marked with `token` so only
- * its taker releases it. The lock is written complete under a temp name and
- * hard-linked into place, which fails if a lock exists: there is never an
- * empty or half-written lock to misread. A lock whose owner is gone (or
- * unreadable) is renamed aside, and taken over only if what was moved is the
- * file that was inspected (same inode); one held by a live process, this
- * one included, is not taken.
- */
-export function acquireOwnerLock(path: string, token: string): boolean {
-	const content = JSON.stringify({
-		pid: process.pid,
-		startTime: processStartTime(process.pid),
-		token,
-	});
-	for (let attempt = 0; attempt < 3; attempt++) {
-		const temp = `${path}.${token}.${attempt}.tmp`;
-		removeTree(temp);
-		writePrivateFile(temp, content);
-		try {
-			linkSync(temp, path);
-			return true;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		} finally {
-			removeTree(temp);
-		}
-		let inode: number;
-		let owner: (GenerationOwner & { token?: unknown }) | null = null;
-		try {
-			const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-			try {
-				inode = fstatSync(fd).ino;
-				const parsed = JSON.parse(readFileSync(fd, "utf8")) as Record<
-					string,
-					unknown
-				>;
-				if (typeof parsed.pid === "number" && Number.isSafeInteger(parsed.pid))
-					owner = {
-						pid: parsed.pid,
-						startTime:
-							typeof parsed.startTime === "string" ? parsed.startTime : null,
-						token: parsed.token,
-					};
-			} catch {
-				inode = fstatSync(fd).ino;
-			} finally {
-				closeSync(fd);
-			}
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-			throw error;
-		}
-		if (owner?.token === token) return true;
-		if (owner && ownerAlive(owner)) return false;
-		const aside = `${path}.stale-${token}-${attempt}`;
-		try {
-			renameSync(path, aside);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-			throw error;
-		}
-		let moved: number | null = null;
-		try {
-			moved = lstatSync(aside).ino;
-		} catch {}
-		if (moved !== inode) {
-			// Someone replaced the stale lock between the look and the rename:
-			// put theirs back unless yet another took the place, and yield.
-			try {
-				linkSync(aside, path);
-			} catch {}
-			removeTree(aside);
-			return false;
-		}
-		removeTree(aside);
-	}
-	return false;
-}
-
-/** Give up a lock this `token` took; anyone else's is left alone. */
-export function releaseOwnerLock(path: string, token: string): void {
-	try {
-		if (!lstatSync(path).isFile()) return;
-		const held = JSON.parse(readFileSync(path, "utf8")) as { token?: unknown };
-		if (held.token === token) unlinkSync(path);
-	} catch {}
 }
 
 /**

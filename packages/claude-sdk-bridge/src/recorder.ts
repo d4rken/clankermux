@@ -6,6 +6,10 @@ import type {
 	SdkBridgeTurnInsert,
 } from "@clankermux/types";
 import type { BridgeLog, SdkBridgeTurnRepo } from "./types";
+import { processStartTime } from "./work-dirs";
+
+/** This process, as turn rows name their owner. */
+const OWNER = { pid: process.pid, startTime: processStartTime(process.pid) };
 
 /**
  * Turn and leg rows. Writes are chained per turn so a finish never overtakes
@@ -30,9 +34,15 @@ export class TurnRecorder {
 		return this.chain;
 	}
 
+	/** The row names this process as the turn's owner (pid and start time). */
 	insertTurn(turn: Omit<SdkBridgeTurnInsert, "id">): Promise<void> {
 		return this.enqueue("insertTurn", () =>
-			this.repo.insertTurn({ ...turn, id: this.turnId }),
+			this.repo.insertTurn({
+				...turn,
+				id: this.turnId,
+				ownerPid: OWNER.pid,
+				ownerStartTime: OWNER.startTime,
+			}),
 		);
 	}
 

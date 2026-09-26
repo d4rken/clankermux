@@ -309,6 +309,15 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	recovering(): BridgeError {
+		return {
+			status: 503,
+			type: "api_error",
+			message:
+				"The SDK bridge is still recovering turns released before a restart; retry shortly",
+			retryAfter: "5",
+		};
+	},
 	parkStoreUnavailable(): BridgeError {
 		return {
 			status: 503,

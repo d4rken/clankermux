@@ -173,8 +173,9 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				model, client_harness, client_user_agent, project,
 				conversation_key_hash, cc_session_id, history_mode, rebuild_reason,
 				system_prompt_policy, system_prompt_detail, ignored_fields,
+				owner_pid, owner_start_time,
 				leg_count, tool_round_count, inner_call_count, inner_error_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)`,
 			[
 				turn.id,
 				turn.kind ?? "turn",
@@ -196,6 +197,8 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 					? JSON.stringify(turn.systemPromptDetail)
 					: null,
 				turn.ignoredFields?.length ? JSON.stringify(turn.ignoredFields) : null,
+				turn.ownerPid ?? null,
+				turn.ownerStartTime ?? null,
 			],
 		);
 	}

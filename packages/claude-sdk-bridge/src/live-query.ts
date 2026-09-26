@@ -3,6 +3,7 @@ import type {
 	SdkBridgeHistoryMode,
 	SdkBridgeInnerOutcome,
 	SdkBridgeLegKind,
+	SdkBridgeTurnFinish,
 	SdkBridgeTurnStatus,
 } from "@clankermux/types";
 import type { ConversationClaim } from "./conversation-store";
@@ -217,6 +218,17 @@ export class LiveQuery {
 	released = false;
 	/** Closed without finishing the turn row ({@link LiveQueryInit.keepTurnOpen}). */
 	keptOpen = false;
+	private deferredFinish: SdkBridgeTurnFinish | null = null;
+
+	/**
+	 * Write the finish a kept-open close held back: the turn turned out spent
+	 * after all (its consumed mark landed after the close).
+	 */
+	finishKeptOpenTurn(): void {
+		if (!this.deferredFinish) return;
+		void this.init.recorder.finishTurn(this.deferredFinish);
+		this.deferredFinish = null;
+	}
 	private clientMessages: ClientMessage[];
 	private lastOutcome: SdkBridgeInnerOutcome | null = null;
 	private outcomeSeq = 0;
@@ -1103,14 +1115,9 @@ export class LiveQuery {
 			this.init.discardSession(this.sessionId);
 		}
 		this.discardClaudeCodeTranscripts();
-		if (this.init.keepTurnOpen?.(status)) {
-			this.keptOpen = true;
-			this.init.onClosed(this);
-			return;
-		}
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
-		void this.init.recorder.finishTurn({
+		const finish: SdkBridgeTurnFinish = {
 			finishedAt: now,
 			status,
 			httpStatus: error ? error.status : 200,
@@ -1126,7 +1133,11 @@ export class LiveQuery {
 			sdkOutputTokens: this.sdkStats.output,
 			sdkCacheReadInputTokens: this.sdkStats.cacheRead,
 			sdkCacheCreationInputTokens: this.sdkStats.cacheCreation,
-		});
+		};
+		if (this.init.keepTurnOpen?.(status)) {
+			this.keptOpen = true;
+			this.deferredFinish = finish;
+		} else void this.init.recorder.finishTurn(finish);
 		this.init.onClosed(this);
 	}
 }

@@ -39,6 +39,7 @@ import {
 	READ_TOOL,
 	resultMessage,
 	streamedMessage,
+	turnIdOf,
 	waitFor,
 } from "./fixtures/fake-sdk";
 import {
@@ -806,8 +807,12 @@ describe("parked tool calls", () => {
 			it(`continues a turn that started on "${model}" with the same name`, async () => {
 				const { h, t } = await parked(model);
 				expect(
-					h.bridge.findContinuation(["toolu_1"], { apiKeyId: "key-1", model })
-						?.turnId,
+					turnIdOf(
+						h.bridge.findContinuation(["toolu_1"], {
+							apiKeyId: "key-1",
+							model,
+						}),
+					),
 				).toBe(t.plan.turnId);
 				const call = t.query.callTool("toolu_1", "read");
 				const c = continueTurn(h, t.plan.turnId, results, { model });
@@ -855,7 +860,7 @@ describe("parked tool calls", () => {
 		it("leaves another key's results to the refusal, whatever model they name", async () => {
 			const { h, t } = await parked("sonnet");
 			const caller = { apiKeyId: "key-2", model: "opus" };
-			expect(h.bridge.findContinuation(["toolu_1"], caller)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["toolu_1"], caller))).toBe(
 				t.plan.turnId,
 			);
 			const c = continueTurn(h, t.plan.turnId, results, caller);
@@ -890,7 +895,7 @@ describe("parked tool calls", () => {
 				],
 			};
 			const caller = { apiKeyId: "key-1", model: "opus" };
-			expect(h.bridge.findContinuation(["toolu_a"], caller)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["toolu_a"], caller))).toBe(
 				t.plan.turnId,
 			);
 			const c = continueTurn(h, t.plan.turnId, partial, caller);
@@ -1053,7 +1058,7 @@ describe("parked tool calls", () => {
 		it("select a parked turn only by the calls it waits on now", async () => {
 			const h = harness();
 			const { t } = await parkedTwice(h);
-			expect(h.bridge.findContinuation(["r2-b"], CALLER)?.turnId).toBe(
+			expect(turnIdOf(h.bridge.findContinuation(["r2-b"], CALLER))).toBe(
 				t.plan.turnId,
 			);
 			expect(h.bridge.findContinuation(["r1"], CALLER)).toBeNull();

@@ -44,8 +44,21 @@ export class BunSqlAdapter {
 	/** The underlying bun:sqlite Database. */
 	private sqliteDb: Database;
 
-	constructor(sqliteDb: Database) {
+	constructor(
+		sqliteDb: Database,
+		/** How long a call keeps retrying SQLITE_BUSY before it throws. */
+		private readonly busyRetryBudgetMs = 10 * 60 * 1000,
+	) {
 		this.sqliteDb = sqliteDb;
+	}
+
+	/**
+	 * The same connection with a shorter busy-retry budget, for a caller that
+	 * would rather fail fast and retry later than wait out a long lock (the
+	 * SDK bridge's startup recovery).
+	 */
+	withBusyRetryBudget(ms: number): BunSqlAdapter {
+		return new BunSqlAdapter(this.sqliteDb, ms);
 	}
 
 	/** Return the underlying bun:sqlite Database. */
@@ -70,7 +83,7 @@ export class BunSqlAdapter {
 	 * VACUUM does not spin.
 	 */
 	private async withBusyRetry<T>(fn: () => T): Promise<T> {
-		const deadline = Date.now() + 10 * 60 * 1000; // retry for up to 10 minutes
+		const deadline = Date.now() + this.busyRetryBudgetMs;
 		let attempt = 0;
 		while (true) {
 			try {

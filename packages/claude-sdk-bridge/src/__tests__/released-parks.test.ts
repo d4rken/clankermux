@@ -16,10 +16,11 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { SdkBridgeTurnMeta } from "@clankermux/types";
 import {
 	assistantMessage,
@@ -38,6 +39,7 @@ import {
 	READ_TOOL,
 	resultMessage,
 	streamedMessage,
+	turnIdOf,
 	waitFor,
 } from "./fixtures/fake-sdk";
 
@@ -199,8 +201,12 @@ async function parkTurn(
 	// This turn parked (others may be parked too).
 	await waitFor(
 		() =>
-			h.bridge.findContinuation(ids, { apiKeyId: meta.apiKeyId, model: MODEL })
-				?.turnId === plan.turnId,
+			turnIdOf(
+				h.bridge.findContinuation(ids, {
+					apiKeyId: meta.apiKeyId,
+					model: MODEL,
+				}),
+			) === plan.turnId,
 	);
 	return {
 		turnId: plan.turnId,
@@ -254,6 +260,7 @@ function parkDir(h: ReleaseHarness): string {
 }
 
 function parkFiles(h: ReleaseHarness): string[] {
+	if (!existsSync(parkDir(h))) return [];
 	return readdirSync(parkDir(h)).filter((n) => n.endsWith(".jsonl"));
 }
 
@@ -330,10 +337,10 @@ describe("releasing a parked query", () => {
 			project: "proj",
 		});
 		// The file is in the released-parks directory, the generation's copy gone.
-		expect(parkFiles(h)).toEqual([String(park?.sessionFile)]);
-		expect(
-			readFileSync(join(parkDir(h), String(park?.sessionFile)), "utf8"),
-		).toContain(`"uuid":"${park?.resumeAt}"`);
+		expect(parkFiles(h)).toEqual([basename(String(park?.sessionPath))]);
+		expect(readFileSync(String(park?.sessionPath), "utf8")).toContain(
+			`"uuid":"${park?.resumeAt}"`,
+		);
 		expect(h.repo.turns.get(p.turnId)?.status).toBe("released");
 		expect(h.repo.turns.get(p.turnId)?.finishedAt).toBeUndefined();
 		expect(h.bridge.status()).toMatchObject({
@@ -356,10 +363,7 @@ describe("releasing a parked query", () => {
 		const p = await parkTurn(h, { ids: ["toolu_a", "toolu_b"] });
 		await released(h, p);
 		const park = h.parkRepo.parks.get(p.turnId);
-		const file = readFileSync(
-			join(parkDir(h), String(park?.sessionFile)),
-			"utf8",
-		)
+		const file = readFileSync(String(park?.sessionPath), "utf8")
 			.trim()
 			.split("\n")
 			.map((l) => JSON.parse(l));
@@ -449,8 +453,9 @@ describe("resuming a released park", () => {
 		await waitFor(() => h.bridge.status().parked === 0, 2_000);
 		// Mid release: the query is still found, and the results wait for it.
 		expect(
-			h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL })
-				?.turnId,
+			turnIdOf(
+				h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
+			),
 		).toBe(p.turnId);
 		const response = answer(h, p, results(p));
 		const q2 = await h.sdk.next();
@@ -810,7 +815,7 @@ describe("across a restart", () => {
 			apiKeyId: "key-1",
 			model: MODEL,
 		});
-		expect(found?.turnId).toBe(p.turnId);
+		expect(turnIdOf(found)).toBe(p.turnId);
 		const response = answer(b, p, results(p));
 		const q2 = await b.sdk.next();
 		expect(q2.options.resumeSessionAt).toBe(
@@ -836,9 +841,13 @@ describe("across a restart", () => {
 		const dir = join(workRoot, "released-parks", parkRepo.namespace);
 		const base = parkRepo.parks.get(kept.turnId);
 		// A claim a dead process held, with no model call after it.
-		await parkRepo.claim(staleClaim.turnId, "dead-owner", 1);
+		Object.assign(parkRepo.parks.get(staleClaim.turnId) ?? {}, {
+			state: "claimed",
+			claimOwner: "dead-owner",
+			claimedAt: 1,
+		});
 		// A record whose file is gone.
-		rmSync(join(dir, String(parkRepo.parks.get(missing.turnId)?.sessionFile)));
+		rmSync(String(parkRepo.parks.get(missing.turnId)?.sessionPath));
 		// A release and a resume the old process never finished.
 		for (const [id, state] of [
 			["preparing-turn", "preparing"],
@@ -856,7 +865,7 @@ describe("across a restart", () => {
 				...(base as NonNullable<typeof base>),
 				turnId: id,
 				sessionId: sid,
-				sessionFile: `${sid}.jsonl`,
+				sessionPath: join(dir, `${sid}.jsonl`),
 				state,
 			});
 		}
@@ -882,9 +891,8 @@ describe("across a restart", () => {
 		expect(repo.turns.get("orphan-turn")?.status).toBe("failed");
 		expect(readdirSync(dir).sort()).toEqual(
 			[
-				"owner.lock",
-				String(parkRepo.parks.get(kept.turnId)?.sessionFile),
-				String(parkRepo.parks.get(staleClaim.turnId)?.sessionFile),
+				basename(String(parkRepo.parks.get(kept.turnId)?.sessionPath)),
+				basename(String(parkRepo.parks.get(staleClaim.turnId)?.sessionPath)),
 			].sort(),
 		);
 	});
@@ -932,7 +940,7 @@ describe("faults", () => {
 		const p = await parkTurn(h);
 		// A directory where the file should go.
 		const sid = p.query.sessionId;
-		mkdirSync(join(parkDir(h), `${sid}.jsonl`));
+		mkdirSync(join(parkDir(h), `${sid}.jsonl`), { recursive: true });
 		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 8_000);
 		expect(h.parkRepo.parks.size).toBe(0);
 		expect(
@@ -949,12 +957,14 @@ describe("faults", () => {
 		expect(parkFiles(h)).toEqual([]);
 	});
 
-	it("a failed claim answers 503 and keeps the park for a retry", async () => {
-		const h = await releaseHarness();
+	it("a failed claim answers 503; the park is claimable again once the database is read back", async () => {
+		const h = await releaseHarness({ timing: { maintenanceIntervalMs: 50 } });
 		const p = await parkTurn(h);
 		await released(h, p);
 		h.parkRepo.failNext.claim = new Error("SQLITE_BUSY");
 		expect((await reply(answer(h, p, results(p)))).status).toBe(503);
+		// Until the maintenance pass has read the record back, not claimable.
+		await waitFor(() => h.bridge.status().releasedParks === 1, 3_000);
 		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
 		const response = answer(h, p, results(p));
 		const q2 = await h.sdk.next();
@@ -1333,15 +1343,27 @@ describe("recovery, row by row", () => {
 		expect(b.bridge.status().releasedParks).toBe(1);
 	});
 
-	it("ends a park whose own transition fails, and keeps the rest", async () => {
+	it("keeps a row whose transition fails, with its file, and retries it on the next attempt", async () => {
 		const { workRoot, repo, parkRepo, one, two } = await twoReleased();
-		await parkRepo.claim(one.turnId, "dead-owner", 1);
+		Object.assign(parkRepo.parks.get(one.turnId) ?? {}, {
+			state: "claimed",
+			claimOwner: "dead-owner",
+			claimedAt: 1,
+		});
+		const file = String(parkRepo.parks.get(one.turnId)?.sessionPath);
 		parkRepo.failNext.unclaim = new Error("SQLITE_BUSY");
-		const b = await releaseHarness({ workRoot, repo, parkRepo });
-		expect(parkRepo.parks.has(one.turnId)).toBe(false);
-		expect(repo.turns.get(one.turnId)?.status).toBe("failed");
+		const b = await releaseHarness({
+			workRoot,
+			repo,
+			parkRepo,
+			timing: { recoveryRetryMs: 100 },
+		});
+		expect(b.bridge.availability().state).toBe("unavailable");
+		expect(existsSync(file)).toBe(true);
+		await waitFor(() => b.bridge.availability().state === "available", 3_000);
+		expect(parkRepo.parks.get(one.turnId)?.state).toBe("released");
 		expect(parkRepo.parks.get(two.turnId)?.state).toBe("released");
-		expect(b.bridge.status().releasedParks).toBe(1);
+		expect(b.bridge.status().releasedParks).toBe(2);
 	});
 
 	it("stays unavailable while recovery fails, and retries until it succeeds", async () => {
@@ -1361,24 +1383,19 @@ describe("recovery, row by row", () => {
 		await waitFor(() => b.bridge.availability().state === "available", 3_000);
 		expect(b.bridge.status().releasedParks).toBe(2);
 		expect(
-			b.bridge.findContinuation(one.ids, { apiKeyId: "key-1", model: MODEL })
-				?.turnId,
+			turnIdOf(
+				b.bridge.findContinuation(one.ids, { apiKeyId: "key-1", model: MODEL }),
+			),
 		).toBe(one.turnId);
 	});
 
 	it("checks only the file's size and resume point at startup; the chain at the resume", async () => {
-		const { workRoot, repo, parkRepo, one, two, dir } = await twoReleased();
+		const { workRoot, repo, parkRepo, one, two } = await twoReleased();
 		// One file shorter than recorded: unusable at startup.
-		const shortFile = join(
-			dir,
-			String(parkRepo.parks.get(one.turnId)?.sessionFile),
-		);
+		const shortFile = String(parkRepo.parks.get(one.turnId)?.sessionPath);
 		writeFileSync(shortFile, readFileSync(shortFile).subarray(0, 10));
 		// One with its calls blanked out, same size: kept until the resume.
-		const blank = join(
-			dir,
-			String(parkRepo.parks.get(two.turnId)?.sessionFile),
-		);
+		const blank = String(parkRepo.parks.get(two.turnId)?.sessionPath);
 		const text = readFileSync(blank, "utf8");
 		const id = two.ids[0] as string;
 		writeFileSync(blank, text.replaceAll(id, "x".repeat(id.length)));
@@ -1479,27 +1496,6 @@ describe("ownership of released parks", () => {
 		);
 		expect((await reply(running)).status).toBe(200);
 	});
-
-	it("takes over a stale directory lock and never an owned one", async () => {
-		const workRoot = tempRoot();
-		const repo = memoryTurnRepo();
-		const parkRepo = memoryParkRepo(repo.turns);
-		const dir = join(workRoot, "released-parks", parkRepo.namespace);
-		mkdirSync(dir, { recursive: true });
-		// A lock a dead process left.
-		writeFileSync(
-			join(dir, "owner.lock"),
-			JSON.stringify({ pid: 2 ** 22 + 9, startTime: "1", token: "old" }),
-		);
-		const a = await releaseHarness({ workRoot, repo, parkRepo });
-		expect(a.bridge.status().releaseBlocked).toBeNull();
-		expect(JSON.parse(readFileSync(join(dir, "owner.lock"), "utf8")).pid).toBe(
-			process.pid,
-		);
-		expect(readdirSync(dir).filter((n) => n.includes("owner.lock"))).toEqual([
-			"owner.lock",
-		]);
-	});
 });
 
 describe("timings of a resumed turn", () => {
@@ -1516,5 +1512,291 @@ describe("timings of a resumed turn", () => {
 		expect(turn.spawnMs).toBeLessThan(400);
 		expect(turn.firstEventMs).toBeLessThan(400);
 		expect(turn.durationMs).toBeGreaterThanOrEqual(600);
+	});
+});
+
+describe("the lease as the only authority", () => {
+	it("a new holder on another work root recovers and resumes a park through its recorded path", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const rootA = tempRoot();
+		const a = await releaseHarness({
+			workRoot: rootA,
+			repo,
+			parkRepo,
+			keep: true,
+		});
+		const p = await parkTurn(a);
+		await released(a, p);
+		const path = String(parkRepo.parks.get(p.turnId)?.sessionPath);
+		expect(path.startsWith(rootA)).toBe(true);
+		await a.bridge.dispose();
+
+		const b = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(1);
+		// Not ended as unusable for living in another root.
+		expect(existsSync(path)).toBe(true);
+		const response = answer(b, p, results(p));
+		const q2 = await b.sdk.next();
+		expect(q2.options.resumeSessionAt).toBe(
+			parkRepo.parks.get(p.turnId)?.resumeAt,
+		);
+		expect((await finishResumed(b, q2, response)).status).toBe(200);
+		await waitFor(() => !parkRepo.parks.has(p.turnId));
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("refuses a recorded path outside a released-parks directory of this database, or through a symlink", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const root = tempRoot();
+		const a = await releaseHarness({
+			workRoot: root,
+			repo,
+			parkRepo,
+			keep: true,
+		});
+		const one = await parkTurn(a);
+		await released(a, one);
+		const two = await parkTurn(a);
+		await released(a, two);
+		await a.bridge.dispose();
+		const outside = join(tempRoot(), "elsewhere.jsonl");
+		const oneFile = String(parkRepo.parks.get(one.turnId)?.sessionPath);
+		writeFileSync(outside, readFileSync(oneFile));
+		Object.assign(parkRepo.parks.get(one.turnId) ?? {}, {
+			sessionPath: outside,
+		});
+		// The other's directory replaced by a symlink to a copy of it.
+		const twoFile = String(parkRepo.parks.get(two.turnId)?.sessionPath);
+		const nsDir = join(root, "released-parks", parkRepo.namespace);
+		const copy = `${nsDir}-real`;
+		mkdirSync(copy);
+		writeFileSync(join(copy, basename(twoFile)), readFileSync(twoFile));
+		rmSync(nsDir, { recursive: true });
+		symlinkSync(copy, nsDir);
+		const b = await releaseHarness({ workRoot: tempRoot(), repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(repo.turns.get(one.turnId)?.status).toBe("failed");
+		expect(repo.turns.get(two.turnId)?.status).toBe("failed");
+		// Never deleted through the symlink or outside the park directories.
+		expect(existsSync(outside)).toBe(true);
+		expect(existsSync(join(copy, basename(twoFile)))).toBe(true);
+	});
+
+	it("a new holder never closes the running turns of a live bridge that holds no lease", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const holder = await releaseHarness({ repo, parkRepo, keep: true });
+		// Another live bridge on the database, without the lease, running a turn.
+		const other = await releaseHarness({ repo, parkRepo });
+		expect(other.bridge.status().releaseBlocked).toContain("database");
+		const running = other.bridge.startTurn({
+			request: messagesRequest({ messages: [{ role: "user", content: "hi" }] }),
+			plan: makePlan(),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		const q = await other.sdk.next();
+		await waitFor(() =>
+			[...repo.turns.values()].some((t) => t.status === "running"),
+		);
+		const liveId = [...repo.turns.values()].find((t) => t.status === "running")
+			?.id as string;
+		// And a turn whose process is gone.
+		await repo.insertTurn({
+			id: "dead-turn",
+			startedAt: 1,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+			ownerPid: 2 ** 22 + 11,
+			ownerStartTime: "1",
+		} as never);
+		await holder.bridge.dispose();
+
+		const next = await releaseHarness({ repo, parkRepo });
+		expect(next.bridge.status().releaseBlocked).toBeNull();
+		expect(repo.turns.get(liveId)?.status).toBe("running");
+		expect(repo.turns.get("dead-turn")?.status).toBe("failed");
+		q.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "hi" }]),
+			resultMessage(),
+		);
+		expect((await reply(running)).status).toBe(200);
+	});
+
+	it("a write in flight when the lease was given up changes nothing", async () => {
+		const h = await releaseHarness({ keep: true });
+		let letGo!: () => void;
+		h.parkRepo.hold.markReleased = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const p = await parkTurn(h);
+		await waitFor(() => h.parkRepo.calls.includes("markReleased"), 5_000);
+		// The lease goes (as dispose gives it up) while markReleased waits.
+		await h.parkRepo.releaseLease(h.parkRepo.lease?.token as string);
+		letGo();
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 5_000);
+		// Refused: never released. Its cleanup is refused too, so the record
+		// stays `preparing` for the next holder's recovery to end.
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("preparing");
+		expect(parkFiles(h)).toEqual([]);
+		await h.bridge.dispose();
+	});
+});
+
+describe("writes the database has not confirmed", () => {
+	it("keeps a park whose unclaim failed out of reach, and releases it once a retry lands", async () => {
+		const h = await releaseHarness({ timing: { maintenanceIntervalMs: 50 } });
+		const p = await parkTurn(h);
+		await released(h, p);
+		h.parkRepo.failNext.unclaim = new Error("SQLITE_BUSY");
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		q2.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		q2.end();
+		expect((await reply(response)).status).toBe(502);
+		await waitFor(
+			() => h.parkRepo.calls.filter((c) => c === "unclaim").length >= 2,
+			3_000,
+		);
+		await waitFor(
+			() => h.parkRepo.parks.get(p.turnId)?.state === "released",
+			3_000,
+		);
+		await waitFor(() => h.bridge.status().releasedParks === 1, 3_000);
+		const retry = answer(h, p, results(p));
+		const q3 = await h.sdk.next();
+		expect((await finishResumed(h, q3, retry)).status).toBe(200);
+	});
+
+	it("while a consumed mark is in flight, a close waits for it before choosing the park's fate", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		let letGo!: () => void;
+		h.parkRepo.hold.markConsumed = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		const call = innerCall(q2);
+		await waitFor(() => h.parkRepo.calls.includes("markConsumed"));
+		// The query ends while the mark is still on its way.
+		q2.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		q2.end();
+		expect((await reply(response)).status).toBe(502);
+		letGo();
+		await call;
+		// It landed: the park is spent, so it goes and the turn ends.
+		await waitFor(() => !h.parkRepo.parks.has(p.turnId), 3_000);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.status === "failed", 3_000);
+		expect(h.parkRepo.calls.includes("unclaim")).toBe(false);
+	});
+
+	it("chains a resumed leg's finish behind its insert", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		let letGo!: () => void;
+		h.repo.legInsertHold.next = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const meta = makeMeta();
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		expect((await finishResumed(h, q2, response)).status).toBe(200);
+		letGo();
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true, 3_000);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			kind: "continue",
+			httpStatus: 200,
+		});
+	});
+});
+
+describe("the recovery gate", () => {
+	it("answers 503 for results while recovering, then resumes once recovered", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+
+		parkRepo.failNext.list = new Error("database is locked");
+		const b = await releaseHarness({
+			workRoot,
+			repo,
+			parkRepo,
+			timing: { recoveryRetryMs: 300 },
+		});
+		const found = b.bridge.findContinuation(p.ids, {
+			apiKeyId: "key-1",
+			model: MODEL,
+		});
+		expect(found).toMatchObject({ retryAfter: "5" });
+		expect(String((found as { unavailable: string }).unavailable)).toContain(
+			"recovering",
+		);
+		const refused = await b.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		expect(refused.status).toBe(503);
+		expect(refused.headers.get("retry-after")).toBe("5");
+		expect(b.sdk.queries.length).toBe(0);
+
+		await waitFor(() => b.bridge.availability().state === "available", 3_000);
+		expect(
+			turnIdOf(
+				b.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
+			),
+		).toBe(p.turnId);
+		const response = answer(b, p, results(p));
+		const q2 = await b.sdk.next();
+		expect((await finishResumed(b, q2, response)).status).toBe(200);
+	});
+
+	it("opens within its startup budget when the database is slow, recovering in the background", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+
+		let letGo!: () => void;
+		parkRepo.hold.list = new Promise((resolve) => {
+			letGo = resolve;
+		});
+		const t0 = Date.now();
+		const b = await releaseHarness({
+			workRoot,
+			repo,
+			parkRepo,
+			timing: { recoveryStartupMs: 200 },
+		});
+		expect(Date.now() - t0).toBeLessThan(1_500);
+		expect(b.bridge.availability().state).toBe("unavailable");
+		letGo();
+		await waitFor(() => b.bridge.availability().state === "available", 3_000);
+		expect(b.bridge.status().releasedParks).toBe(1);
 	});
 });

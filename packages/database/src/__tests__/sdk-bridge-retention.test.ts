@@ -51,7 +51,7 @@ function insertTurn(
 function insertPark(db: Database, turnId: string, state: string): void {
 	db.run(
 		`INSERT INTO sdk_bridge_released_parks (
-			turn_id, state, session_id, session_file, resume_at,
+			turn_id, state, session_id, session_path, resume_at,
 			awaited_tool_use_ids, requested_model, descriptor, active_ms,
 			parked_since, expires_at, file_bytes, created_at
 		) VALUES (?, ?, 's', 'f', 'u', '[]', 'm', '{}', 0, 0, 0, 0, 0)`,

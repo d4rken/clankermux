@@ -590,7 +590,7 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 			"owner_api_key_id",
 			"conversation_key_hash",
 			"session_id",
-			"session_file",
+			"session_path",
 			"resume_at",
 			"awaited_tool_use_ids",
 			"requested_model",
