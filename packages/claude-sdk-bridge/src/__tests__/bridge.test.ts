@@ -1909,6 +1909,58 @@ describe("conversations", () => {
 		});
 	});
 
+	describe("a stored session that cannot be copied", () => {
+		const onB = {
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
+			],
+			preferredAccountId: "acct-b",
+		} as const;
+
+		async function goneSession(h: Harness) {
+			const { t, r } = await firstTurn(h, header);
+			t.query.emit(resultMessage());
+			await settled(h);
+			rmSync(join(sessionsDir(h), `${t.query.options.sessionId}.jsonl`));
+			return r;
+		}
+
+		it("rebuilds instead, keeping the account change as its reason", async () => {
+			const h = harness();
+			const r = await goneSession(h);
+			const t2 = await start(h, second(r), { meta: header, plan: onB });
+			expect(h.repo.turns.get(t2.plan.turnId)).toMatchObject({
+				historyMode: "rebuild_transcript",
+				rebuildReason: "account_change",
+			});
+		});
+
+		it("refuses that rebuild at the rebuild cap", async () => {
+			const h = harness({ limits: () => ({ maxConcurrentRebuilds: 1 }) });
+			const r = await goneSession(h);
+			// Without a session header, a history always rebuilds.
+			await start(h, second(r));
+			const plan = makePlan();
+			const outcome = await Promise.race([
+				h.bridge
+					.startTurn({
+						request: messagesRequest(second(r)),
+						plan,
+						meta: makeMeta(header),
+						signal: new AbortController().signal,
+					})
+					.then(
+						() => "answered",
+						(e: unknown) => e,
+					),
+				Bun.sleep(1_000).then(() => "launched"),
+			]);
+			expect(outcome).toBeInstanceOf(SdkBridgeCapacityError);
+			expect(h.sdk.queries).toHaveLength(2);
+			expect(h.bridge.status().counters.rejected).toEqual({ rebuild_cap: 1 });
+		});
+	});
+
 	it("flattens a history a transcript cannot represent, with a provenance note", async () => {
 		const h = harness();
 		const t = await start(h, {
