@@ -186,6 +186,16 @@ made private, never deleted: no pid says whether a process still uses them.
   all-accounts 429 took 594 s with the CLI's backoff and 0.7 s without.
 - **Never set `CLAUDE_CODE_ENTRYPOINT`.** Traffic is honestly labelled
   `cc_entrypoint=sdk-ts`; setting it would misdeclare the billing class.
+- `effort` is the client's reasoning effort lowered to what the planned model
+  accepts (`clampEffortToModel`, as for an alias target): Haiku takes `low`
+  and `medium`, the other Claude families `low` to `max`.
+- A `[1m]` model (`claude-opus-5-5[1m]`) goes to Claude Code as is. Claude
+  Code turns the suffix into the 1M beta header and sends the bare id, so the
+  inner route plans both forms (`sdkBridgeCandidatesForModel`). An official
+  Anthropic account permits the suffixed id through the bare one
+  (`isModelPermitted`), discovery publishes it at a 1M window, and a route
+  that would send it directly (not bridged) answers 400
+  `model_suffix_requires_claude_code`.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` carries the client's `max_tokens`. It bounds
   each model call, not the turn: after a `max_tokens` stop Claude Code asks
   the model to continue under the same limit, and the client sees one reply
