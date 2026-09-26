@@ -129,10 +129,7 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 		},
 		...(input.effort
 			? {
-					effort: clampEffortToModel(
-						input.model,
-						input.effort,
-					) as EffortLevel,
+					effort: clampEffortToModel(input.model, input.effort) as EffortLevel,
 				}
 			: {}),
 		...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
