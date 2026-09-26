@@ -147,6 +147,9 @@ describe("reasoning effort support", () => {
 		).toBeNull();
 		expect(
 			getSupportedReasoningEfforts("claude-sonnet-4-6", "anthropic"),
+		).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		expect(
+			getSupportedReasoningEfforts("claude-sonnet-4-6", "anthropic-compatible"),
 		).toBeNull();
 	});
 
