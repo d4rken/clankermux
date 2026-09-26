@@ -301,6 +301,7 @@ export function streamedMessage(
 		stopReason?: string;
 		model?: string;
 		usage?: Record<string, number>;
+		deltaUsage?: Record<string, number>;
 	} = {},
 ): SDKMessage[] {
 	const id = opts.id ?? `msg_${uuid()}`;
@@ -390,7 +391,7 @@ export function streamedMessage(
 		streamEvent({
 			type: "message_delta",
 			delta: { stop_reason: stopReason, stop_sequence: null },
-			usage: { output_tokens: 5 },
+			usage: opts.deltaUsage ?? { output_tokens: 5 },
 		}),
 	);
 	out.push(streamEvent({ type: "message_stop" }));
@@ -405,6 +406,7 @@ export function assistantMessage(
 		stopReason?: string | null;
 		error?: string;
 		model?: string;
+		usage?: Record<string, number>;
 	} = {},
 ): SDKMessage {
 	return {
@@ -417,7 +419,7 @@ export function assistantMessage(
 			content,
 			stop_reason: opts.stopReason ?? null,
 			stop_sequence: null,
-			usage: { input_tokens: 10, output_tokens: 5 },
+			usage: opts.usage ?? { input_tokens: 10, output_tokens: 5 },
 		},
 		parent_tool_use_id: null,
 		...(opts.error ? { error: opts.error } : {}),

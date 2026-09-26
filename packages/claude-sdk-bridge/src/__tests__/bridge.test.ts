@@ -314,6 +314,99 @@ describe("a plain turn", () => {
 		expect(body.stop_reason).toBe("end_turn");
 	});
 
+	describe("usage of a reply that spans several model calls", () => {
+		const firstCall = {
+			input_tokens: 10,
+			cache_read_input_tokens: 0,
+			cache_creation_input_tokens: 100,
+			output_tokens: 1,
+		};
+		const lastCall = {
+			input_tokens: 20,
+			cache_read_input_tokens: 100,
+			cache_creation_input_tokens: 30,
+			output_tokens: 1,
+		};
+		const lastCalls = {
+			streamed: {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: lastCall,
+					deltaUsage: { output_tokens: 7 },
+				}),
+				expected: { ...lastCall, output_tokens: 57 },
+			},
+			"streamed, its delta carrying input": {
+				events: streamedMessage([{ type: "text", text: " second" }], {
+					usage: lastCall,
+					deltaUsage: {
+						input_tokens: 21,
+						cache_read_input_tokens: 100,
+						cache_creation_input_tokens: 31,
+						output_tokens: 7,
+					},
+				}),
+				expected: {
+					input_tokens: 21,
+					cache_read_input_tokens: 100,
+					cache_creation_input_tokens: 31,
+					output_tokens: 57,
+				},
+			},
+			"non-streamed": {
+				events: [
+					assistantMessage([{ type: "text", text: " second" }], {
+						stopReason: "end_turn",
+						usage: { ...lastCall, output_tokens: 7 },
+					}),
+				],
+				expected: { ...lastCall, output_tokens: 57 },
+			},
+		};
+
+		for (const stream of [true, false])
+			for (const [name, last] of Object.entries(lastCalls))
+				it(`reports the last call's input and cache and the summed output (${name} last call, stream: ${stream})`, async () => {
+					const h = harness();
+					const t = await start(h, {
+						stream,
+						messages: [{ role: "user", content: "hello" }],
+					});
+					t.query.emit(
+						initMessage(),
+						// Cut at max_tokens: Claude Code asks the model to continue.
+						...streamedMessage([{ type: "text", text: "first" }], {
+							stopReason: "max_tokens",
+							usage: firstCall,
+							deltaUsage: { output_tokens: 50 },
+						}),
+						...last.events,
+					);
+					const res = await t.response;
+					if (!stream) {
+						const body = (await res.json()) as { usage: unknown };
+						expect(body.usage).toEqual(last.expected);
+						return;
+					}
+					const events = parseSse(await res.text());
+					const usageOf = (type: string) =>
+						events
+							.filter((e) => e.data.type === type)
+							.map((e) =>
+								type === "message_start"
+									? (e.data.message as { usage: object }).usage
+									: (e.data.usage as object),
+							);
+					const [delta, ...more] = usageOf("message_delta");
+					expect(more).toHaveLength(0);
+					// The final delta alone carries the whole leg's usage.
+					expect(delta).toEqual(last.expected);
+					// Folded the way a client does, the delta's counts win.
+					expect({ ...usageOf("message_start")[0], ...delta }).toEqual(
+						last.expected,
+					);
+				});
+	});
+
 	it("revokes the turn's token once the turn is over", async () => {
 		const h = harness();
 		const t = await start(h, {

@@ -16,6 +16,25 @@ export type UpstreamMessageEnd =
 
 const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "refusal"]);
 const FORWARDED_BLOCKS = new Set(["text", "thinking", "redacted_thinking"]);
+const INPUT_USAGE_FIELDS = [
+	"input_tokens",
+	"cache_read_input_tokens",
+	"cache_creation_input_tokens",
+] as const;
+
+/** The input and cache counts `usage` reports, overlaid on `onto`. */
+function withInputUsage(
+	onto: Record<string, number>,
+	usage: unknown,
+): Record<string, number> {
+	const out = { ...onto };
+	if (!usage || typeof usage !== "object") return out;
+	for (const field of INPUT_USAGE_FIELDS) {
+		const value = (usage as Record<string, unknown>)[field];
+		if (typeof value === "number") out[field] = value;
+	}
+	return out;
+}
 
 interface Accumulated {
 	type: string;
@@ -40,6 +59,8 @@ export class ReplyComposer {
 	private indexMap = new Map<number, number | null>();
 	private heldDelta: Record<string, unknown> | null = null;
 	private outputTokens = 0;
+	/** Input and cache counts of the leg's latest model call. */
+	private lastInputUsage: Record<string, number> = {};
 	private forwardedThisMessage = 0;
 	private readonly streamedIds = new Set<string>();
 	private streaming = false;
@@ -85,6 +106,7 @@ export class ReplyComposer {
 		this.indexMap = new Map();
 		this.heldDelta = null;
 		this.outputTokens = 0;
+		this.lastInputUsage = {};
 		this.forwardedThisMessage = 0;
 		this.accumulated = new Map();
 		this.legToolUseIds = [];
@@ -191,6 +213,7 @@ export class ReplyComposer {
 				this.indexMap = new Map();
 				this.heldDelta = null;
 				this.forwardedThisMessage = 0;
+				this.lastInputUsage = withInputUsage({}, message.usage);
 				this.startMessage(message);
 				return null;
 			}
@@ -214,6 +237,7 @@ export class ReplyComposer {
 			}
 			case "message_delta": {
 				this.heldDelta = event;
+				this.lastInputUsage = withInputUsage(this.lastInputUsage, event.usage);
 				const usage = event.usage as { output_tokens?: number } | undefined;
 				if (typeof usage?.output_tokens === "number")
 					this.outputTokens += usage.output_tokens;
@@ -272,6 +296,7 @@ export class ReplyComposer {
 			return null;
 		if (typeof usage?.output_tokens === "number")
 			this.outputTokens += usage.output_tokens;
+		this.lastInputUsage = withInputUsage({}, usage);
 		this.heldDelta = {
 			type: "message_delta",
 			delta: {
@@ -290,7 +315,15 @@ export class ReplyComposer {
 		this.emit({ type: "content_block_stop", index: out });
 	}
 
-	/** Close the leg's reply with `message_delta` and `message_stop`. */
+	/**
+	 * Close the leg's reply with `message_delta` and `message_stop`. Its usage
+	 * is the leg's: the input and cache counts of its last model call (the
+	 * `message_start` went out with the first call's), and the output of all.
+	 *
+	 *   call 1: input 10, cache read 0,   output 50 (max_tokens)
+	 *   call 2: input 20, cache read 100, output 7
+	 *   delta:  input 20, cache read 100, output 57
+	 */
 	finish(stopReason: string | null): void {
 		if (!this.sink) return;
 		this.startMessage({});
@@ -304,7 +337,11 @@ export class ReplyComposer {
 				stop_reason: stopReason ?? this.lastStopReason ?? "end_turn",
 				stop_sequence: held.delta?.stop_sequence ?? null,
 			},
-			usage: { ...(held.usage ?? {}), output_tokens: this.outputTokens },
+			usage: {
+				...(held.usage ?? {}),
+				...this.lastInputUsage,
+				output_tokens: this.outputTokens,
+			},
 		});
 		this.emit({ type: "message_stop" });
 		this.sink = null;
