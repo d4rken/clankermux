@@ -270,7 +270,11 @@ describe("published model metadata", () => {
 		];
 		expect(await efforts("claude-opus-5-5", ["anthropic"])).toEqual(full);
 		expect(
-			await efforts("claude-fable-5-1", ["anthropic", "claude-console-api"]),
+			await efforts("claude-fable-5-1", [
+				"anthropic",
+				"claude-oauth",
+				"claude-console-api",
+			]),
 		).toEqual(full);
 		// Haiku 4.5 takes no effort.
 		expect(await efforts("claude-haiku-4-5", ["anthropic"])).toBeUndefined();
@@ -368,14 +372,23 @@ describe("published model metadata", () => {
 				tiers: [{ inputTokensAbove: 200_000, input: 10, output: 37.5 }],
 			},
 		});
+		// The legacy spelling has no catalogue entry of its own, but the window
+		// and the efforts hold for it.
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "claude-opus-5-5[1m]",
+				providers: ["claude-oauth"],
+			}),
+		).toEqual({
+			contextWindow: 1_000_000,
+			supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+		});
 		// Outside the measured 1M set the suffixed id is a literal nothing lists.
-		for (const targetModel of ["claude-haiku-4-5[1m]", "claude-opus-5[1m]"])
-			expect(
-				await resolveClientModelMetadata({
-					targetModel,
-					providers: ["anthropic"],
-				}),
-			).toEqual({});
+		for (const providers of [["anthropic"], ["claude-oauth"]])
+			for (const targetModel of ["claude-haiku-4-5[1m]", "claude-opus-5[1m]"])
+				expect(
+					await resolveClientModelMetadata({ targetModel, providers }),
+				).toEqual({});
 		// Anywhere else the suffix is part of an id nothing publishes.
 		expect(
 			await resolveClientModelMetadata({

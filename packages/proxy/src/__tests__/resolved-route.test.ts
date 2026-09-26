@@ -472,6 +472,16 @@ describe("a [1m] id", () => {
 		);
 	});
 
+	it("is refused on a direct send to a forced account too", () => {
+		for (const forced of [{ forcedAccountId: "a" }, { headerAccountId: "a" }])
+			expect(() => oneM(forced)).toThrow(
+				expect.objectContaining({
+					statusCode: 400,
+					code: "model_suffix_requires_claude_code",
+				}),
+			);
+	});
+
 	it("is a literal no other provider permits", () => {
 		expect(() =>
 			oneM({ bridgesOfficialAnthropic: true, accounts: [c, o] }),

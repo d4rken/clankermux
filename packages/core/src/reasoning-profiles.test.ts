@@ -172,6 +172,8 @@ it("clamps an effort to the nearest level the model accepts at or below it", () 
 	expect(clampEffortToModel("claude-haiku-4-5", "max")).toBe("medium");
 	expect(clampEffortToModel("claude-haiku-4-5", "low")).toBe("low");
 	expect(clampEffortToModel("claude-opus-4-8", "max")).toBe("max");
+	expect(clampEffortToModel("claude-sonnet-5", "max")).toBe("max");
+	expect(clampEffortToModel("claude-sonnet-5", "minimal")).toBe("low");
 	// Below the lowest listed level: the lowest one.
 	expect(clampEffortToModel("claude-opus-4-8", "minimal")).toBe("low");
 	// Unknown model or a value outside the vocabulary: unchanged.
