@@ -545,6 +545,8 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
  * repository's fencing: every write applies only while its token holds the
  * lease, and moves the turn rows the way the repository's transactions do.
  * `failNext` makes one method throw once; `hold` makes its next call wait.
+ * A call that throws does not take the hold, so both on one method fail
+ * the first call and hold the second.
  */
 export function memoryParkRepo(
 	turns: Map<string, TurnRow>,
@@ -564,15 +566,15 @@ export function memoryParkRepo(
 	let lease: SdkBridgeParkLease | null = null;
 	const check = async (name: keyof SdkBridgeParkRepo) => {
 		calls.push(name);
-		const wait = hold[name];
-		if (wait) {
-			delete hold[name];
-			await wait;
-		}
 		const error = failNext[name];
 		if (error) {
 			delete failNext[name];
 			throw error;
+		}
+		const wait = hold[name];
+		if (wait) {
+			delete hold[name];
+			await wait;
 		}
 	};
 	const leased = (token: string) => lease?.token === token;

@@ -1846,8 +1846,13 @@ describe("second review fixes", () => {
 		const h = await releaseHarness({ timing: { maintenanceIntervalMs: 20 } });
 		const p = await parkTurn(h);
 		await released(h, p);
-		// First resume: ends before its first model call, and its unclaim fails.
+		// First resume: ends before its first model call, and its unclaim
+		// fails; the maintenance retry after it waits on the hold.
+		let letGo!: () => void;
 		h.parkRepo.failNext.unclaim = new Error("SQLITE_BUSY");
+		h.parkRepo.hold.unclaim = new Promise((resolve) => {
+			letGo = resolve;
+		});
 		const first = answer(h, p, results(p));
 		const q2 = await h.sdk.next();
 		q2.emit(
@@ -1857,14 +1862,6 @@ describe("second review fixes", () => {
 		q2.end();
 		expect((await reply(first)).status).toBe(502);
 		// The retry is held: maintenance keeps ticking but never starts another.
-		let letGo!: () => void;
-		await waitFor(
-			() => h.parkRepo.calls.filter((c) => c === "unclaim").length === 1,
-			3_000,
-		);
-		h.parkRepo.hold.unclaim = new Promise((resolve) => {
-			letGo = resolve;
-		});
 		await waitFor(
 			() => h.parkRepo.calls.filter((c) => c === "unclaim").length === 2,
 			3_000,
