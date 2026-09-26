@@ -79,21 +79,37 @@ pipeline. The client keeps executing its own tools.
   (envelopes arrive after `message_stop`), the final user message as one
   prompt. The listener writes `consumed` before the first model call goes
   out. A gone session file falls back to a flattened dead continuation.
-  Parks survive restarts. Files live in
-  `released-parks/<sha256(realpath(db))[:16]>`, so servers on different
-  databases sharing a cache never meet; acting on them needs both that
-  directory's owner lock (hard-linked into place, stale ones renamed aside
-  by inode) and the database's `sdk_bridge_park_lease` row. Recovery
-  (before `installSdkBridge` exposes the transport) goes row by row: it
-  ends `preparing`/`consumed` records and unusable ones (size or resume
-  point wrong; the full chain is checked when a resume claims the park),
-  returns stale claims to `released`, and never overwrites a finished turn.
-  If recovery itself fails the bridge stays unavailable ("recovering") and
-  retries with backoff. Everything from a resume's claim to its launch is
-  one sequence with one rollback, and a resume that ends before its first
-  model call gives the park back. They expire after
+  Parks survive restarts. The database lease (`sdk_bridge_park_lease`, one
+  row) is the only authority over them: taken only when free, already this
+  process's token, or its holder's process gone (pid and /proc start
+  time). Every write to a park or to a turn a park owns carries the lease
+  token in the same statement or transaction and changes nothing without
+  it, so whatever a process still has in flight after losing the lease
+  (declared dead, or dispose) is harmless. Refused or failed writes leave
+  the park `reconciling` (indexed, not claimable) and the maintenance pass
+  retries them until the database agrees; a park is `released` locally
+  only after a confirmed write. New files go to
+  `released-parks/<sha256(realpath(db))[:16]>` under the holder's work
+  root, and each record stores its file's absolute path, so a new holder
+  on another work root recovers them where they are (only paths inside a
+  released-parks directory of this database, never through a symlink).
+  Recovery runs before `installSdkBridge` exposes the transport, bounded
+  by `recoveryStartupMs` (each DB call with a short busy-retry budget);
+  it builds the index privately and publishes it only when every row was
+  handled. Preparing and consumed records and unusable ones (size or resume
+  point wrong; the full chain is checked when a resume claims the park)
+  end their turns, and a file goes only after its close is confirmed.
+  Stale claims return to `released`. Any database failure fails the
+  attempt: the bridge stays "recovering" (unavailable; tool results that
+  match no live query answer 503 with Retry-After, also through the proxy)
+  and retries with backoff. Turn rows record their owning process, and
+  only turns whose process is gone are closed. Everything from a resume's
+  claim to its launch is one sequence with one rollback; a resume that
+  ends before its first model call gives the park back (after waiting for
+  a consumed mark in flight). Parks expire after
   `sdk_bridge_released_park_ttl_ms` (24 h, `timed_out`). Shutdown releases
-  parked turns, including ones that park during the drain.
+  parked turns, including ones that park during the drain, and dispose
+  drains outstanding park writes before giving the lease up.
 - **Dead continuations.** Tool results no live query holds, sent with the
   assistant message that made the calls, start a new query with
   `rebuild_reason = dead_continuation`: the history and the results are
