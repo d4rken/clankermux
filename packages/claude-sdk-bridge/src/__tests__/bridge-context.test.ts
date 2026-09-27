@@ -1011,6 +1011,64 @@ describe("a turn whose reply the client already has, and whose session goes", ()
 		).toMatch(/^rebuild_/);
 	});
 
+	it("a side request refused for a tool-only reply stays failed with its own error when a rewrite follows", async () => {
+		const h = harness();
+		const main = await start(
+			h,
+			{ tools, messages: [{ role: "user", content: "hello" }] },
+			{ meta: session },
+		);
+		await mirrored(main, "hello");
+		main.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+			resultMessage(),
+		);
+		const r = await reply(main.response);
+		await settled(h);
+
+		const side = await start(
+			h,
+			{
+				tools,
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: r.content },
+					{ role: "user", content: "RECAP" },
+				],
+				tool_choice: { type: "none" },
+			},
+			{ meta: { ...session, sideRequest: "session-fork-v1" } },
+		);
+		side.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_x", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const refused = await reply(side.response);
+		expect(refused.errors.map((e) => e.data)).toEqual([
+			{
+				type: "error",
+				error: expect.objectContaining({
+					code: "sdk_bridge_side_request_tool_call",
+				}),
+			},
+		]);
+		side.query.emit(compaction(), resultMessage());
+		await settled(h);
+		expect(h.repo.turns.get(side.plan.turnId)).toMatchObject({
+			kind: "side_request",
+			status: "failed",
+			httpStatus: 502,
+			errorType: "api_error",
+		});
+		expect(String(h.repo.turns.get(side.plan.turnId)?.errorMessage)).toContain(
+			"tool call and no text",
+		);
+		expect(h.bridge.status().counters).toMatchObject({ turnsFailed: 1 });
+	});
+
 	it("stops the process once the turn is settled, whatever Claude Code does next", async () => {
 		const h = harness();
 		const t = await start(

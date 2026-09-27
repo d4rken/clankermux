@@ -258,6 +258,12 @@ export class LiveQuery {
 	private resultOk = false;
 	/** A side request's reply is settled; nothing Claude Code does after counts. */
 	private sideSettled = false;
+	/**
+	 * The client received a successful reply that ends the turn: a turn's
+	 * last leg ended well, or a side request's reply settled. Only such a
+	 * turn can be settled as succeeded after the fact.
+	 */
+	private deliveredOk = false;
 	private registered = false;
 	private pendingTeardown: {
 		reason: TeardownReason;
@@ -622,6 +628,7 @@ export class LiveQuery {
 		composer.finish(stopReason);
 		this.stopReason = finalReason;
 		leg.response.end();
+		this.deliveredOk = true;
 		this.finishLeg(leg, {
 			httpStatus: 200,
 			stopReason: finalReason,
@@ -950,12 +957,16 @@ export class LiveQuery {
 			// A release under way fails the turn itself.
 			if (this.state === "releasing") return;
 			// The client already has its reply: a side request settled, or a
-			// turn finishing with no leg open. That reply stands.
-			if (this.sideSettled || (this.state === "finishing" && !this.leg))
-				this.settleDelivered(
-					`${rewrite.message} after the reply; its session will not be resumed`,
-				);
-			else this.pendingTeardown = { reason: "error", error: rewrite };
+			// turn finishing with no leg open. A successful reply stands; an
+			// error reply keeps the turn's failed outcome.
+			if (this.sideSettled || (this.state === "finishing" && !this.leg)) {
+				if (this.deliveredOk)
+					this.settleDelivered(
+						`${rewrite.message} after the reply; its session will not be resumed`,
+					);
+				return;
+			}
+			this.pendingTeardown = { reason: "error", error: rewrite };
 			return;
 		}
 		switch (message.type) {
@@ -1087,6 +1098,7 @@ export class LiveQuery {
 
 	private failTurn(error: BridgeError): void {
 		this.finalError = error;
+		this.deliveredOk = false;
 		const leg = this.leg;
 		if (!leg) return;
 		const committed = leg.response.committed;
@@ -1180,7 +1192,7 @@ export class LiveQuery {
 	 * it, token first.
 	 */
 	private settleDelivered(note: string): void {
-		if (this.state === "closed") return;
+		if (this.state === "closed" || !this.deliveredOk) return;
 		this.settledNote = note;
 		this.init.registration.revoke();
 		this.init.parked.close("settled");
