@@ -63,7 +63,21 @@ pipeline. The client keeps executing its own tools.
   each: another key's turn (409), ids that do not name every awaited call
   exactly once, name one it does not wait on, or that an earlier round
   handed out (409 "stale tool results"), shutdown (503). The same holds for
-  a released park (below).
+  a released park (below). A live query also refuses a result over
+  `MAX_TOOL_RESULT_CHARS` (500,000 characters of text) with 400
+  `sdk_bridge_tool_result_too_large`, delivers nothing and stays parked.
+  Claude Code would hand the model a 2 KB preview of it, naming a file the
+  model has no tool to read. A released park's resume, a rebuilt history and
+  a dead continuation carry results as message content, which Claude Code
+  sends whole, so they take no such check.
+- **History header.** Every leg's response, JSON or SSE, success or error,
+  carries `x-clankermux-sdk-bridge-history` (`SDK_BRIDGE_HISTORY_HEADER`):
+  the turn row's history mode, plus `; reason=<rebuildReason>` when there is
+  one. A continuation leg and a refused one report their turn's decision; a
+  released park keeps it in its resume descriptor (`history`; absent in
+  parks stored before, which then send no header). A start refused before
+  its turn exists (`reject()`) sends none. Both adapters and the router's
+  Chat error rebuild copy it to the client, next to `x-clankermux-request-id`.
 - **Released parks.** Parked for `sdk_bridge_park_release_ms` (2 min), a
   query is released instead of held: token revoked, process group SIGTERMed
   (SIGKILL after the grace), and only then the parked MCP handlers closed.
@@ -208,6 +222,23 @@ made private, never deleted: no pid says whether a process still uses them.
   `CLAUDE_CODE_DISABLE_ATTACHMENTS`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_AUTO_COMPACT`,
   `ENABLE_CLAUDEAI_MCP_SERVERS=0`.
+- `DISABLE_AUTO_COMPACT` turns off both automatic and reactive compaction;
+  microcompaction needs a query source the SDK never uses.
+  `real-claude-context.integration.test.ts` pins each, with a control that
+  shows it firing without the setting. If Claude Code ever reports a rewrite
+  anyway (a `system` message `compact_boundary` or `microcompact_boundary`,
+  or a `hint_clears` message), the turn fails with 502
+  `sdk_bridge_context_rewritten`.
+- `CLAUDE_CODE_NO_MODEL_FALLBACK=1`: without it a refusal on Fable 5.1 or
+  Opus 5.5 is retried on `claude-opus-4-8`, which the inner listener refuses
+  as unplanned. With it the refused message reaches the client with
+  `stop_reason: refusal`, and the turn is `completed`: the error result
+  Claude Code reports after a refusal does not fail it. Its session keeps
+  the refused exchange, so the next turn resumes it.
+- Every tool is listed with `anthropic/maxResultSizeChars` at
+  `MAX_TOOL_RESULT_CHARS`. Without it Claude Code previews any result over
+  50,000 characters, and answers one over 25,000 tokens (it counts them
+  with `/v1/messages/count_tokens`) with an error string instead.
 - Options: `tools: []`, `settingSources: []`, `skills: []`, `plugins: []`,
   `strictMcpConfig`, `verbatimPrompts`, `systemPrompt.snapshot: false` (a
   resume renders the current policy's prompt), and
