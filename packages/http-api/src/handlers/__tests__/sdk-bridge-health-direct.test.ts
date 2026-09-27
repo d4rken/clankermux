@@ -103,13 +103,14 @@ describe("SDK bridge health", () => {
 		await turn("r1", HOUR, "rejected");
 		await turn("run", HOUR, "running");
 		await turn("rel", HOUR, "released");
+		await turn("exp", HOUR, "expired");
 		await turn("side", HOUR, "completed", { kind: "side_request" });
 
 		const data = await health();
 
 		expect(data.range).toBe("24h");
 		expect(data.windowStartsAt).toBe(NOW - 24 * HOUR);
-		expect(data.total).toBe(10);
+		expect(data.total).toBe(11);
 		expect(data.byStatus).toEqual({
 			running: 1,
 			released: 1,
@@ -117,15 +118,16 @@ describe("SDK bridge health", () => {
 			failed: 1,
 			aborted: 1,
 			timed_out: 1,
+			expired: 1,
 			shutdown: 1,
 			rejected: 1,
 		});
-		expect(data.byKind).toEqual({ turn: 9, side_request: 1 });
-		// Failed and timed out over everything that ended on the bridge's side:
-		// running, released, rejected and aborted stay out of the denominator.
-		expect(data.failureRate).toEqual({ failures: 2, finished: 6, rate: 2 / 6 });
+		expect(data.byKind).toEqual({ turn: 10, side_request: 1 });
+		// Failed and timed out over completed, failed and timed out. Open,
+		// rejected, aborted, expired and shut-down turns are counted apart.
+		expect(data.failureRate).toEqual({ failures: 2, finished: 5, rate: 2 / 5 });
 
-		expect((await health("all")).total).toBe(11);
+		expect((await health("all")).total).toBe(12);
 	});
 
 	it("answers an empty range with zeros and a null rate", async () => {

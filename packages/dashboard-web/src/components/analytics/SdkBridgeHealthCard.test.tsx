@@ -32,6 +32,7 @@ describe("SdkBridgeHealthCard", () => {
 			"Shut down 0",
 			"Running 1",
 			"Waiting for tool results 2",
+			"Expired, tool results never came 1",
 		])
 			expect(out).toContain(part);
 	});

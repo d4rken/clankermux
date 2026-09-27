@@ -7,7 +7,8 @@
 /**
  * `released`: parked on the client's tool calls with no Claude Code process;
  * its session is stored in `sdk_bridge_released_parks` until the results
- * resume it or the park expires.
+ * resume it or the park expires. `expired`: a released park whose tool
+ * results never came.
  */
 export type SdkBridgeTurnStatus =
 	| "running"
@@ -16,6 +17,7 @@ export type SdkBridgeTurnStatus =
 	| "failed"
 	| "aborted"
 	| "timed_out"
+	| "expired"
 	| "shutdown"
 	| "rejected";
 
@@ -26,6 +28,7 @@ const TURN_STATUS_SET = {
 	timed_out: true,
 	rejected: true,
 	aborted: true,
+	expired: true,
 	shutdown: true,
 	running: true,
 	released: true,

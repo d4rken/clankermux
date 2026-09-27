@@ -128,7 +128,7 @@ pipeline. The client keeps executing its own tools.
   claim to its launch is one sequence with one rollback; a resume that
   ends before its first model call gives the park back (after waiting for
   a consumed mark in flight). Parks expire after
-  `sdk_bridge_released_park_ttl_ms` (24 h, `timed_out`). Shutdown releases
+  `sdk_bridge_released_park_ttl_ms` (24 h, `expired`, 504). Shutdown releases
   parked turns, including ones that park during the drain, and dispose
   drains outstanding park writes before giving the lease up.
 - **Known conditions of released parks.** A development database created

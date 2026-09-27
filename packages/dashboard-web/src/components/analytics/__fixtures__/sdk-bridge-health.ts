@@ -41,6 +41,7 @@ export function healthFixture(
 			failed: 1,
 			aborted: 1,
 			timed_out: 1,
+			expired: 1,
 			shutdown: 0,
 			rejected: 2,
 		},

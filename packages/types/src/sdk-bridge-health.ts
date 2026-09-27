@@ -8,8 +8,9 @@ import type {
 
 /**
  * A status's place in the failure rate, failures over finished turns.
- * `excluded`: still open (running, released), or ended by the client
- * (rejected, aborted); those are counted on their own.
+ * `excluded`: still open (running, released), ended by the client
+ * (rejected, aborted, expired), or by a server shutdown; those are counted
+ * on their own.
  */
 export type SdkBridgeFailureRateRole = "failure" | "finished" | "excluded";
 
@@ -21,12 +22,13 @@ export function sdkBridgeFailureRateRole(
 		case "timed_out":
 			return "failure";
 		case "completed":
-		case "shutdown":
 			return "finished";
 		case "running":
 		case "released":
 		case "rejected":
 		case "aborted":
+		case "expired":
+		case "shutdown":
 			return "excluded";
 	}
 }

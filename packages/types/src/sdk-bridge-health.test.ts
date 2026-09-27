@@ -20,7 +20,8 @@ describe("sdkBridgeFailureRateRole", () => {
 			failed: "failure",
 			aborted: "excluded",
 			timed_out: "failure",
-			shutdown: "finished",
+			expired: "excluded",
+			shutdown: "excluded",
 			rejected: "excluded",
 		} satisfies Record<SdkBridgeTurnStatus, SdkBridgeFailureRateRole>);
 	});

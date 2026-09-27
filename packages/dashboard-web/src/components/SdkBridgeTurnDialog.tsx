@@ -63,7 +63,8 @@ function statusVariant(
 ): "success" | "warning" | "destructive" | "secondary" {
 	if (status === "completed") return "success";
 	if (status === "running" || status === "released") return "secondary";
-	if (status === "aborted" || status === "shutdown") return "warning";
+	if (status === "aborted" || status === "shutdown" || status === "expired")
+		return "warning";
 	return "destructive";
 }
 

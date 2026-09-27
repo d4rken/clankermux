@@ -737,7 +737,7 @@ export function createClaudeSdkBridge(
 	function closePark(
 		entry: ReleasedEntry,
 		error: BridgeError,
-		status: "aborted" | "timed_out" | "failed",
+		status: "aborted" | "expired" | "failed",
 	): Promise<void> {
 		if (!parks) return Promise.resolve();
 		// Refused or failed, the close is pending and the maintenance pass retries it.
@@ -751,7 +751,7 @@ export function createClaudeSdkBridge(
 		return closePark(
 			entry,
 			bridgeErrors.releasedParkExpired(limits().releasedParkTtlMs),
-			"timed_out",
+			"expired",
 		);
 	}
 

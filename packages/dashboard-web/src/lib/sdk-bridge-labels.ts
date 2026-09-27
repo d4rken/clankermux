@@ -11,6 +11,7 @@ export const SDK_BRIDGE_STATUS_LABEL: Record<SdkBridgeTurnStatus, string> = {
 	failed: "Failed",
 	aborted: "Aborted",
 	timed_out: "Timed out",
+	expired: "Expired, tool results never came",
 	shutdown: "Shut down",
 	rejected: "Rejected",
 };
