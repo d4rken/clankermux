@@ -551,6 +551,8 @@ export function createClaudeSdkBridge(
 		meta: SdkBridgeTurnMeta,
 		startedAt: number,
 		error: BridgeError,
+		/** The turn's decision for the header; absent: read from the live query or park. */
+		history?: SdkBridgeTurnHistory | null,
 	): Response {
 		// A released park's turn is written under the lease, like its resume.
 		const recorder = new TurnRecorder(
@@ -570,9 +572,11 @@ export function createClaudeSdkBridge(
 		return errorResponse(
 			error,
 			historyHeaders(
-				lives.get(turnId)?.turnHistory ??
-					parks?.get(turnId)?.descriptor.history ??
-					null,
+				history === undefined
+					? (lives.get(turnId)?.turnHistory ??
+							parks?.get(turnId)?.descriptor.history ??
+							null)
+					: history,
 			),
 		);
 	}
@@ -1685,8 +1689,10 @@ export function createClaudeSdkBridge(
 	}): Promise<Response> {
 		const { meta } = input;
 		const startedAt = now();
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(input.turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history?: SdkBridgeTurnHistory | null,
+		) => refuseContinuation(input.turnId, meta, startedAt, error, history);
 		try {
 			if (shuttingDown) return refuse(bridgeErrors.shutdown());
 			await ready;
@@ -1706,7 +1712,7 @@ export function createClaudeSdkBridge(
 			if (!live || live.closed || !live.awaitingClient)
 				return refuse(bridgeErrors.deadTurn());
 			if (live.ownerApiKeyId !== meta.apiKeyId)
-				return refuse(bridgeErrors.otherOwner());
+				return refuse(bridgeErrors.otherOwner(), null);
 			const body = await readBody(input.request);
 			if ("error" in body) return refuse(body.error);
 			const parsed = parseTurnRequest(
@@ -1758,9 +1764,11 @@ export function createClaudeSdkBridge(
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.
 			if (meta.model !== live.requestedModel) {
+				const history = live.turnHistory;
 				live.teardown("superseded", bridgeErrors.superseded());
 				return refuse(
 					bridgeErrors.modelChanged(live.requestedModel, meta.model),
+					history,
 				);
 			}
 			counters.continuations++;
@@ -1856,10 +1864,12 @@ export function createClaudeSdkBridge(
 		startedAt: number,
 	): Promise<Response> {
 		const { meta } = input;
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(entry.park.turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history = entry.descriptor.history ?? null,
+		) => refuseContinuation(entry.park.turnId, meta, startedAt, error, history);
 		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
-			return refuse(bridgeErrors.otherOwner());
+			return refuse(bridgeErrors.otherOwner(), null);
 		if (entry.state === "released" && entry.park.expiresAt <= now()) {
 			void expirePark(entry);
 			return refuse(bridgeErrors.deadTurn());
@@ -1901,11 +1911,13 @@ export function createClaudeSdkBridge(
 	): Promise<Response> {
 		const { meta } = input;
 		const turnId = entry.park.turnId;
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history = entry.descriptor.history ?? null,
+		) => refuseContinuation(turnId, meta, startedAt, error, history);
 		const store = parks as ReleasedParkStore;
 		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
-			return refuse(bridgeErrors.otherOwner());
+			return refuse(bridgeErrors.otherOwner(), null);
 		if (shuttingDown) return refuse(bridgeErrors.shutdown());
 		if (
 			!answersExactly(

@@ -5,7 +5,9 @@
  * history header on every response of a turn.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SDKMessage, SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import {
 	SDK_BRIDGE_HISTORY_HEADER,
@@ -23,6 +25,8 @@ import {
 	makeHarness,
 	makeMeta,
 	makePlan,
+	memoryParkRepo,
+	memoryTurnRepo,
 	messagesRequest,
 	parseSse,
 	READ_TOOL,
@@ -45,6 +49,73 @@ function harness(): Harness {
 	const h = makeHarness();
 	harnesses.push(h);
 	return h;
+}
+
+/** A bridge that releases a parked query after 60 ms into its own park store. */
+async function releaseHarness(limits: Record<string, number> = {}) {
+	const repo = memoryTurnRepo();
+	const parkRepo = memoryParkRepo(repo.turns);
+	const h = makeHarness(
+		{
+			parkRepo,
+			parkNamespace: parkRepo.namespace,
+			limits: () => ({
+				parkReleaseMs: 60,
+				releasedParkTtlMs: 60_000,
+				parkedTimeoutMs: 60_000,
+				...limits,
+			}),
+			timing: {
+				headHoldMs: 1_000,
+				pingIntervalMs: 100,
+				settleWaitMs: 500,
+				idleTimeoutMs: 5_000,
+				exitGraceMs: 50,
+				maintenanceIntervalMs: 60_000,
+				releaseDrainMs: 8_000,
+			},
+		},
+		{
+			process: "normal",
+			repo,
+			workRoot: mkdtempSync(join(tmpdir(), "sdk-bridge-context-release-")),
+		},
+	);
+	harnesses.push(h);
+	await h.bridge.ready();
+	return { ...h, parkRepo };
+}
+
+/**
+ * A turn parked on `toolu_p`, with Claude Code's envelope for the call
+ * reported after `message_stop` unless `envelopes` is false.
+ */
+async function parkForRelease(h: Harness, envelopes = true) {
+	const t = await start(h, { tools, messages: [first] });
+	const msgId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+	const use = {
+		type: "tool_use" as const,
+		id: "toolu_p",
+		name: "mcp__c__read",
+		input: { path: "a" },
+	};
+	t.query.emit(initMessage(), ...streamedMessage([use], { id: msgId }));
+	const r1 = await reply(t.response);
+	const envelope = () =>
+		t.query.emit(
+			assistantMessage([use], { id: msgId, stopReason: "tool_use" }),
+		);
+	if (envelopes) envelope();
+	const call = t.query.callTool("toolu_p", "read");
+	const answer = (content: unknown): Msg[] => [
+		first,
+		{ role: "assistant", content: r1.content },
+		{
+			role: "user",
+			content: [{ type: "tool_result", tool_use_id: "toolu_p", content }],
+		},
+	];
+	return { t, r1, call, answer, envelope };
 }
 
 async function start(
@@ -520,5 +591,81 @@ describe(`the ${SDK_BRIDGE_HISTORY_HEADER} header`, () => {
 		});
 		expect(res.status).toBe(400);
 		expect(res.headers.get(SDK_BRIDGE_HISTORY_HEADER)).toBeNull();
+	});
+});
+
+describe(`the ${SDK_BRIDGE_HISTORY_HEADER} header on a refused continuation`, () => {
+	it("stays on the refusal of a live turn torn down for another model, and never goes to another key", async () => {
+		const h = harness();
+		const { t, answer } = await parked(h);
+		const other = await reply(
+			continueTurn(
+				h,
+				t.plan.turnId,
+				{ tools, messages: answer("A") },
+				{ apiKeyId: "key-2" },
+			).response,
+		);
+		expect(other.status).toBe(409);
+		expect(other.history).toBeNull();
+
+		const moved = await reply(
+			continueTurn(
+				h,
+				t.plan.turnId,
+				{ tools, messages: answer("A") },
+				{ model: "claude-opus-5-5" },
+			).response,
+		);
+		expect(moved.status).toBe(409);
+		expect(JSON.stringify(moved.json)).toContain("claude-opus-5-5");
+		expect(moved.history).toBe("fresh");
+	});
+
+	it("stays on the refusals of a released park: another model and an expired park, and never goes to another key", async () => {
+		const h = await releaseHarness();
+		const other = await parkForRelease(h);
+		await waitFor(
+			() => h.repo.turns.get(other.t.plan.turnId)?.status === "released",
+			8_000,
+		);
+		const foreign = await reply(
+			continueTurn(
+				h,
+				other.t.plan.turnId,
+				{ tools, messages: other.answer("A") },
+				{ apiKeyId: "key-2" },
+			).response,
+		);
+		expect(foreign.status).toBe(409);
+		expect(foreign.history).toBeNull();
+		const moved = await reply(
+			continueTurn(
+				h,
+				other.t.plan.turnId,
+				{ tools, messages: other.answer("A") },
+				{ model: "claude-opus-5-5" },
+			).response,
+		);
+		expect(moved.status).toBe(409);
+		expect(moved.history).toBe("fresh");
+	});
+
+	it("stays on the refusal of an expired released park", async () => {
+		const h = await releaseHarness({ releasedParkTtlMs: 300 });
+		const p = await parkForRelease(h);
+		await waitFor(
+			() => h.repo.turns.get(p.t.plan.turnId)?.status === "released",
+			8_000,
+		);
+		await Bun.sleep(400);
+		const expired = await reply(
+			continueTurn(h, p.t.plan.turnId, {
+				tools,
+				messages: p.answer("A"),
+			}).response,
+		);
+		expect(expired.status).toBe(409);
+		expect(expired.history).toBe("fresh");
 	});
 });
