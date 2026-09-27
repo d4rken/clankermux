@@ -84,6 +84,25 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 	);
 }
 
+/** The stored JSON is not type-checked on read; a malformed row is refused. */
+function wellFormed(detail: SdkBridgeSystemPromptDetail): boolean {
+	const d = detail as Partial<Record<string, unknown>>;
+	if (d.outcome === "forwarded")
+		return (
+			typeof d.forwardedLength === "number" &&
+			typeof d.headStripped === "boolean" &&
+			Array.isArray(d.sectionsSeen)
+		);
+	if (d.outcome === "refused")
+		return (
+			typeof d.code === "string" &&
+			typeof d.reason === "string" &&
+			typeof d.promptLength === "number" &&
+			typeof d.promptSha256 === "string"
+		);
+	return true;
+}
+
 /** What the system-prompt policy recorded; never the prompt's text. */
 function PromptDetailFields({
 	detail,
@@ -91,8 +110,17 @@ function PromptDetailFields({
 	detail: SdkBridgeSystemPromptDetail;
 }) {
 	const layout = (
-		<Field label="Prompt layout">{detail.version ?? "None declared"}</Field>
+		<Field label="Prompt layout">
+			{typeof detail.version === "string" ? detail.version : "None declared"}
+		</Field>
 	);
+	if (!wellFormed(detail))
+		return (
+			<>
+				{layout}
+				<Field label="Prompt detail">unavailable</Field>
+			</>
+		);
 	if (detail.outcome === "forwarded")
 		return (
 			<>

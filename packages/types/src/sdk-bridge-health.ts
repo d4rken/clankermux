@@ -55,7 +55,7 @@ export interface SdkBridgeHealthSplit {
 	completed: number;
 	/** Failed and timed out. */
 	failures: number;
-	/** Failures plus completed and shut down: the failure rate's denominator. */
+	/** Failures plus completed: the failure rate's denominator. */
 	finished: number;
 	rejected: number;
 	aborted: number;

@@ -250,6 +250,36 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(text).not.toContain("Refused");
 	});
 
+	for (const [name, detail] of [
+		[
+			"a forwarded detail without its lengths",
+			{ outcome: "forwarded", version: "0.80.1" },
+		],
+		[
+			"a refused detail without its digest",
+			{ outcome: "refused", version: null, code: "c", reason: "r" },
+		],
+	] as const)
+		it(`renders ${name} as unavailable`, () => {
+			const base = view();
+			const html = renderToStaticMarkup(
+				<SdkBridgeTurnDetails
+					view={{
+						...base,
+						turn: {
+							...base.turn,
+							systemPromptPolicy: "pi-head-v1",
+							systemPromptDetail:
+								detail as unknown as SdkBridgeTurnView["turn"]["systemPromptDetail"],
+						},
+					}}
+				/>,
+			);
+			const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+			expect(text).toContain("Prompt detail unavailable");
+			expect(text).not.toContain("undefined");
+		});
+
 	it("labels an expired turn", () => {
 		const base = view();
 		const html = renderToStaticMarkup(

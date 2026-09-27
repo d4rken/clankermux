@@ -174,7 +174,9 @@ export function SdkBridgeHealthCard({
 								(refused before Claude Code ran), aborted ones (the client left
 								or started a new turn), expired ones (tool results never came)
 								and turns a server shutdown ended. Timings and tool rounds cover
-								finished turns only.
+								finished turns only. Duration is wall-clock time from the turn's
+								start to its end, so it includes the client running its tools
+								and the time spent waiting for their results.
 							</p>
 							<p>
 								Tokens and cost come from the turns' model calls that are still
@@ -232,7 +234,10 @@ export function SdkBridgeHealthCard({
 								[
 									["Start-up", data.timings.spawnMs],
 									["First event", data.timings.firstEventMs],
-									["Duration", data.timings.durationMs],
+									[
+										"Duration (wall clock, incl. tool time)",
+										data.timings.durationMs,
+									],
 								] as const
 							).map(([label, p]) => (
 								<div key={label}>

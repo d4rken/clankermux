@@ -45,7 +45,7 @@ describe("SdkBridgeHealthCard", () => {
 		);
 		expect(out).toContain("Start-up p50 1.2s · p95 3.4s · 9 samples");
 		expect(out).toContain("First event p50 2.0s · p95 5.0s · 8 samples");
-		expect(out).toContain("Duration no samples");
+		expect(out).toContain("Duration (wall clock, incl. tool time) no samples");
 		expect(out).toContain("Tool rounds per turn p50 2 · p95 6 · 7 turns");
 	});
 
