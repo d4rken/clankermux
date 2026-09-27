@@ -283,6 +283,15 @@ export class LiveQuery {
 		cacheCreation: null,
 	};
 	private finalError: BridgeError | null = null;
+	/**
+	 * A context rewrite Claude Code reported: during a release it fails the
+	 * turn instead of the park being stored; after the client's reply it only
+	 * keeps the session from being resumed.
+	 */
+	private contextRewrite: BridgeError | null = null;
+	private rewriteAfterReply = false;
+	/** Claude Code's session holds more than the client's reply: never resume it. */
+	private sessionDiverged = false;
 	private toolUsesThisLeg = 0;
 	/** Set while `pump` runs, so the rebuild counter can tell. */
 	sawFirstEvent = false;
@@ -709,11 +718,11 @@ export class LiveQuery {
 		// so a query released as it parks (at shutdown) may not have them yet.
 		let resumeAt = this.resumePoint();
 		const envelopesBy = Date.now() + ENVELOPE_WAIT_MS;
-		while (!resumeAt && Date.now() < envelopesBy) {
+		while (!resumeAt && !this.contextRewrite && Date.now() < envelopesBy) {
 			await Bun.sleep(20);
 			resumeAt = this.resumePoint();
 		}
-		if (!resumeAt) {
+		if (!resumeAt && !this.contextRewrite) {
 			// Still whole: it stays parked, or the caller tears it down.
 			this.state = "awaiting_client";
 			// Unless Claude Code died meanwhile: then the query ends as the
@@ -746,6 +755,13 @@ export class LiveQuery {
 			return {
 				ok: false,
 				reason: "Claude Code did not exit",
+				stopped: true,
+			};
+		// Its session no longer holds what the client sent; failRelease names why.
+		if (this.contextRewrite || !resumeAt)
+			return {
+				ok: false,
+				reason: "Claude Code rewrote the conversation's context",
 				stopped: true,
 			};
 		return {
@@ -781,7 +797,7 @@ export class LiveQuery {
 	/** The release could not be completed: the turn ends here. */
 	failRelease(error: BridgeError): void {
 		if (this.state !== "releasing") return;
-		this.finalError = error;
+		this.finalError = this.contextRewrite ?? error;
 		this.close("failed", false);
 	}
 
@@ -851,7 +867,10 @@ export class LiveQuery {
 				.query as AsyncIterable<SDKMessage>) {
 				if (this.state === "closed") break;
 				// A query being stopped for release is left to exit on its signal.
-				if (this.stopping) continue;
+				if (this.stopping) {
+					this.noteRewrite(message);
+					continue;
+				}
 				this.armIdle();
 				this.onMessage(message);
 				if (this.pendingTeardown) {
@@ -883,19 +902,35 @@ export class LiveQuery {
 		return this.init.prompt;
 	}
 
-	private onMessage(message: SDKMessage): void {
-		const rewrite =
+	/** The error for a context rewrite `message` reports, logged and remembered. */
+	private noteRewrite(message: SDKMessage): BridgeError | null {
+		const event =
 			message.type === "system"
 				? (message as { subtype?: string }).subtype
 				: (message as { type: string }).type;
-		if (rewrite && CONTEXT_REWRITES.has(rewrite)) {
-			this.init.log.error(
-				`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${rewrite})`,
-			);
-			this.pendingTeardown = {
-				reason: "error",
-				error: bridgeErrors.contextRewritten(rewrite),
-			};
+		if (!event || !CONTEXT_REWRITES.has(event)) return null;
+		const error = bridgeErrors.contextRewritten(event);
+		this.contextRewrite ??= error;
+		// The client already has its reply: a side request settled, or a turn
+		// finishing with no leg open.
+		const delivered =
+			this.sideSettled || (this.state === "finishing" && !this.leg);
+		if (delivered) {
+			this.rewriteAfterReply = true;
+			this.sessionDiverged = true;
+		}
+		this.init.log.error(
+			`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${event})${delivered ? " after the reply; its session will not be resumed" : ""}`,
+		);
+		return error;
+	}
+
+	private onMessage(message: SDKMessage): void {
+		const rewrite = this.noteRewrite(message);
+		if (rewrite) {
+			// A release under way fails the turn itself; a delivered reply stands.
+			if (this.state === "releasing" || this.rewriteAfterReply) return;
+			this.pendingTeardown = { reason: "error", error: rewrite };
 			return;
 		}
 		switch (message.type) {
@@ -1153,7 +1188,8 @@ export class LiveQuery {
 		this.init.registration.revoke();
 		this.init.parked.close(status);
 		this.prompt().end();
-		this.resolveDone(ok);
+		// The turn stands; a session that no longer matches it is not resumed.
+		this.resolveDone(ok && !this.sessionDiverged);
 		// A registered session belongs to its conversation, which discards it
 		// once a later one replaces it or it fails to settle.
 		if (!this.registered) {
@@ -1163,12 +1199,15 @@ export class LiveQuery {
 		this.discardClaudeCodeTranscripts();
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
+		// Recorded, not raised: the rewrite after the reply, on a completed turn.
+		const shown =
+			error ?? (ok && this.rewriteAfterReply ? this.contextRewrite : null);
 		const finish: SdkBridgeTurnFinish = {
 			finishedAt: now,
 			status,
 			httpStatus: error ? error.status : 200,
 			errorType: error?.type ?? null,
-			errorMessage: error ? sanitizeMessage(error.message) : null,
+			errorMessage: shown ? sanitizeMessage(shown.message) : null,
 			stopReason: this.stopReason,
 			ccSessionId: this.sessionId,
 			spawnMs: this.spawnMs,

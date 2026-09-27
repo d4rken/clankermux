@@ -669,3 +669,147 @@ describe(`the ${SDK_BRIDGE_HISTORY_HEADER} header on a refused continuation`, ()
 		expect(expired.history).toBe("fresh");
 	});
 });
+
+describe("a context rewrite Claude Code reports late", () => {
+	const compaction = () =>
+		({
+			type: "system",
+			subtype: "compact_boundary",
+			compact_metadata: { trigger: "auto", pre_tokens: 190_000 },
+			uuid: crypto.randomUUID(),
+			session_id: "s",
+		}) as unknown as SDKMessage;
+
+	it("while its parked query is being released: the turn fails with the named error and no park is stored", async () => {
+		const h = await releaseHarness();
+		// No envelope yet: the release waits for one, and the rewrite comes first.
+		const p = await parkForRelease(h, false);
+		await Bun.sleep(200);
+		p.t.query.emit(compaction());
+		p.envelope();
+		await waitFor(
+			() => h.repo.turns.get(p.t.plan.turnId)?.finishedAt != null,
+			8_000,
+		);
+		expect(h.repo.turns.get(p.t.plan.turnId)).toMatchObject({
+			status: "failed",
+			httpStatus: 502,
+			errorType: "api_error",
+		});
+		expect(String(h.repo.turns.get(p.t.plan.turnId)?.errorMessage)).toContain(
+			"compact_boundary",
+		);
+		expect(h.parkRepo.parks.size).toBe(0);
+	});
+
+	it("after the reply went out: the turn completes, records the rewrite, and the next turn rebuilds", async () => {
+		const h = harness();
+		const session = {
+			affinityScope: "client_session",
+			affinityKey: "sess-late",
+		} as const;
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }] },
+			{ meta: session },
+		);
+		const store = t.query.options.sessionStore as SessionStore;
+		await store.append(
+			{ projectKey: "p", sessionId: t.query.options.sessionId as string },
+			[
+				{
+					type: "user",
+					sessionId: t.query.options.sessionId as string,
+					uuid: crypto.randomUUID(),
+					message: { role: "user", content: "hello" },
+				},
+			],
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+		);
+		const r = await reply(t.response);
+		expect(r).toMatchObject({ status: 200, stop: "end_turn" });
+		t.query.emit(compaction(), resultMessage());
+		await settled(h);
+		const row = h.repo.turns.get(t.plan.turnId);
+		expect(row).toMatchObject({ status: "completed", httpStatus: 200 });
+		expect(String(row?.errorMessage)).toContain("compact_boundary");
+
+		const next = await start(
+			h,
+			{
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: r.content },
+					{ role: "user", content: "again" },
+				],
+			},
+			{ meta: session },
+		);
+		expect(h.repo.turns.get(next.plan.turnId)?.historyMode).toBe(
+			"rebuild_transcript",
+		);
+	});
+
+	it("after a side request's reply settled: the side request completes and records the rewrite", async () => {
+		const h = harness();
+		const session = {
+			affinityScope: "client_session",
+			affinityKey: "sess-side-late",
+		} as const;
+		const main = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }] },
+			{ meta: session },
+		);
+		const sessionId = main.query.options.sessionId as string;
+		await (main.query.options.sessionStore as SessionStore).append(
+			{ projectKey: "p", sessionId },
+			[
+				{
+					type: "user",
+					sessionId,
+					uuid: crypto.randomUUID(),
+					message: { role: "user", content: "hello" },
+				},
+			],
+		);
+		main.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+			resultMessage(),
+		);
+		const r = await reply(main.response);
+		await settled(h);
+
+		const side = await start(
+			h,
+			{
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: r.content },
+					{ role: "user", content: "RECAP" },
+				],
+				tool_choice: { type: "none" },
+			},
+			{ meta: { ...session, sideRequest: "session-fork-v1" } },
+		);
+		side.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "recap" }]),
+		);
+		const answered = await reply(side.response);
+		expect(answered).toMatchObject({ status: 200, stop: "end_turn" });
+		side.query.emit(compaction(), resultMessage());
+		await settled(h);
+		const row = h.repo.turns.get(side.plan.turnId);
+		expect(row).toMatchObject({
+			kind: "side_request",
+			status: "completed",
+			httpStatus: 200,
+		});
+		expect(String(row?.errorMessage)).toContain("compact_boundary");
+	});
+});
