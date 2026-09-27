@@ -2,9 +2,12 @@
 // receives and answers /v1/messages with a scripted SSE stream:
 //
 //   last user turn carries tool_result      -> text "done: <first result text>"
+//   ... whose first result text starts "AGAIN" -> one tool_use for the *read tool
 //   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
 //   last user text contains "FANOUT<n>"     -> n tool_use blocks
+//   last user text contains "STRAY"         -> tool_use for the *read tool, then one for a tool not offered
+//   last user text contains "UNMAPPED"      -> tool_use for an unoffered mcp__c__ tool, then the *read tool
 //   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
@@ -225,7 +228,14 @@ function script(
 		const inner = Array.isArray(first.content)
 			? textOf(first.content as Block[])
 			: String(first.content);
-		content.push({ type: "text", text: `done: ${inner}` });
+		if (readTool && inner.startsWith("AGAIN"))
+			content.push({
+				type: "tool_use",
+				id: `toolu_mock_${++toolSeq}`,
+				name: readTool,
+				input: { path: "again.txt" },
+			});
+		else content.push({ type: "text", text: `done: ${inner}` });
 	} else if (flattenedResult) {
 		content.push({ type: "text", text: `done: ${flattenedResult[1]}` });
 	} else if (readTool && /FANOUT(\d+)/.test(text)) {
@@ -236,6 +246,21 @@ function script(
 				id: `toolu_mock_${++toolSeq}`,
 				name: readTool,
 				input: { path: `fan-${i}.txt` },
+			});
+	} else if (readTool && /STRAY|UNMAPPED/.test(text)) {
+		const stray = /UNMAPPED/.test(text)
+			? "mcp__c__unmapped_tool"
+			: "no_such_tool";
+		const calls = [
+			{ name: readTool, input: { path: "a.txt" } },
+			{ name: stray, input: {} },
+		];
+		if (/UNMAPPED/.test(text)) calls.reverse();
+		for (const call of calls)
+			content.push({
+				type: "tool_use",
+				id: `toolu_mock_${++toolSeq}`,
+				...call,
 			});
 	} else if (readTool && /PARALLEL/.test(text)) {
 		for (const path of ["a.txt", "b.txt"]) {

@@ -97,8 +97,21 @@ pipeline. The client keeps executing its own tools.
   409 stale), fork it under a new id and run Claude Code with `resume` +
   `resumeSessionAt` at the last envelope of the message that made the calls
   (envelopes arrive after `message_stop`), the final user message as one
-  prompt. The listener writes `consumed` before the first model call goes
-  out. A gone session file falls back to a flattened dead continuation.
+  prompt. On resume Claude Code drops calls with no result from the chain
+  before it looks for `resumeSessionAt`, and restores them only when it
+  classifies the tail as an interrupted turn (an attachment or a tool
+  result before the calls). A prompt Claude Code wrote nothing after (every
+  turn of a resumed session) or text before the calls in the same message
+  gets them dropped for good: "No message found with message.uuid". So the
+  resumed session's `load()` (never its file) also returns one user entry
+  answering, as a child of the resume point, every awaited call on its
+  chain and every other one without a result of its own (a descendant of
+  the entry holding the call, or one naming it as
+  `sourceToolAssistantUUID`) (`FileSessionStore.appendOnLoad`);
+  `resumeSessionAt` cuts it off
+  before any model call. The listener writes `consumed` before the first
+  model call goes out. A gone session file falls back to a flattened dead
+  continuation.
   Parks survive restarts. The database lease (`sdk_bridge_park_lease`, one
   row) is the only authority over them: taken only when free, already this
   process's token, or its holder's process gone (pid and /proc start

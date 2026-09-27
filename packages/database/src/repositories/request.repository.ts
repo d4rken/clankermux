@@ -285,11 +285,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					client_user_agent, client_harness,
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
-					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted,
+					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted, gateway_hint_prompt_id,
 					correlation_tag, usage_source, cache_creation_1h_input_tokens,
 					sdk_bridge_turn_id
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -353,6 +353,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_prev_tool_durations = COALESCE(EXCLUDED.gateway_hint_prev_tool_durations, requests.gateway_hint_prev_tool_durations),
 				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
 				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted),
+				gateway_hint_prompt_id = COALESCE(EXCLUDED.gateway_hint_prompt_id, requests.gateway_hint_prompt_id),
 				correlation_tag = COALESCE(EXCLUDED.correlation_tag, requests.correlation_tag),
 				sdk_bridge_turn_id = COALESCE(EXCLUDED.sdk_bridge_turn_id, requests.sdk_bridge_turn_id),
 				-- Stored value FIRST, unlike the token columns above: a non-NULL
@@ -428,6 +429,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.gatewayHintPrevToolDurations ?? null,
 				data.gatewayHintCompaction ?? null,
 				data.gatewayHintContextCompacted ?? null,
+				data.gatewayHintPromptId ?? null,
 				data.correlationTag ?? null,
 				data.usageSource ?? null,
 				usage?.cacheCreation1hInputTokens ?? null,

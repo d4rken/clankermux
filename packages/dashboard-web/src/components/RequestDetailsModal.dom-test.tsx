@@ -209,7 +209,7 @@ describe("RequestDetailsModal notices", () => {
 });
 
 describe("RequestDetailsModal gateway hints", () => {
-	it("shows all five hints from the summary without a retained payload", async () => {
+	it("shows every hint from the summary without a retained payload", async () => {
 		spyOn(api, "getRequestPayload").mockImplementation(
 			async () => payload() as never,
 		);
@@ -229,6 +229,7 @@ describe("RequestDetailsModal gateway hints", () => {
 			gatewayHintPrevToolDurations: "[12,34]",
 			gatewayHintCompaction: "false",
 			gatewayHintContextCompacted: "0",
+			gatewayHintPromptId: "prm_0a1b2c",
 		};
 		await mount(payload(), summary);
 		expect(document.body.textContent).toContain("Request class: primary");
@@ -242,7 +243,9 @@ describe("RequestDetailsModal gateway hints", () => {
 		expect(hints?.textContent).toContain("[12,34]");
 		expect(hints?.textContent).toContain("false");
 		expect(hints?.textContent).toContain("0");
-		expect(hints?.querySelectorAll("dt")).toHaveLength(5);
+		expect(hints?.textContent).toContain("Prompt ID");
+		expect(hints?.textContent).toContain("prm_0a1b2c");
+		expect(hints?.querySelectorAll("dt")).toHaveLength(6);
 		expect(document.body.querySelector("script")).toBeNull();
 	});
 	it("omits the hints block for older clients", async () => {

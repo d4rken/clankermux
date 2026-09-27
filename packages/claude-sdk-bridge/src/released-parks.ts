@@ -10,7 +10,10 @@ import {
 	realpathSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize } from "node:path";
-import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
+import type {
+	EffortLevel,
+	SessionStoreEntry,
+} from "@anthropic-ai/claude-agent-sdk";
 import type {
 	ProjectAttributionSource,
 	SdkBridgeReleasedPark,
@@ -19,7 +22,7 @@ import type {
 	SdkBridgeTurnFinish,
 } from "@clankermux/types";
 import { type BridgeError, errorSummary } from "./errors";
-import { rewriteSessionId } from "./session-store";
+import { type FileSessionStore, rewriteSessionId } from "./session-store";
 import type { SystemPromptDecision } from "./system-prompt-policy";
 import type { ClientTool } from "./turn-request";
 import type {
@@ -98,16 +101,26 @@ const NAMESPACE = /^[A-Za-z0-9_-]{1,64}$/;
 const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 
 /**
- * Whether a transcript (JSONL bytes) has an entry `resumeAt` whose chain,
- * walking parentUuid back from it, carries every awaited tool_use id. Each
- * line is decoded on its own; an unparsable line fails the check.
+ * The entry `resumeAt` of a transcript (JSONL bytes), when its chain,
+ * walking parentUuid back from it to an entry whose parentUuid is null,
+ * carries every awaited tool_use id; null otherwise. With it, the calls on
+ * that chain, oldest first, a resume has to answer: every awaited one, and
+ * every other one without a result of its own. A result is a call's own
+ * when it descends from the entry holding the call or names that entry as
+ * its `sourceToolAssistantUUID` (Claude Code writes a parallel call's
+ * result as a child of its call, off the chain); one for the same id
+ * elsewhere does not count. Each line is decoded on its own; an unparsable
+ * line or a parent missing from the file fails the check.
  */
-function chainHoldsCalls(
+function resumePoint(
 	bytes: Buffer,
 	resumeAt: string,
 	awaited: readonly string[],
-): boolean {
+): { entry: Record<string, unknown>; unanswered: string[] } | null {
 	const byUuid = new Map<string, { parent: string | null; calls: string[] }>();
+	/** For each tool_use id, the entries holding a result for it. */
+	const results = new Map<string, Array<{ uuid: string; source: unknown }>>();
+	let point: Record<string, unknown> | null = null;
 	let start = 0;
 	while (start < bytes.length) {
 		let end = bytes.indexOf(0x0a, start);
@@ -120,37 +133,123 @@ function chainHoldsCalls(
 					unknown
 				>;
 			} catch {
-				return false;
+				return null;
 			}
 			if (typeof entry.uuid === "string") {
 				const content = (entry.message as { content?: unknown } | undefined)
 					?.content;
+				const blocks = Array.isArray(content)
+					? (content as Array<{
+							type?: unknown;
+							id?: unknown;
+							tool_use_id?: unknown;
+						}>)
+					: [];
+				for (const b of blocks) {
+					if (b?.type !== "tool_result") continue;
+					const id = String(b.tool_use_id);
+					const own = results.get(id) ?? [];
+					own.push({ uuid: entry.uuid, source: entry.sourceToolAssistantUUID });
+					results.set(id, own);
+				}
 				byUuid.set(entry.uuid, {
 					parent:
 						typeof entry.parentUuid === "string" ? entry.parentUuid : null,
 					calls:
-						entry.type === "assistant" && Array.isArray(content)
-							? (content as Array<{ type?: unknown; id?: unknown }>)
+						entry.type === "assistant"
+							? blocks
 									.filter((b) => b?.type === "tool_use")
 									.map((b) => String(b.id))
 							: [],
 				});
+				if (entry.uuid === resumeAt) point = entry;
 			}
 		}
 		start = end + 1;
 	}
-	if (!byUuid.has(resumeAt)) return false;
-	const found = new Set<string>();
+	if (!point) return null;
+	const chain: Array<{ uuid: string; calls: string[] }> = [];
 	const seen = new Set<string>();
 	let at: string | null = resumeAt;
 	while (at && !seen.has(at)) {
 		seen.add(at);
 		const entry = byUuid.get(at);
-		if (!entry) break;
-		for (const id of entry.calls) found.add(id);
+		// A parent the file does not hold: the chain Claude Code loads is not whole.
+		if (!entry) return null;
+		chain.push({ uuid: at, calls: entry.calls });
 		at = entry.parent;
 	}
-	return awaited.every((id) => found.has(id));
+	chain.reverse();
+	const found = chain.flatMap((e) => e.calls);
+	if (!awaited.every((id) => found.includes(id))) return null;
+	const descends = (from: string, ancestor: string): boolean => {
+		const walked = new Set<string>();
+		let up = byUuid.get(from)?.parent ?? null;
+		while (up && !walked.has(up)) {
+			if (up === ancestor) return true;
+			walked.add(up);
+			up = byUuid.get(up)?.parent ?? null;
+		}
+		return false;
+	};
+	const answeredHere = (id: string, holder: string) =>
+		(results.get(id) ?? []).some(
+			(r) => r.source === holder || descends(r.uuid, holder),
+		);
+	return {
+		entry: point,
+		unanswered: chain.flatMap((e) =>
+			e.calls.filter((id) => awaited.includes(id) || !answeredHere(id, e.uuid)),
+		),
+	};
+}
+
+/** The fields {@link answerEntry} takes from its resume point. */
+const ANSWER_ENVELOPE = [
+	"cwd",
+	"userType",
+	"entrypoint",
+	"version",
+	"gitBranch",
+] as const;
+
+/**
+ * A user entry answering `calls`, as a child of the resume point `point`.
+ * On resume Claude Code drops calls that have no result on the chain
+ * before it looks for `resumeSessionAt`, and puts them back only in some
+ * cases (not after a prompt it wrote nothing else for, nor after text in
+ * the same message). With this entry after them, no call is unanswered; it
+ * lies past the resume point, so Claude Code cuts it off before any model
+ * call and the client's results are the prompt. Pinned by "resumes parks
+ * released from resumed sessions and from a call after text" in
+ * real-claude.integration.test.ts.
+ */
+function answerEntry(
+	point: Record<string, unknown>,
+	sessionId: string,
+	calls: readonly string[],
+): SessionStoreEntry {
+	const envelope: Record<string, unknown> = {};
+	for (const key of ANSWER_ENVELOPE)
+		if (point[key] !== undefined) envelope[key] = point[key];
+	return {
+		type: "user",
+		uuid: crypto.randomUUID(),
+		parentUuid: point.uuid,
+		sourceToolAssistantUUID: point.uuid,
+		isSidechain: false,
+		sessionId,
+		timestamp: new Date().toISOString(),
+		...envelope,
+		message: {
+			role: "user",
+			content: calls.map((id) => ({
+				type: "tool_result",
+				tool_use_id: id,
+				content: "",
+			})),
+		},
+	};
 }
 
 function lstatOrNull(path: string) {
@@ -190,14 +289,15 @@ export function transcriptHoldsCalls(
 	awaited: readonly string[],
 ): boolean {
 	const bytes = readFileOrNull(path);
-	return bytes !== null && chainHoldsCalls(bytes, resumeAt, awaited);
+	return bytes !== null && resumePoint(bytes, resumeAt, awaited) !== null;
 }
 
 /**
  * A resume's copy of a released session: read once, the chain checked,
  * then written under the new id with only `"sessionId":"<from>"` rewritten.
- * False, writing nothing, when the file is gone or does not hold the calls.
- * Synchronous: the claimed park is copied with no await in between.
+ * Returns the {@link answerEntry} the resumed query has to load after the
+ * copy; null, writing nothing, when the file is gone or does not hold the
+ * calls. Synchronous: the claimed park is copied with no await in between.
  */
 export function forkVerifiedTranscript(
 	from: string,
@@ -206,11 +306,12 @@ export function forkVerifiedTranscript(
 	toId: string,
 	resumeAt: string,
 	awaited: readonly string[],
-): boolean {
+): SessionStoreEntry | null {
 	const bytes = readFileOrNull(from);
-	if (!bytes || !chainHoldsCalls(bytes, resumeAt, awaited)) return false;
+	const point = bytes ? resumePoint(bytes, resumeAt, awaited) : null;
+	if (!bytes || !point) return null;
 	writePrivateBytes(to, rewriteSessionId(bytes, fromId, toId));
-	return true;
+	return answerEntry(point.entry, toId, point.unanswered);
 }
 
 /**
@@ -426,21 +527,27 @@ export class ReleasedParkStore {
 	}
 
 	/**
-	 * A resume's copy of a park: the path checked again as at recovery, then
-	 * read once, the chain verified and written under the new id.
+	 * A resume's copy of a park in `sessions`: the path checked again as at
+	 * recovery, then read once, the chain verified and written under the new
+	 * id, with the calls' answer queued for the resumed query's load.
 	 */
-	forkForResume(entry: ReleasedEntry, to: string, toId: string): boolean {
-		return (
-			this.acceptsPath(entry.path) &&
-			forkVerifiedTranscript(
-				entry.path,
-				to,
-				entry.park.sessionId,
-				toId,
-				entry.park.resumeAt,
-				entry.park.awaitedToolUseIds,
-			)
+	forkForResume(
+		entry: ReleasedEntry,
+		sessions: FileSessionStore,
+		toId: string,
+	): boolean {
+		if (!this.acceptsPath(entry.path)) return false;
+		const answer = forkVerifiedTranscript(
+			entry.path,
+			sessions.pathOf(toId),
+			entry.park.sessionId,
+			toId,
+			entry.park.resumeAt,
+			entry.park.awaitedToolUseIds,
 		);
+		if (!answer) return false;
+		sessions.appendOnLoad(toId, [answer]);
+		return true;
 	}
 
 	/**

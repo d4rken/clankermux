@@ -155,6 +155,7 @@ describe("gateway hint persistence", () => {
 				gatewayHintPrevToolDurations: "[12,34]",
 				gatewayHintCompaction: "false",
 				gatewayHintContextCompacted: "0",
+				gatewayHintPromptId: "prm_0a1b2c",
 			};
 			await repo.save(requestData(hints));
 			await repo.save(

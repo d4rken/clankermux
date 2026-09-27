@@ -55,6 +55,38 @@ describe("FileSessionStore", () => {
 		expect(readFileSync(outside, "utf8")).toBe("untouched");
 	});
 
+	it("hands entries to every load of the session until it is removed, never to the file", async () => {
+		const dir = temp();
+		const store = new FileSessionStore(dir);
+		const key = { projectKey: "p", sessionId: A };
+		await store.append(key, [{ type: "user", uuid: "u" }] as never);
+		store.appendOnLoad(A, [{ type: "user", uuid: "x" }] as never);
+		expect(
+			await store.load({ ...key, subpath: "subagents/agent-1" }),
+		).toBeNull();
+		const withExtra = [
+			{ type: "user", uuid: "u" },
+			{ type: "user", uuid: "x" },
+		];
+		expect(await store.load(key)).toEqual(withExtra as never);
+		expect(await store.load(key)).toEqual(withExtra as never);
+		expect(readFileSync(join(dir, `${A}.jsonl`), "utf8")).not.toContain('"x"');
+		// Removing the session clears them, and so does the SDK's delete().
+		store.remove(A);
+		await store.append(key, [{ type: "user", uuid: "u2" }] as never);
+		expect(await store.load(key)).toEqual([
+			{ type: "user", uuid: "u2" },
+		] as never);
+		store.appendOnLoad(B, [{ type: "user", uuid: "y" }] as never);
+		await store.delete({ projectKey: "p", sessionId: B });
+		await store.append({ projectKey: "p", sessionId: B }, [
+			{ type: "user", uuid: "b" },
+		] as never);
+		expect(await store.load({ projectKey: "p", sessionId: B })).toEqual([
+			{ type: "user", uuid: "b" },
+		] as never);
+	});
+
 	it("does not fork a session that is missing, so the turn rebuilds", () => {
 		const dir = temp();
 		const store = new FileSessionStore(dir);
