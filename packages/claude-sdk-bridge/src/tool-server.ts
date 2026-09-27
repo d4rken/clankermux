@@ -168,11 +168,17 @@ export function toMcpResult(block: Block): McpToolResult {
 	return { content, isError: block.is_error === true };
 }
 
-/** What Claude Code measures against {@link MAX_TOOL_RESULT_CHARS}. */
-export function toolResultChars(result: McpToolResult): number {
+/**
+ * The characters Claude Code measures against {@link MAX_TOOL_RESULT_CHARS},
+ * or null for a result it never previews: one with an image, which it cannot
+ * store in a file.
+ */
+export function previewedChars(result: McpToolResult): number | null {
 	let chars = 0;
-	for (const block of result.content)
-		if (block.type === "text") chars += block.text.length;
+	for (const block of result.content) {
+		if (block.type === "image") return null;
+		chars += block.text.length;
+	}
 	return chars;
 }
 

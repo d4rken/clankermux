@@ -290,6 +290,39 @@ describe("client tool results Claude Code would replace", () => {
 	});
 });
 
+describe("client tool results that carry an image", () => {
+	it("are delivered whole past the limit: Claude Code never previews a result with an image", async () => {
+		const h = harness();
+		const { t, call, answer } = await parked(h);
+		const text = "x".repeat(MAX_TOOL_RESULT_CHARS + 1);
+		const c = continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: answer([
+				{
+					type: "image",
+					source: {
+						type: "base64",
+						media_type: "image/png",
+						data: "iVBORw0KGgo=",
+					},
+				},
+				{ type: "text", text },
+			]),
+		});
+		const delivered = await call;
+		expect(
+			(delivered.content as Array<{ type: string; text?: string }>).map((b) =>
+				b.type === "text" ? (b.text as string).length : b.type,
+			),
+		).toEqual(["image", text.length]);
+		t.query.emit(
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		expect((await reply(c.response)).status).toBe(200);
+	});
+});
+
 describe("a context Claude Code rewrote", () => {
 	const rewrites: Array<[string, SDKMessage]> = [
 		[

@@ -83,10 +83,10 @@ import {
 	MAX_TOOL_RESULT_CHARS,
 	type McpSdk,
 	ParkedCalls,
+	previewedChars,
 	sideRequestToolResult,
 	ToolNames,
 	toMcpResult,
-	toolResultChars,
 } from "./tool-server";
 import {
 	type Block,
@@ -1751,8 +1751,8 @@ export function createClaudeSdkBridge(
 			// Rebuilt histories and released parks carry results as message
 			// content, which it sends whole.
 			for (const block of parsed.turn.toolResults) {
-				const chars = toolResultChars(toMcpResult(block));
-				if (chars > MAX_TOOL_RESULT_CHARS)
+				const chars = previewedChars(toMcpResult(block));
+				if (chars !== null && chars > MAX_TOOL_RESULT_CHARS)
 					return refuse(
 						bridgeErrors.toolResultTooLarge(
 							String(block.tool_use_id),
