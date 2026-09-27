@@ -37,6 +37,13 @@ export const MCP_SERVER_NAME = "c";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 /** Where Claude Code puts the model's tool_use id on an MCP call. */
 export const TOOL_USE_ID_META = "claudecode/toolUseId";
+/**
+ * The largest result, in characters of its text blocks, Claude Code hands to
+ * the model whole when a tool declares it as `anthropic/maxResultSizeChars`;
+ * past it, and past 50,000 without the declaration, the model gets a preview
+ * naming a file it has no tool to read.
+ */
+export const MAX_TOOL_RESULT_CHARS = 500_000;
 /** Parked calls wait on the client; the bridge's own timeouts end them first. */
 export const TOOL_CALL_TIMEOUT_MS = 24 * 60 * 60_000;
 
@@ -161,6 +168,20 @@ export function toMcpResult(block: Block): McpToolResult {
 	return { content, isError: block.is_error === true };
 }
 
+/**
+ * The characters Claude Code measures against {@link MAX_TOOL_RESULT_CHARS},
+ * or null for a result it never previews: one with an image, which it cannot
+ * store in a file.
+ */
+export function previewedChars(result: McpToolResult): number | null {
+	let chars = 0;
+	for (const block of result.content) {
+		if (block.type === "image") return null;
+		chars += block.text.length;
+	}
+	return chars;
+}
+
 /** What a side request's tool calls get: no client ever runs them. */
 export function sideRequestToolResult(): McpToolResult {
 	return {
@@ -258,7 +279,10 @@ export function createToolServer(
 		},
 		// The SDK's own `alwaysLoad` option sets exactly this per tool: never
 		// defer the client's tools behind tool search.
-		_meta: { "anthropic/alwaysLoad": true },
+		_meta: {
+			"anthropic/alwaysLoad": true,
+			"anthropic/maxResultSizeChars": MAX_TOOL_RESULT_CHARS,
+		},
 	}));
 	server.server.setRequestHandler(mcp.ListToolsRequestSchema, () => ({
 		tools: listed,

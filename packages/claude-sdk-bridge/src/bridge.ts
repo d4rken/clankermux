@@ -3,6 +3,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Logger } from "@clankermux/logger";
 import {
+	SDK_BRIDGE_HISTORY_HEADER,
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeAvailability,
 	SdkBridgeCapacityError,
@@ -19,6 +20,7 @@ import {
 	type SdkBridgeTurnKind,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	sdkBridgeHistoryHeaderValue,
 } from "@clankermux/types";
 import {
 	type AdmissionRejection,
@@ -78,10 +80,13 @@ import {
 import {
 	createToolServer,
 	loadMcpSdk,
+	MAX_TOOL_RESULT_CHARS,
 	type McpSdk,
 	ParkedCalls,
+	previewedChars,
 	sideRequestToolResult,
 	ToolNames,
+	toMcpResult,
 } from "./tool-server";
 import {
 	type Block,
@@ -98,6 +103,7 @@ import {
 	DEFAULT_SDK_BRIDGE_TIMING,
 	type QueryFn,
 	type SdkBridgeLimits,
+	type SdkBridgeTurnHistory,
 } from "./types";
 import {
 	claimGeneration,
@@ -545,6 +551,8 @@ export function createClaudeSdkBridge(
 		meta: SdkBridgeTurnMeta,
 		startedAt: number,
 		error: BridgeError,
+		/** The turn's decision for the header; absent: read from the live query or park. */
+		history?: SdkBridgeTurnHistory | null,
 	): Response {
 		// A released park's turn is written under the lease, like its resume.
 		const recorder = new TurnRecorder(
@@ -561,7 +569,16 @@ export function createClaudeSdkBridge(
 			errorType: error.type,
 			errorMessage: error.message,
 		});
-		return errorResponse(error);
+		return errorResponse(
+			error,
+			historyHeaders(
+				history === undefined
+					? (lives.get(turnId)?.turnHistory ??
+							parks?.get(turnId)?.descriptor.history ??
+							null)
+					: history,
+			),
+		);
 	}
 
 	async function readBody(
@@ -832,6 +849,20 @@ export function createClaudeSdkBridge(
 		return null;
 	}
 
+	/** {@link SDK_BRIDGE_HISTORY_HEADER}, when the turn's decision is known. */
+	function historyHeaders(
+		history: SdkBridgeTurnHistory | null,
+	): Record<string, string> {
+		return history
+			? {
+					[SDK_BRIDGE_HISTORY_HEADER]: sdkBridgeHistoryHeaderValue(
+						history.mode,
+						history.reason,
+					),
+				}
+			: {};
+	}
+
 	function newLeg(
 		id: string,
 		kind: Leg["kind"],
@@ -839,6 +870,7 @@ export function createClaudeSdkBridge(
 		signal: AbortSignal,
 		bumpIdleTimeout: (() => void) | undefined,
 		onGone: (leg: Leg) => void,
+		history: SdkBridgeTurnHistory | null,
 	): Leg {
 		const leg: Leg = {
 			id,
@@ -853,6 +885,7 @@ export function createClaudeSdkBridge(
 			signal,
 			onClientGone: () => onGone(leg),
 			bumpIdleTimeout,
+			headers: historyHeaders(history),
 		});
 		return leg;
 	}
@@ -1013,6 +1046,7 @@ export function createClaudeSdkBridge(
 			accountId: plan.preferredAccountId,
 			requestedModel: meta.model,
 			historyMode: input.historyMode,
+			turnHistory: input.descriptor.history ?? null,
 			query,
 			prompt,
 			parked,
@@ -1097,6 +1131,7 @@ export function createClaudeSdkBridge(
 		turn: TurnBody,
 		systemPrompt: SystemPromptDecision,
 		startedAt: number,
+		history: SdkBridgeTurnHistory,
 	): ResumeDescriptor {
 		return {
 			v: 1,
@@ -1110,6 +1145,7 @@ export function createClaudeSdkBridge(
 			project: start.meta.project,
 			projectAttributionSource: start.meta.projectAttributionSource,
 			turnStartedAt: startedAt,
+			history,
 		};
 	}
 
@@ -1135,6 +1171,7 @@ export function createClaudeSdkBridge(
 			start.signal,
 			start.bumpIdleTimeout,
 			(l) => live.onClientGone(l),
+			{ mode: row.historyMode, reason: row.rebuildReason ?? null },
 		);
 		live.start(leg);
 		return leg.response.response;
@@ -1451,7 +1488,10 @@ export function createClaudeSdkBridge(
 				sideRequest: false,
 				recorder,
 				startedAt,
-				descriptor: describe(input, turn, systemPrompt, startedAt),
+				descriptor: describe(input, turn, systemPrompt, startedAt, {
+					mode: history.mode,
+					reason: history.reason,
+				}),
 			});
 			// The query owns the claim from here.
 			claimReleased = true;
@@ -1597,6 +1637,7 @@ export function createClaudeSdkBridge(
 					turn,
 					input.systemPrompt,
 					input.startedAt,
+					{ mode: "resume", reason: null },
 				),
 			});
 		} catch (error) {
@@ -1648,8 +1689,10 @@ export function createClaudeSdkBridge(
 	}): Promise<Response> {
 		const { meta } = input;
 		const startedAt = now();
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(input.turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history?: SdkBridgeTurnHistory | null,
+		) => refuseContinuation(input.turnId, meta, startedAt, error, history);
 		try {
 			if (shuttingDown) return refuse(bridgeErrors.shutdown());
 			await ready;
@@ -1669,7 +1712,7 @@ export function createClaudeSdkBridge(
 			if (!live || live.closed || !live.awaitingClient)
 				return refuse(bridgeErrors.deadTurn());
 			if (live.ownerApiKeyId !== meta.apiKeyId)
-				return refuse(bridgeErrors.otherOwner());
+				return refuse(bridgeErrors.otherOwner(), null);
 			const body = await readBody(input.request);
 			if ("error" in body) return refuse(body.error);
 			const parsed = parseTurnRequest(
@@ -1704,12 +1747,28 @@ export function createClaudeSdkBridge(
 			// Parked state stays as it is unless every awaited call is answered.
 			if (!live.answersAwaiting(toolResultIds(parsed.turn)))
 				return refuse(bridgeErrors.staleToolResults());
+			// Claude Code would hand the model a preview of a larger result.
+			// Rebuilt histories and released parks carry results as message
+			// content, which it sends whole.
+			for (const block of parsed.turn.toolResults) {
+				const chars = previewedChars(toMcpResult(block));
+				if (chars !== null && chars > MAX_TOOL_RESULT_CHARS)
+					return refuse(
+						bridgeErrors.toolResultTooLarge(
+							String(block.tool_use_id),
+							chars,
+							MAX_TOOL_RESULT_CHARS,
+						),
+					);
+			}
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.
 			if (meta.model !== live.requestedModel) {
+				const history = live.turnHistory;
 				live.teardown("superseded", bridgeErrors.superseded());
 				return refuse(
 					bridgeErrors.modelChanged(live.requestedModel, meta.model),
+					history,
 				);
 			}
 			counters.continuations++;
@@ -1720,6 +1779,7 @@ export function createClaudeSdkBridge(
 				input.signal,
 				input.bumpIdleTimeout,
 				(l) => live.onClientGone(l),
+				live.turnHistory,
 			);
 			live.continueWith(
 				leg,
@@ -1804,10 +1864,12 @@ export function createClaudeSdkBridge(
 		startedAt: number,
 	): Promise<Response> {
 		const { meta } = input;
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(entry.park.turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history = entry.descriptor.history ?? null,
+		) => refuseContinuation(entry.park.turnId, meta, startedAt, error, history);
 		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
-			return refuse(bridgeErrors.otherOwner());
+			return refuse(bridgeErrors.otherOwner(), null);
 		if (entry.state === "released" && entry.park.expiresAt <= now()) {
 			void expirePark(entry);
 			return refuse(bridgeErrors.deadTurn());
@@ -1849,11 +1911,13 @@ export function createClaudeSdkBridge(
 	): Promise<Response> {
 		const { meta } = input;
 		const turnId = entry.park.turnId;
-		const refuse = (error: BridgeError) =>
-			refuseContinuation(turnId, meta, startedAt, error);
+		const refuse = (
+			error: BridgeError,
+			history = entry.descriptor.history ?? null,
+		) => refuseContinuation(turnId, meta, startedAt, error, history);
 		const store = parks as ReleasedParkStore;
 		if (entry.park.ownerApiKeyId !== meta.apiKeyId)
-			return refuse(bridgeErrors.otherOwner());
+			return refuse(bridgeErrors.otherOwner(), null);
 		if (shuttingDown) return refuse(bridgeErrors.shutdown());
 		if (
 			!answersExactly(
@@ -2032,6 +2096,7 @@ export function createClaudeSdkBridge(
 			input.signal,
 			input.bumpIdleTimeout,
 			(l) => live.onClientGone(l),
+			live.turnHistory,
 		);
 		live.start(leg);
 		return leg.response.response;

@@ -285,6 +285,29 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	toolResultTooLarge(
+		toolUseId: string,
+		chars: number,
+		max: number,
+	): BridgeError {
+		const n = (x: number) => x.toLocaleString("en-US");
+		return {
+			status: 400,
+			type: "invalid_request_error",
+			code: "sdk_bridge_tool_result_too_large",
+			message: `The result for tool call ${toolUseId} is ${n(chars)} characters; Claude Code passes at most ${n(max)} to the model whole`,
+			retryAfter: null,
+		};
+	},
+	contextRewritten(event: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "sdk_bridge_context_rewritten",
+			message: `Claude Code rewrote the conversation's context (${event}); the model no longer sees it as the client sent it`,
+			retryAfter: null,
+		};
+	},
 	tooDeep(): BridgeError {
 		return {
 			status: 400,
@@ -428,8 +451,14 @@ export function errorBody(error: BridgeError) {
 	};
 }
 
-export function errorResponse(error: BridgeError): Response {
-	const headers = new Headers({ "content-type": "application/json" });
+export function errorResponse(
+	error: BridgeError,
+	extraHeaders: Record<string, string> = {},
+): Response {
+	const headers = new Headers({
+		...extraHeaders,
+		"content-type": "application/json",
+	});
 	if (error.retryAfter) headers.set("retry-after", error.retryAfter);
 	return new Response(JSON.stringify(errorBody(error)), {
 		status: error.status,

@@ -92,6 +92,8 @@ export interface LegResponseOptions {
 	/** The client went away (disconnect or abort) before the reply ended. */
 	onClientGone: () => void;
 	bumpIdleTimeout?: () => void;
+	/** On the leg's response, whichever form it takes. */
+	headers?: Record<string, string>;
 }
 
 /**
@@ -155,7 +157,10 @@ export class LegResponse {
 		this.cleanup();
 		this.state = "done";
 		// Whoever awaits the response must not wait forever for a client that left.
-		if (holding) this.resolveResponse(errorResponse(bridgeErrors.clientGone()));
+		if (holding)
+			this.resolveResponse(
+				errorResponse(bridgeErrors.clientGone(), this.opts.headers),
+			);
 		else
 			try {
 				this.controller?.close();
@@ -185,6 +190,7 @@ export class LegResponse {
 			new Response(stream, {
 				status: 200,
 				headers: {
+					...this.opts.headers,
 					"content-type": "text/event-stream",
 					"cache-control": "no-cache",
 				},
@@ -221,7 +227,9 @@ export class LegResponse {
 		if (this.reducer) {
 			this.state = "done";
 			this.cleanup();
-			this.resolveResponse(Response.json(this.reducer.result()));
+			this.resolveResponse(
+				Response.json(this.reducer.result(), { headers: this.opts.headers }),
+			);
 			return;
 		}
 		if (this.state === "holding") this.commit();
@@ -238,7 +246,7 @@ export class LegResponse {
 		if (this.state === "holding") {
 			this.state = "done";
 			this.cleanup();
-			this.resolveResponse(errorResponse(error));
+			this.resolveResponse(errorResponse(error, this.opts.headers));
 			return;
 		}
 		this.write(sseFrame("error", errorBody(error)));

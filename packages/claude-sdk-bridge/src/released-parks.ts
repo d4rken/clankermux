@@ -25,7 +25,11 @@ import { type BridgeError, errorSummary } from "./errors";
 import { type FileSessionStore, rewriteSessionId } from "./session-store";
 import type { SystemPromptDecision } from "./system-prompt-policy";
 import type { ClientTool } from "./turn-request";
-import type { BridgeLog, SdkBridgeParkRepo } from "./types";
+import type {
+	BridgeLog,
+	SdkBridgeParkRepo,
+	SdkBridgeTurnHistory,
+} from "./types";
 import {
 	ensurePrivateDir,
 	ownerRunning,
@@ -51,6 +55,8 @@ export interface ResumeDescriptor {
 	project: string | null;
 	projectAttributionSource: ProjectAttributionSource | null;
 	turnStartedAt: number;
+	/** The turn's own history decision; absent in parks stored before it was kept. */
+	history?: SdkBridgeTurnHistory;
 }
 
 /** A transition the database has not confirmed yet, retried until it does. */

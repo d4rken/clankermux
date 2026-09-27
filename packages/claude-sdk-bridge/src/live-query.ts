@@ -32,7 +32,19 @@ import {
 	toMcpResult,
 } from "./tool-server";
 import type { Block, ClientMessage } from "./turn-request";
-import type { BridgeLog, BridgeQuery, SdkBridgeTiming } from "./types";
+import type {
+	BridgeLog,
+	BridgeQuery,
+	SdkBridgeTiming,
+	SdkBridgeTurnHistory,
+} from "./types";
+
+/** What Claude Code reports when it has rewritten the context it sends. */
+const CONTEXT_REWRITES: ReadonlySet<string> = new Set([
+	"compact_boundary",
+	"microcompact_boundary",
+	"hint_clears",
+]);
 
 export type TeardownReason =
 	| "client_abort"
@@ -121,6 +133,12 @@ export interface LiveQueryInit {
 	/** The model the client asked for, as it named it. */
 	requestedModel: string;
 	historyMode: SdkBridgeHistoryMode;
+	/**
+	 * The history decision the turn's row records, which every leg's response
+	 * reports. A released park's resume runs as `resume` under the decision
+	 * its turn started with; null when that is unknown.
+	 */
+	turnHistory: SdkBridgeTurnHistory | null;
 	query: BridgeQuery;
 	prompt: PromptStream;
 	parked: ParkedCalls;
@@ -240,14 +258,26 @@ export class LiveQuery {
 	private resultOk = false;
 	/** A side request's reply is settled; nothing Claude Code does after counts. */
 	private sideSettled = false;
+	/**
+	 * The client received a successful reply that ends the turn: a turn's
+	 * last leg ended well, or a side request's reply settled. Only such a
+	 * turn can be settled as succeeded after the fact.
+	 */
+	private deliveredOk = false;
 	private registered = false;
 	private pendingTeardown: {
 		reason: TeardownReason;
 		error: BridgeError;
 	} | null = null;
 	private resolveDone!: (ok: boolean) => void;
-	/** Settles once the query is over: true when its session may be resumed. */
+	/** Settles once the query is over: true when the turn succeeded. */
 	readonly done: Promise<boolean>;
+	private resolveResumable!: (ok: boolean) => void;
+	/**
+	 * Settles with `done`: true when the conversation's next turn may resume
+	 * the session, which a succeeded turn's session can still not be.
+	 */
+	readonly resumable: Promise<boolean>;
 	private spawnMs: number | null = null;
 	private firstEventMs: number | null = null;
 	private stopReason: string | null = null;
@@ -265,6 +295,18 @@ export class LiveQuery {
 		cacheCreation: null,
 	};
 	private finalError: BridgeError | null = null;
+	/**
+	 * A context rewrite Claude Code reported: during a release it fails the
+	 * turn instead of the park being stored; after the client's reply it only
+	 * keeps the session from being resumed.
+	 */
+	private contextRewrite: BridgeError | null = null;
+	/**
+	 * Set when the turn succeeded with the client's reply delivered, but
+	 * Claude Code's session no longer holds only that reply: the turn row
+	 * records why, and the session is never resumed.
+	 */
+	private settledNote: string | null = null;
 	private toolUsesThisLeg = 0;
 	/** Set while `pump` runs, so the rebuild counter can tell. */
 	sawFirstEvent = false;
@@ -284,6 +326,14 @@ export class LiveQuery {
 			this.resolveDone = (ok) => {
 				if (settled) return;
 				settled = true;
+				resolve(ok);
+			};
+		});
+		let resumableSettled = false;
+		this.resumable = new Promise((resolve) => {
+			this.resolveResumable = (ok) => {
+				if (resumableSettled) return;
+				resumableSettled = true;
 				resolve(ok);
 			};
 		});
@@ -357,6 +407,10 @@ export class LiveQuery {
 
 	get historyMode(): SdkBridgeHistoryMode {
 		return this.init.historyMode;
+	}
+
+	get turnHistory(): SdkBridgeTurnHistory | null {
+		return this.init.turnHistory;
 	}
 
 	/** Start the query with its first leg's response already created. */
@@ -574,6 +628,7 @@ export class LiveQuery {
 		composer.finish(stopReason);
 		this.stopReason = finalReason;
 		leg.response.end();
+		this.deliveredOk = true;
 		this.finishLeg(leg, {
 			httpStatus: 200,
 			stopReason: finalReason,
@@ -605,6 +660,15 @@ export class LiveQuery {
 		}
 		this.state = "finishing";
 		this.register([...this.clientMessages, { role: "assistant", content }]);
+		// Calls Claude Code started for a reply that did not end on them (a
+		// refusal after a tool_use) are never answered by the client: without
+		// an answer the process waits out the parked timeout holding its slot,
+		// and answered as aborted they would put a call and a result the
+		// client never had into the session.
+		if (toolUseIds.length)
+			this.settleDelivered(
+				`The reply ended (${finalReason}) after Claude Code started tool calls the client will not answer; its session will not be resumed`,
+			);
 	}
 
 	private armParkedTimeout(): void {
@@ -687,11 +751,11 @@ export class LiveQuery {
 		// so a query released as it parks (at shutdown) may not have them yet.
 		let resumeAt = this.resumePoint();
 		const envelopesBy = Date.now() + ENVELOPE_WAIT_MS;
-		while (!resumeAt && Date.now() < envelopesBy) {
+		while (!resumeAt && !this.contextRewrite && Date.now() < envelopesBy) {
 			await Bun.sleep(20);
 			resumeAt = this.resumePoint();
 		}
-		if (!resumeAt) {
+		if (!resumeAt && !this.contextRewrite) {
 			// Still whole: it stays parked, or the caller tears it down.
 			this.state = "awaiting_client";
 			// Unless Claude Code died meanwhile: then the query ends as the
@@ -726,6 +790,13 @@ export class LiveQuery {
 				reason: "Claude Code did not exit",
 				stopped: true,
 			};
+		// Its session no longer holds what the client sent; failRelease names why.
+		if (this.contextRewrite || !resumeAt)
+			return {
+				ok: false,
+				reason: "Claude Code rewrote the conversation's context",
+				stopped: true,
+			};
 		return {
 			ok: true,
 			sessionId: this.sessionId,
@@ -750,6 +821,7 @@ export class LiveQuery {
 		this.released = true;
 		this.state = "closed";
 		this.resolveDone(false);
+		this.resolveResumable(false);
 		this.init.claim?.release();
 		this.init.discardSession(this.sessionId);
 		this.discardClaudeCodeTranscripts();
@@ -759,7 +831,7 @@ export class LiveQuery {
 	/** The release could not be completed: the turn ends here. */
 	failRelease(error: BridgeError): void {
 		if (this.state !== "releasing") return;
-		this.finalError = error;
+		this.finalError = this.contextRewrite ?? error;
 		this.close("failed", false);
 	}
 
@@ -788,7 +860,7 @@ export class LiveQuery {
 				digests,
 				accountId: this.init.accountId,
 			},
-			this.done,
+			this.resumable,
 		);
 	}
 
@@ -829,7 +901,10 @@ export class LiveQuery {
 				.query as AsyncIterable<SDKMessage>) {
 				if (this.state === "closed") break;
 				// A query being stopped for release is left to exit on its signal.
-				if (this.stopping) continue;
+				if (this.stopping) {
+					this.noteRewrite(message);
+					continue;
+				}
 				this.armIdle();
 				this.onMessage(message);
 				if (this.pendingTeardown) {
@@ -861,7 +936,39 @@ export class LiveQuery {
 		return this.init.prompt;
 	}
 
+	/** The error for a context rewrite `message` reports, logged and remembered. */
+	private noteRewrite(message: SDKMessage): BridgeError | null {
+		const event =
+			message.type === "system"
+				? (message as { subtype?: string }).subtype
+				: (message as { type: string }).type;
+		if (!event || !CONTEXT_REWRITES.has(event)) return null;
+		const error = bridgeErrors.contextRewritten(event);
+		this.contextRewrite ??= error;
+		this.init.log.error(
+			`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${event})`,
+		);
+		return error;
+	}
+
 	private onMessage(message: SDKMessage): void {
+		const rewrite = this.noteRewrite(message);
+		if (rewrite) {
+			// A release under way fails the turn itself.
+			if (this.state === "releasing") return;
+			// The client already has its reply: a side request settled, or a
+			// turn finishing with no leg open. A successful reply stands; an
+			// error reply keeps the turn's failed outcome.
+			if (this.sideSettled || (this.state === "finishing" && !this.leg)) {
+				if (this.deliveredOk)
+					this.settleDelivered(
+						`${rewrite.message} after the reply; its session will not be resumed`,
+					);
+				return;
+			}
+			this.pendingTeardown = { reason: "error", error: rewrite };
+			return;
+		}
 		switch (message.type) {
 			case "system":
 				if (message.subtype === "init" && this.spawnMs === null)
@@ -949,7 +1056,9 @@ export class LiveQuery {
 			return;
 		}
 		const failed = message.is_error || message.subtype !== "success";
-		if (!failed) {
+		// A refusal reached the client as its reply; the error result that
+		// follows it is Claude Code declining to go on, not a failed turn.
+		if (!failed || (!this.leg && this.stopReason === "refusal")) {
 			this.resultOk = true;
 			if (this.leg) this.endLeg(this.init.composer.lastStopReason);
 			return;
@@ -989,6 +1098,7 @@ export class LiveQuery {
 
 	private failTurn(error: BridgeError): void {
 		this.finalError = error;
+		this.deliveredOk = false;
 		const leg = this.leg;
 		if (!leg) return;
 		const committed = leg.response.committed;
@@ -1074,6 +1184,29 @@ export class LiveQuery {
 		this.close(this.resultOk ? "completed" : "failed", this.resultOk);
 	}
 
+	/**
+	 * End a turn whose reply the client already has, as succeeded, with
+	 * `note` on its row and its session kept from the conversation. Whatever
+	 * Claude Code reports afterwards (an error result, an exit without one)
+	 * no longer reaches the turn: the query is stopped as a teardown stops
+	 * it, token first.
+	 */
+	private settleDelivered(note: string): void {
+		if (this.state === "closed" || !this.deliveredOk) return;
+		this.settledNote = note;
+		this.init.registration.revoke();
+		this.init.parked.close("settled");
+		this.prompt().end();
+		const query = this.init.query;
+		void query.interrupt().catch(() => {});
+		try {
+			query.close();
+		} catch {}
+		this.samplePeakRss();
+		this.killProcesses();
+		this.close("completed", true);
+	}
+
 	/** Tear the query down. The token goes first, so an orphaned child's calls fail. */
 	teardown(reason: TeardownReason, error: BridgeError): void {
 		// A release in progress ends through completeRelease or failRelease.
@@ -1116,6 +1249,8 @@ export class LiveQuery {
 		this.init.parked.close(status);
 		this.prompt().end();
 		this.resolveDone(ok);
+		// A settled turn's session holds more than the client's reply.
+		this.resolveResumable(ok && this.settledNote === null);
 		// A registered session belongs to its conversation, which discards it
 		// once a later one replaces it or it fails to settle.
 		if (!this.registered) {
@@ -1125,12 +1260,14 @@ export class LiveQuery {
 		this.discardClaudeCodeTranscripts();
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
+		// Recorded, not raised: why a completed turn's session goes.
+		const message = error?.message ?? (ok ? this.settledNote : null);
 		const finish: SdkBridgeTurnFinish = {
 			finishedAt: now,
 			status,
 			httpStatus: error ? error.status : 200,
 			errorType: error?.type ?? null,
-			errorMessage: error ? sanitizeMessage(error.message) : null,
+			errorMessage: message ? sanitizeMessage(message) : null,
 			stopReason: this.stopReason,
 			ccSessionId: this.sessionId,
 			spawnMs: this.spawnMs,

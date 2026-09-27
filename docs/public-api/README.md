@@ -221,6 +221,38 @@ such as `/wire/anthropic` from a client other than Claude Code, answers
 `400 model_suffix_requires_claude_code` before anything is sent, and that
 client's Anthropic-format catalogue publishes no metadata for it.
 
+## SDK bridge history header
+
+A Responses or Chat Completions request on `/wire/openai` that an official
+Anthropic account serves through the SDK bridge carries
+`x-clankermux-sdk-bridge-history` on its response, streamed or JSON, success
+or error, once the turn's history is decided. It says how the conversation
+reached Claude Code, and names the rebuild reason when there is one:
+
+| Value | Meaning |
+| --- | --- |
+| `fresh` | The request carried no earlier turns. |
+| `resume` | Claude Code resumed its own session of this conversation. |
+| `resume; reason=account_change` | The same, on another account than the previous turn. |
+| `rebuild_transcript; reason=<reason>` | The session was rebuilt from the request's history, message for message. |
+| `rebuild_flattened; reason=<reason>` | The history was rebuilt as one framed text prompt. |
+
+Reasons are `edit` (an earlier message differs), `compaction` (the history
+is shorter than the stored one), `continuation`, `account_change` (on a
+resume, or on a rebuild when the stored session could not be copied),
+`dead_continuation` (tool results for a Claude Code query that no longer
+exists) and `unknown` (no stored session, for example without a session
+header). A request answering
+a turn's tool calls reports the turn's decision. A request refused before
+its turn starts carries no header.
+
+A tool result that holds more than 500,000 characters of text and no image
+may be refused with `400 invalid_request_error`, code
+`sdk_bridge_tool_result_too_large`; the turn then keeps waiting for its
+results. A result at or under that size, or one that carries an image, is
+never rejected with `sdk_bridge_tool_result_too_large`; the request-body and
+context-window limits still apply to it.
+
 ## Wire and transport rules
 
 Instants are ISO/RFC3339 strings; durations include units in field names. Null

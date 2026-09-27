@@ -5,6 +5,7 @@
 //   ... whose first result text starts "AGAIN" -> one tool_use for the *read tool
 //   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
+//   last user text contains "FANOUT<n>"     -> n tool_use blocks
 //   last user text contains "STRAY"         -> tool_use for the *read tool, then one for a tool not offered
 //   last user text contains "UNMAPPED"      -> tool_use for an unoffered mcp__c__ tool, then the *read tool
 //   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
@@ -13,7 +14,17 @@
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   last user text contains "THINK"         -> a signed thinking block before the rest
+//   a user text contains "LOOP<n>"          -> one tool_use per call until the
+//                                              conversation holds n tool_results
+//   last user text asks for a "detailed summary" (Claude Code's compaction
+//   prompt)                                 -> text "<summary>MOCK-SUMMARY</summary>"
 //   a tools[].name outside ^[a-zA-Z0-9_-]{1,64}$ -> the API's 400
+//
+// A rule (`addRule`) keyed on a marker string in the body can fail a call or
+// reshape its reply (usage, stop reason, reported model), for the calls of
+// one conversation only.
+//
+// /v1/messages/count_tokens answers bytes / 4.
 //
 // Usage reports prompt caching the way the API does it: a cache_control
 // breakpoint writes the prefix up to it (tools, then system, then messages),
@@ -39,9 +50,38 @@ export interface MockRequest {
 	abortedAfterMs?: number;
 }
 
+/** What a rule changes about a scripted 200 reply. */
+export interface ReplyShape {
+	usage?: Partial<{
+		input_tokens: number;
+		output_tokens: number;
+		cache_read_input_tokens: number;
+		cache_creation_input_tokens: number;
+	}>;
+	stopReason?: string;
+	stopDetails?: unknown;
+	/** The model message_start reports instead of the requested one. */
+	model?: string;
+}
+
+export interface MockRule {
+	/** Applies only to calls whose raw body contains this string. */
+	marker: string;
+	/**
+	 * Which of the marker's calls it applies to; `index` counts the earlier
+	 * calls carrying the marker. Absent: every one.
+	 */
+	when?: (call: { index: number; body: unknown }) => boolean;
+	/** How many calls it applies to at most; absent: unlimited. */
+	times?: number;
+	fail?: { status: number; body: unknown; headers?: Record<string, string> };
+	shape?: ReplyShape;
+}
+
 export interface MockUpstream {
 	url: string;
 	requests: MockRequest[];
+	addRule(rule: MockRule): void;
 	/**
 	 * The next `times` /v1/messages calls answer with this status and body;
 	 * with `match`, only calls whose authorization header contains it.
@@ -148,9 +188,17 @@ function createPromptCache() {
 	};
 }
 
+function userTexts(messages: Msg[]): string {
+	return messages
+		.filter((m) => m.role === "user")
+		.map((m) => textOf(blocksOf(m)))
+		.join("\n");
+}
+
 function script(
 	body: ScriptBody,
 	cache: { read: number; creation: number },
+	shape: ReplyShape = {},
 ): string {
 	const user = blocksOf(lastUser(body.messages));
 	const toolResults = user.filter((b) => b.type === "tool_result");
@@ -162,7 +210,20 @@ function script(
 
 	const content: Block[] = [];
 	const flattenedResult = /\[tool result id=[^\]]*\]\n([^\n]*)/.exec(text);
-	if (toolResults.length > 0) {
+	const loop = /LOOP(\d+)/.exec(userTexts(body.messages));
+	const resultsSoFar = body.messages
+		.flatMap((m) => blocksOf(m))
+		.filter((b) => b.type === "tool_result").length;
+	if (/create a detailed summary/.test(JSON.stringify(user))) {
+		content.push({ type: "text", text: "<summary>MOCK-SUMMARY</summary>" });
+	} else if (readTool && loop && resultsSoFar < Number(loop[1])) {
+		content.push({
+			type: "tool_use",
+			id: `toolu_mock_${++toolSeq}`,
+			name: readTool,
+			input: { path: `loop-${resultsSoFar}.txt` },
+		});
+	} else if (toolResults.length > 0) {
 		const first = toolResults[0] as Block;
 		const inner = Array.isArray(first.content)
 			? textOf(first.content as Block[])
@@ -177,6 +238,15 @@ function script(
 		else content.push({ type: "text", text: `done: ${inner}` });
 	} else if (flattenedResult) {
 		content.push({ type: "text", text: `done: ${flattenedResult[1]}` });
+	} else if (readTool && /FANOUT(\d+)/.test(text)) {
+		const n = Number(/FANOUT(\d+)/.exec(text)?.[1]);
+		for (let i = 0; i < n; i++)
+			content.push({
+				type: "tool_use",
+				id: `toolu_mock_${++toolSeq}`,
+				name: readTool,
+				input: { path: `fan-${i}.txt` },
+			});
 	} else if (readTool && /STRAY|UNMAPPED/.test(text)) {
 		const stray = /UNMAPPED/.test(text)
 			? "mcp__c__unmapped_tool"
@@ -227,16 +297,19 @@ function script(
 			signature: `sig_mock_${toolSeq}`,
 		});
 
-	const stopReason = content.some((b) => b.type === "tool_use")
-		? "tool_use"
-		: /MAXTOK/.test(text)
-			? "max_tokens"
-			: "end_turn";
+	const stopReason =
+		shape.stopReason ??
+		(content.some((b) => b.type === "tool_use")
+			? "tool_use"
+			: /MAXTOK/.test(text)
+				? "max_tokens"
+				: "end_turn");
 	const usage = {
 		input_tokens: 100,
 		output_tokens: 20,
 		cache_read_input_tokens: cache.read,
 		cache_creation_input_tokens: cache.creation,
+		...shape.usage,
 	};
 	let out = sse("message_start", {
 		type: "message_start",
@@ -244,7 +317,7 @@ function script(
 			id: `msg_mock_${Date.now()}_${toolSeq}`,
 			type: "message",
 			role: "assistant",
-			model: body.model,
+			model: shape.model ?? body.model,
 			content: [],
 			stop_reason: null,
 			stop_sequence: null,
@@ -303,8 +376,14 @@ function script(
 	});
 	out += sse("message_delta", {
 		type: "message_delta",
-		delta: { stop_reason: stopReason, stop_sequence: null },
-		usage: { output_tokens: 20 },
+		delta: {
+			stop_reason: stopReason,
+			stop_sequence: null,
+			...(shape.stopDetails !== undefined
+				? { stop_details: shape.stopDetails }
+				: {}),
+		},
+		usage: { output_tokens: usage.output_tokens },
 	});
 	out += sse("message_stop", { type: "message_stop" });
 	return out;
@@ -339,7 +418,31 @@ export function startMockUpstream(): MockUpstream {
 		match: string | null;
 	};
 	let failures: Failure[] = [];
+	const rules: Array<MockRule & { used: number }> = [];
+	const markerCalls = new Map<string, number>();
 	const promptCache = createPromptCache();
+
+	/** The rules that apply to this call, each counted once it applies. */
+	function rulesFor(raw: string, body: unknown): MockRule[] {
+		const markers = new Set(
+			rules.filter((r) => raw.includes(r.marker)).map((r) => r.marker),
+		);
+		const index = new Map<string, number>();
+		for (const marker of markers) {
+			index.set(marker, markerCalls.get(marker) ?? 0);
+			markerCalls.set(marker, (markerCalls.get(marker) ?? 0) + 1);
+		}
+		const applied: MockRule[] = [];
+		for (const rule of rules) {
+			if (!markers.has(rule.marker)) continue;
+			if (rule.times !== undefined && rule.used >= rule.times) continue;
+			if (rule.when && !rule.when({ index: index.get(rule.marker) ?? 0, body }))
+				continue;
+			rule.used++;
+			applied.push(rule);
+		}
+		return applied;
+	}
 
 	async function handle(req: Request): Promise<Response> {
 		const url = new URL(req.url);
@@ -363,6 +466,19 @@ export function startMockUpstream(): MockUpstream {
 				record.status = 400;
 				return Response.json(invalid, { status: 400 });
 			}
+			const applied = rulesFor(raw, body);
+			const ruleFailure = applied.find((r) => r.fail)?.fail;
+			if (ruleFailure) {
+				record.status = ruleFailure.status;
+				return Response.json(ruleFailure.body, {
+					status: ruleFailure.status,
+					headers: ruleFailure.headers ?? {},
+				});
+			}
+			const shape = Object.assign(
+				{},
+				...applied.flatMap((r) => (r.shape ? [r.shape] : [])),
+			) as ReplyShape;
 			const auth = req.headers.get("authorization") ?? "";
 			const f = failures.find(
 				(x) => x.times > 0 && (x.match === null || auth.includes(x.match)),
@@ -401,8 +517,15 @@ export function startMockUpstream(): MockUpstream {
 				);
 			}
 			record.cache = promptCache(b);
-			return new Response(script(b, record.cache), {
+			return new Response(script(b, record.cache, shape), {
 				headers: { "content-type": "text/event-stream" },
+			});
+		}
+		if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
+			// Tokens are bytes / 4, as for prompt caching above.
+			record.status = 200;
+			return Response.json({
+				input_tokens: Math.ceil(Buffer.byteLength(raw) / 4),
 			});
 		}
 		record.status = 404;
@@ -420,6 +543,9 @@ export function startMockUpstream(): MockUpstream {
 	return {
 		url: `http://127.0.0.1:${server.port}`,
 		requests,
+		addRule(rule) {
+			rules.push({ ...rule, used: 0 });
+		},
 		failNext(status, body, headers = {}, times = 1, match) {
 			if (times > 0)
 				failures.push({ status, body, headers, times, match: match ?? null });

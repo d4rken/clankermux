@@ -1,5 +1,9 @@
 import type { RequestMeta } from "./api";
 import type { ProjectAttributionSource } from "./request";
+import type {
+	SdkBridgeHistoryMode,
+	SdkBridgeRebuildReason,
+} from "./sdk-bridge";
 
 // The seam between the proxy and the Claude Agent SDK bridge. The proxy owns
 // routing and hands the bridge a frozen plan; the bridge runs Claude Code, whose
@@ -159,6 +163,21 @@ export interface SdkBridgeTurnMeta {
 	readonly piPromptVersion: string | null;
 	/** {@link sdkBridgeSideRequestMode}: null when absent, "" when blank. */
 	readonly sideRequest: string | null;
+}
+
+/**
+ * On every response of a bridged turn once its history is decided: how the
+ * conversation reached Claude Code (`SdkBridgeHistoryMode`), with the rebuild
+ * reason when there is one. `resume`, `resume; reason=account_change`,
+ * `rebuild_transcript; reason=edit`.
+ */
+export const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
+
+export function sdkBridgeHistoryHeaderValue(
+	mode: SdkBridgeHistoryMode,
+	reason: SdkBridgeRebuildReason | null,
+): string {
+	return reason ? `${mode}; reason=${reason}` : mode;
 }
 
 /** The pi prompt-layout version a pi client declares, e.g. `0.87`. */

@@ -45,6 +45,7 @@ import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
 } from "@clankermux/proxy";
+import { SDK_BRIDGE_HISTORY_HEADER } from "@clankermux/types";
 import { isClientApiPath } from "./client-api-mount";
 import { terminalForRequestError } from "./request-error-terminal";
 import {
@@ -234,8 +235,13 @@ export async function routeRequest(
 			// The handle for `/client/v1/requests/{id}`: this rebuild is the last
 			// thing a chat client's error passes through, and a client that has to
 			// reconcile an error needs the id at least as much as a success does.
-			const requestId = response.headers.get(CLIENT_REQUEST_ID_HEADER);
-			if (requestId) headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
+			for (const name of [
+				CLIENT_REQUEST_ID_HEADER,
+				SDK_BRIDGE_HISTORY_HEADER,
+			]) {
+				const value = response.headers.get(name);
+				if (value) headers.set(name, value);
+			}
 			return new Response(
 				JSON.stringify(
 					errorEnvelope(

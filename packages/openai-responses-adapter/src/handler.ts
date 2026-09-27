@@ -198,14 +198,21 @@ function nativeExtractionError(
  * on the native streaming leg, which forwards the upstream headers verbatim.
  */
 const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+/**
+ * How an SDK bridge turn's conversation reached Claude Code
+ * (`SDK_BRIDGE_HISTORY_HEADER`), copied for the same reason as the id.
+ */
+const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
+/** The proxy's headers every leg copies onto the response it builds. */
+const CARRIED_HEADERS = [CLIENT_REQUEST_ID_HEADER, SDK_BRIDGE_HISTORY_HEADER];
 
 /**
- * One exit for every response this adapter produces, so the request id is
- * applied in a single place rather than at each construction site: the handler
+ * One exit for every response this adapter produces, so the carried headers
+ * are applied in a single place rather than at each construction site: the handler
  * answers from a dozen return points and a copy at each one is a copy a future
  * leg can silently omit.
  *
- * Only the id is carried over. The fresh headers each leg builds are what
+ * Only {@link CARRIED_HEADERS} are carried over. The fresh headers each leg builds are what
  * strips the internal native-Responses marker, the account id and the
  * upstream's now-wrong content-type, and that must survive.
  */
@@ -217,7 +224,7 @@ export async function handleResponsesRequest(
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
 ): Promise<Response> {
-	let captured: string | null = null;
+	const captured: { headers: Headers | null } = { headers: null };
 	const response = await respondToResponsesRequest(
 		req,
 		url,
@@ -226,11 +233,13 @@ export async function handleResponsesRequest(
 		apiKeyId,
 		apiKeyName,
 		(proxied) => {
-			captured = proxied.headers.get(CLIENT_REQUEST_ID_HEADER);
+			captured.headers = proxied.headers;
 		},
 	);
-	const requestId: string | null = captured;
-	if (requestId) response.headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
+	for (const name of CARRIED_HEADERS) {
+		const value = captured.headers?.get(name);
+		if (value) response.headers.set(name, value);
+	}
 	return response;
 }
 
