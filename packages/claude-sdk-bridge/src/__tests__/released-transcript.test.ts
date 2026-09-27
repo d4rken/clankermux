@@ -133,9 +133,10 @@ describe("forkVerifiedTranscript", () => {
 			type: "user",
 			uuid: expect.stringMatching(/^[0-9a-f-]{36}$/),
 			parentUuid: "a2",
+			sourceToolAssistantUUID: "a2",
 			isSidechain: false,
 			sessionId: B,
-			timestamp: "2026-09-27T06:02:11.366Z",
+			timestamp: expect.any(String),
 			cwd: "/work",
 			version: "2.1.280",
 			message: {
@@ -146,8 +147,51 @@ describe("forkVerifiedTranscript", () => {
 				],
 			},
 		});
+		// Stamped when it is made, not copied from the resume point.
+		const stamped = Date.parse(String(answer?.timestamp));
+		expect(Math.abs(Date.now() - stamped)).toBeLessThan(60_000);
 		// It is never part of the copy.
 		expect(readFileSync(dst, "utf8")).not.toContain(String(answer?.uuid));
+	});
+
+	it("also answers calls on the chain that nothing answered, awaited or not", () => {
+		const dir = temp();
+		const src = join(dir, "src.jsonl");
+		writeFileSync(src, transcript());
+		// Only toolu_2 was handed to the client; toolu_1 has no result anywhere.
+		const both = forkVerifiedTranscript(src, join(dir, "d1"), A, B, "a2", [
+			"toolu_2",
+		]);
+		expect(
+			(
+				both?.message as { content: Array<{ tool_use_id: string }> }
+			).content.map((b) => b.tool_use_id),
+		).toEqual(["toolu_1", "toolu_2"]);
+		// A result Claude Code wrote for toolu_1 off the chain (a child of its
+		// call, as parallel results are) counts as an answer.
+		writeFileSync(
+			src,
+			`${transcript()}${JSON.stringify({
+				type: "user",
+				uuid: "r1",
+				parentUuid: "a1",
+				sessionId: A,
+				message: {
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_1", content: "no" },
+					],
+				},
+			})}\n`,
+		);
+		const one = forkVerifiedTranscript(src, join(dir, "d2"), A, B, "a2", [
+			"toolu_2",
+		]);
+		expect(
+			(one?.message as { content: Array<{ tool_use_id: string }> }).content.map(
+				(b) => b.tool_use_id,
+			),
+		).toEqual(["toolu_2"]);
 	});
 
 	it("writes nothing when the chain does not hold the calls or the file is gone", () => {

@@ -97,16 +97,19 @@ const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 /**
  * The entry `resumeAt` of a transcript (JSONL bytes), when its chain,
  * walking parentUuid back from it to an entry whose parentUuid is null,
- * carries every awaited tool_use id; null otherwise. Each line is decoded
- * on its own; an unparsable line or a parent missing from the file fails
- * the check.
+ * carries every awaited tool_use id; null otherwise. With it, the calls on
+ * that chain, oldest first, that no tool_result anywhere in the file
+ * answers (Claude Code writes a parallel call's result as a child of its
+ * call, off the chain). Each line is decoded on its own; an unparsable line or a parent
+ * missing from the file fails the check.
  */
 function resumePoint(
 	bytes: Buffer,
 	resumeAt: string,
 	awaited: readonly string[],
-): Record<string, unknown> | null {
+): { entry: Record<string, unknown>; unanswered: string[] } | null {
 	const byUuid = new Map<string, { parent: string | null; calls: string[] }>();
+	const answered = new Set<string>();
 	let point: Record<string, unknown> | null = null;
 	let start = 0;
 	while (start < bytes.length) {
@@ -125,12 +128,21 @@ function resumePoint(
 			if (typeof entry.uuid === "string") {
 				const content = (entry.message as { content?: unknown } | undefined)
 					?.content;
+				const blocks = Array.isArray(content)
+					? (content as Array<{
+							type?: unknown;
+							id?: unknown;
+							tool_use_id?: unknown;
+						}>)
+					: [];
+				for (const b of blocks)
+					if (b?.type === "tool_result") answered.add(String(b.tool_use_id));
 				byUuid.set(entry.uuid, {
 					parent:
 						typeof entry.parentUuid === "string" ? entry.parentUuid : null,
 					calls:
-						entry.type === "assistant" && Array.isArray(content)
-							? (content as Array<{ type?: unknown; id?: unknown }>)
+						entry.type === "assistant"
+							? blocks
 									.filter((b) => b?.type === "tool_use")
 									.map((b) => String(b.id))
 							: [],
@@ -141,7 +153,7 @@ function resumePoint(
 		start = end + 1;
 	}
 	if (!point) return null;
-	const found = new Set<string>();
+	const chain: string[][] = [];
 	const seen = new Set<string>();
 	let at: string | null = resumeAt;
 	while (at && !seen.has(at)) {
@@ -149,15 +161,19 @@ function resumePoint(
 		const entry = byUuid.get(at);
 		// A parent the file does not hold: the chain Claude Code loads is not whole.
 		if (!entry) return null;
-		for (const id of entry.calls) found.add(id);
+		chain.push(entry.calls);
 		at = entry.parent;
 	}
-	return awaited.every((id) => found.has(id)) ? point : null;
+	const found = chain.reverse().flat();
+	if (!awaited.every((id) => found.includes(id))) return null;
+	return {
+		entry: point,
+		unanswered: found.filter((id) => !answered.has(id)),
+	};
 }
 
 /** The fields {@link answerEntry} takes from its resume point. */
 const ANSWER_ENVELOPE = [
-	"timestamp",
 	"cwd",
 	"userType",
 	"entrypoint",
@@ -166,20 +182,20 @@ const ANSWER_ENVELOPE = [
 ] as const;
 
 /**
- * A user entry answering every awaited call, as a child of the resume
- * point `point`. On resume Claude Code drops calls that have no result on
- * the chain before it looks for `resumeSessionAt`, and puts them back only
- * in some cases (not after a prompt it wrote nothing else for, nor after
- * text in the same message). With this entry after them, no call is
- * unanswered; it lies past the resume point, so Claude Code cuts it off
- * before any model call and the client's results are the prompt. Pinned by
- * "resumes parks released from resumed sessions and from a call after
- * text" in real-claude.integration.test.ts.
+ * A user entry answering `calls`, as a child of the resume point `point`.
+ * On resume Claude Code drops calls that have no result on the chain
+ * before it looks for `resumeSessionAt`, and puts them back only in some
+ * cases (not after a prompt it wrote nothing else for, nor after text in
+ * the same message). With this entry after them, no call is unanswered; it
+ * lies past the resume point, so Claude Code cuts it off before any model
+ * call and the client's results are the prompt. Pinned by "resumes parks
+ * released from resumed sessions and from a call after text" in
+ * real-claude.integration.test.ts.
  */
 function answerEntry(
 	point: Record<string, unknown>,
 	sessionId: string,
-	awaited: readonly string[],
+	calls: readonly string[],
 ): SessionStoreEntry {
 	const envelope: Record<string, unknown> = {};
 	for (const key of ANSWER_ENVELOPE)
@@ -188,12 +204,14 @@ function answerEntry(
 		type: "user",
 		uuid: crypto.randomUUID(),
 		parentUuid: point.uuid,
+		sourceToolAssistantUUID: point.uuid,
 		isSidechain: false,
 		sessionId,
+		timestamp: new Date().toISOString(),
 		...envelope,
 		message: {
 			role: "user",
-			content: awaited.map((id) => ({
+			content: calls.map((id) => ({
 				type: "tool_result",
 				tool_use_id: id,
 				content: "",
@@ -261,7 +279,7 @@ export function forkVerifiedTranscript(
 	const point = bytes ? resumePoint(bytes, resumeAt, awaited) : null;
 	if (!bytes || !point) return null;
 	writePrivateBytes(to, rewriteSessionId(bytes, fromId, toId));
-	return answerEntry(point, toId, awaited);
+	return answerEntry(point.entry, toId, point.unanswered);
 }
 
 /**

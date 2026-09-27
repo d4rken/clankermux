@@ -83,9 +83,10 @@ pipeline. The client keeps executing its own tools.
   result before the calls). A prompt Claude Code wrote nothing after (every
   turn of a resumed session) or text before the calls in the same message
   gets them dropped for good: "No message found with message.uuid". So the
-  resumed query's `load()` (never the file) also returns one user entry
-  answering every awaited call as a child of the resume point
-  (`FileSessionStore.appendOnNextLoad`); `resumeSessionAt` cuts it off
+  resumed session's `load()` (never its file) also returns one user entry
+  answering, as a child of the resume point, every call on its chain that
+  no result in the file answers (the awaited ones, and any the bridge did
+  not forward) (`FileSessionStore.appendOnLoad`); `resumeSessionAt` cuts it off
   before any model call. The listener writes `consumed` before the first
   model call goes out. A gone session file falls back to a flattened dead
   continuation.
