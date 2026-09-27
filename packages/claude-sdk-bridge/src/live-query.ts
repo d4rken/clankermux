@@ -634,6 +634,17 @@ export class LiveQuery {
 				queueMicrotask(() => release(this));
 			return;
 		}
+		// Calls Claude Code started for a reply that did not end on them (a
+		// refusal after a tool_use) are never answered by the client: without
+		// an answer the process waits out the parked timeout holding its slot.
+		// Answered as aborted, they would send the model a call and a result
+		// the client never had, so no further model call is allowed and the
+		// session is not resumed.
+		if (toolUseIds.length) {
+			this.init.registration.revoke();
+			this.init.parked.close(`reply ended (${finalReason})`);
+			this.sessionDiverged = true;
+		}
 		this.state = "finishing";
 		this.register([...this.clientMessages, { role: "assistant", content }]);
 	}

@@ -813,3 +813,48 @@ describe("a context rewrite Claude Code reports late", () => {
 		expect(String(row?.errorMessage)).toContain("compact_boundary");
 	});
 });
+
+describe("a reply that ends on another reason after a tool call", () => {
+	it("answers the call Claude Code started, so the query does not hold its slot until the parked timeout", async () => {
+		const h = harness();
+		const t = await start(h, { tools, messages: [first] });
+		const msgId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+		const stream = streamedMessage(
+			[
+				{
+					type: "tool_use",
+					id: "toolu_r",
+					name: "mcp__c__read",
+					input: { path: "a" },
+				},
+			],
+			{ id: msgId, stopReason: "refusal" },
+		);
+		// Claude Code starts the call as soon as its block is complete.
+		const stop = stream.length - 2;
+		t.query.emit(initMessage(), ...stream.slice(0, stop));
+		await waitFor(() => t.query.prompts.length > 0);
+		const call = t.query.callTool("toolu_r", "read");
+		await Bun.sleep(50);
+		t.query.emit(...stream.slice(stop));
+		const r = await reply(t.response);
+		expect(r.stop).toBe("refusal");
+		const result = await Promise.race([
+			call,
+			Bun.sleep(2_000).then(() => "still parked"),
+		]);
+		expect(result).toMatchObject({ isError: true });
+		expect(h.bridge.status().parked).toBe(0);
+		// Nothing the aborted call leads Claude Code to do reaches a model.
+		const env = t.query.options.env ?? {};
+		const after = await fetch(`${env.ANTHROPIC_BASE_URL}/v1/messages`, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${env.ANTHROPIC_AUTH_TOKEN}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ model: MODEL, messages: [], stream: true }),
+		});
+		expect(after.status).toBe(401);
+	});
+});
