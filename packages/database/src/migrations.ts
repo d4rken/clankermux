@@ -202,6 +202,7 @@ export function ensureSchema(db: Database): void {
 			gateway_hint_prev_tool_durations TEXT,
 			gateway_hint_compaction TEXT,
 			gateway_hint_context_compacted TEXT,
+			gateway_hint_prompt_id TEXT,
 			-- The value of the client's x-clankermux-correlation-tag header,
 			-- stored VERBATIM: 1-128 bytes, every byte 0x20-0x7E, or NULL. A tag
 			-- that failed that test is not repaired into something storable — it
@@ -2086,6 +2087,11 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "sdk_bridge_turns",
 		column: "owner_start_time",
 		ddl: "ALTER TABLE sdk_bridge_turns ADD COLUMN owner_start_time TEXT",
+	},
+	{
+		table: "requests",
+		column: "gateway_hint_prompt_id",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_prompt_id TEXT",
 	},
 ];
 

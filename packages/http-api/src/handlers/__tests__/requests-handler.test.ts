@@ -319,6 +319,7 @@ it("returns every gateway hint in summaries and omits absent hints", async () =>
 			gateway_hint_prev_tool_durations: "[12,34]",
 			gateway_hint_compaction: "false",
 			gateway_hint_context_compacted: "0",
+			gateway_hint_prompt_id: "prm_0a1b2c",
 		},
 		{
 			...base,
@@ -328,6 +329,7 @@ it("returns every gateway hint in summaries and omits absent hints", async () =>
 			gateway_hint_prev_tool_durations: null,
 			gateway_hint_compaction: null,
 			gateway_hint_context_compacted: null,
+			gateway_hint_prompt_id: null,
 		},
 	]);
 	const rows = await (await createRequestsSummaryHandler(db)()).json();
@@ -337,6 +339,7 @@ it("returns every gateway hint in summaries and omits absent hints", async () =>
 		gatewayHintPrevToolDurations: "[12,34]",
 		gatewayHintCompaction: "false",
 		gatewayHintContextCompacted: "0",
+		gatewayHintPromptId: "prm_0a1b2c",
 	};
 	expect(rows[0]).toMatchObject(hints);
 	for (const key of Object.keys(hints)) expect(rows[1]).not.toHaveProperty(key);

@@ -11,6 +11,7 @@ describe("Claude Code gateway hints", () => {
 				"x-claude-code-prev-tool-durations": "[12,34]",
 				"x-claude-code-compaction": "false",
 				"x-claude-code-context-compacted": "0",
+				"x-claude-code-prompt-id": "prm_0a1b2c",
 			}),
 		).toEqual({
 			gatewayHintRequestClass: "primary",
@@ -18,6 +19,7 @@ describe("Claude Code gateway hints", () => {
 			gatewayHintPrevToolDurations: "[12,34]",
 			gatewayHintCompaction: "false",
 			gatewayHintContextCompacted: "0",
+			gatewayHintPromptId: "prm_0a1b2c",
 		});
 	});
 	it("omits absent and blank hints and bounds retained values", () => {
@@ -42,6 +44,7 @@ describe("Claude Code gateway hints", () => {
 			"X-Claude-Code-Prev-Tool-Durations": "[42]",
 			"X-Claude-Code-Compaction": "true",
 			"X-Claude-Code-Context-Compacted": "true",
+			"X-Claude-Code-Prompt-Id": "prm_0a1b2c",
 			"anthropic-version": "2023-06-01",
 		});
 		expect(sanitizeHeadersForReplay(headers)).toEqual({
