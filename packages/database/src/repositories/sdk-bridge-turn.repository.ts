@@ -130,8 +130,12 @@ export type SdkBridgeHealthMetric =
 	| "tool_round_count";
 
 export interface SdkBridgeHealthInnerRow {
+	/** The turn's harness. */
 	clientHarness: string | null;
-	accountId: string | null;
+	/** The account that served the inner call (`requests.account_used`). */
+	servedAccountId: string | null;
+	/** Null when the account was deleted since. */
+	servedAccountName: string | null;
 	requestCount: number;
 	inputTokens: number;
 	outputTokens: number;
@@ -602,8 +606,8 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	}
 
 	/**
-	 * Inner `requests` rows of the range's turns, by harness and account.
-	 * CROSS JOIN pins the turns as the outer loop, so each is probed through
+	 * Inner `requests` rows of the range's turns, by the turn's harness and
+	 * the account that served each call. CROSS JOIN pins the turns as the outer loop, so each is probed through
 	 * the partial turn-id index instead of the planner walking every inner row
 	 * ever retained.
 	 */
@@ -612,7 +616,8 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	): Promise<SdkBridgeHealthInnerRow[]> {
 		const rows = await this.query<{
 			client_harness: string | null;
-			account_id: string | null;
+			account_used: string | null;
+			account_name: string | null;
 			request_count: number;
 			input_tokens: number | null;
 			output_tokens: number | null;
@@ -620,7 +625,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 			cache_creation_input_tokens: number | null;
 			cost_usd: number | null;
 		}>(
-			`SELECT t.client_harness, t.account_id,
+			`SELECT t.client_harness, r.account_used, MAX(a.name) AS account_name,
 				COUNT(*) AS request_count,
 				SUM(r.input_tokens) AS input_tokens,
 				SUM(r.output_tokens) AS output_tokens,
@@ -629,13 +634,16 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				SUM(r.cost_usd) AS cost_usd
 			FROM sdk_bridge_turns t
 			CROSS JOIN requests r ON r.sdk_bridge_turn_id = t.id
+			LEFT JOIN accounts a ON a.id = r.account_used
 			WHERE t.started_at >= ?
-			GROUP BY t.client_harness, t.account_id`,
+			GROUP BY t.client_harness, r.account_used
+			ORDER BY t.client_harness, r.account_used`,
 			[sinceMs],
 		);
 		return rows.map((row) => ({
 			clientHarness: row.client_harness,
-			accountId: row.account_id,
+			servedAccountId: row.account_used,
+			servedAccountName: row.account_name,
 			requestCount: row.request_count,
 			inputTokens: row.input_tokens ?? 0,
 			outputTokens: row.output_tokens ?? 0,

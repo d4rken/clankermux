@@ -35,6 +35,7 @@ afterEach(() => {
 
 type TurnOver = Partial<SdkBridgeTurnInsert> & {
 	spawnMs?: number;
+	firstEventMs?: number;
 	durationMs?: number;
 	toolRounds?: number;
 	httpStatus?: number;
@@ -64,6 +65,7 @@ async function turn(
 			finishedAt: startedAt + 1,
 			status,
 			spawnMs: over.spawnMs,
+			firstEventMs: over.firstEventMs,
 			durationMs: over.durationMs,
 			httpStatus: over.httpStatus,
 			errorType: over.errorType,
@@ -73,12 +75,18 @@ async function turn(
 		await repo.bumpTurnCounters(id, { toolRounds: over.toolRounds });
 }
 
-function inner(id: string, turnId: string, costUsd: number): void {
+function inner(
+	id: string,
+	turnId: string,
+	costUsd: number,
+	servedBy: string | null = "acct-a",
+): void {
 	db.run(
 		`INSERT INTO requests (id, timestamp, method, path, success,
-			input_tokens, output_tokens, cost_usd, sdk_bridge_turn_id)
-		VALUES (?, ?, 'POST', '/v1/messages', 1, 100, 10, ?, ?)`,
-		[id, NOW, costUsd, turnId],
+			input_tokens, output_tokens, cost_usd, sdk_bridge_turn_id,
+			account_used)
+		VALUES (?, ?, 'POST', '/v1/messages', 1, 100, 10, ?, ?, ?)`,
+		[id, NOW, costUsd, turnId, servedBy],
 	);
 }
 
@@ -209,7 +217,7 @@ describe("SDK bridge health", () => {
 		});
 		await turn("gone", HOUR, "completed", { accountId: "acct-deleted" });
 		inner("r1", "p1", 0.5);
-		inner("r2", "p2", 0.25);
+		inner("r2", "p2", 0.25, "acct-b");
 
 		const data = await health();
 
@@ -223,6 +231,7 @@ describe("SDK bridge health", () => {
 				finished: 3,
 				rejected: 0,
 				aborted: 0,
+				innerCalls: 2,
 				costUsd: 0.75,
 			},
 			{
@@ -234,6 +243,7 @@ describe("SDK bridge health", () => {
 				finished: 0,
 				rejected: 1,
 				aborted: 0,
+				innerCalls: 0,
 				costUsd: 0,
 			},
 		]);
@@ -250,7 +260,38 @@ describe("SDK bridge health", () => {
 		expect(data.inner.costUsd).toBe(0.75);
 	});
 
-	it("reports timings over non-null values and tool rounds over ended turns", async () => {
+	it("charges an inner call to the account that served it", async () => {
+		// Failover: the turn chose acct-a; acct-b served one of its calls, and
+		// acct-c, which no turn chose, served another.
+		db.run(
+			`INSERT INTO accounts (id, name, provider, refresh_token, created_at)
+			VALUES ('acct-c', 'Claude-c', 'claude-oauth', 'tok', 0)`,
+		);
+		await turn("t1", HOUR, "completed");
+		inner("r1", "t1", 0.5);
+		inner("r2", "t1", 0.25, "acct-b");
+		inner("r3", "t1", 0.125, "acct-c");
+
+		const data = await health();
+
+		expect(
+			data.byAccount.map((a) => [
+				a.key,
+				a.name,
+				a.total,
+				a.innerCalls,
+				a.costUsd,
+			]),
+		).toEqual([
+			["acct-a", "Claude-a", 1, 1, 0.5],
+			["acct-b", "Claude-b", 0, 1, 0.25],
+			["acct-c", "Claude-c", 0, 1, 0.125],
+		]);
+		expect(data.byHarness[0]?.costUsd).toBe(0.875);
+		expect(data.byHarness[0]?.innerCalls).toBe(3);
+	});
+
+	it("reports timings over finished turns and tool rounds over ended turns", async () => {
 		await turn("t1", HOUR, "completed", {
 			spawnMs: 100,
 			durationMs: 1_000,
@@ -262,7 +303,16 @@ describe("SDK bridge health", () => {
 			kind: "side_request",
 			spawnMs: 200,
 		});
-		await turn("rej", HOUR, "rejected");
+		// What production writes: a refusal's duration is the ~0 ms to refuse,
+		// an expired park's the wall clock since the turn began.
+		await turn("rej", HOUR, "rejected", { durationMs: 2 });
+		await turn("exp", HOUR, "expired", { durationMs: 24 * HOUR });
+		await turn("ab", HOUR, "aborted", {
+			spawnMs: 9_000,
+			firstEventMs: 9_500,
+			durationMs: 60_000,
+		});
+		await turn("sd", HOUR, "shutdown", { spawnMs: 8_000, durationMs: 30_000 });
 
 		const data = await health();
 
@@ -276,7 +326,9 @@ describe("SDK bridge health", () => {
 		expect(data.toolRounds).toEqual({ samples: 2, p50: 2, p95: 6, total: 8 });
 	});
 
-	it("counts history modes and rebuild reasons", async () => {
+	it("counts history modes and rebuild reasons, leaving refusals out", async () => {
+		// A refusal is recorded with the placeholder "fresh"; no session existed.
+		await turn("rej", HOUR, "rejected");
 		await turn("a", HOUR, "completed", { historyMode: "resume" });
 		await turn("b", HOUR, "completed", {
 			historyMode: "resume",

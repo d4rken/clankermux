@@ -24,7 +24,8 @@ beforeEach(() => {
 	repo = new SdkBridgeTurnRepository(new BunSqlAdapter(db));
 	db.run(
 		`INSERT INTO accounts (id, name, provider, refresh_token, created_at)
-		VALUES ('acct-a', 'Claude-a', 'claude-oauth', 'tok', 0)`,
+		VALUES ('acct-a', 'Claude-a', 'claude-oauth', 'tok', 0),
+			('acct-b', 'Claude-b', 'claude-oauth', 'tok', 0)`,
 	);
 });
 
@@ -77,13 +78,23 @@ function inner(
 	id: string,
 	turnId: string,
 	tokens: { input: number; output: number; cost: number },
+	servedBy = "acct-a",
 ): void {
 	db.run(
 		`INSERT INTO requests (id, timestamp, method, path, success,
 			input_tokens, output_tokens, cache_read_input_tokens,
-			cache_creation_input_tokens, cost_usd, sdk_bridge_turn_id)
-		VALUES (?, ?, 'POST', '/v1/messages', 1, ?, ?, 10, 5, ?, ?)`,
-		[id, SINCE + 10, tokens.input, tokens.output, tokens.cost, turnId],
+			cache_creation_input_tokens, cost_usd, sdk_bridge_turn_id,
+			account_used)
+		VALUES (?, ?, 'POST', '/v1/messages', 1, ?, ?, 10, 5, ?, ?, ?)`,
+		[
+			id,
+			SINCE + 10,
+			tokens.input,
+			tokens.output,
+			tokens.cost,
+			turnId,
+			servedBy,
+		],
 	);
 }
 
@@ -124,7 +135,8 @@ async function seed(): Promise<void> {
 	inner("r-old", "old", { input: 1_000, output: 1_000, cost: 9 });
 	inner("r1", "t1", { input: 100, output: 20, cost: 0.5 });
 	inner("r2", "t1", { input: 50, output: 10, cost: 0.25 });
-	inner("r3", "t3", { input: 7, output: 3, cost: 0.125 });
+	// Failover: t3's turn chose acct-a, and acct-b served its call.
+	inner("r3", "t3", { input: 7, output: 3, cost: 0.125 }, "acct-b");
 }
 
 describe("SdkBridgeTurnRepository health reads", () => {
@@ -213,19 +225,31 @@ describe("SdkBridgeTurnRepository health reads", () => {
 		});
 	});
 
-	it("sums inner requests of the range's turns only", async () => {
+	it("sums inner requests of the range's turns by the account that served them", async () => {
 		await seed();
 		const rows = await repo.sumHealthInnerUsage(SINCE);
 		expect(rows).toEqual([
 			{
 				clientHarness: "pi",
-				accountId: "acct-a",
-				requestCount: 3,
-				inputTokens: 157,
-				outputTokens: 33,
-				cacheReadInputTokens: 30,
-				cacheCreationInputTokens: 15,
-				costUsd: 0.875,
+				servedAccountId: "acct-a",
+				servedAccountName: "Claude-a",
+				requestCount: 2,
+				inputTokens: 150,
+				outputTokens: 30,
+				cacheReadInputTokens: 20,
+				cacheCreationInputTokens: 10,
+				costUsd: 0.75,
+			},
+			{
+				clientHarness: "pi",
+				servedAccountId: "acct-b",
+				servedAccountName: "Claude-b",
+				requestCount: 1,
+				inputTokens: 7,
+				outputTokens: 3,
+				cacheReadInputTokens: 10,
+				cacheCreationInputTokens: 5,
+				costUsd: 0.125,
 			},
 		]);
 	});

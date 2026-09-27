@@ -21,6 +21,7 @@ function split(
 		finished: 0,
 		rejected: 0,
 		aborted: 0,
+		innerCalls: 0,
 		costUsd: 0,
 		...over,
 	};

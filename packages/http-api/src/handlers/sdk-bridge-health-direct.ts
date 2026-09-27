@@ -66,9 +66,13 @@ const ERROR_STATUSES = SDK_BRIDGE_TURN_STATUSES.filter(
 	(s) => sdkBridgeFailureRateRole(s) === "failure" || s === "rejected",
 );
 
-/** Turns that ran a Claude Code process and ended; their tool rounds are final. */
-const ENDED_WITH_PROCESS = SDK_BRIDGE_TURN_STATUSES.filter(
-	(s) => s !== "running" && s !== "released" && s !== "rejected",
+/**
+ * The failure rate's denominator, and the only rows timings describe: a
+ * refusal's duration is the time to refuse, an expired park's the wall clock
+ * since the turn began.
+ */
+const FINISHED = SDK_BRIDGE_TURN_STATUSES.filter(
+	(s) => sdkBridgeFailureRateRole(s) !== "excluded",
 );
 
 function zeroRecord<K extends string>(keys: readonly K[]): Record<K, number> {
@@ -79,18 +83,29 @@ function percentiles(row: SdkBridgeHealthPercentileRow): SdkBridgePercentiles {
 	return { samples: row.samples, p50: row.p50, p95: row.p95 };
 }
 
-function emptySplit(key: string | null, name: string | null) {
-	return {
-		key,
-		name,
-		total: 0,
-		completed: 0,
-		failures: 0,
-		finished: 0,
-		rejected: 0,
-		aborted: 0,
-		costUsd: 0,
-	} satisfies SdkBridgeHealthSplit;
+function splitFor(
+	splits: Map<string | null, SdkBridgeHealthSplit>,
+	key: string | null,
+	name: string | null,
+): SdkBridgeHealthSplit {
+	let split = splits.get(key);
+	if (!split) {
+		split = {
+			key,
+			name,
+			total: 0,
+			completed: 0,
+			failures: 0,
+			finished: 0,
+			rejected: 0,
+			aborted: 0,
+			innerCalls: 0,
+			costUsd: 0,
+		};
+		splits.set(key, split);
+	}
+	split.name ??= name;
+	return split;
 }
 
 function sortSplits(splits: Iterable<SdkBridgeHealthSplit>) {
@@ -124,12 +139,14 @@ export async function computeSdkBridgeHealth(
 	] = await Promise.all([
 		sources.countHealthGroups(sinceMs),
 		sources.countHealthErrors(sinceMs, ERROR_STATUSES),
-		sources.healthPercentiles(sinceMs, "spawn_ms"),
-		sources.healthPercentiles(sinceMs, "first_event_ms"),
-		sources.healthPercentiles(sinceMs, "duration_ms"),
+		sources.healthPercentiles(sinceMs, "spawn_ms", { statuses: FINISHED }),
+		sources.healthPercentiles(sinceMs, "first_event_ms", {
+			statuses: FINISHED,
+		}),
+		sources.healthPercentiles(sinceMs, "duration_ms", { statuses: FINISHED }),
 		sources.healthPercentiles(sinceMs, "tool_round_count", {
 			kind: "turn",
-			statuses: ENDED_WITH_PROCESS,
+			statuses: FINISHED,
 		}),
 		sources.sumHealthInnerUsage(sinceMs),
 		sources.listHealthFailures(
@@ -151,24 +168,20 @@ export async function computeSdkBridgeHealth(
 		total += row.count;
 		if (Object.hasOwn(byKind, row.kind))
 			byKind[row.kind as SdkBridgeTurnKind] += row.count;
-		if (Object.hasOwn(byHistoryMode, row.historyMode))
-			byHistoryMode[row.historyMode as SdkBridgeHistoryMode] += row.count;
-		if (
-			row.rebuildReason !== null &&
-			Object.hasOwn(byRebuildReason, row.rebuildReason)
-		)
-			byRebuildReason[row.rebuildReason as SdkBridgeRebuildReason] += row.count;
+		// A refusal is recorded as "fresh" but never had a session.
+		if (row.status !== "rejected") {
+			if (Object.hasOwn(byHistoryMode, row.historyMode))
+				byHistoryMode[row.historyMode as SdkBridgeHistoryMode] += row.count;
+			if (
+				row.rebuildReason !== null &&
+				Object.hasOwn(byRebuildReason, row.rebuildReason)
+			)
+				byRebuildReason[row.rebuildReason as SdkBridgeRebuildReason] +=
+					row.count;
+		}
 
-		let harness = harnesses.get(row.clientHarness);
-		if (!harness) {
-			harness = emptySplit(row.clientHarness, null);
-			harnesses.set(row.clientHarness, harness);
-		}
-		let account = accounts.get(row.accountId);
-		if (!account) {
-			account = emptySplit(row.accountId, row.accountName);
-			accounts.set(row.accountId, account);
-		}
+		const harness = splitFor(harnesses, row.clientHarness, null);
+		const account = splitFor(accounts, row.accountId, row.accountName);
 		for (const split of [harness, account]) split.total += row.count;
 
 		if (!isSdkBridgeTurnStatus(row.status)) continue;
@@ -198,10 +211,13 @@ export async function computeSdkBridgeHealth(
 		innerTotal.cacheReadInputTokens += row.cacheReadInputTokens;
 		innerTotal.cacheCreationInputTokens += row.cacheCreationInputTokens;
 		innerTotal.costUsd += row.costUsd;
-		const harness = harnesses.get(row.clientHarness);
-		if (harness) harness.costUsd += row.costUsd;
-		const account = accounts.get(row.accountId);
-		if (account) account.costUsd += row.costUsd;
+		for (const split of [
+			splitFor(harnesses, row.clientHarness, null),
+			splitFor(accounts, row.servedAccountId, row.servedAccountName),
+		]) {
+			split.innerCalls += row.requestCount;
+			split.costUsd += row.costUsd;
+		}
 	}
 
 	let failures = 0;

@@ -40,7 +40,12 @@ export interface SdkBridgePercentiles {
 	p95: number | null;
 }
 
-/** One client harness's or account's turns in the range. */
+/**
+ * One client harness's or account's share of the range. Turn counts go to
+ * the turn's harness and the account routing chose for it; inner calls and
+ * cost go to the turn's harness and the account that served each call, so
+ * an account can have calls and no turns.
+ */
 export interface SdkBridgeHealthSplit {
 	/** The harness, or the account id; null when the turn recorded none. */
 	key: string | null;
@@ -54,7 +59,8 @@ export interface SdkBridgeHealthSplit {
 	finished: number;
 	rejected: number;
 	aborted: number;
-	/** Summed over the inner `requests` rows that still exist. */
+	/** Inner `requests` rows that still exist. */
+	innerCalls: number;
 	costUsd: number;
 }
 
@@ -98,13 +104,15 @@ export interface SdkBridgeHealthResponse {
 	};
 	/** Failed, timed-out and rejected rows, biggest group first. */
 	errors: SdkBridgeHealthError[];
+	/** Finished turns and side requests only. */
 	timings: {
 		spawnMs: SdkBridgePercentiles;
 		firstEventMs: SdkBridgePercentiles;
 		durationMs: SdkBridgePercentiles;
 	};
-	/** Turns (not side requests) that ran a process and have ended. */
+	/** Finished turns, side requests excluded. */
 	toolRounds: SdkBridgePercentiles & { total: number };
+	/** Rejected rows excluded: they never had a session. */
 	byHistoryMode: Record<SdkBridgeHistoryMode, number>;
 	byRebuildReason: Record<SdkBridgeRebuildReason, number>;
 	/** Most rows first. */
