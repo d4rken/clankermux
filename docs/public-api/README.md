@@ -238,16 +238,19 @@ reached Claude Code, and names the rebuild reason when there is one:
 | `rebuild_flattened; reason=<reason>` | The history was rebuilt as one framed text prompt. |
 
 Reasons are `edit` (an earlier message differs), `compaction` (the history
-is shorter than the stored one), `continuation`, `dead_continuation` (tool
-results for a Claude Code query that no longer exists) and `unknown` (no
-stored session, for example without a session header). A request answering
+is shorter than the stored one), `continuation`, `account_change` (on a
+resume, or on a rebuild when the stored session could not be copied),
+`dead_continuation` (tool results for a Claude Code query that no longer
+exists) and `unknown` (no stored session, for example without a session
+header). A request answering
 a turn's tool calls reports the turn's decision. A request refused before
 its turn starts carries no header.
 
-A tool result the client sends to a waiting turn may hold at most 500,000
-characters of text. A larger one is refused with `400
-invalid_request_error`, code `sdk_bridge_tool_result_too_large`, and the turn
-keeps waiting for its results.
+A tool result that holds more than 500,000 characters of text and no image
+may be refused with `400 invalid_request_error`, code
+`sdk_bridge_tool_result_too_large`; the turn then keeps waiting for its
+results. A result at or under that size, or one that carries an image, is
+never refused for its size.
 
 ## Wire and transport rules
 
