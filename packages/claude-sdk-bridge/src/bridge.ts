@@ -78,10 +78,13 @@ import {
 import {
 	createToolServer,
 	loadMcpSdk,
+	MAX_TOOL_RESULT_CHARS,
 	type McpSdk,
 	ParkedCalls,
 	sideRequestToolResult,
 	ToolNames,
+	toMcpResult,
+	toolResultChars,
 } from "./tool-server";
 import {
 	type Block,
@@ -1704,6 +1707,20 @@ export function createClaudeSdkBridge(
 			// Parked state stays as it is unless every awaited call is answered.
 			if (!live.answersAwaiting(toolResultIds(parsed.turn)))
 				return refuse(bridgeErrors.staleToolResults());
+			// Claude Code would hand the model a preview of a larger result.
+			// Rebuilt histories and released parks carry results as message
+			// content, which it sends whole.
+			for (const block of parsed.turn.toolResults) {
+				const chars = toolResultChars(toMcpResult(block));
+				if (chars > MAX_TOOL_RESULT_CHARS)
+					return refuse(
+						bridgeErrors.toolResultTooLarge(
+							String(block.tool_use_id),
+							chars,
+							MAX_TOOL_RESULT_CHARS,
+						),
+					);
+			}
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.
 			if (meta.model !== live.requestedModel) {

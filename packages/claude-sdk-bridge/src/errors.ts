@@ -285,6 +285,20 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	toolResultTooLarge(
+		toolUseId: string,
+		chars: number,
+		max: number,
+	): BridgeError {
+		const n = (x: number) => x.toLocaleString("en-US");
+		return {
+			status: 400,
+			type: "invalid_request_error",
+			code: "sdk_bridge_tool_result_too_large",
+			message: `The result for tool call ${toolUseId} is ${n(chars)} characters; Claude Code passes at most ${n(max)} to the model whole`,
+			retryAfter: null,
+		};
+	},
 	tooDeep(): BridgeError {
 		return {
 			status: 400,

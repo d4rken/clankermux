@@ -524,7 +524,10 @@ describe("parked tool calls", () => {
 					properties: { path: { type: "string" } },
 					required: ["path"],
 				},
-				_meta: { "anthropic/alwaysLoad": true },
+				_meta: {
+					"anthropic/alwaysLoad": true,
+					"anthropic/maxResultSizeChars": 500_000,
+				},
 			},
 		]);
 		expect(t.query.options.allowedTools).toEqual(["mcp__c__read"]);
