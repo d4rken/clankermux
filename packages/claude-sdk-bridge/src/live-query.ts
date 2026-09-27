@@ -295,9 +295,12 @@ export class LiveQuery {
 	 * keeps the session from being resumed.
 	 */
 	private contextRewrite: BridgeError | null = null;
-	private rewriteAfterReply = false;
-	/** Claude Code's session holds more than the client's reply: never resume it. */
-	private sessionDiverged = false;
+	/**
+	 * Set when the turn succeeded with the client's reply delivered, but
+	 * Claude Code's session no longer holds only that reply: the turn row
+	 * records why, and the session is never resumed.
+	 */
+	private settledNote: string | null = null;
 	private toolUsesThisLeg = 0;
 	/** Set while `pump` runs, so the rebuild counter can tell. */
 	sawFirstEvent = false;
@@ -648,19 +651,17 @@ export class LiveQuery {
 				queueMicrotask(() => release(this));
 			return;
 		}
-		// Calls Claude Code started for a reply that did not end on them (a
-		// refusal after a tool_use) are never answered by the client: without
-		// an answer the process waits out the parked timeout holding its slot.
-		// Answered as aborted, they would send the model a call and a result
-		// the client never had, so no further model call is allowed and the
-		// session is not resumed.
-		if (toolUseIds.length) {
-			this.init.registration.revoke();
-			this.init.parked.close(`reply ended (${finalReason})`);
-			this.sessionDiverged = true;
-		}
 		this.state = "finishing";
 		this.register([...this.clientMessages, { role: "assistant", content }]);
+		// Calls Claude Code started for a reply that did not end on them (a
+		// refusal after a tool_use) are never answered by the client: without
+		// an answer the process waits out the parked timeout holding its slot,
+		// and answered as aborted they would put a call and a result the
+		// client never had into the session.
+		if (toolUseIds.length)
+			this.settleDelivered(
+				`The reply ended (${finalReason}) after Claude Code started tool calls the client will not answer; its session will not be resumed`,
+			);
 	}
 
 	private armParkedTimeout(): void {
@@ -937,16 +938,8 @@ export class LiveQuery {
 		if (!event || !CONTEXT_REWRITES.has(event)) return null;
 		const error = bridgeErrors.contextRewritten(event);
 		this.contextRewrite ??= error;
-		// The client already has its reply: a side request settled, or a turn
-		// finishing with no leg open.
-		const delivered =
-			this.sideSettled || (this.state === "finishing" && !this.leg);
-		if (delivered) {
-			this.rewriteAfterReply = true;
-			this.sessionDiverged = true;
-		}
 		this.init.log.error(
-			`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${event})${delivered ? " after the reply; its session will not be resumed" : ""}`,
+			`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${event})`,
 		);
 		return error;
 	}
@@ -954,9 +947,15 @@ export class LiveQuery {
 	private onMessage(message: SDKMessage): void {
 		const rewrite = this.noteRewrite(message);
 		if (rewrite) {
-			// A release under way fails the turn itself; a delivered reply stands.
-			if (this.state === "releasing" || this.rewriteAfterReply) return;
-			this.pendingTeardown = { reason: "error", error: rewrite };
+			// A release under way fails the turn itself.
+			if (this.state === "releasing") return;
+			// The client already has its reply: a side request settled, or a
+			// turn finishing with no leg open. That reply stands.
+			if (this.sideSettled || (this.state === "finishing" && !this.leg))
+				this.settleDelivered(
+					`${rewrite.message} after the reply; its session will not be resumed`,
+				);
+			else this.pendingTeardown = { reason: "error", error: rewrite };
 			return;
 		}
 		switch (message.type) {
@@ -1173,6 +1172,29 @@ export class LiveQuery {
 		this.close(this.resultOk ? "completed" : "failed", this.resultOk);
 	}
 
+	/**
+	 * End a turn whose reply the client already has, as succeeded, with
+	 * `note` on its row and its session kept from the conversation. Whatever
+	 * Claude Code reports afterwards (an error result, an exit without one)
+	 * no longer reaches the turn: the query is stopped as a teardown stops
+	 * it, token first.
+	 */
+	private settleDelivered(note: string): void {
+		if (this.state === "closed") return;
+		this.settledNote = note;
+		this.init.registration.revoke();
+		this.init.parked.close("settled");
+		this.prompt().end();
+		const query = this.init.query;
+		void query.interrupt().catch(() => {});
+		try {
+			query.close();
+		} catch {}
+		this.samplePeakRss();
+		this.killProcesses();
+		this.close("completed", true);
+	}
+
 	/** Tear the query down. The token goes first, so an orphaned child's calls fail. */
 	teardown(reason: TeardownReason, error: BridgeError): void {
 		// A release in progress ends through completeRelease or failRelease.
@@ -1215,8 +1237,8 @@ export class LiveQuery {
 		this.init.parked.close(status);
 		this.prompt().end();
 		this.resolveDone(ok);
-		// The turn stands; a session that no longer matches it is not resumed.
-		this.resolveResumable(ok && !this.sessionDiverged);
+		// A settled turn's session holds more than the client's reply.
+		this.resolveResumable(ok && this.settledNote === null);
 		// A registered session belongs to its conversation, which discards it
 		// once a later one replaces it or it fails to settle.
 		if (!this.registered) {
@@ -1226,15 +1248,14 @@ export class LiveQuery {
 		this.discardClaudeCodeTranscripts();
 		const now = this.init.now();
 		const error = ok ? null : this.finalError;
-		// Recorded, not raised: the rewrite after the reply, on a completed turn.
-		const shown =
-			error ?? (ok && this.rewriteAfterReply ? this.contextRewrite : null);
+		// Recorded, not raised: why a completed turn's session goes.
+		const message = error?.message ?? (ok ? this.settledNote : null);
 		const finish: SdkBridgeTurnFinish = {
 			finishedAt: now,
 			status,
 			httpStatus: error ? error.status : 200,
 			errorType: error?.type ?? null,
-			errorMessage: shown ? sanitizeMessage(shown.message) : null,
+			errorMessage: message ? sanitizeMessage(message) : null,
 			stopReason: this.stopReason,
 			ccSessionId: this.sessionId,
 			spawnMs: this.spawnMs,

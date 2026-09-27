@@ -895,3 +895,137 @@ describe("a reply that ends on another reason after a tool call", () => {
 		expect(after.status).toBe(401);
 	});
 });
+
+describe("a turn whose reply the client already has, and whose session goes", () => {
+	const session = {
+		affinityScope: "client_session",
+		affinityKey: "sess-settled",
+	} as const;
+	const compaction = () =>
+		({
+			type: "system",
+			subtype: "compact_boundary",
+			compact_metadata: { trigger: "auto", pre_tokens: 190_000 },
+			uuid: crypto.randomUUID(),
+			session_id: "s",
+		}) as unknown as SDKMessage;
+
+	async function mirrored(t: { query: FakeQuery }, text: string) {
+		const sessionId = t.query.options.sessionId as string;
+		await (t.query.options.sessionStore as SessionStore).append(
+			{ projectKey: "p", sessionId },
+			[
+				{
+					type: "user",
+					sessionId,
+					uuid: crypto.randomUUID(),
+					message: { role: "user", content: text },
+				},
+			],
+		);
+	}
+
+	/** The conversation's next turn: how its history reached Claude Code. */
+	async function nextTurn(h: Harness, history: Msg[]) {
+		const next = await start(h, { messages: history }, { meta: session });
+		return h.repo.turns.get(next.plan.turnId)?.historyMode;
+	}
+
+	it("a rewrite after the reply, then an exit without a result: completed, annotated, counted, and the next turn rebuilds", async () => {
+		const h = harness();
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }] },
+			{ meta: session },
+		);
+		await mirrored(t, "hello");
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+		);
+		const r = await reply(t.response);
+		t.query.emit(compaction());
+		// Claude Code dies without reporting a result.
+		t.query.end();
+		await settled(h);
+		const row = h.repo.turns.get(t.plan.turnId);
+		expect(row).toMatchObject({ status: "completed", httpStatus: 200 });
+		expect(String(row?.errorMessage)).toContain("compact_boundary");
+		expect(h.bridge.status().counters).toMatchObject({
+			turnsCompleted: 1,
+			turnsFailed: 0,
+		});
+		expect(
+			await nextTurn(h, [
+				{ role: "user", content: "hello" },
+				{ role: "assistant", content: r.content },
+				{ role: "user", content: "again" },
+			]),
+		).toBe("rebuild_transcript");
+	});
+
+	it("a refusal after a tool call, then an error result: completed, annotated, counted, and the next turn rebuilds", async () => {
+		const h = harness();
+		const t = await start(h, { tools, messages: [first] }, { meta: session });
+		await mirrored(t, "TOOL read a.txt");
+		const stream = streamedMessage(
+			[
+				{
+					type: "tool_use",
+					id: "toolu_s",
+					name: "mcp__c__read",
+					input: { path: "a" },
+				},
+			],
+			{ stopReason: "refusal" },
+		);
+		t.query.emit(initMessage(), ...stream);
+		const r = await reply(t.response);
+		expect(r.stop).toBe("refusal");
+		// What Claude Code reports once its aborted call is answered.
+		t.query.emit(
+			assistantMessage([{ type: "text", text: "API Error: 401" }], {
+				error: "authentication_failed",
+				model: "<synthetic>",
+			}),
+			resultMessage({ isError: true, result: "API Error: 401" }),
+		);
+		await settled(h);
+		const row = h.repo.turns.get(t.plan.turnId);
+		expect(row).toMatchObject({
+			status: "completed",
+			httpStatus: 200,
+			stopReason: "refusal",
+		});
+		expect(String(row?.errorMessage)).toContain("refusal");
+		expect(h.bridge.status().counters).toMatchObject({
+			turnsCompleted: 1,
+			turnsFailed: 0,
+		});
+		expect(
+			await nextTurn(h, [
+				first,
+				{ role: "assistant", content: r.content },
+				{ role: "user", content: "again" },
+			]),
+		).toMatch(/^rebuild_/);
+	});
+
+	it("stops the process once the turn is settled, whatever Claude Code does next", async () => {
+		const h = harness();
+		const t = await start(
+			h,
+			{ messages: [{ role: "user", content: "hello" }] },
+			{ meta: session },
+		);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+		);
+		await reply(t.response);
+		t.query.emit(compaction());
+		await settled(h);
+		expect(t.query.interrupted || t.query.closed).toBe(true);
+		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("completed");
+	});
+});
