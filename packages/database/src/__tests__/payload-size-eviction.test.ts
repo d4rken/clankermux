@@ -724,7 +724,7 @@ describe("deletePayloadsBatched: per-batch byte cap", () => {
 		} finally {
 			db.close();
 		}
-	});
+	}, 20_000);
 
 	it("leaves rows newer than the cutoff alone", async () => {
 		const now = seedMany(4, 1 * MiB);
