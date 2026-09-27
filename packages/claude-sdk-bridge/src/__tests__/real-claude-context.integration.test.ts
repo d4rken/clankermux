@@ -56,6 +56,8 @@ interface Call {
 	clearedToolResult: boolean;
 	persistedOutput: boolean;
 	lastUserChars: number;
+	/** The call's user and assistant messages as [role, text], system reminders left out. */
+	conversation: Array<[string, string]>;
 	toolResults: number;
 	toolResultChars: number[];
 }
@@ -576,6 +578,77 @@ describe.skipIf(reason !== null)(
 				// Errors too: a turn's own, and a refused continuation leg's.
 				expect(history(s.reactive)).toBe("rebuild_transcript; reason=unknown");
 				expect(history(s.hugeRefused)).toBe("fresh");
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"passes a result with an image whole past 500,000 characters: never previewed, and not cut at 25,000 tokens with the bridge's MAX_MCP_OUTPUT_TOKENS",
+			async () => {
+				const s = await scenario<{
+					bridge: Run;
+					mcpTokensDefault: Run;
+					bridged: Bridged;
+				}>("imageToolResult");
+				const whole = s.bridge.calls.at(-1) as Call;
+				expect(whole.persistedOutput).toBe(false);
+				expect(whole.toolResultChars[0]).toBeGreaterThan(600_000);
+				expect(s.bridge.tokenCounts).toBe(0);
+				// Control, MAX_MCP_OUTPUT_TOKENS unset: cut to 25,000 tokens.
+				const cut = s.mcpTokensDefault.calls.at(-1) as Call;
+				expect(cut.persistedOutput).toBe(false);
+				expect(cut.toolResultChars[0]).toBeLessThan(100_000);
+				expect(s.mcpTokensDefault.tokenCounts).toBeGreaterThan(0);
+				// The bridge's size check lets it through.
+				expect(s.bridged.status).toBe(200);
+				expect(s.bridged.row?.status).toBe("completed");
+				const sent = s.bridged.calls.at(-1) as Call;
+				expect(sent.toolResultChars[0]).toBeGreaterThan(600_000);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"through the bridge: the turn after a refusal resumes a session that holds the exchange as the client has it",
+			async () => {
+				const s = await scenario<{
+					refused: Bridged;
+					next: Bridged;
+					clientHistory: Array<{ role: string; content: unknown }>;
+				}>("refusalThenResume");
+				expect(s.refused).toMatchObject({ status: 200, stop: "refusal" });
+				expect(s.refused.row?.status).toBe("completed");
+				expect(s.next.row).toMatchObject({
+					status: "completed",
+					historyMode: "resume",
+				});
+				const client = s.clientHistory.map((m): [string, string] => [
+					m.role,
+					typeof m.content === "string"
+						? m.content
+						: String((m.content as Array<{ text: string }>)[0]?.text),
+				]);
+				// Nothing dropped, nothing added: no interrupted call, no error text.
+				expect((s.next.calls.at(-1) as Call).conversation).toEqual(client);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"through the bridge: a refusal after a tool call ends the turn at once, and its session is not resumed",
+			async () => {
+				const s = await scenario<{
+					reply: Bridged;
+					settledMs: number;
+					status: string;
+					next: Bridged;
+				}>("toolThenRefusal");
+				expect(s.reply).toMatchObject({ status: 200, stop: "refusal" });
+				// It waited out the parked timeout, holding its slot, before.
+				expect(s.status).toBe("completed");
+				expect(s.settledMs).toBeLessThan(15_000);
+				expect(s.reply.row?.counters.innerCalls).toBe(1);
+				expect(s.next.row?.historyMode).toMatch(/^rebuild_/);
 			},
 			TIMEOUT,
 		);

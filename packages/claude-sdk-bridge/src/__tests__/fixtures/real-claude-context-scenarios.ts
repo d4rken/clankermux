@@ -19,7 +19,12 @@ import { buildQueryOptions, workPaths } from "../../options";
 import { PromptStream } from "../../prompt-stream";
 import { FileSessionStore } from "../../session-store";
 import { ProcessGroupSpawner, resolveClaudeExecutable } from "../../spawn";
-import { createToolServer, loadMcpSdk, ToolNames } from "../../tool-server";
+import {
+	createToolServer,
+	loadMcpSdk,
+	type McpContent,
+	ToolNames,
+} from "../../tool-server";
 import type { SdkBridgeLimits, SdkBridgeParkRepo } from "../../types";
 import { ensurePrivateDir } from "../../work-dirs";
 import {
@@ -90,7 +95,8 @@ type EnvName =
 	| "bridgePlusDisableCompact"
 	| "autoCompactOn"
 	| "disableCompactOnly"
-	| "modelFallbackOn";
+	| "modelFallbackOn"
+	| "mcpTokensDefault";
 
 function envFor(name: EnvName, base: Record<string, string>) {
 	const env = { ...base };
@@ -99,6 +105,7 @@ function envFor(name: EnvName, base: Record<string, string>) {
 		delete env.DISABLE_AUTO_COMPACT;
 	if (name === "disableCompactOnly") env.DISABLE_COMPACT = "1";
 	if (name === "modelFallbackOn") delete env.CLAUDE_CODE_NO_MODEL_FALLBACK;
+	if (name === "mcpTokensDefault") delete env.MAX_MCP_OUTPUT_TOKENS;
 	return env;
 }
 
@@ -150,6 +157,22 @@ function describeCall(q: MockRequest) {
 		clearedToolResult: raw.includes("[Old tool result content cleared]"),
 		persistedOutput: raw.includes("<persisted-output>"),
 		truncatedOutput: raw.includes("<truncated-output>"),
+		conversation: (body.messages ?? [])
+			.filter((m) => m.role !== "system")
+			.map((m) => [
+				m.role,
+				(typeof m.content === "string"
+					? [{ type: "text", text: m.content }]
+					: (m.content as Block[])
+				)
+					.filter(
+						(b) =>
+							b.type !== "text" ||
+							!String(b.text).startsWith("<system-reminder>"),
+					)
+					.map((b) => (b.type === "text" ? String(b.text) : `[${b.type}]`))
+					.join("\n"),
+			]),
 		lastUserChars: JSON.stringify(
 			(body.messages ?? []).filter((m) => m.role === "user").at(-1) ?? null,
 		).length,
@@ -207,6 +230,8 @@ interface RunInput {
 	resume?: boolean;
 	/** What every client tool call answers. */
 	toolResult?: string;
+	/** What every client tool call answers, as MCP content; wins over `toolResult`. */
+	toolContent?: McpContent[];
 	extraOptions?: Partial<Options>;
 	extraEnv?: Record<string, string>;
 	/** Every listed tool's `_meta`, in place of the bridge's own. */
@@ -230,7 +255,9 @@ async function runQuery(input: RunInput) {
 		model: input.model ?? MODEL,
 		toolNames: names.exposed,
 		toolServer: createToolServer(mcp, [READ_TOOL], names, async () => ({
-			content: [{ type: "text", text: input.toolResult ?? "R" }],
+			content: input.toolContent ?? [
+				{ type: "text", text: input.toolResult ?? "R" },
+			],
 		})),
 		systemPrompt: { append: null, excludeDynamicSections: false },
 		effort: null,
@@ -462,19 +489,21 @@ await scenario("largeToolResult", async () => {
 	const variants: Array<{
 		name: string;
 		sizes: number[];
-		extraEnv?: Record<string, string>;
+		env?: EnvName;
 		toolMeta?: Record<string, unknown>;
 	}> = [
 		{ name: "bridge", sizes: [51_000, 120_000, 499_000, 501_000] },
+		// The listing and environment the bridge had before either limit was set.
 		{
 			name: "undeclared",
 			sizes: [49_000, 51_000, 120_000],
+			env: "mcpTokensDefault",
 			toolMeta: { "anthropic/alwaysLoad": true },
 		},
+		// Raising MAX_MCP_OUTPUT_TOKENS alone.
 		{
 			name: "undeclaredMaxMcpOutputTokens",
 			sizes: [120_000],
-			extraEnv: { MAX_MCP_OUTPUT_TOKENS: "10000000" },
 			toolMeta: { "anthropic/alwaysLoad": true },
 		},
 	];
@@ -484,10 +513,9 @@ await scenario("largeToolResult", async () => {
 				const marker = `[S:big-${v.name}-${size}]`;
 				const r = await runQuery({
 					marker,
-					env: "bridge",
+					env: v.env ?? "bridge",
 					prompt: `${marker} TOOL read the big file`,
 					toolResult: bigText(size),
-					extraEnv: v.extraEnv,
 					toolMeta: v.toolMeta,
 				});
 				return [`${v.name} ${size}`, r] as const;
@@ -1160,6 +1188,149 @@ await scenario("bigHistory", async () => {
 	} finally {
 		await released.dispose();
 	}
+});
+
+// A result with an image and 600,000 characters of text, which Claude Code
+// never previews: on the bridge's options, without its MAX_MCP_OUTPUT_TOKENS,
+// and through the bridge, whose size check lets it through. A 1M model, so
+// the size never meets the blocking limit.
+await scenario("imageToolResult", async () => {
+	const model = "claude-opus-5-5[1m]";
+	const png =
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	const direct = await Promise.all(
+		(["bridge", "mcpTokensDefault"] as EnvName[]).map(async (env) => {
+			const marker = `[S:img-${env}]`;
+			const r = await runQuery({
+				marker,
+				env,
+				model,
+				prompt: `${marker} TOOL read the picture`,
+				toolContent: [
+					{ type: "image", data: png, mimeType: "image/png" },
+					{ type: "text", text: bigText(600_000) },
+				],
+			});
+			return [env, r] as const;
+		}),
+	);
+	const marker = "[S:b-img]";
+	const start = await bridgedTurn({
+		model,
+		marker,
+		messages: [{ role: "user", content: `${marker} TOOL read` }],
+	});
+	const use = (start.content as Block[]).find((b) => b?.type === "tool_use");
+	const bridged = await bridgedTurn({
+		model,
+		marker,
+		continues: start.turnId,
+		messages: [
+			{ role: "user", content: `${marker} TOOL read` },
+			{ role: "assistant", content: [use as Block] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(use?.id),
+						content: [
+							{
+								type: "image",
+								source: { type: "base64", media_type: "image/png", data: png },
+							},
+							{ type: "text", text: bigText(600_000) },
+						],
+					},
+				],
+			},
+		],
+	});
+	return { ...Object.fromEntries(direct), bridged };
+});
+
+// A refused turn, then the conversation's next turn with the client's
+// history: the question, the refused answer as the client got it, and a new
+// message.
+await scenario("refusalThenResume", async () => {
+	const marker = "[S:rr]";
+	rule(marker, {
+		when: ({ index }) => index === 0,
+		times: 1,
+		shape: {
+			stopReason: "refusal",
+			stopDetails: { type: "refusal", category: "cyber", explanation: null },
+		},
+	});
+	const header = {
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	};
+	const history: Msg[] = [
+		{ role: "user", content: `${marker} REFUSED-QUESTION` },
+	];
+	const refused = await bridgedTurn({
+		model: MODEL,
+		marker,
+		messages: history,
+		extra: header,
+	});
+	history.push(
+		{ role: "assistant", content: [{ type: "text", text: refused.text }] },
+		{ role: "user", content: `${marker} NEXT-QUESTION` },
+	);
+	const next = await bridgedTurn({
+		model: MODEL,
+		marker,
+		messages: history,
+		extra: header,
+	});
+	return { refused, next, clientHistory: history };
+});
+
+// A reply that ends with stop_reason refusal after a tool_use block: Claude
+// Code starts the call, and nobody answers it. Then the conversation's next
+// turn, whose history holds that reply.
+await scenario("toolThenRefusal", async () => {
+	const marker = "[S:tr]";
+	rule(marker, {
+		when: ({ index }) => index === 0,
+		times: 1,
+		shape: {
+			stopReason: "refusal",
+			stopDetails: { type: "refusal", category: "cyber", explanation: null },
+		},
+	});
+	const header = {
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	};
+	const history: Msg[] = [{ role: "user", content: `${marker} TOOL read` }];
+	const t0 = performance.now();
+	const r = await bridgedTurn({
+		model: MODEL,
+		marker,
+		messages: history,
+		extra: header,
+	});
+	const until = Date.now() + 20_000;
+	while (repo.turns.get(r.turnId)?.status === "running" && Date.now() < until)
+		await Bun.sleep(50);
+	const settled = {
+		settledMs: Math.round(performance.now() - t0),
+		status: repo.turns.get(r.turnId)?.status ?? null,
+	};
+	history.push(
+		{ role: "assistant", content: r.content as Block[] },
+		{ role: "user", content: `${marker} after the refusal` },
+	);
+	const next = await bridgedTurn({
+		model: MODEL,
+		marker,
+		messages: history,
+		extra: header,
+	});
+	return { reply: r, ...settled, next };
 });
 
 // Calls that carry no scenario marker: requests Claude Code makes on its own.
