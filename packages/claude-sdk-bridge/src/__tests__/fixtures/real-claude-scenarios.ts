@@ -302,6 +302,68 @@ const lastUpstreamMessages = () =>
 			?.body as { messages?: unknown[] }
 	)?.messages ?? [];
 
+type Shape = { role: string; blocks: Array<[string, string | null, string]> };
+
+function blockText(b: Block): string {
+	if (typeof b.content === "string") return b.content;
+	if (Array.isArray(b.content))
+		return (b.content as Block[])
+			.filter((c) => c.type === "text")
+			.map((c) => String(c.text))
+			.join("");
+	return typeof b.text === "string" ? b.text : "";
+}
+
+function shape(m: Msg): Shape {
+	const blocks =
+		typeof m.content === "string"
+			? [{ type: "text", text: m.content } as Block]
+			: m.content;
+	return {
+		role: m.role,
+		blocks: blocks.map((b) => [
+			b.type,
+			typeof b.tool_use_id === "string" ? b.tool_use_id : null,
+			blockText(b),
+		]),
+	};
+}
+
+/** A model request's messages. */
+const messagesOf = (q: { body: unknown } | undefined): Msg[] =>
+	(q?.body as { messages?: Msg[] } | undefined)?.messages ?? [];
+
+/** Every tool_result block answering `id` in `messages`, as its text. */
+const resultTexts = (messages: Msg[], id: string): string[] =>
+	messages
+		.flatMap((m) => shape(m).blocks)
+		.filter(([type, useId]) => type === "tool_result" && useId === id)
+		.map(([, , text]) => text);
+
+/** The messages of a JSONL transcript's user and assistant entries. */
+const transcriptMessages = (text: string): Msg[] =>
+	text
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as { message?: Msg })
+		.flatMap((e) =>
+			e.message && typeof e.message === "object" && "content" in e.message
+				? [{ role: e.message.role, content: e.message.content }]
+				: [],
+		);
+
+/** tool_result blocks with empty content in a JSONL transcript. */
+const emptyResults = (text: string): number =>
+	transcriptMessages(text)
+		.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+		.filter(
+			(b) =>
+				b.type === "tool_result" &&
+				(b.content === "" ||
+					b.content === undefined ||
+					(Array.isArray(b.content) && b.content.length === 0)),
+		).length;
+
 async function scenario(name: string, run: () => Promise<unknown>) {
 	const t0 = performance.now();
 	try {
@@ -1231,9 +1293,9 @@ await scenario("releasedParkOfResumedSession", async () => {
 		if (reply.content)
 			history.push({ role: "assistant", content: reply.content });
 		const resumed = calls().slice(from).at(0);
-		const sent = JSON.stringify(
-			(resumed?.body as { messages?: unknown[] } | undefined)?.messages ?? [],
-		);
+		const messages = messagesOf(resumed);
+		const sent = JSON.stringify(messages);
+		const last = messages.at(-1);
 		return {
 			stop: parked.stop,
 			status,
@@ -1244,7 +1306,12 @@ await scenario("releasedParkOfResumedSession", async () => {
 			parkedCallCacheCreation: parkedCall?.cache?.creation ?? null,
 			parkedCallCacheRead: parkedCall?.cache?.read ?? null,
 			resultReachedModel: sent.includes(result),
-			resultBlocks: sent.split(`"tool_use_id":"${String(use?.id)}"`).length - 1,
+			resultBlocks: resultTexts(messages, String(use?.id)),
+			lastMessage: last ? shape(last) : null,
+			expectedLastMessage: {
+				role: "user",
+				blocks: [["tool_result", String(use?.id), result]],
+			},
 			interrupted: sent.includes("interrupted"),
 		};
 	};
@@ -1357,13 +1424,7 @@ await scenario("releasedTwiceInOneTurn", async () => {
 	const emptyAnswersOnDisk = () =>
 		filesUnder(root)
 			.filter((f) => f.endsWith(".jsonl"))
-			.filter((f) =>
-				/"tool_use_id":"[^"]+","content":""/.test(
-					readFileSync(join(root, f), "utf8"),
-				),
-			);
-	const resultCount = (sent: string, id: string) =>
-		sent.split(`"tool_use_id":"${id}"`).length - 1;
+			.filter((f) => emptyResults(readFileSync(join(root, f), "utf8")) > 0);
 	const toolUse = (reply: Reply) =>
 		(reply.content ?? []).find((x) => x.type === "tool_use");
 	const run = async (history: Msg[], conv: Partial<SdkBridgeTurnMeta>) => {
@@ -1384,7 +1445,9 @@ await scenario("releasedTwiceInOneTurn", async () => {
 				],
 			},
 		);
+		const fromFirst = calls().length;
 		const r2 = await answer(r1.turnId, history, bridgeB);
+		const firstResume = messagesOf(calls().slice(fromFirst).at(0));
 		const second = toolUse(r2);
 		const park2 = await parkFile(r1.turnId);
 		const emptyAfterSecondRelease = emptyAnswersOnDisk();
@@ -1405,10 +1468,9 @@ await scenario("releasedTwiceInOneTurn", async () => {
 		const r3 = await answer(r1.turnId, history, bridgeB);
 		await settled(bridgeB);
 		const resumed = calls().slice(from);
-		const sent = JSON.stringify(
-			(resumed.at(0)?.body as { messages?: unknown[] } | undefined)?.messages ??
-				[],
-		);
+		const messages = messagesOf(resumed.at(0));
+		const _sent = JSON.stringify(messages);
+		const park2Messages = transcriptMessages(park2.text);
 		if (r3.content) history.push({ role: "assistant", content: r3.content });
 		return {
 			historyMode,
@@ -1425,17 +1487,30 @@ await scenario("releasedTwiceInOneTurn", async () => {
 			secondRelease: {
 				status: park2.status,
 				holdsSecondCall: park2.text.includes(String(second?.id)),
-				holdsFirstResult:
-					resultCount(park2.text, String(first?.id)) === 1 &&
-					park2.text.includes("AGAIN-FIRST"),
-				holdsEmptyAnswer: /"tool_use_id":"[^"]+","content":""/.test(park2.text),
+				firstResults: resultTexts(park2Messages, String(first?.id)),
+				emptyResults: emptyResults(park2.text),
 			},
 			emptyAfterSecondRelease,
 			emptyAtEnd: emptyAnswersOnDisk(),
 			modelCalls: resumed.length,
-			firstResultBlocks: resultCount(sent, String(first?.id)),
-			secondResultBlocks: resultCount(sent, String(second?.id)),
-			interrupted: sent.includes("interrupted"),
+			firstResults: resultTexts(messages, String(first?.id)),
+			secondResults: resultTexts(messages, String(second?.id)),
+			lastMessages: [firstResume.at(-1), messages.at(-1)].map((m) =>
+				m ? shape(m) : null,
+			),
+			expectedLastMessages: [
+				{
+					role: "user",
+					blocks: [["tool_result", String(first?.id), "AGAIN-FIRST"]],
+				},
+				{
+					role: "user",
+					blocks: [["tool_result", String(second?.id), "FINAL-RESULT"]],
+				},
+			],
+			interrupted: [firstResume, messages].some((m) =>
+				JSON.stringify(m).includes("interrupted"),
+			),
 		};
 	};
 	try {
@@ -1463,6 +1538,94 @@ await scenario("releasedTwiceInOneTurn", async () => {
 		};
 	} finally {
 		await bridgeB.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("releasedWithUnforwardedCall", async () => {
+	// The parked message also calls a tool the client was never offered, so
+	// the bridge forwards only the client's call.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-stray-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const on = makeBridge(
+		{
+			maxProcesses: 2,
+			parkReleaseMs: 500,
+			parkedTimeoutMs: 60_000,
+			turnDeadlineMs: 120_000,
+			releasedParkTtlMs: 600_000,
+		},
+		root,
+		parkRepo,
+	);
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const run = async (prompt: string) => {
+		const history: Msg[] = [{ role: "user", content: prompt }];
+		const r1 = await turn(history, {}, undefined, on);
+		const until = Date.now() + 20_000;
+		while (
+			repo.turns.get(r1.turnId)?.status !== "released" &&
+			Date.now() < until
+		)
+			await Bun.sleep(50);
+		const park = parkRepo.parks.get(r1.turnId);
+		const parkMessages = park
+			? transcriptMessages(readFileSync(park.sessionPath, "utf8"))
+			: [];
+		const use = (r1.content ?? []).find((x) => x.type === "tool_use");
+		history.push(
+			{ role: "assistant", content: r1.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(use?.id),
+						content: "CLIENT-RESULT",
+					},
+				],
+			},
+		);
+		const fromResume = calls().length;
+		const r2 = await answer(r1.turnId, history, on);
+		await settled(on);
+		const resumed = messagesOf(calls().slice(fromResume).at(0));
+		return {
+			r1Stop: r1.stop,
+			forwarded: (r1.content ?? []).map((b) => [b.type, b.name ?? null]),
+			awaited: park?.awaitedToolUseIds.length ?? null,
+			// Every call the model made in the parked message, and the results
+			// the stored session holds for each.
+			parkedCalls: parkMessages
+				.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+				.filter((b) => b.type === "tool_use")
+				.map((b) => [
+					String(b.name),
+					resultTexts(parkMessages, String(b.id)).length,
+				]),
+			r2,
+			turnStatus: repo.turns.get(r1.turnId)?.status,
+			// Each call of the parked message, and what the resumed model call
+			// sent as its results.
+			resumedResults: parkMessages
+				.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+				.filter((b) => b.type === "tool_use")
+				.map((b) => [String(b.name), resultTexts(resumed, String(b.id))]),
+			lastBlockTypes: shape(
+				resumed.at(-1) ?? { role: "user", content: [] },
+			).blocks.map(([type]) => type),
+			interrupted: JSON.stringify(resumed).includes("interrupted"),
+		};
+	};
+	try {
+		await on.ready();
+		return {
+			strayAfter: await run("STRAY read and more"),
+			unmappedFirst: await run("UNMAPPED then read"),
+		};
+	} finally {
+		await on.dispose();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

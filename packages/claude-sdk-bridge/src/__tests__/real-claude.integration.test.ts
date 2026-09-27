@@ -555,7 +555,9 @@ describe.skipIf(reason !== null)(
 					parkedCallCacheCreation: number | null;
 					parkedCallCacheRead: number | null;
 					resultReachedModel: boolean;
-					resultBlocks: number;
+					resultBlocks: string[];
+					lastMessage: unknown;
+					expectedLastMessage: unknown;
 					interrupted: boolean;
 				};
 				const released = (leg: Leg, historyMode: string, result: string) => {
@@ -570,9 +572,11 @@ describe.skipIf(reason !== null)(
 						},
 						turnStatus: "completed",
 						resultReachedModel: true,
-						resultBlocks: 1,
+						resultBlocks: [result],
 						interrupted: false,
 					});
+					// The client's result alone, with no text: nothing injected.
+					expect(leg.lastMessage).toEqual(leg.expectedLastMessage);
 					// The whole prefix the parked call sent is read back.
 					expect(leg.cacheRead).toBe(
 						(leg.parkedCallCacheRead ?? 0) + (leg.parkedCallCacheCreation ?? 0),
@@ -603,7 +607,15 @@ describe.skipIf(reason !== null)(
 			"resumes a turn released twice, on a first turn and on a resumed session",
 			async () => {
 				const s = scenario(await results(), "releasedTwiceInOneTurn");
-				const twice = (leg: unknown, historyMode: string) =>
+				type Twice = {
+					lastMessages: unknown[];
+					expectedLastMessages: unknown[];
+				};
+				const twice = (leg: unknown, historyMode: string) => {
+					// Each resume's last message is the client's result alone.
+					expect((leg as Twice).lastMessages).toEqual(
+						(leg as Twice).expectedLastMessages,
+					);
 					expect(leg).toMatchObject({
 						historyMode,
 						statuses: [200, 200, 200],
@@ -621,20 +633,68 @@ describe.skipIf(reason !== null)(
 						secondRelease: {
 							status: "released",
 							holdsSecondCall: true,
-							holdsFirstResult: true,
-							holdsEmptyAnswer: false,
+							firstResults: ["AGAIN-FIRST"],
+							emptyResults: 0,
 						},
 						emptyAfterSecondRelease: [],
 						emptyAtEnd: [],
 						modelCalls: 1,
-						firstResultBlocks: 1,
-						secondResultBlocks: 1,
+						firstResults: ["AGAIN-FIRST"],
+						secondResults: ["FINAL-RESULT"],
 						interrupted: false,
 					});
+				};
 				twice(s.firstTurn, "fresh");
 				expect(s.openerStop).toBe("end_turn");
 				twice(s.resumedTurn, "resume");
 				expect(s.parksLeft).toBe(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"resumes a park whose message also called a tool the client was not offered",
+			async () => {
+				const s = scenario(await results(), "releasedWithUnforwardedCall");
+				const common = {
+					r1Stop: "tool_use",
+					forwarded: [["tool_use", "read"]],
+					awaited: 1,
+					r2: { status: 200, stop: "end_turn" },
+					turnStatus: "completed",
+					lastBlockTypes: ["tool_result", "tool_result"],
+					interrupted: false,
+				};
+				// Claude Code runs the calls in order: the client's parks first,
+				// so the stray one after it has no result when the turn is released.
+				expect(s.strayAfter).toMatchObject({
+					...common,
+					parkedCalls: [
+						["mcp__c__read", 0],
+						["no_such_tool", 0],
+					],
+					resumedResults: [
+						["mcp__c__read", ["CLIENT-RESULT"]],
+						["no_such_tool", ["[Tool result missing due to internal error]"]],
+					],
+				});
+				// Before it, Claude Code answers the stray call itself.
+				expect(s.unmappedFirst).toMatchObject({
+					...common,
+					parkedCalls: [
+						["mcp__c__unmapped_tool", 1],
+						["mcp__c__read", 0],
+					],
+					resumedResults: [
+						[
+							"mcp__c__unmapped_tool",
+							[
+								"<tool_use_error>Error: No such tool available: mcp__c__unmapped_tool</tool_use_error>",
+							],
+						],
+						["mcp__c__read", ["CLIENT-RESULT"]],
+					],
+				});
 			},
 			TIMEOUT,
 		);
