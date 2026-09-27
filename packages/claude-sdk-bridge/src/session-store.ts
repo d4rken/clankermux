@@ -99,18 +99,19 @@ export class FileSessionStore implements SessionStore {
 
 	async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
 		const entries = this.read(key.sessionId, key.subpath);
-		if (key.subpath !== undefined) return entries;
-		const extra = this.loadOnly.get(key.sessionId);
-		this.loadOnly.delete(key.sessionId);
+		const extra =
+			key.subpath === undefined ? this.loadOnly.get(key.sessionId) : undefined;
 		return entries && extra ? [...entries, ...extra] : entries;
 	}
 
 	/**
-	 * Entries the session's next `load()` returns after its file's own. They
-	 * never reach the file, so Claude Code resumes with them and the
-	 * transcript it writes on goes without them.
+	 * Entries every `load()` of the session returns after its file's own,
+	 * until the session is removed. They never reach the session file; the
+	 * SDK writes what `load()` returns to a temporary copy of its own, and
+	 * the entries Claude Code appends from there land in the file without
+	 * them.
 	 */
-	appendOnNextLoad(sessionId: string, entries: SessionStoreEntry[]): void {
+	appendOnLoad(sessionId: string, entries: SessionStoreEntry[]): void {
 		assertSessionId(sessionId);
 		this.loadOnly.set(sessionId, entries);
 	}

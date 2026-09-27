@@ -79,6 +79,28 @@ describe("transcriptHoldsCalls", () => {
 		expect(transcriptHoldsCalls(path, "nope", [])).toBe(false);
 		expect(transcriptHoldsCalls(join(dir, "missing"), "a2", [])).toBe(false);
 	});
+
+	it("refuses a chain whose parent is missing from the file", () => {
+		const dir = temp();
+		const path = join(dir, "t.jsonl");
+		// a1's parent u1 is gone: the chain from a2 breaks before its root.
+		writeFileSync(
+			path,
+			transcript()
+				.split("\n")
+				.filter((line) => !line.includes('"uuid":"u1"'))
+				.join("\n"),
+		);
+		expect(transcriptHoldsCalls(path, "a2", ["toolu_1", "toolu_2"])).toBe(
+			false,
+		);
+		expect(transcriptHoldsCalls(path, "a2", ["toolu_2"])).toBe(false);
+		const dst = join(dir, "dst.jsonl");
+		expect(
+			forkVerifiedTranscript(path, dst, A, B, "a2", ["toolu_2"]),
+		).toBeNull();
+		expect(existsSync(dst)).toBe(false);
+	});
 });
 
 describe("forkVerifiedTranscript", () => {

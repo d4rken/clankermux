@@ -96,9 +96,10 @@ const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
 
 /**
  * The entry `resumeAt` of a transcript (JSONL bytes), when its chain,
- * walking parentUuid back from it, carries every awaited tool_use id; null
- * otherwise. Each line is decoded on its own; an unparsable line fails the
- * check.
+ * walking parentUuid back from it to an entry whose parentUuid is null,
+ * carries every awaited tool_use id; null otherwise. Each line is decoded
+ * on its own; an unparsable line or a parent missing from the file fails
+ * the check.
  */
 function resumePoint(
 	bytes: Buffer,
@@ -146,7 +147,8 @@ function resumePoint(
 	while (at && !seen.has(at)) {
 		seen.add(at);
 		const entry = byUuid.get(at);
-		if (!entry) break;
+		// A parent the file does not hold: the chain Claude Code loads is not whole.
+		if (!entry) return null;
 		for (const id of entry.calls) found.add(id);
 		at = entry.parent;
 	}
@@ -494,7 +496,7 @@ export class ReleasedParkStore {
 			entry.park.awaitedToolUseIds,
 		);
 		if (!answer) return false;
-		sessions.appendOnNextLoad(toId, [answer]);
+		sessions.appendOnLoad(toId, [answer]);
 		return true;
 	}
 
