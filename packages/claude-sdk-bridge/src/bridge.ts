@@ -3,6 +3,7 @@ import { lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Logger } from "@clankermux/logger";
 import {
+	SDK_BRIDGE_HISTORY_HEADER,
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeAvailability,
 	SdkBridgeCapacityError,
@@ -19,6 +20,7 @@ import {
 	type SdkBridgeTurnKind,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	sdkBridgeHistoryHeaderValue,
 } from "@clankermux/types";
 import {
 	type AdmissionRejection,
@@ -101,6 +103,7 @@ import {
 	DEFAULT_SDK_BRIDGE_TIMING,
 	type QueryFn,
 	type SdkBridgeLimits,
+	type SdkBridgeTurnHistory,
 } from "./types";
 import {
 	claimGeneration,
@@ -564,7 +567,14 @@ export function createClaudeSdkBridge(
 			errorType: error.type,
 			errorMessage: error.message,
 		});
-		return errorResponse(error);
+		return errorResponse(
+			error,
+			historyHeaders(
+				lives.get(turnId)?.turnHistory ??
+					parks?.get(turnId)?.descriptor.history ??
+					null,
+			),
+		);
 	}
 
 	async function readBody(
@@ -835,6 +845,20 @@ export function createClaudeSdkBridge(
 		return null;
 	}
 
+	/** {@link SDK_BRIDGE_HISTORY_HEADER}, when the turn's decision is known. */
+	function historyHeaders(
+		history: SdkBridgeTurnHistory | null,
+	): Record<string, string> {
+		return history
+			? {
+					[SDK_BRIDGE_HISTORY_HEADER]: sdkBridgeHistoryHeaderValue(
+						history.mode,
+						history.reason,
+					),
+				}
+			: {};
+	}
+
 	function newLeg(
 		id: string,
 		kind: Leg["kind"],
@@ -842,6 +866,7 @@ export function createClaudeSdkBridge(
 		signal: AbortSignal,
 		bumpIdleTimeout: (() => void) | undefined,
 		onGone: (leg: Leg) => void,
+		history: SdkBridgeTurnHistory | null,
 	): Leg {
 		const leg: Leg = {
 			id,
@@ -856,6 +881,7 @@ export function createClaudeSdkBridge(
 			signal,
 			onClientGone: () => onGone(leg),
 			bumpIdleTimeout,
+			headers: historyHeaders(history),
 		});
 		return leg;
 	}
@@ -1016,6 +1042,7 @@ export function createClaudeSdkBridge(
 			accountId: plan.preferredAccountId,
 			requestedModel: meta.model,
 			historyMode: input.historyMode,
+			turnHistory: input.descriptor.history ?? null,
 			query,
 			prompt,
 			parked,
@@ -1100,6 +1127,7 @@ export function createClaudeSdkBridge(
 		turn: TurnBody,
 		systemPrompt: SystemPromptDecision,
 		startedAt: number,
+		history: SdkBridgeTurnHistory,
 	): ResumeDescriptor {
 		return {
 			v: 1,
@@ -1113,6 +1141,7 @@ export function createClaudeSdkBridge(
 			project: start.meta.project,
 			projectAttributionSource: start.meta.projectAttributionSource,
 			turnStartedAt: startedAt,
+			history,
 		};
 	}
 
@@ -1138,6 +1167,7 @@ export function createClaudeSdkBridge(
 			start.signal,
 			start.bumpIdleTimeout,
 			(l) => live.onClientGone(l),
+			{ mode: row.historyMode, reason: row.rebuildReason ?? null },
 		);
 		live.start(leg);
 		return leg.response.response;
@@ -1454,7 +1484,10 @@ export function createClaudeSdkBridge(
 				sideRequest: false,
 				recorder,
 				startedAt,
-				descriptor: describe(input, turn, systemPrompt, startedAt),
+				descriptor: describe(input, turn, systemPrompt, startedAt, {
+					mode: history.mode,
+					reason: history.reason,
+				}),
 			});
 			// The query owns the claim from here.
 			claimReleased = true;
@@ -1600,6 +1633,7 @@ export function createClaudeSdkBridge(
 					turn,
 					input.systemPrompt,
 					input.startedAt,
+					{ mode: "resume", reason: null },
 				),
 			});
 		} catch (error) {
@@ -1737,6 +1771,7 @@ export function createClaudeSdkBridge(
 				input.signal,
 				input.bumpIdleTimeout,
 				(l) => live.onClientGone(l),
+				live.turnHistory,
 			);
 			live.continueWith(
 				leg,
@@ -2055,6 +2090,7 @@ export function createClaudeSdkBridge(
 			input.signal,
 			input.bumpIdleTimeout,
 			(l) => live.onClientGone(l),
+			live.turnHistory,
 		);
 		live.start(leg);
 		return leg.response.response;

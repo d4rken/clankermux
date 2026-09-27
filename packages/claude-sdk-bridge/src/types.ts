@@ -4,16 +4,24 @@ import type {
 	SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
+	SdkBridgeHistoryMode,
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
 	SdkBridgeParkLease,
+	SdkBridgeRebuildReason,
 	SdkBridgeReleasedPark,
 	SdkBridgeReleasedParkInsert,
 	SdkBridgeTurnCounterDelta,
 	SdkBridgeTurnFinish,
 	SdkBridgeTurnInsert,
 } from "@clankermux/types";
+
+/** How a turn's conversation reached Claude Code, as its row records it. */
+export interface SdkBridgeTurnHistory {
+	mode: SdkBridgeHistoryMode;
+	reason: SdkBridgeRebuildReason | null;
+}
 
 /** The part of the SDK's `Query` the bridge drives. The real `query()` satisfies it. */
 export interface BridgeQuery extends AsyncIterable<SDKMessage> {

@@ -294,13 +294,20 @@ async function jsonResponse(
  * fresh Response, so it only reaches the client if it is copied deliberately.
  */
 const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
+/**
+ * How an SDK bridge turn's conversation reached Claude Code
+ * (`SDK_BRIDGE_HISTORY_HEADER`), copied for the same reason as the id.
+ */
+const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
+/** The proxy's headers every leg copies onto the response it builds. */
+const CARRIED_HEADERS = [CLIENT_REQUEST_ID_HEADER, SDK_BRIDGE_HISTORY_HEADER];
 
 /**
- * One exit for every response this adapter produces, so the request id is
- * applied in a single place rather than at each construction site — including
- * the error envelopes, which is where a client most needs to look the row up.
- * Only the id is carried over; the fresh headers each leg builds are otherwise
- * exactly what the client should see.
+ * One exit for every response this adapter produces, so the carried headers
+ * are applied in a single place rather than at each construction site —
+ * including the error envelopes, which is where a client most needs to look
+ * the row up. Only {@link CARRIED_HEADERS} are carried over; the fresh headers
+ * each leg builds are otherwise exactly what the client should see.
  */
 export async function handleChatCompletionsRequest(
 	req: Request,
@@ -311,7 +318,7 @@ export async function handleChatCompletionsRequest(
 	apiKeyName?: string | null,
 	defaultMaxTokens = 8192,
 ): Promise<Response> {
-	let captured: string | null = null;
+	const captured: { headers: Headers | null } = { headers: null };
 	const response = await respondToChatCompletionsRequest(
 		req,
 		url,
@@ -321,11 +328,13 @@ export async function handleChatCompletionsRequest(
 		apiKeyName,
 		defaultMaxTokens,
 		(proxied) => {
-			captured = proxied.headers.get(CLIENT_REQUEST_ID_HEADER);
+			captured.headers = proxied.headers;
 		},
 	);
-	const requestId: string | null = captured;
-	if (requestId) response.headers.set(CLIENT_REQUEST_ID_HEADER, requestId);
+	for (const name of CARRIED_HEADERS) {
+		const value = captured.headers?.get(name);
+		if (value) response.headers.set(name, value);
+	}
 	return response;
 }
 

@@ -32,7 +32,12 @@ import {
 	toMcpResult,
 } from "./tool-server";
 import type { Block, ClientMessage } from "./turn-request";
-import type { BridgeLog, BridgeQuery, SdkBridgeTiming } from "./types";
+import type {
+	BridgeLog,
+	BridgeQuery,
+	SdkBridgeTiming,
+	SdkBridgeTurnHistory,
+} from "./types";
 
 /** What Claude Code reports when it has rewritten the context it sends. */
 const CONTEXT_REWRITES: ReadonlySet<string> = new Set([
@@ -128,6 +133,12 @@ export interface LiveQueryInit {
 	/** The model the client asked for, as it named it. */
 	requestedModel: string;
 	historyMode: SdkBridgeHistoryMode;
+	/**
+	 * The history decision the turn's row records, which every leg's response
+	 * reports. A released park's resume runs as `resume` under the decision
+	 * its turn started with; null when that is unknown.
+	 */
+	turnHistory: SdkBridgeTurnHistory | null;
 	query: BridgeQuery;
 	prompt: PromptStream;
 	parked: ParkedCalls;
@@ -364,6 +375,10 @@ export class LiveQuery {
 
 	get historyMode(): SdkBridgeHistoryMode {
 		return this.init.historyMode;
+	}
+
+	get turnHistory(): SdkBridgeTurnHistory | null {
+		return this.init.turnHistory;
 	}
 
 	/** Start the query with its first leg's response already created. */

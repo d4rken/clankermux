@@ -1,18 +1,25 @@
 /**
  * What the bridge does so a client's conversation reaches the model as the
- * client sent it: tool results Claude Code would have shortened, context
- * rewrites it reports, and a refusal.
+ * client sent it, and so the client can tell how it did: tool results Claude
+ * Code would have shortened, context rewrites it reports, a refusal, and the
+ * history header on every response of a turn.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { SdkBridgeRoutePlan, SdkBridgeTurnMeta } from "@clankermux/types";
+import type { SDKMessage, SessionStore } from "@anthropic-ai/claude-agent-sdk";
+import {
+	SDK_BRIDGE_HISTORY_HEADER,
+	type SdkBridgeRoutePlan,
+	type SdkBridgeTurnMeta,
+} from "@clankermux/types";
 import { MAX_TOOL_RESULT_CHARS } from "../tool-server";
 import {
 	assistantMessage,
+	type FakeQuery,
 	foldReply,
 	type Harness,
 	initMessage,
+	MODEL,
 	makeHarness,
 	makeMeta,
 	makePlan,
@@ -86,6 +93,7 @@ async function reply(response: Promise<Response>) {
 		: [];
 	return {
 		status: res.status,
+		history: res.headers.get(SDK_BRIDGE_HISTORY_HEADER),
 		json: events.length ? null : (JSON.parse(text) as Record<string, unknown>),
 		events,
 		...foldReply(events),
@@ -335,5 +343,182 @@ describe("a refusal", () => {
 			httpStatus: 200,
 			errorType: null,
 		});
+	});
+});
+
+describe(`the ${SDK_BRIDGE_HISTORY_HEADER} header`, () => {
+	const session = {
+		affinityScope: "client_session",
+		affinityKey: "sess-h",
+	} as const;
+
+	async function mirror(query: FakeQuery, text: string) {
+		const store = query.options.sessionStore as SessionStore;
+		const sessionId = (query.options.sessionId ??
+			query.options.resume) as string;
+		await store.append({ projectKey: "p", sessionId }, [
+			{
+				type: "user",
+				sessionId,
+				uuid: crypto.randomUUID(),
+				message: { role: "user", content: text },
+			},
+		]);
+	}
+
+	/** One user turn answered "echo: <text>". */
+	async function answered(
+		h: Harness,
+		messages: Msg[],
+		opts: { plan?: Partial<SdkBridgeRoutePlan>; stream?: boolean } = {},
+	) {
+		const t = await start(
+			h,
+			{ messages, ...(opts.stream === false ? { stream: false } : {}) },
+			{ meta: session, plan: opts.plan },
+		);
+		await mirror(t.query, "hello");
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "echo" }]),
+			resultMessage(),
+		);
+		const r = await reply(t.response);
+		await settled(h);
+		return { t, r };
+	}
+
+	const hello: Msg = { role: "user", content: "hello" };
+	const echoed: Msg = {
+		role: "assistant",
+		content: [{ type: "text", text: "echo" }],
+	};
+
+	it("reports fresh, an edit, resume and an account change, streamed and as JSON", async () => {
+		const h = harness();
+		const fresh = await answered(h, [hello]);
+		expect(fresh.r.history).toBe("fresh");
+
+		const edited: Msg[] = [
+			hello,
+			{ role: "assistant", content: "an edited answer" },
+			{ role: "user", content: "again" },
+		];
+		const rebuilt = await answered(h, edited);
+		expect(rebuilt.r.history).toBe("rebuild_transcript; reason=edit");
+
+		const third: Msg[] = [
+			...edited,
+			echoed,
+			{ role: "user", content: "third" },
+		];
+		const resumed = await answered(h, third, { stream: false });
+		expect(resumed.r.json).toMatchObject({ type: "message" });
+		expect(resumed.r.history).toBe("resume");
+
+		const onB = {
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: MODEL },
+			],
+			preferredAccountId: "acct-b",
+		} as const;
+		const moved = await answered(
+			h,
+			[...third, echoed, { role: "user", content: "fourth" }],
+			{ plan: onB },
+		);
+		expect(moved.r.history).toBe("resume; reason=account_change");
+	});
+
+	it("reports the turn's decision on its continuation legs and their refusals", async () => {
+		const h = harness();
+		const t = await start(h, {
+			tools,
+			messages: [
+				{ role: "user", content: "earlier" },
+				{ role: "assistant", content: "earlier answer" },
+				first,
+			],
+		});
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_1", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const r1 = await reply(t.response);
+		expect(r1.history).toBe("rebuild_transcript; reason=unknown");
+		const call = t.query.callTool("toolu_1", "read");
+		await waitFor(() => h.bridge.status().parked === 1);
+		const history: Msg[] = [
+			{ role: "user", content: "earlier" },
+			{ role: "assistant", content: "earlier answer" },
+			first,
+			{ role: "assistant", content: r1.content },
+		];
+
+		const stale = continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: [
+				...history,
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "other", content: "x" },
+					],
+				},
+			],
+		});
+		const refused = await reply(stale.response);
+		expect(refused.status).toBe(409);
+		expect(refused.history).toBe("rebuild_transcript; reason=unknown");
+
+		const c = continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: [
+				...history,
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_1", content: "A" },
+					],
+				},
+			],
+		});
+		await call;
+		t.query.emit(
+			...streamedMessage([{ type: "text", text: "done" }]),
+			resultMessage(),
+		);
+		expect((await reply(c.response)).history).toBe(
+			"rebuild_transcript; reason=unknown",
+		);
+	});
+
+	it("rides on an error the turn answers after it started, and not on a refusal before it", async () => {
+		const h = harness();
+		const t = await start(h, { messages: [hello] });
+		t.query.emit(
+			initMessage(),
+			assistantMessage([{ type: "text", text: "API Error: 500" }], {
+				error: "unknown",
+			}),
+			resultMessage({ isError: true, result: "API Error: 500" }),
+		);
+		const failed = await reply(t.response);
+		expect(failed.status).toBe(502);
+		expect(failed.history).toBe("fresh");
+
+		const res = await h.bridge.startTurn({
+			request: messagesRequest({
+				messages: [hello],
+				stop_sequences: ["END"],
+			}),
+			plan: makePlan(),
+			meta: makeMeta(),
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(400);
+		expect(res.headers.get(SDK_BRIDGE_HISTORY_HEADER)).toBeNull();
 	});
 });

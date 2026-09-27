@@ -451,8 +451,14 @@ export function errorBody(error: BridgeError) {
 	};
 }
 
-export function errorResponse(error: BridgeError): Response {
-	const headers = new Headers({ "content-type": "application/json" });
+export function errorResponse(
+	error: BridgeError,
+	extraHeaders: Record<string, string> = {},
+): Response {
+	const headers = new Headers({
+		...extraHeaders,
+		"content-type": "application/json",
+	});
 	if (error.retryAfter) headers.set("retry-after", error.retryAfter);
 	return new Response(JSON.stringify(errorBody(error)), {
 		status: error.status,
