@@ -14,15 +14,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeRoutePlan, SdkBridgeTurnMeta } from "@clankermux/types";
-import { createClaudeSdkBridge } from "../../bridge";
+import { type ClaudeSdkBridge, createClaudeSdkBridge } from "../../bridge";
 import { buildQueryOptions, workPaths } from "../../options";
 import { PromptStream } from "../../prompt-stream";
 import { FileSessionStore } from "../../session-store";
 import { ProcessGroupSpawner, resolveClaudeExecutable } from "../../spawn";
 import { createToolServer, loadMcpSdk, ToolNames } from "../../tool-server";
+import type { SdkBridgeLimits, SdkBridgeParkRepo } from "../../types";
 import { ensurePrivateDir } from "../../work-dirs";
 import {
 	MODEL,
+	memoryParkRepo,
 	memoryTurnRepo,
 	parseSse,
 	READ_TOOL,
@@ -87,7 +89,8 @@ type EnvName =
 	| "bridge"
 	| "bridgePlusDisableCompact"
 	| "autoCompactOn"
-	| "disableCompactOnly";
+	| "disableCompactOnly"
+	| "modelFallbackOn";
 
 function envFor(name: EnvName, base: Record<string, string>) {
 	const env = { ...base };
@@ -95,6 +98,7 @@ function envFor(name: EnvName, base: Record<string, string>) {
 	if (name === "autoCompactOn" || name === "disableCompactOnly")
 		delete env.DISABLE_AUTO_COMPACT;
 	if (name === "disableCompactOnly") env.DISABLE_COMPACT = "1";
+	if (name === "modelFallbackOn") delete env.CLAUDE_CODE_NO_MODEL_FALLBACK;
 	return env;
 }
 
@@ -146,6 +150,9 @@ function describeCall(q: MockRequest) {
 		clearedToolResult: raw.includes("[Old tool result content cleared]"),
 		persistedOutput: raw.includes("<persisted-output>"),
 		truncatedOutput: raw.includes("<truncated-output>"),
+		lastUserChars: JSON.stringify(
+			(body.messages ?? []).filter((m) => m.role === "user").at(-1) ?? null,
+		).length,
 		toolResults: results.length,
 		toolResultChars: results.map((b) =>
 			typeof b.content === "string"
@@ -202,7 +209,7 @@ interface RunInput {
 	toolResult?: string;
 	extraOptions?: Partial<Options>;
 	extraEnv?: Record<string, string>;
-	/** Added to every listed tool's `_meta`. */
+	/** Every listed tool's `_meta`, in place of the bridge's own. */
 	toolMeta?: Record<string, unknown>;
 }
 
@@ -256,7 +263,7 @@ async function runQuery(input: RunInput) {
 						type: "object",
 						properties: { path: { type: "string" } },
 					},
-					_meta: { "anthropic/alwaysLoad": true, ...input.toolMeta },
+					_meta: input.toolMeta,
 				},
 			],
 		}));
@@ -443,14 +450,14 @@ await scenario("microcompact", async () => {
 	return { manyRounds, hint422 };
 });
 
-// Tool results of growing size: whether the model receives them whole.
 function bigText(size: number): string {
 	const line = "0123456789abcdef0123456789abcdef0123456789abcdef012345678\n";
 	return line.repeat(Math.ceil(size / line.length)).slice(0, size);
 }
 
 // Tool results of growing size: whether the model receives them whole, with
-// the bridge's env and tool listing, and with the two limits raised.
+// the bridge's tool listing, and with the listing it had before it declared
+// Claude Code's largest result size.
 await scenario("largeToolResult", async () => {
 	const variants: Array<{
 		name: string;
@@ -458,16 +465,17 @@ await scenario("largeToolResult", async () => {
 		extraEnv?: Record<string, string>;
 		toolMeta?: Record<string, unknown>;
 	}> = [
-		{ name: "bridge", sizes: [49_000, 51_000, 120_000] },
+		{ name: "bridge", sizes: [51_000, 120_000, 499_000, 501_000] },
 		{
-			name: "maxMcpOutputTokens",
-			sizes: [60_000, 120_000],
-			extraEnv: { MAX_MCP_OUTPUT_TOKENS: "10000000" },
+			name: "undeclared",
+			sizes: [49_000, 51_000, 120_000],
+			toolMeta: { "anthropic/alwaysLoad": true },
 		},
 		{
-			name: "maxResultSizeChars",
-			sizes: [60_000, 120_000, 499_000, 501_000],
-			toolMeta: { "anthropic/maxResultSizeChars": 10_000_000 },
+			name: "undeclaredMaxMcpOutputTokens",
+			sizes: [120_000],
+			extraEnv: { MAX_MCP_OUTPUT_TOKENS: "10000000" },
+			toolMeta: { "anthropic/alwaysLoad": true },
 		},
 	];
 	const runs = await Promise.all(
@@ -522,57 +530,32 @@ await scenario("slashCompact", async () => {
 	return Object.fromEntries(runs);
 });
 
-// Whether a refusal's fallback to another model can be switched off.
-await scenario("refusalFallbackOff", async () => {
-	const variants: Array<{
-		name: string;
-		extraEnv?: Record<string, string>;
-		settings?: Record<string, unknown>;
-	}> = [
-		{
-			name: "noModelFallbackEnv",
-			extraEnv: { CLAUDE_CODE_NO_MODEL_FALLBACK: "1" },
-		},
-		{
-			name: "switchModelsOnFlagFalse",
-			settings: { switchModelsOnFlag: false },
-		},
-	];
+// Control for the bridge's CLAUDE_CODE_NO_MODEL_FALLBACK: without it, a
+// refusal on Fable 5.1 or Opus 5.5 is retried on Opus 4.8.
+await scenario("refusalFallbackOn", async () => {
 	const runs = await Promise.all(
-		variants.flatMap((v) =>
-			["claude-fable-5-1", "claude-opus-5-5"].map(async (model) => {
-				const marker = `[S:refoff-${v.name}-${model}]`;
-				rule(marker, {
-					when: ({ index }) => index === 0,
-					times: 1,
-					shape: {
-						stopReason: "refusal",
-						stopDetails: {
-							type: "refusal",
-							category: "cyber",
-							explanation: null,
-						},
+		["claude-fable-5-1", "claude-opus-5-5"].map(async (model) => {
+			const marker = `[S:refon-${model}]`;
+			rule(marker, {
+				when: ({ index }) => index === 0,
+				times: 1,
+				shape: {
+					stopReason: "refusal",
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: null,
 					},
-				});
-				const r = await runQuery({
-					marker,
-					env: "bridge",
-					model,
-					prompt: `${marker} hi`,
-					extraEnv: v.extraEnv,
-					extraOptions: v.settings
-						? {
-								settings: {
-									autoMemoryEnabled: false,
-									includeGitInstructions: false,
-									...v.settings,
-								} as Options["settings"],
-							}
-						: undefined,
-				});
-				return [`${v.name} ${model}`, r] as const;
-			}),
-		),
+				},
+			});
+			const r = await runQuery({
+				marker,
+				env: "modelFallbackOn",
+				model,
+				prompt: `${marker} hi`,
+			});
+			return [model, r] as const;
+		}),
 	);
 	return Object.fromEntries(runs);
 });
@@ -695,31 +678,39 @@ await scenario("oneMillion", async () => {
 // ---- Through the bridge: what the client sees. ----
 
 const repo = memoryTurnRepo();
-/** Every inner call's outcome, listener refusals included. */
-const bridge = createClaudeSdkBridge({
-	dispatchInner: async (req, ctx) => {
-		const requestId = crypto.randomUUID();
-		ctx.onInnerRequestStarted?.(requestId);
-		const res = await mock.handle(req);
-		ctx.onInnerOutcome?.({
-			requestId,
-			status: res.status,
-			errorType: null,
-			message: null,
-			retryAfter: res.headers.get("retry-after"),
-			accountId: ctx.plan.preferredAccountId,
-		});
-		return res;
-	},
-	turnRepo: repo,
-	workRoot: join(root, "bridge"),
-	log: silentLog,
-	limits: () => ({
-		maxProcesses: 8,
-		parkedTimeoutMs: 60_000,
-		turnDeadlineMs: 120_000,
-	}),
-});
+function makeBridge(
+	name: string,
+	limits: Partial<SdkBridgeLimits> = {},
+	parkRepo?: SdkBridgeParkRepo,
+): ClaudeSdkBridge {
+	return createClaudeSdkBridge({
+		...(parkRepo ? { parkRepo } : {}),
+		dispatchInner: async (req, ctx) => {
+			const requestId = crypto.randomUUID();
+			ctx.onInnerRequestStarted?.(requestId);
+			const res = await mock.handle(req);
+			ctx.onInnerOutcome?.({
+				requestId,
+				status: res.status,
+				errorType: null,
+				message: null,
+				retryAfter: res.headers.get("retry-after"),
+				accountId: ctx.plan.preferredAccountId,
+			});
+			return res;
+		},
+		turnRepo: repo,
+		workRoot: join(root, name),
+		log: silentLog,
+		limits: () => ({
+			maxProcesses: 8,
+			parkedTimeoutMs: 60_000,
+			turnDeadlineMs: 120_000,
+			...limits,
+		}),
+	});
+}
+const bridge = makeBridge("bridge");
 
 function plan(model: string, account = "acct-a"): SdkBridgeRoutePlan {
 	return {
@@ -766,7 +757,9 @@ async function bridgedTurn(input: {
 	marker: string;
 	/** Answer this parked turn instead of starting one. */
 	continues?: string;
+	on?: ClaudeSdkBridge;
 }) {
+	const on = input.on ?? bridge;
 	const p = plan(input.model, input.account);
 	const turnId = input.continues ?? p.turnId;
 	const request = new Request("http://bridge.test/v1/messages", {
@@ -782,13 +775,13 @@ async function bridgedTurn(input: {
 		}),
 	});
 	const res = input.continues
-		? await bridge.continueTurn({
+		? await on.continueTurn({
 				turnId,
 				request,
 				meta: meta(input.model, input.extra),
 				signal: new AbortController().signal,
 			})
-		: await bridge.startTurn({
+		: await on.startTurn({
 				request,
 				plan: p,
 				meta: meta(input.model, input.extra),
@@ -970,6 +963,41 @@ await scenario("bridged", async () => {
 			},
 		],
 	});
+	// A result past Claude Code's ceiling is refused, and the turn waits on.
+	const hugeMarker = "[S:b-hugetool]";
+	const hugeStart = await bridgedTurn({
+		model: MODEL,
+		marker: hugeMarker,
+		messages: [{ role: "user", content: `${hugeMarker} TOOL read` }],
+	});
+	const hugeUse = (hugeStart.content as Block[]).find(
+		(b) => b?.type === "tool_use",
+	);
+	const hugeRefused = await bridgedTurn({
+		model: MODEL,
+		marker: hugeMarker,
+		continues: hugeStart.turnId,
+		messages: [
+			{ role: "user", content: `${hugeMarker} TOOL read` },
+			{ role: "assistant", content: [hugeUse as Block] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(hugeUse?.id),
+						content: bigText(600_000),
+					},
+				],
+			},
+		],
+	});
+	const hugeStillWaits =
+		repo.turns.get(hugeStart.turnId)?.status === "running" &&
+		bridge.findContinuation([String(hugeUse?.id)], {
+			apiKeyId: "key-1",
+			model: MODEL,
+		}) !== null;
 	const rebuildMarker = "[S:b-bigrebuild]";
 	const bigRebuild = await bridgedTurn({
 		model: MODEL,
@@ -1027,6 +1055,8 @@ await scenario("bridged", async () => {
 	});
 	return {
 		bigLive,
+		hugeRefused,
+		hugeStillWaits,
 		bigRebuild,
 		blocking,
 		blockingResult,
@@ -1035,6 +1065,101 @@ await scenario("bridged", async () => {
 		reported,
 		accountChange: { first: acFirst, second: acSecond },
 	};
+});
+
+// Results over Claude Code's 500,000-character persistence ceiling, in the
+// paths that do not go through a parked MCP call: a history rebuilt as a
+// transcript, a flattened one, a dead continuation and a released park.
+await scenario("bigHistory", async () => {
+	const big = bigText(600_000);
+	// A 1M window, so the size alone never meets Claude Code's blocking limit.
+	const model = "claude-opus-5-5[1m]";
+	const toolTurn = (marker: string, id: string, name = "read"): Msg[] => [
+		{ role: "user", content: `${marker} read it` },
+		{
+			role: "assistant",
+			content: [{ type: "tool_use", id, name, input: { path: "a" } }],
+		},
+		{
+			role: "user",
+			content: [{ type: "tool_result", tool_use_id: id, content: big }],
+		},
+	];
+	const transcriptMarker = "[S:h-transcript]";
+	const transcript = await bridgedTurn({
+		model,
+		marker: transcriptMarker,
+		messages: [
+			...toolTurn(transcriptMarker, "toolu_h_1"),
+			{ role: "assistant", content: [{ type: "text", text: "read it" }] },
+			{ role: "user", content: `${transcriptMarker} next` },
+		],
+	});
+	// A call to a tool the turn does not offer makes the history ineligible
+	// for a transcript.
+	const flatMarker = "[S:h-flat]";
+	const flattened = await bridgedTurn({
+		model,
+		marker: flatMarker,
+		messages: [
+			...toolTurn(flatMarker, "toolu_h_2", "gone"),
+			{ role: "assistant", content: [{ type: "text", text: "read it" }] },
+			{ role: "user", content: `${flatMarker} next` },
+		],
+	});
+	const deadMarker = "[S:h-dead]";
+	const dead = await bridgedTurn({
+		model,
+		marker: deadMarker,
+		messages: toolTurn(deadMarker, "toolu_h_3"),
+	});
+
+	const parkRoot = "released";
+	const released = makeBridge(
+		parkRoot,
+		{ maxProcesses: 2, parkReleaseMs: 500, releasedParkTtlMs: 600_000 },
+		memoryParkRepo(repo.turns),
+	);
+	try {
+		await released.ready();
+		const parkMarker = "[S:h-park]";
+		const history: Msg[] = [
+			{ role: "user", content: `${parkMarker} TOOL read` },
+		];
+		const start = await bridgedTurn({
+			model,
+			marker: parkMarker,
+			messages: history,
+			on: released,
+		});
+		const use = (start.content as Block[]).find((b) => b?.type === "tool_use");
+		const until = Date.now() + 20_000;
+		while (
+			repo.turns.get(start.turnId)?.status !== "released" &&
+			Date.now() < until
+		)
+			await Bun.sleep(50);
+		const statusBefore = repo.turns.get(start.turnId)?.status;
+		const resumed = await bridgedTurn({
+			model,
+			marker: parkMarker,
+			continues: start.turnId,
+			on: released,
+			messages: [
+				...history,
+				{ role: "assistant", content: [use as Block] },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: String(use?.id), content: big },
+					],
+				},
+			],
+		});
+		return { transcript, flattened, dead, statusBefore, resumed };
+	} finally {
+		await released.dispose();
+	}
 });
 
 // Calls that carry no scenario marker: requests Claude Code makes on its own.
