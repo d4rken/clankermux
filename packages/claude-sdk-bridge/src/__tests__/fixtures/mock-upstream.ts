@@ -2,6 +2,7 @@
 // receives and answers /v1/messages with a scripted SSE stream:
 //
 //   last user turn carries tool_result      -> text "done: <first result text>"
+//   ... whose first result text starts "AGAIN" -> one tool_use for the *read tool
 //   ... or a flattened "[tool result id=…]" -> the same, from its first line
 //   last user text contains "PARALLEL"      -> two tool_use blocks
 //   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
@@ -164,7 +165,14 @@ function script(
 		const inner = Array.isArray(first.content)
 			? textOf(first.content as Block[])
 			: String(first.content);
-		content.push({ type: "text", text: `done: ${inner}` });
+		if (readTool && inner.startsWith("AGAIN"))
+			content.push({
+				type: "tool_use",
+				id: `toolu_mock_${++toolSeq}`,
+				name: readTool,
+				input: { path: "again.txt" },
+			});
+		else content.push({ type: "text", text: `done: ${inner}` });
 	} else if (flattenedResult) {
 		content.push({ type: "text", text: `done: ${flattenedResult[1]}` });
 	} else if (readTool && /PARALLEL/.test(text)) {

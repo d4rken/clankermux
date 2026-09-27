@@ -600,6 +600,46 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"resumes a turn released twice, on a first turn and on a resumed session",
+			async () => {
+				const s = scenario(await results(), "releasedTwiceInOneTurn");
+				const twice = (leg: unknown, historyMode: string) =>
+					expect(leg).toMatchObject({
+						historyMode,
+						statuses: [200, 200, 200],
+						stops: ["tool_use", "tool_use", "end_turn"],
+						r3: { content: [{ type: "text", text: "done: FINAL-RESULT" }] },
+						turnStatus: "completed",
+						distinctCalls: 2,
+						firstRelease: {
+							status: "released",
+							holdsCall: true,
+							holdsAnyResult: false,
+						},
+						// The second park holds the client's first result, and no
+						// answer the first resume loaded.
+						secondRelease: {
+							status: "released",
+							holdsSecondCall: true,
+							holdsFirstResult: true,
+							holdsEmptyAnswer: false,
+						},
+						emptyAfterSecondRelease: [],
+						emptyAtEnd: [],
+						modelCalls: 1,
+						firstResultBlocks: 1,
+						secondResultBlocks: 1,
+						interrupted: false,
+					});
+				twice(s.firstTurn, "fresh");
+				expect(s.openerStop).toBe("end_turn");
+				twice(s.resumedTurn, "resume");
+				expect(s.parksLeft).toBe(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {
 				const s = scenario(await results(), "oversizedInnerBody");

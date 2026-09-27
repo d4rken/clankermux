@@ -1317,6 +1317,156 @@ await scenario("releasedParkOfResumedSession", async () => {
 	}
 });
 
+await scenario("releasedTwiceInOneTurn", async () => {
+	// One turn parks, is released and resumed; the model then calls again,
+	// and the turn parks and is released a second time before it ends.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-twice-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const bridgeB = makeBridge(
+		{
+			maxProcesses: 2,
+			parkReleaseMs: 500,
+			parkedTimeoutMs: 60_000,
+			turnDeadlineMs: 120_000,
+			releasedParkTtlMs: 600_000,
+		},
+		root,
+		parkRepo,
+	);
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const parkFile = async (turnId: string) => {
+		const until = Date.now() + 20_000;
+		let park = parkRepo.parks.get(turnId);
+		while (
+			!(
+				repo.turns.get(turnId)?.status === "released" &&
+				park?.state === "released"
+			) &&
+			Date.now() < until
+		) {
+			await Bun.sleep(50);
+			park = parkRepo.parks.get(turnId);
+		}
+		return {
+			status: repo.turns.get(turnId)?.status,
+			text: park ? readFileSync(park.sessionPath, "utf8") : "",
+		};
+	};
+	/** Stored transcripts anywhere under the root holding an empty tool result. */
+	const emptyAnswersOnDisk = () =>
+		filesUnder(root)
+			.filter((f) => f.endsWith(".jsonl"))
+			.filter((f) =>
+				/"tool_use_id":"[^"]+","content":""/.test(
+					readFileSync(join(root, f), "utf8"),
+				),
+			);
+	const resultCount = (sent: string, id: string) =>
+		sent.split(`"tool_use_id":"${id}"`).length - 1;
+	const toolUse = (reply: Reply) =>
+		(reply.content ?? []).find((x) => x.type === "tool_use");
+	const run = async (history: Msg[], conv: Partial<SdkBridgeTurnMeta>) => {
+		const r1 = await turn(history, conv, undefined, bridgeB);
+		const first = toolUse(r1);
+		const park1 = await parkFile(r1.turnId);
+		const historyMode = repo.turns.get(r1.turnId)?.historyMode;
+		history.push(
+			{ role: "assistant", content: r1.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(first?.id),
+						content: "AGAIN-FIRST",
+					},
+				],
+			},
+		);
+		const r2 = await answer(r1.turnId, history, bridgeB);
+		const second = toolUse(r2);
+		const park2 = await parkFile(r1.turnId);
+		const emptyAfterSecondRelease = emptyAnswersOnDisk();
+		history.push(
+			{ role: "assistant", content: r2.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(second?.id),
+						content: "FINAL-RESULT",
+					},
+				],
+			},
+		);
+		const from = calls().length;
+		const r3 = await answer(r1.turnId, history, bridgeB);
+		await settled(bridgeB);
+		const resumed = calls().slice(from);
+		const sent = JSON.stringify(
+			(resumed.at(0)?.body as { messages?: unknown[] } | undefined)?.messages ??
+				[],
+		);
+		if (r3.content) history.push({ role: "assistant", content: r3.content });
+		return {
+			historyMode,
+			statuses: [r1.status, r2.status, r3.status],
+			stops: [r1.stop, r2.stop, r3.stop],
+			r3,
+			turnStatus: repo.turns.get(r1.turnId)?.status,
+			distinctCalls: new Set([first?.id, second?.id]).size,
+			firstRelease: {
+				status: park1.status,
+				holdsCall: park1.text.includes(String(first?.id)),
+				holdsAnyResult: park1.text.includes('"tool_result"'),
+			},
+			secondRelease: {
+				status: park2.status,
+				holdsSecondCall: park2.text.includes(String(second?.id)),
+				holdsFirstResult:
+					resultCount(park2.text, String(first?.id)) === 1 &&
+					park2.text.includes("AGAIN-FIRST"),
+				holdsEmptyAnswer: /"tool_use_id":"[^"]+","content":""/.test(park2.text),
+			},
+			emptyAfterSecondRelease,
+			emptyAtEnd: emptyAnswersOnDisk(),
+			modelCalls: resumed.length,
+			firstResultBlocks: resultCount(sent, String(first?.id)),
+			secondResultBlocks: resultCount(sent, String(second?.id)),
+			interrupted: sent.includes("interrupted"),
+		};
+	};
+	try {
+		await bridgeB.ready();
+		const firstTurn = await run(
+			[{ role: "user", content: "TOOL read twice.txt" }],
+			{},
+		);
+		const conv = {
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const history: Msg[] = [{ role: "user", content: "hello twice" }];
+		const opener = await turn(history, conv, undefined, bridgeB);
+		history.push(
+			{ role: "assistant", content: opener.content as Block[] },
+			{ role: "user", content: "TOOL read twice-resumed.txt" },
+		);
+		const resumedTurn = await run(history, conv);
+		return {
+			firstTurn,
+			openerStop: opener.stop,
+			resumedTurn,
+			parksLeft: parkRepo.parks.size,
+		};
+	} finally {
+		await bridgeB.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 await scenario("oversizedInnerBody", async () => {
 	// The client's request fits; Claude Code's own model call, carrying its
 	// system prompt and tools, does not.
