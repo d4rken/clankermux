@@ -106,6 +106,16 @@ function PromptDetailFields({
 				</Field>
 			</>
 		);
+	if (detail.outcome !== "refused")
+		// A row written by a newer policy than this dashboard knows.
+		return (
+			<>
+				{layout}
+				<Field label="Prompt outcome">
+					{String((detail as { outcome: unknown }).outcome)}, not shown
+				</Field>
+			</>
+		);
 	return (
 		<>
 			{layout}

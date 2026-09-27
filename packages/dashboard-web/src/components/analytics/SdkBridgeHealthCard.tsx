@@ -72,11 +72,14 @@ function time(ms: number): string {
 function SplitTable({
 	label,
 	heading,
+	served,
 	rows,
 	name,
 }: {
 	label: string;
 	heading: string;
+	/** Model calls and cost belong to the account that served them. */
+	served: boolean;
 	rows: SdkBridgeHealthSplit[];
 	name: (row: SdkBridgeHealthSplit) => string;
 }) {
@@ -86,11 +89,16 @@ function SplitTable({
 				<TableHeader>
 					<TableRow>
 						<TableHead>{heading}</TableHead>
-						<TableHead className="text-right">Turns</TableHead>
+						<TableHead className="text-right">Total</TableHead>
 						<TableHead className="text-right">Failed</TableHead>
 						<TableHead className="text-right">Rejected</TableHead>
 						<TableHead className="text-right">Failure rate</TableHead>
-						<TableHead className="text-right">Cost</TableHead>
+						<TableHead className="text-right">
+							{served ? "Model calls served" : "Model calls"}
+						</TableHead>
+						<TableHead className="text-right">
+							{served ? "Cost served" : "Cost"}
+						</TableHead>
 					</TableRow>
 				</TableHeader>
 				<TableBody>
@@ -106,6 +114,9 @@ function SplitTable({
 							</TableCell>
 							<TableCell className="figure text-right">
 								{percent(row.failures, row.finished)}
+							</TableCell>
+							<TableCell className="figure text-right">
+								{row.innerCalls}
 							</TableCell>
 							<TableCell className="figure text-right">
 								{formatCost(row.costUsd)}
@@ -158,14 +169,19 @@ export function SdkBridgeHealthCard({
 							</p>
 							<p>
 								The failure rate is failed and timed-out turns over finished
-								ones (completed, failed, timed out, shut down). Running turns,
-								turns waiting for tool results, rejected turns (refused before
-								Claude Code ran) and aborted ones (the client left or started a
-								new turn) are counted on their own.
+								ones (completed, failed, timed out). Counted on their own:
+								running turns, turns waiting for tool results, rejected turns
+								(refused before Claude Code ran), aborted ones (the client left
+								or started a new turn), expired ones (tool results never came)
+								and turns a server shutdown ended. Timings and tool rounds cover
+								finished turns only.
 							</p>
 							<p>
 								Tokens and cost come from the turns' model calls that are still
-								recorded.
+								recorded. By account, a turn counts on the account routing chose
+								for it, and a model call on the account that served it, so an
+								account that took over after a failover shows calls without
+								turns.
 							</p>
 						</PopoverContent>
 					</Popover>
@@ -195,7 +211,7 @@ export function SdkBridgeHealthCard({
 							<p className="text-sm font-medium">
 								{data.failureRate.finished === 0
 									? "No finished turns"
-									: `${data.failureRate.failures} of ${data.failureRate.finished} finished turns failed (${percent(data.failureRate.failures, data.failureRate.finished)})`}
+									: `${data.failureRate.failures} of ${data.failureRate.finished} finished turns and side requests failed (${percent(data.failureRate.failures, data.failureRate.finished)})`}
 							</p>
 							<p className="text-muted-foreground tabular-nums">
 								{data.byKind.turn} turns · {data.byKind.side_request} side
@@ -264,12 +280,14 @@ export function SdkBridgeHealthCard({
 						<SplitTable
 							label="By client"
 							heading="Client"
+							served={false}
 							rows={data.byHarness}
 							name={(row) => row.key ?? "Unknown"}
 						/>
 						<SplitTable
 							label="By account"
 							heading="Account"
+							served
 							rows={data.byAccount}
 							name={(row) => row.name ?? row.key ?? "None"}
 						/>

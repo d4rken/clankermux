@@ -227,6 +227,40 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(text).toContain("12,000 characters · SHA-256 abababababab");
 	});
 
+	it("names an outcome it does not know instead of calling it a refusal", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						systemPromptPolicy: "pi-head-v2",
+						systemPromptDetail: {
+							outcome: "rewritten",
+							version: "0.90.0",
+						} as unknown as SdkBridgeTurnView["turn"]["systemPromptDetail"],
+					},
+				}}
+			/>,
+		);
+		const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+		expect(text).toContain("Prompt layout 0.90.0");
+		expect(text).toContain("Prompt outcome rewritten, not shown");
+		expect(text).not.toContain("Refused");
+	});
+
+	it("labels an expired turn", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{ ...base, turn: { ...base.turn, status: "expired" } }}
+			/>,
+		);
+		expect(html).toContain("Expired, tool results never came");
+		expect(html).toContain("bg-warning");
+	});
+
 	it("shows no prompt detail for the drop policy", () => {
 		const html = renderToStaticMarkup(<SdkBridgeTurnDetails view={view()} />);
 		expect(html).not.toContain("Prompt layout");

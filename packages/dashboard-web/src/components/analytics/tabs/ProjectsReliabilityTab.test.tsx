@@ -163,7 +163,9 @@ describe("ProjectsReliabilityTab Agent SDK bridge card", () => {
 		const html = render(queryClient, FILTERS);
 
 		expect(html).toContain("Agent SDK bridge");
-		expect(html).toContain("2 of 8 finished turns failed (25.0%)");
+		expect(html).toContain(
+			"2 of 8 finished turns and side requests failed (25.0%)",
+		);
 	});
 
 	it("blanks only the bridge card when its own read fails", () => {

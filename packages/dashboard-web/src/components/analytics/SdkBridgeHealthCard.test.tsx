@@ -15,7 +15,9 @@ describe("SdkBridgeHealthCard", () => {
 			renderToStaticMarkup(<SdkBridgeHealthCard data={healthFixture()} />),
 		);
 		expect(out).toContain("Agent SDK bridge");
-		expect(out).toContain("2 of 8 finished turns failed (25.0%)");
+		expect(out).toContain(
+			"2 of 8 finished turns and side requests failed (25.0%)",
+		);
 		expect(out).toContain("12 turns · 2 side requests");
 	});
 
@@ -70,11 +72,20 @@ describe("SdkBridgeHealthCard", () => {
 		const out = text(html);
 		expect(html).toContain('aria-label="By client"');
 		expect(html).toContain('aria-label="By account"');
-		expect(out).toContain("pi 12 2 0 25.0% $1.5000");
-		expect(out).toContain("codex 2 0 2 — $0.0000");
-		expect(out).toContain("Claude-a 10");
+		expect(html).not.toContain(">Turns<");
+		expect(out).toContain(
+			"Client Total Failed Rejected Failure rate Model calls Cost",
+		);
+		expect(out).toContain(
+			"Account Total Failed Rejected Failure rate Model calls served Cost served",
+		);
+		expect(out).toContain("pi 12 2 0 25.0% 31 $1.5000");
+		expect(out).toContain("codex 2 0 2 — 0 $0.0000");
+		expect(out).toContain("Claude-a 10 1 0 14.3% 25 $1.2500");
 		expect(out).toContain("acct-gone 2");
 		expect(out).toContain("None 2");
+		// Served calls after failover, on an account routing chose for no turn.
+		expect(out).toContain("Claude-b 0 0 0 — 6 $0.2500");
 	});
 
 	it("lists errors and recent failures, each failure opening its turn", () => {
@@ -104,7 +115,7 @@ describe("SdkBridgeHealthCard", () => {
 			),
 		);
 		expect(out).toContain("No Agent SDK turns in this range");
-		expect(out).not.toContain("finished turns failed");
+		expect(out).not.toContain("failed (");
 	});
 
 	it("shows a skeleton while loading, and the reason when unavailable", () => {
@@ -134,6 +145,6 @@ describe("SdkBridgeHealthCard", () => {
 			),
 		);
 		expect(out).toContain("Last updated 3m ago");
-		expect(out).toContain("2 of 8 finished turns failed");
+		expect(out).toContain("2 of 8 finished turns and side requests failed");
 	});
 });
