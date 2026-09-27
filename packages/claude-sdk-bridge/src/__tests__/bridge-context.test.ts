@@ -769,6 +769,10 @@ describe("a context rewrite Claude Code reports late", () => {
 		const row = h.repo.turns.get(t.plan.turnId);
 		expect(row).toMatchObject({ status: "completed", httpStatus: 200 });
 		expect(String(row?.errorMessage)).toContain("compact_boundary");
+		expect(h.bridge.status().counters).toMatchObject({
+			turnsCompleted: 1,
+			turnsFailed: 0,
+		});
 
 		const next = await start(
 			h,

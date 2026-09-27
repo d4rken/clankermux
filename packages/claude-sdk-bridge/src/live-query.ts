@@ -264,8 +264,14 @@ export class LiveQuery {
 		error: BridgeError;
 	} | null = null;
 	private resolveDone!: (ok: boolean) => void;
-	/** Settles once the query is over: true when its session may be resumed. */
+	/** Settles once the query is over: true when the turn succeeded. */
 	readonly done: Promise<boolean>;
+	private resolveResumable!: (ok: boolean) => void;
+	/**
+	 * Settles with `done`: true when the conversation's next turn may resume
+	 * the session, which a succeeded turn's session can still not be.
+	 */
+	readonly resumable: Promise<boolean>;
 	private spawnMs: number | null = null;
 	private firstEventMs: number | null = null;
 	private stopReason: string | null = null;
@@ -311,6 +317,14 @@ export class LiveQuery {
 			this.resolveDone = (ok) => {
 				if (settled) return;
 				settled = true;
+				resolve(ok);
+			};
+		});
+		let resumableSettled = false;
+		this.resumable = new Promise((resolve) => {
+			this.resolveResumable = (ok) => {
+				if (resumableSettled) return;
+				resumableSettled = true;
 				resolve(ok);
 			};
 		});
@@ -799,6 +813,7 @@ export class LiveQuery {
 		this.released = true;
 		this.state = "closed";
 		this.resolveDone(false);
+		this.resolveResumable(false);
 		this.init.claim?.release();
 		this.init.discardSession(this.sessionId);
 		this.discardClaudeCodeTranscripts();
@@ -837,7 +852,7 @@ export class LiveQuery {
 				digests,
 				accountId: this.init.accountId,
 			},
-			this.done,
+			this.resumable,
 		);
 	}
 
@@ -1199,8 +1214,9 @@ export class LiveQuery {
 		this.init.registration.revoke();
 		this.init.parked.close(status);
 		this.prompt().end();
+		this.resolveDone(ok);
 		// The turn stands; a session that no longer matches it is not resumed.
-		this.resolveDone(ok && !this.sessionDiverged);
+		this.resolveResumable(ok && !this.sessionDiverged);
 		// A registered session belongs to its conversation, which discards it
 		// once a later one replaces it or it fails to settle.
 		if (!this.registered) {
