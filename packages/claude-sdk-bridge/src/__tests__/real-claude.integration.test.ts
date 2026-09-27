@@ -542,6 +542,64 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"resumes parks released from resumed sessions and from a call after text",
+			async () => {
+				const s = scenario(await results(), "releasedParkOfResumedSession");
+				type Leg = {
+					stop: unknown;
+					status: unknown;
+					historyMode: unknown;
+					reply: unknown;
+					turnStatus: unknown;
+					cacheRead: number | null;
+					parkedCallCacheCreation: number | null;
+					parkedCallCacheRead: number | null;
+					resultReachedModel: boolean;
+					resultBlocks: number;
+					interrupted: boolean;
+				};
+				const released = (leg: Leg, historyMode: string, result: string) => {
+					expect(leg).toMatchObject({
+						stop: "tool_use",
+						status: "released",
+						historyMode,
+						reply: {
+							status: 200,
+							stop: "end_turn",
+							content: [{ type: "text", text: `done: ${result}` }],
+						},
+						turnStatus: "completed",
+						resultReachedModel: true,
+						resultBlocks: 1,
+						interrupted: false,
+					});
+					// The whole prefix the parked call sent is read back.
+					expect(leg.cacheRead).toBe(
+						(leg.parkedCallCacheRead ?? 0) + (leg.parkedCallCacheCreation ?? 0),
+					);
+				};
+				expect(s.r1Stop).toBe("end_turn");
+				released(s.second as Leg, "resume", "SECOND-RESULT");
+				released(s.third as Leg, "resume", "THIRD-RESULT");
+				// The next turn resumes the conversation with both results.
+				expect(s.r4).toMatchObject({
+					status: 200,
+					content: [{ type: "text", text: "echo: NEXT after two releases" }],
+				});
+				expect(s.r4Carries).toEqual([
+					"SECOND-RESULT",
+					"THIRD-RESULT",
+					"NEXT after two releases",
+				]);
+				expect(s.r4Interrupted).toBe(false);
+				released(s.restart as Leg, "resume", "RESTART-RESULT");
+				released(s.textThenCall as Leg, "fresh", "SAID-RESULT");
+				expect(s.parksLeft).toBe(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {
 				const s = scenario(await results(), "oversizedInnerBody");

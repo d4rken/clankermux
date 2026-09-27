@@ -1943,13 +1943,7 @@ export function createClaudeSdkBridge(
 			if (!isUuid(newSessionId))
 				throw new Error("randomId must produce UUIDs for session ids");
 			sessionId = newSessionId;
-			if (
-				!store.forkForResume(
-					entry,
-					sessionStore().pathOf(newSessionId),
-					newSessionId,
-				)
-			) {
+			if (!store.forkForResume(entry, sessionStore(), newSessionId)) {
 				claim?.release();
 				claim = null;
 				log.warn(

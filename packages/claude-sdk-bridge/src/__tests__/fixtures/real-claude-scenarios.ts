@@ -1168,6 +1168,155 @@ await scenario("releaseThenResume", async () => {
 	}
 });
 
+await scenario("releasedParkOfResumedSession", async () => {
+	// Parks whose calls follow a prompt Claude Code wrote nothing after: any
+	// turn that resumes a stored session, and a call with text before it.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-resumed-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const releaseLimits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const whenReleased = async (turnId: string) => {
+		const until = Date.now() + 20_000;
+		while (repo.turns.get(turnId)?.status !== "released" && Date.now() < until)
+			await Bun.sleep(50);
+		return repo.turns.get(turnId)?.status;
+	};
+	const header = () => ({
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	});
+	let a: ClaudeSdkBridge = makeBridge(releaseLimits, root, parkRepo);
+	/** One user turn that parks on a call, is released, and is then answered. */
+	const parkReleaseAnswer = async (
+		history: Msg[],
+		conv: Partial<SdkBridgeTurnMeta>,
+		prompt: string,
+		result: string,
+		restart = false,
+	) => {
+		history.push({ role: "user", content: prompt });
+		const parked = await turn(history, conv, undefined, a);
+		const parkedCall = calls().at(-1);
+		const use = (parked.content ?? []).find((x) => x.type === "tool_use");
+		const status = await whenReleased(parked.turnId);
+		const historyMode = repo.turns.get(parked.turnId)?.historyMode;
+		if (restart) {
+			await a.dispose();
+			a = makeBridge(releaseLimits, root, parkRepo);
+			await a.ready();
+		}
+		history.push(
+			{ role: "assistant", content: parked.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(use?.id),
+						content: result,
+					},
+				],
+			},
+		);
+		const from = calls().length;
+		const reply = await answer(parked.turnId, history, a);
+		await settled(a);
+		if (reply.content)
+			history.push({ role: "assistant", content: reply.content });
+		const resumed = calls().slice(from).at(0);
+		const sent = JSON.stringify(
+			(resumed?.body as { messages?: unknown[] } | undefined)?.messages ?? [],
+		);
+		return {
+			stop: parked.stop,
+			status,
+			historyMode,
+			reply,
+			turnStatus: repo.turns.get(parked.turnId)?.status,
+			cacheRead: resumed?.cache?.read ?? null,
+			parkedCallCacheCreation: parkedCall?.cache?.creation ?? null,
+			parkedCallCacheRead: parkedCall?.cache?.read ?? null,
+			resultReachedModel: sent.includes(result),
+			resultBlocks: sent.split(`"tool_use_id":"${String(use?.id)}"`).length - 1,
+			interrupted: sent.includes("interrupted"),
+		};
+	};
+	try {
+		await a.ready();
+		// One conversation: turn 1 completes, turns 2 and 3 each resume the
+		// stored session, park on a call and are released; turn 4 follows.
+		const conv = header();
+		const history: Msg[] = [{ role: "user", content: "hello resumed park" }];
+		const r1 = await turn(history, conv, undefined, a);
+		history.push({ role: "assistant", content: r1.content as Block[] });
+		const second = await parkReleaseAnswer(
+			history,
+			conv,
+			"TOOL read second.txt",
+			"SECOND-RESULT",
+		);
+		const third = await parkReleaseAnswer(
+			history,
+			conv,
+			"TOOL read third.txt",
+			"THIRD-RESULT",
+		);
+		history.push({ role: "user", content: "NEXT after two releases" });
+		const from = calls().length;
+		const r4 = await turn(history, conv, undefined, a);
+		await settled(a);
+		const r4Sent = JSON.stringify(
+			(calls().slice(from).at(0)?.body as { messages?: unknown[] })?.messages,
+		);
+
+		// A conversation's second turn, released, resumed by a new bridge.
+		const conv2 = header();
+		const history2: Msg[] = [{ role: "user", content: "hello restart park" }];
+		const s1 = await turn(history2, conv2, undefined, a);
+		history2.push({ role: "assistant", content: s1.content as Block[] });
+		const restart = await parkReleaseAnswer(
+			history2,
+			conv2,
+			"TOOL read after-restart.txt",
+			"RESTART-RESULT",
+			true,
+		);
+
+		// Text before the call, on a conversation's first turn.
+		const textThenCall = await parkReleaseAnswer(
+			[],
+			{},
+			"SAYTOOL read said.txt",
+			"SAID-RESULT",
+		);
+		return {
+			r1Stop: r1.stop,
+			second,
+			third,
+			r4,
+			r4Carries: [
+				"SECOND-RESULT",
+				"THIRD-RESULT",
+				"NEXT after two releases",
+			].filter((text) => r4Sent?.includes(text)),
+			r4Interrupted: r4Sent?.includes("interrupted") ?? null,
+			restart,
+			textThenCall,
+			parksLeft: parkRepo.parks.size,
+		};
+	} finally {
+		await a.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 await scenario("oversizedInnerBody", async () => {
 	// The client's request fits; Claude Code's own model call, carrying its
 	// system prompt and tools, does not.

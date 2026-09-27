@@ -71,6 +71,8 @@ function assertSessionId(sessionId: string): void {
  * copy of a session the bridge relies on.
  */
 export class FileSessionStore implements SessionStore {
+	private readonly loadOnly = new Map<string, SessionStoreEntry[]>();
+
 	constructor(private readonly dir: string) {
 		ensurePrivateDir(dir);
 	}
@@ -96,7 +98,21 @@ export class FileSessionStore implements SessionStore {
 	}
 
 	async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
-		return this.read(key.sessionId, key.subpath);
+		const entries = this.read(key.sessionId, key.subpath);
+		if (key.subpath !== undefined) return entries;
+		const extra = this.loadOnly.get(key.sessionId);
+		this.loadOnly.delete(key.sessionId);
+		return entries && extra ? [...entries, ...extra] : entries;
+	}
+
+	/**
+	 * Entries the session's next `load()` returns after its file's own. They
+	 * never reach the file, so Claude Code resumes with them and the
+	 * transcript it writes on goes without them.
+	 */
+	appendOnNextLoad(sessionId: string, entries: SessionStoreEntry[]): void {
+		assertSessionId(sessionId);
+		this.loadOnly.set(sessionId, entries);
 	}
 
 	read(sessionId: string, subpath?: string): SessionStoreEntry[] | null {
@@ -148,6 +164,7 @@ export class FileSessionStore implements SessionStore {
 		} catch {
 			return;
 		}
+		this.loadOnly.delete(sessionId);
 		let names: string[] = [];
 		try {
 			names = readdirSync(this.dir);

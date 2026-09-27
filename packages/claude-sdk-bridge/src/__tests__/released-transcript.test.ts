@@ -50,6 +50,9 @@ function transcript(): string {
 			type: "assistant",
 			uuid: "a2",
 			parentUuid: "a1",
+			cwd: "/work",
+			version: "2.1.280",
+			timestamp: "2026-09-27T06:02:11.366Z",
 			message: { content: [{ type: "tool_use", id: "toolu_2" }] },
 		}),
 		e({
@@ -86,7 +89,7 @@ describe("forkVerifiedTranscript", () => {
 		writeFileSync(src, transcript());
 		expect(
 			forkVerifiedTranscript(src, dst, A, B, "a2", ["toolu_1", "toolu_2"]),
-		).toBe(true);
+		).not.toBeNull();
 		expect(readFileSync(dst, "utf8")).toBe(
 			transcript().replaceAll(`"sessionId":"${A}"`, `"sessionId":"${B}"`),
 		);
@@ -95,18 +98,48 @@ describe("forkVerifiedTranscript", () => {
 		expect(readFileSync(src, "utf8")).toBe(transcript());
 	});
 
+	it("answers every awaited call in an entry after the resume point, for the resumed load", () => {
+		const dir = temp();
+		const src = join(dir, "src.jsonl");
+		const dst = join(dir, "dst.jsonl");
+		writeFileSync(src, transcript());
+		const answer = forkVerifiedTranscript(src, dst, A, B, "a2", [
+			"toolu_1",
+			"toolu_2",
+		]);
+		expect(answer).toEqual({
+			type: "user",
+			uuid: expect.stringMatching(/^[0-9a-f-]{36}$/),
+			parentUuid: "a2",
+			isSidechain: false,
+			sessionId: B,
+			timestamp: "2026-09-27T06:02:11.366Z",
+			cwd: "/work",
+			version: "2.1.280",
+			message: {
+				role: "user",
+				content: [
+					{ type: "tool_result", tool_use_id: "toolu_1", content: "" },
+					{ type: "tool_result", tool_use_id: "toolu_2", content: "" },
+				],
+			},
+		});
+		// It is never part of the copy.
+		expect(readFileSync(dst, "utf8")).not.toContain(String(answer?.uuid));
+	});
+
 	it("writes nothing when the chain does not hold the calls or the file is gone", () => {
 		const dir = temp();
 		const src = join(dir, "src.jsonl");
 		const dst = join(dir, "dst.jsonl");
 		writeFileSync(src, transcript());
-		expect(forkVerifiedTranscript(src, dst, A, B, "a1", ["toolu_2"])).toBe(
-			false,
-		);
+		expect(
+			forkVerifiedTranscript(src, dst, A, B, "a1", ["toolu_2"]),
+		).toBeNull();
 		expect(existsSync(dst)).toBe(false);
 		expect(
 			forkVerifiedTranscript(join(dir, "gone"), dst, A, B, "a2", ["toolu_2"]),
-		).toBe(false);
+		).toBeNull();
 		expect(existsSync(dst)).toBe(false);
 	});
 
@@ -140,7 +173,7 @@ describe("forkVerifiedTranscript", () => {
 			forkVerifiedTranscript(src, join(dir, "dst.jsonl"), A, B, "e15999", [
 				"toolu_last",
 			]),
-		).toBe(true);
+		).not.toBeNull();
 		expect(performance.now() - t0).toBeLessThan(3_000);
 		expect(readFileSync(join(dir, "dst.jsonl"), "latin1").includes(A)).toBe(
 			false,
