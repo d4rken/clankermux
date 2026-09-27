@@ -299,6 +299,15 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	contextRewritten(event: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "sdk_bridge_context_rewritten",
+			message: `Claude Code rewrote the conversation's context (${event}); the model no longer sees it as the client sent it`,
+			retryAfter: null,
+		};
+	},
 	tooDeep(): BridgeError {
 		return {
 			status: 400,

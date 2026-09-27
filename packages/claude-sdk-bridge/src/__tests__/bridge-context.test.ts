@@ -1,9 +1,11 @@
 /**
  * What the bridge does so a client's conversation reaches the model as the
- * client sent it: tool results Claude Code would have shortened.
+ * client sent it: tool results Claude Code would have shortened, and context
+ * rewrites it reports.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeRoutePlan, SdkBridgeTurnMeta } from "@clankermux/types";
 import { MAX_TOOL_RESULT_CHARS } from "../tool-server";
 import {
@@ -205,5 +207,86 @@ describe("client tool results Claude Code would replace", () => {
 		expect((await reply(retry.response)).status).toBe(200);
 		await settled(h);
 		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("completed");
+	});
+});
+
+describe("a context Claude Code rewrote", () => {
+	const rewrites: Array<[string, SDKMessage]> = [
+		[
+			"compact_boundary",
+			{
+				type: "system",
+				subtype: "compact_boundary",
+				compact_metadata: { trigger: "auto", pre_tokens: 190_000 },
+				uuid: crypto.randomUUID(),
+				session_id: "s",
+			} as unknown as SDKMessage,
+		],
+		[
+			"microcompact_boundary",
+			{
+				type: "system",
+				subtype: "microcompact_boundary",
+				uuid: crypto.randomUUID(),
+				session_id: "s",
+			} as unknown as SDKMessage,
+		],
+		[
+			"hint_clears",
+			{
+				type: "hint_clears",
+				ids: ["toolu_old"],
+				content_by_id: {},
+				uuid: crypto.randomUUID(),
+				session_id: "s",
+			} as unknown as SDKMessage,
+		],
+	];
+
+	for (const [name, message] of rewrites)
+		it(`fails the turn on ${name} with a named 502, and records it`, async () => {
+			const h = harness();
+			const t = await start(h, { messages: [{ role: "user", content: "hi" }] });
+			t.query.emit(initMessage(), message);
+			const r = await reply(t.response);
+			expect(r.status).toBe(502);
+			expect(r.json).toEqual({
+				type: "error",
+				error: {
+					type: "api_error",
+					code: "sdk_bridge_context_rewritten",
+					message: `Claude Code rewrote the conversation's context (${name}); the model no longer sees it as the client sent it`,
+				},
+			});
+			await settled(h);
+			expect(t.query.interrupted || t.query.closed).toBe(true);
+			expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+				status: "failed",
+				httpStatus: 502,
+				errorType: "api_error",
+			});
+			expect(String(h.repo.turns.get(t.plan.turnId)?.errorMessage)).toContain(
+				name,
+			);
+		});
+
+	it("ends a reply already streaming with an SSE error", async () => {
+		const h = harness();
+		const t = await start(h, { messages: [{ role: "user", content: "hi" }] });
+		const [, message] = rewrites[0] as [string, SDKMessage];
+		const streamed = streamedMessage([{ type: "text", text: "partial" }]);
+		// Everything up to message_stop: the reply is open, not finished.
+		t.query.emit(initMessage(), ...streamed.slice(0, -1), message);
+		const r = await reply(t.response);
+		expect(r.status).toBe(200);
+		expect(r.errors.map((e) => e.data)).toEqual([
+			{
+				type: "error",
+				error: expect.objectContaining({
+					type: "api_error",
+					code: "sdk_bridge_context_rewritten",
+				}),
+			},
+		]);
 	});
 });

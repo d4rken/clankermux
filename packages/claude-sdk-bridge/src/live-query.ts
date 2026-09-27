@@ -34,6 +34,13 @@ import {
 import type { Block, ClientMessage } from "./turn-request";
 import type { BridgeLog, BridgeQuery, SdkBridgeTiming } from "./types";
 
+/** What Claude Code reports when it has rewritten the context it sends. */
+const CONTEXT_REWRITES: ReadonlySet<string> = new Set([
+	"compact_boundary",
+	"microcompact_boundary",
+	"hint_clears",
+]);
+
 export type TeardownReason =
 	| "client_abort"
 	| "parked_timeout"
@@ -862,6 +869,20 @@ export class LiveQuery {
 	}
 
 	private onMessage(message: SDKMessage): void {
+		const rewrite =
+			message.type === "system"
+				? (message as { subtype?: string }).subtype
+				: (message as { type: string }).type;
+		if (rewrite && CONTEXT_REWRITES.has(rewrite)) {
+			this.init.log.error(
+				`SDK bridge turn ${this.turnId}: Claude Code rewrote the conversation's context (${rewrite})`,
+			);
+			this.pendingTeardown = {
+				reason: "error",
+				error: bridgeErrors.contextRewritten(rewrite),
+			};
+			return;
+		}
 		switch (message.type) {
 			case "system":
 				if (message.subtype === "init" && this.spawnMs === null)
