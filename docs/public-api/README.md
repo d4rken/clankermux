@@ -250,7 +250,8 @@ A tool result that holds more than 500,000 characters of text and no image
 may be refused with `400 invalid_request_error`, code
 `sdk_bridge_tool_result_too_large`; the turn then keeps waiting for its
 results. A result at or under that size, or one that carries an image, is
-never refused for its size.
+never rejected with `sdk_bridge_tool_result_too_large`; the request-body and
+context-window limits still apply to it.
 
 ## Wire and transport rules
 

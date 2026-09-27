@@ -72,7 +72,8 @@ pipeline. The client keeps executing its own tools.
   released park's resume, a rebuilt history and a dead continuation carry
   results as message content, which Claude Code sends whole, so they take
   no such check. The published contract says only that a larger result
-  may be refused.
+  may be refused, and that no other is rejected with this code (the body
+  and context-window limits still apply).
 - **History header.** Every leg's response, JSON or SSE, success or error,
   carries `x-clankermux-sdk-bridge-history` (`SDK_BRIDGE_HISTORY_HEADER`):
   the turn row's history mode, plus `; reason=<rebuildReason>` when there is
@@ -235,8 +236,12 @@ made private, never deleted: no pid says whether a process still uses them.
   or a `hint_clears` message), the turn fails with 502
   `sdk_bridge_context_rewritten`, a release under way included (no park is
   stored). After the client's reply went out (a settled side request, or a
-  finishing turn), the turn keeps its status, the rewrite goes to its
-  `error_message`, and its session is not resumed.
+  finishing turn), the turn is settled as `completed` at once
+  (`settleDelivered`): the rewrite goes to its `error_message`, the process
+  is stopped, nothing Claude Code reports later changes the turn, and its
+  session is not resumed. A turn's outcome (`done`, the counters) and
+  whether its session may be resumed (`resumable`, what `register` offers
+  the conversation) are separate.
 - `CLAUDE_CODE_NO_MODEL_FALLBACK=1`: without it a refusal on Fable 5.1 or
   Opus 5.5 is retried on `claude-opus-4-8`, which the inner listener refuses
   as unplanned. With it the refused message reaches the client with
@@ -244,9 +249,9 @@ made private, never deleted: no pid says whether a process still uses them.
   Claude Code reports after a refusal does not fail it. Its session keeps
   the refused exchange as the client has it, so the next turn resumes it.
   A reply that ends on anything but `tool_use` after forwarding a call (a
-  refusal after a tool_use) revokes the turn's token, answers the started
-  calls as aborted and drops the session, so the process ends at once and
-  the next turn rebuilds.
+  refusal after a tool_use) settles the turn the same way, with that
+  reason in its `error_message`: the started calls are answered as aborted,
+  the process ends at once, and the next turn rebuilds.
 - Every tool is listed with `anthropic/maxResultSizeChars` at
   `MAX_TOOL_RESULT_CHARS`. Without it Claude Code previews any result over
   50,000 characters, and answers one over 25,000 tokens (it counts them
