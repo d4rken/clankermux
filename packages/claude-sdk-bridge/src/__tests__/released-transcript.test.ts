@@ -65,6 +65,40 @@ function transcript(): string {
 	].join("\n")}\n`;
 }
 
+/** A user entry holding one tool_result, as Claude Code writes them. */
+function result(
+	uuid: string,
+	parentUuid: string,
+	toolUseId: string,
+	sourceToolAssistantUUID?: string,
+): string {
+	return JSON.stringify({
+		type: "user",
+		uuid,
+		parentUuid,
+		sessionId: A,
+		...(sourceToolAssistantUUID ? { sourceToolAssistantUUID } : {}),
+		message: {
+			role: "user",
+			content: [{ type: "tool_result", tool_use_id: toolUseId, content: "r" }],
+		},
+	});
+}
+
+/** The tool_use ids a resume's answer entry answers. */
+function answered(
+	src: string,
+	dst: string,
+	resumeAt: string,
+	awaited: string[],
+): string[] | undefined {
+	return (
+		forkVerifiedTranscript(src, dst, A, B, resumeAt, awaited)?.message as
+			| { content: Array<{ tool_use_id: string }> }
+			| undefined
+	)?.content.map((b) => b.tool_use_id);
+}
+
 describe("transcriptHoldsCalls", () => {
 	it("walks the chain back from the resume point", () => {
 		const dir = temp();
@@ -192,6 +226,52 @@ describe("forkVerifiedTranscript", () => {
 				(b) => b.tool_use_id,
 			),
 		).toEqual(["toolu_2"]);
+	});
+
+	it("answers an awaited call whatever results for its id lie elsewhere", () => {
+		const dir = temp();
+		const src = join(dir, "src.jsonl");
+		// A result for toolu_2 on the side branch, beneath x1.
+		writeFileSync(src, `${transcript()}${result("s1", "x1", "toolu_2")}\n`);
+		expect(answered(src, join(dir, "d"), "a2", ["toolu_2"])).toEqual([
+			"toolu_1",
+			"toolu_2",
+		]);
+	});
+
+	it("takes an off-chain result for an unforwarded call only from that call's own entry", () => {
+		const dir = temp();
+		const src = join(dir, "src.jsonl");
+		// For toolu_1 (in a1), a result on the side branch is someone else's.
+		writeFileSync(src, `${transcript()}${result("s1", "x1", "toolu_1")}\n`);
+		expect(answered(src, join(dir, "d1"), "a2", ["toolu_2"])).toEqual([
+			"toolu_1",
+			"toolu_2",
+		]);
+		// Beneath a1 at any depth, it is a1's.
+		writeFileSync(
+			src,
+			`${transcript()}${[
+				JSON.stringify({
+					type: "attachment",
+					uuid: "t1",
+					parentUuid: "a1",
+					sessionId: A,
+				}),
+				result("r1", "t1", "toolu_1"),
+			].join("\n")}\n`,
+		);
+		expect(answered(src, join(dir, "d2"), "a2", ["toolu_2"])).toEqual([
+			"toolu_2",
+		]);
+		// Elsewhere, but naming a1 as its source, it is a1's too.
+		writeFileSync(
+			src,
+			`${transcript()}${result("r1", "x1", "toolu_1", "a1")}\n`,
+		);
+		expect(answered(src, join(dir, "d3"), "a2", ["toolu_2"])).toEqual([
+			"toolu_2",
+		]);
 	});
 
 	it("writes nothing when the chain does not hold the calls or the file is gone", () => {

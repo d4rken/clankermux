@@ -98,10 +98,13 @@ const SESSION_FILE = /^[0-9a-f-]{36}\.jsonl$/;
  * The entry `resumeAt` of a transcript (JSONL bytes), when its chain,
  * walking parentUuid back from it to an entry whose parentUuid is null,
  * carries every awaited tool_use id; null otherwise. With it, the calls on
- * that chain, oldest first, that no tool_result anywhere in the file
- * answers (Claude Code writes a parallel call's result as a child of its
- * call, off the chain). Each line is decoded on its own; an unparsable line or a parent
- * missing from the file fails the check.
+ * that chain, oldest first, a resume has to answer: every awaited one, and
+ * every other one without a result of its own. A result is a call's own
+ * when it descends from the entry holding the call or names that entry as
+ * its `sourceToolAssistantUUID` (Claude Code writes a parallel call's
+ * result as a child of its call, off the chain); one for the same id
+ * elsewhere does not count. Each line is decoded on its own; an unparsable
+ * line or a parent missing from the file fails the check.
  */
 function resumePoint(
 	bytes: Buffer,
@@ -109,7 +112,8 @@ function resumePoint(
 	awaited: readonly string[],
 ): { entry: Record<string, unknown>; unanswered: string[] } | null {
 	const byUuid = new Map<string, { parent: string | null; calls: string[] }>();
-	const answered = new Set<string>();
+	/** For each tool_use id, the entries holding a result for it. */
+	const results = new Map<string, Array<{ uuid: string; source: unknown }>>();
 	let point: Record<string, unknown> | null = null;
 	let start = 0;
 	while (start < bytes.length) {
@@ -135,8 +139,13 @@ function resumePoint(
 							tool_use_id?: unknown;
 						}>)
 					: [];
-				for (const b of blocks)
-					if (b?.type === "tool_result") answered.add(String(b.tool_use_id));
+				for (const b of blocks) {
+					if (b?.type !== "tool_result") continue;
+					const id = String(b.tool_use_id);
+					const own = results.get(id) ?? [];
+					own.push({ uuid: entry.uuid, source: entry.sourceToolAssistantUUID });
+					results.set(id, own);
+				}
 				byUuid.set(entry.uuid, {
 					parent:
 						typeof entry.parentUuid === "string" ? entry.parentUuid : null,
@@ -153,7 +162,7 @@ function resumePoint(
 		start = end + 1;
 	}
 	if (!point) return null;
-	const chain: string[][] = [];
+	const chain: Array<{ uuid: string; calls: string[] }> = [];
 	const seen = new Set<string>();
 	let at: string | null = resumeAt;
 	while (at && !seen.has(at)) {
@@ -161,14 +170,31 @@ function resumePoint(
 		const entry = byUuid.get(at);
 		// A parent the file does not hold: the chain Claude Code loads is not whole.
 		if (!entry) return null;
-		chain.push(entry.calls);
+		chain.push({ uuid: at, calls: entry.calls });
 		at = entry.parent;
 	}
-	const found = chain.reverse().flat();
+	chain.reverse();
+	const found = chain.flatMap((e) => e.calls);
 	if (!awaited.every((id) => found.includes(id))) return null;
+	const descends = (from: string, ancestor: string): boolean => {
+		const walked = new Set<string>();
+		let up = byUuid.get(from)?.parent ?? null;
+		while (up && !walked.has(up)) {
+			if (up === ancestor) return true;
+			walked.add(up);
+			up = byUuid.get(up)?.parent ?? null;
+		}
+		return false;
+	};
+	const answeredHere = (id: string, holder: string) =>
+		(results.get(id) ?? []).some(
+			(r) => r.source === holder || descends(r.uuid, holder),
+		);
 	return {
 		entry: point,
-		unanswered: found.filter((id) => !answered.has(id)),
+		unanswered: chain.flatMap((e) =>
+			e.calls.filter((id) => awaited.includes(id) || !answeredHere(id, e.uuid)),
+		),
 	};
 }
 
