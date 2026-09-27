@@ -542,6 +542,164 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"resumes parks released from resumed sessions and from a call after text",
+			async () => {
+				const s = scenario(await results(), "releasedParkOfResumedSession");
+				type Leg = {
+					stop: unknown;
+					status: unknown;
+					historyMode: unknown;
+					reply: unknown;
+					turnStatus: unknown;
+					cacheRead: number | null;
+					parkedCallCacheCreation: number | null;
+					parkedCallCacheRead: number | null;
+					resultReachedModel: boolean;
+					resultBlocks: string[];
+					lastMessage: unknown;
+					expectedLastMessage: unknown;
+					interrupted: boolean;
+				};
+				const released = (leg: Leg, historyMode: string, result: string) => {
+					expect(leg).toMatchObject({
+						stop: "tool_use",
+						status: "released",
+						historyMode,
+						reply: {
+							status: 200,
+							stop: "end_turn",
+							content: [{ type: "text", text: `done: ${result}` }],
+						},
+						turnStatus: "completed",
+						resultReachedModel: true,
+						resultBlocks: [result],
+						interrupted: false,
+					});
+					// The client's result alone, with no text: nothing injected.
+					expect(leg.lastMessage).toEqual(leg.expectedLastMessage);
+					// The whole prefix the parked call sent is read back.
+					expect(leg.cacheRead).toBe(
+						(leg.parkedCallCacheRead ?? 0) + (leg.parkedCallCacheCreation ?? 0),
+					);
+				};
+				expect(s.r1Stop).toBe("end_turn");
+				released(s.second as Leg, "resume", "SECOND-RESULT");
+				released(s.third as Leg, "resume", "THIRD-RESULT");
+				// The next turn resumes the conversation with both results.
+				expect(s.r4).toMatchObject({
+					status: 200,
+					content: [{ type: "text", text: "echo: NEXT after two releases" }],
+				});
+				expect(s.r4Carries).toEqual([
+					"SECOND-RESULT",
+					"THIRD-RESULT",
+					"NEXT after two releases",
+				]);
+				expect(s.r4Interrupted).toBe(false);
+				released(s.restart as Leg, "resume", "RESTART-RESULT");
+				released(s.textThenCall as Leg, "fresh", "SAID-RESULT");
+				expect(s.parksLeft).toBe(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"resumes a turn released twice, on a first turn and on a resumed session",
+			async () => {
+				const s = scenario(await results(), "releasedTwiceInOneTurn");
+				type Twice = {
+					lastMessages: unknown[];
+					expectedLastMessages: unknown[];
+				};
+				const twice = (leg: unknown, historyMode: string) => {
+					// Each resume's last message is the client's result alone.
+					expect((leg as Twice).lastMessages).toEqual(
+						(leg as Twice).expectedLastMessages,
+					);
+					expect(leg).toMatchObject({
+						historyMode,
+						statuses: [200, 200, 200],
+						stops: ["tool_use", "tool_use", "end_turn"],
+						r3: { content: [{ type: "text", text: "done: FINAL-RESULT" }] },
+						turnStatus: "completed",
+						distinctCalls: 2,
+						firstRelease: {
+							status: "released",
+							holdsCall: true,
+							holdsAnyResult: false,
+						},
+						// The second park holds the client's first result, and no
+						// answer the first resume loaded.
+						secondRelease: {
+							status: "released",
+							holdsSecondCall: true,
+							firstResults: ["AGAIN-FIRST"],
+							emptyResults: 0,
+						},
+						emptyAfterSecondRelease: [],
+						emptyAtEnd: [],
+						modelCalls: 1,
+						firstResults: ["AGAIN-FIRST"],
+						secondResults: ["FINAL-RESULT"],
+						interrupted: false,
+					});
+				};
+				twice(s.firstTurn, "fresh");
+				expect(s.openerStop).toBe("end_turn");
+				twice(s.resumedTurn, "resume");
+				expect(s.parksLeft).toBe(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"resumes a park whose message also called a tool the client was not offered",
+			async () => {
+				const s = scenario(await results(), "releasedWithUnforwardedCall");
+				const common = {
+					r1Stop: "tool_use",
+					forwarded: [["tool_use", "read"]],
+					awaited: 1,
+					r2: { status: 200, stop: "end_turn" },
+					turnStatus: "completed",
+					lastBlockTypes: ["tool_result", "tool_result"],
+					interrupted: false,
+				};
+				// Claude Code runs the calls in order: the client's parks first,
+				// so the stray one after it has no result when the turn is released.
+				expect(s.strayAfter).toMatchObject({
+					...common,
+					parkedCalls: [
+						["mcp__c__read", 0],
+						["no_such_tool", 0],
+					],
+					resumedResults: [
+						["mcp__c__read", ["CLIENT-RESULT"]],
+						["no_such_tool", ["[Tool result missing due to internal error]"]],
+					],
+				});
+				// Before it, Claude Code answers the stray call itself.
+				expect(s.unmappedFirst).toMatchObject({
+					...common,
+					parkedCalls: [
+						["mcp__c__unmapped_tool", 1],
+						["mcp__c__read", 0],
+					],
+					resumedResults: [
+						[
+							"mcp__c__unmapped_tool",
+							[
+								"<tool_use_error>Error: No such tool available: mcp__c__unmapped_tool</tool_use_error>",
+							],
+						],
+						["mcp__c__read", ["CLIENT-RESULT"]],
+					],
+				});
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {
 				const s = scenario(await results(), "oversizedInnerBody");

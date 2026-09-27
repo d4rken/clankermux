@@ -302,6 +302,68 @@ const lastUpstreamMessages = () =>
 			?.body as { messages?: unknown[] }
 	)?.messages ?? [];
 
+type Shape = { role: string; blocks: Array<[string, string | null, string]> };
+
+function blockText(b: Block): string {
+	if (typeof b.content === "string") return b.content;
+	if (Array.isArray(b.content))
+		return (b.content as Block[])
+			.filter((c) => c.type === "text")
+			.map((c) => String(c.text))
+			.join("");
+	return typeof b.text === "string" ? b.text : "";
+}
+
+function shape(m: Msg): Shape {
+	const blocks =
+		typeof m.content === "string"
+			? [{ type: "text", text: m.content } as Block]
+			: m.content;
+	return {
+		role: m.role,
+		blocks: blocks.map((b) => [
+			b.type,
+			typeof b.tool_use_id === "string" ? b.tool_use_id : null,
+			blockText(b),
+		]),
+	};
+}
+
+/** A model request's messages. */
+const messagesOf = (q: { body: unknown } | undefined): Msg[] =>
+	(q?.body as { messages?: Msg[] } | undefined)?.messages ?? [];
+
+/** Every tool_result block answering `id` in `messages`, as its text. */
+const resultTexts = (messages: Msg[], id: string): string[] =>
+	messages
+		.flatMap((m) => shape(m).blocks)
+		.filter(([type, useId]) => type === "tool_result" && useId === id)
+		.map(([, , text]) => text);
+
+/** The messages of a JSONL transcript's user and assistant entries. */
+const transcriptMessages = (text: string): Msg[] =>
+	text
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as { message?: Msg })
+		.flatMap((e) =>
+			e.message && typeof e.message === "object" && "content" in e.message
+				? [{ role: e.message.role, content: e.message.content }]
+				: [],
+		);
+
+/** tool_result blocks with empty content in a JSONL transcript. */
+const emptyResults = (text: string): number =>
+	transcriptMessages(text)
+		.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+		.filter(
+			(b) =>
+				b.type === "tool_result" &&
+				(b.content === "" ||
+					b.content === undefined ||
+					(Array.isArray(b.content) && b.content.length === 0)),
+		).length;
+
 async function scenario(name: string, run: () => Promise<unknown>) {
 	const t0 = performance.now();
 	try {
@@ -1164,6 +1226,406 @@ await scenario("releaseThenResume", async () => {
 	} finally {
 		await a?.dispose();
 		await b?.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("releasedParkOfResumedSession", async () => {
+	// Parks whose calls follow a prompt Claude Code wrote nothing after: any
+	// turn that resumes a stored session, and a call with text before it.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-resumed-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const releaseLimits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const whenReleased = async (turnId: string) => {
+		const until = Date.now() + 20_000;
+		while (repo.turns.get(turnId)?.status !== "released" && Date.now() < until)
+			await Bun.sleep(50);
+		return repo.turns.get(turnId)?.status;
+	};
+	const header = () => ({
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	});
+	let a: ClaudeSdkBridge = makeBridge(releaseLimits, root, parkRepo);
+	/** One user turn that parks on a call, is released, and is then answered. */
+	const parkReleaseAnswer = async (
+		history: Msg[],
+		conv: Partial<SdkBridgeTurnMeta>,
+		prompt: string,
+		result: string,
+		restart = false,
+	) => {
+		history.push({ role: "user", content: prompt });
+		const parked = await turn(history, conv, undefined, a);
+		const parkedCall = calls().at(-1);
+		const use = (parked.content ?? []).find((x) => x.type === "tool_use");
+		const status = await whenReleased(parked.turnId);
+		const historyMode = repo.turns.get(parked.turnId)?.historyMode;
+		if (restart) {
+			await a.dispose();
+			a = makeBridge(releaseLimits, root, parkRepo);
+			await a.ready();
+		}
+		history.push(
+			{ role: "assistant", content: parked.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(use?.id),
+						content: result,
+					},
+				],
+			},
+		);
+		const from = calls().length;
+		const reply = await answer(parked.turnId, history, a);
+		await settled(a);
+		if (reply.content)
+			history.push({ role: "assistant", content: reply.content });
+		const resumed = calls().slice(from).at(0);
+		const messages = messagesOf(resumed);
+		const sent = JSON.stringify(messages);
+		const last = messages.at(-1);
+		return {
+			stop: parked.stop,
+			status,
+			historyMode,
+			reply,
+			turnStatus: repo.turns.get(parked.turnId)?.status,
+			cacheRead: resumed?.cache?.read ?? null,
+			parkedCallCacheCreation: parkedCall?.cache?.creation ?? null,
+			parkedCallCacheRead: parkedCall?.cache?.read ?? null,
+			resultReachedModel: sent.includes(result),
+			resultBlocks: resultTexts(messages, String(use?.id)),
+			lastMessage: last ? shape(last) : null,
+			expectedLastMessage: {
+				role: "user",
+				blocks: [["tool_result", String(use?.id), result]],
+			},
+			interrupted: sent.includes("interrupted"),
+		};
+	};
+	try {
+		await a.ready();
+		// One conversation: turn 1 completes, turns 2 and 3 each resume the
+		// stored session, park on a call and are released; turn 4 follows.
+		const conv = header();
+		const history: Msg[] = [{ role: "user", content: "hello resumed park" }];
+		const r1 = await turn(history, conv, undefined, a);
+		history.push({ role: "assistant", content: r1.content as Block[] });
+		const second = await parkReleaseAnswer(
+			history,
+			conv,
+			"TOOL read second.txt",
+			"SECOND-RESULT",
+		);
+		const third = await parkReleaseAnswer(
+			history,
+			conv,
+			"TOOL read third.txt",
+			"THIRD-RESULT",
+		);
+		history.push({ role: "user", content: "NEXT after two releases" });
+		const from = calls().length;
+		const r4 = await turn(history, conv, undefined, a);
+		await settled(a);
+		const r4Sent = JSON.stringify(
+			(calls().slice(from).at(0)?.body as { messages?: unknown[] })?.messages,
+		);
+
+		// A conversation's second turn, released, resumed by a new bridge.
+		const conv2 = header();
+		const history2: Msg[] = [{ role: "user", content: "hello restart park" }];
+		const s1 = await turn(history2, conv2, undefined, a);
+		history2.push({ role: "assistant", content: s1.content as Block[] });
+		const restart = await parkReleaseAnswer(
+			history2,
+			conv2,
+			"TOOL read after-restart.txt",
+			"RESTART-RESULT",
+			true,
+		);
+
+		// Text before the call, on a conversation's first turn.
+		const textThenCall = await parkReleaseAnswer(
+			[],
+			{},
+			"SAYTOOL read said.txt",
+			"SAID-RESULT",
+		);
+		return {
+			r1Stop: r1.stop,
+			second,
+			third,
+			r4,
+			r4Carries: [
+				"SECOND-RESULT",
+				"THIRD-RESULT",
+				"NEXT after two releases",
+			].filter((text) => r4Sent?.includes(text)),
+			r4Interrupted: r4Sent?.includes("interrupted") ?? null,
+			restart,
+			textThenCall,
+			parksLeft: parkRepo.parks.size,
+		};
+	} finally {
+		await a.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("releasedTwiceInOneTurn", async () => {
+	// One turn parks, is released and resumed; the model then calls again,
+	// and the turn parks and is released a second time before it ends.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-twice-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const bridgeB = makeBridge(
+		{
+			maxProcesses: 2,
+			parkReleaseMs: 500,
+			parkedTimeoutMs: 60_000,
+			turnDeadlineMs: 120_000,
+			releasedParkTtlMs: 600_000,
+		},
+		root,
+		parkRepo,
+	);
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const parkFile = async (turnId: string) => {
+		const until = Date.now() + 20_000;
+		let park = parkRepo.parks.get(turnId);
+		while (
+			!(
+				repo.turns.get(turnId)?.status === "released" &&
+				park?.state === "released"
+			) &&
+			Date.now() < until
+		) {
+			await Bun.sleep(50);
+			park = parkRepo.parks.get(turnId);
+		}
+		return {
+			status: repo.turns.get(turnId)?.status,
+			text: park ? readFileSync(park.sessionPath, "utf8") : "",
+		};
+	};
+	/** Stored transcripts anywhere under the root holding an empty tool result. */
+	const emptyAnswersOnDisk = () =>
+		filesUnder(root)
+			.filter((f) => f.endsWith(".jsonl"))
+			.filter((f) => emptyResults(readFileSync(join(root, f), "utf8")) > 0);
+	const toolUse = (reply: Reply) =>
+		(reply.content ?? []).find((x) => x.type === "tool_use");
+	const run = async (history: Msg[], conv: Partial<SdkBridgeTurnMeta>) => {
+		const r1 = await turn(history, conv, undefined, bridgeB);
+		const first = toolUse(r1);
+		const park1 = await parkFile(r1.turnId);
+		const historyMode = repo.turns.get(r1.turnId)?.historyMode;
+		history.push(
+			{ role: "assistant", content: r1.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(first?.id),
+						content: "AGAIN-FIRST",
+					},
+				],
+			},
+		);
+		const fromFirst = calls().length;
+		const r2 = await answer(r1.turnId, history, bridgeB);
+		const firstResume = messagesOf(calls().slice(fromFirst).at(0));
+		const second = toolUse(r2);
+		const park2 = await parkFile(r1.turnId);
+		const emptyAfterSecondRelease = emptyAnswersOnDisk();
+		history.push(
+			{ role: "assistant", content: r2.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(second?.id),
+						content: "FINAL-RESULT",
+					},
+				],
+			},
+		);
+		const from = calls().length;
+		const r3 = await answer(r1.turnId, history, bridgeB);
+		await settled(bridgeB);
+		const resumed = calls().slice(from);
+		const messages = messagesOf(resumed.at(0));
+		const _sent = JSON.stringify(messages);
+		const park2Messages = transcriptMessages(park2.text);
+		if (r3.content) history.push({ role: "assistant", content: r3.content });
+		return {
+			historyMode,
+			statuses: [r1.status, r2.status, r3.status],
+			stops: [r1.stop, r2.stop, r3.stop],
+			r3,
+			turnStatus: repo.turns.get(r1.turnId)?.status,
+			distinctCalls: new Set([first?.id, second?.id]).size,
+			firstRelease: {
+				status: park1.status,
+				holdsCall: park1.text.includes(String(first?.id)),
+				holdsAnyResult: park1.text.includes('"tool_result"'),
+			},
+			secondRelease: {
+				status: park2.status,
+				holdsSecondCall: park2.text.includes(String(second?.id)),
+				firstResults: resultTexts(park2Messages, String(first?.id)),
+				emptyResults: emptyResults(park2.text),
+			},
+			emptyAfterSecondRelease,
+			emptyAtEnd: emptyAnswersOnDisk(),
+			modelCalls: resumed.length,
+			firstResults: resultTexts(messages, String(first?.id)),
+			secondResults: resultTexts(messages, String(second?.id)),
+			lastMessages: [firstResume.at(-1), messages.at(-1)].map((m) =>
+				m ? shape(m) : null,
+			),
+			expectedLastMessages: [
+				{
+					role: "user",
+					blocks: [["tool_result", String(first?.id), "AGAIN-FIRST"]],
+				},
+				{
+					role: "user",
+					blocks: [["tool_result", String(second?.id), "FINAL-RESULT"]],
+				},
+			],
+			interrupted: [firstResume, messages].some((m) =>
+				JSON.stringify(m).includes("interrupted"),
+			),
+		};
+	};
+	try {
+		await bridgeB.ready();
+		const firstTurn = await run(
+			[{ role: "user", content: "TOOL read twice.txt" }],
+			{},
+		);
+		const conv = {
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const history: Msg[] = [{ role: "user", content: "hello twice" }];
+		const opener = await turn(history, conv, undefined, bridgeB);
+		history.push(
+			{ role: "assistant", content: opener.content as Block[] },
+			{ role: "user", content: "TOOL read twice-resumed.txt" },
+		);
+		const resumedTurn = await run(history, conv);
+		return {
+			firstTurn,
+			openerStop: opener.stop,
+			resumedTurn,
+			parksLeft: parkRepo.parks.size,
+		};
+	} finally {
+		await bridgeB.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("releasedWithUnforwardedCall", async () => {
+	// The parked message also calls a tool the client was never offered, so
+	// the bridge forwards only the client's call.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-released-stray-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const on = makeBridge(
+		{
+			maxProcesses: 2,
+			parkReleaseMs: 500,
+			parkedTimeoutMs: 60_000,
+			turnDeadlineMs: 120_000,
+			releasedParkTtlMs: 600_000,
+		},
+		root,
+		parkRepo,
+	);
+	const calls = () =>
+		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
+	const run = async (prompt: string) => {
+		const history: Msg[] = [{ role: "user", content: prompt }];
+		const r1 = await turn(history, {}, undefined, on);
+		const until = Date.now() + 20_000;
+		while (
+			repo.turns.get(r1.turnId)?.status !== "released" &&
+			Date.now() < until
+		)
+			await Bun.sleep(50);
+		const park = parkRepo.parks.get(r1.turnId);
+		const parkMessages = park
+			? transcriptMessages(readFileSync(park.sessionPath, "utf8"))
+			: [];
+		const use = (r1.content ?? []).find((x) => x.type === "tool_use");
+		history.push(
+			{ role: "assistant", content: r1.content as Block[] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: String(use?.id),
+						content: "CLIENT-RESULT",
+					},
+				],
+			},
+		);
+		const fromResume = calls().length;
+		const r2 = await answer(r1.turnId, history, on);
+		await settled(on);
+		const resumed = messagesOf(calls().slice(fromResume).at(0));
+		return {
+			r1Stop: r1.stop,
+			forwarded: (r1.content ?? []).map((b) => [b.type, b.name ?? null]),
+			awaited: park?.awaitedToolUseIds.length ?? null,
+			// Every call the model made in the parked message, and the results
+			// the stored session holds for each.
+			parkedCalls: parkMessages
+				.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+				.filter((b) => b.type === "tool_use")
+				.map((b) => [
+					String(b.name),
+					resultTexts(parkMessages, String(b.id)).length,
+				]),
+			r2,
+			turnStatus: repo.turns.get(r1.turnId)?.status,
+			// Each call of the parked message, and what the resumed model call
+			// sent as its results.
+			resumedResults: parkMessages
+				.flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+				.filter((b) => b.type === "tool_use")
+				.map((b) => [String(b.name), resultTexts(resumed, String(b.id))]),
+			lastBlockTypes: shape(
+				resumed.at(-1) ?? { role: "user", content: [] },
+			).blocks.map(([type]) => type),
+			interrupted: JSON.stringify(resumed).includes("interrupted"),
+		};
+	};
+	try {
+		await on.ready();
+		return {
+			strayAfter: await run("STRAY read and more"),
+			unmappedFirst: await run("UNMAPPED then read"),
+		};
+	} finally {
+		await on.dispose();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
