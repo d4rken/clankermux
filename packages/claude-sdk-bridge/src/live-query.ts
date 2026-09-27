@@ -970,7 +970,9 @@ export class LiveQuery {
 			return;
 		}
 		const failed = message.is_error || message.subtype !== "success";
-		if (!failed) {
+		// A refusal reached the client as its reply; the error result that
+		// follows it is Claude Code declining to go on, not a failed turn.
+		if (!failed || (!this.leg && this.stopReason === "refusal")) {
 			this.resultOk = true;
 			if (this.leg) this.endLeg(this.init.composer.lastStopReason);
 			return;

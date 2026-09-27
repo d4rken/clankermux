@@ -1,7 +1,7 @@
 /**
  * What the bridge does so a client's conversation reaches the model as the
- * client sent it: tool results Claude Code would have shortened, and context
- * rewrites it reports.
+ * client sent it: tool results Claude Code would have shortened, context
+ * rewrites it reports, and a refusal.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
@@ -9,6 +9,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeRoutePlan, SdkBridgeTurnMeta } from "@clankermux/types";
 import { MAX_TOOL_RESULT_CHARS } from "../tool-server";
 import {
+	assistantMessage,
 	foldReply,
 	type Harness,
 	initMessage,
@@ -288,5 +289,51 @@ describe("a context Claude Code rewrote", () => {
 				}),
 			},
 		]);
+	});
+});
+
+describe("a refusal", () => {
+	it("reaches the client with stop_reason refusal and completes the turn", async () => {
+		const h = harness();
+		const t = await start(h, { messages: [{ role: "user", content: "hi" }] });
+		// Claude Code without a fallback model: the refused message, then its
+		// own error message and an error result.
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "I can't help" }], {
+				stopReason: "refusal",
+			}),
+			{
+				type: "system",
+				subtype: "model_refusal_no_fallback",
+				uuid: crypto.randomUUID(),
+				session_id: "s",
+			} as unknown as SDKMessage,
+			assistantMessage(
+				[{ type: "text", text: "API Error: safeguards flagged this message" }],
+				{
+					model: "<synthetic>",
+					error: "invalid_request",
+					stopReason: "refusal",
+				},
+			),
+			resultMessage({
+				isError: true,
+				result: "API Error: safeguards flagged this message",
+				terminalReason: "api_error",
+			}),
+		);
+		const r = await reply(t.response);
+		expect(r.status).toBe(200);
+		expect(r.stop).toBe("refusal");
+		expect(r.content).toEqual([{ type: "text", text: "I can't help" }]);
+		expect(r.errors).toEqual([]);
+		await settled(h);
+		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+			status: "completed",
+			stopReason: "refusal",
+			httpStatus: 200,
+			errorType: null,
+		});
 	});
 });

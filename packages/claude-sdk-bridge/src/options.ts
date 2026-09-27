@@ -62,6 +62,9 @@ export function childEnv(input: {
 			: {}),
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 		DISABLE_AUTO_COMPACT: "1",
+		// A refusal stays the requested model's: Fable 5.1 and Opus 5.5 would
+		// retry it on Opus 4.8, a model the turn's route never planned.
+		CLAUDE_CODE_NO_MODEL_FALLBACK: "1",
 		ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 		DISABLE_AUTOUPDATER: "1",
 		CLAUDE_CODE_DISABLE_ATTACHMENTS: "1",
