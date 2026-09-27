@@ -2600,6 +2600,7 @@ describe("RequestRecorder gateway hints", () => {
 						"x-claude-code-prev-tool-durations": "[42]",
 						"x-claude-code-compaction": "false",
 						"x-claude-code-context-compacted": "true",
+						"x-claude-code-prompt-id": "prm_0a1b2c",
 					},
 				}),
 			);
@@ -2612,6 +2613,7 @@ describe("RequestRecorder gateway hints", () => {
 				gatewayHintPrevToolDurations: "[42]",
 				gatewayHintCompaction: "false",
 				gatewayHintContextCompacted: "true",
+				gatewayHintPromptId: "prm_0a1b2c",
 			};
 			expect(saved.mock.calls[0]?.[0]).toMatchObject(expected);
 			expect(h.emitted[0]).toMatchObject(expected);

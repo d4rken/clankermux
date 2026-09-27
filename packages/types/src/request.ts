@@ -126,6 +126,7 @@ export interface GatewayHintMetadata {
 	gatewayHintPrevToolDurations?: string;
 	gatewayHintCompaction?: string;
 	gatewayHintContextCompacted?: string;
+	gatewayHintPromptId?: string;
 }
 
 // Database row type
@@ -135,6 +136,7 @@ export interface RequestRow {
 	gateway_hint_prev_tool_durations?: string | null;
 	gateway_hint_compaction?: string | null;
 	gateway_hint_context_compacted?: string | null;
+	gateway_hint_prompt_id?: string | null;
 
 	id: string;
 	timestamp: number;
@@ -460,6 +462,7 @@ export function toRequest(row: RequestRow): Request {
 		gatewayHintCompaction: row.gateway_hint_compaction ?? undefined,
 		gatewayHintContextCompacted:
 			row.gateway_hint_context_compacted ?? undefined,
+		gatewayHintPromptId: row.gateway_hint_prompt_id ?? undefined,
 
 		id: row.id,
 		timestamp: Number(row.timestamp),
@@ -531,6 +534,7 @@ export function toRequestResponse(request: Request): RequestResponse {
 		gatewayHintPrevToolDurations: request.gatewayHintPrevToolDurations,
 		gatewayHintCompaction: request.gatewayHintCompaction,
 		gatewayHintContextCompacted: request.gatewayHintContextCompacted,
+		gatewayHintPromptId: request.gatewayHintPromptId,
 
 		id: request.id,
 		timestamp: new Date(request.timestamp).toISOString(),

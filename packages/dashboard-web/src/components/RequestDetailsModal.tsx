@@ -224,6 +224,7 @@ export function RequestDetailsModal({
 		["Previous tool durations", summary?.gatewayHintPrevToolDurations],
 		["Compaction", summary?.gatewayHintCompaction],
 		["Context compacted", summary?.gatewayHintContextCompacted],
+		["Prompt ID", summary?.gatewayHintPromptId],
 	].filter((entry): entry is [string, string] => !!entry[1]);
 
 	return (
