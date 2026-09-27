@@ -103,7 +103,15 @@ export {
 	RoutingRepository,
 } from "./repositories/routing.repository";
 export { SdkBridgeReleasedParkRepository } from "./repositories/sdk-bridge-released-park.repository";
-export { SdkBridgeTurnRepository } from "./repositories/sdk-bridge-turn.repository";
+export {
+	type SdkBridgeHealthErrorRow,
+	type SdkBridgeHealthFailureRow,
+	type SdkBridgeHealthGroupRow,
+	type SdkBridgeHealthInnerRow,
+	type SdkBridgeHealthMetric,
+	type SdkBridgeHealthPercentileRow,
+	SdkBridgeTurnRepository,
+} from "./repositories/sdk-bridge-turn.repository";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";

@@ -95,6 +95,71 @@ interface InnerSummaryRow {
 	cost_usd: number | null;
 }
 
+/** One group of {@link SdkBridgeTurnRepository.countHealthGroups}. */
+export interface SdkBridgeHealthGroupRow {
+	kind: string;
+	status: string;
+	historyMode: string;
+	rebuildReason: string | null;
+	clientHarness: string | null;
+	accountId: string | null;
+	/** Null when the account was deleted since. */
+	accountName: string | null;
+	count: number;
+}
+
+export interface SdkBridgeHealthErrorRow {
+	status: string;
+	errorType: string | null;
+	httpStatus: number | null;
+	count: number;
+}
+
+/** Nearest-rank percentiles and the sum; null percentiles with no samples. */
+export interface SdkBridgeHealthPercentileRow {
+	samples: number;
+	p50: number | null;
+	p95: number | null;
+	total: number;
+}
+
+export type SdkBridgeHealthMetric =
+	| "spawn_ms"
+	| "first_event_ms"
+	| "duration_ms"
+	| "tool_round_count";
+
+export interface SdkBridgeHealthInnerRow {
+	/** The turn's harness. */
+	clientHarness: string | null;
+	/** The account that served the inner call (`requests.account_used`). */
+	servedAccountId: string | null;
+	/** Null when the account was deleted since. */
+	servedAccountName: string | null;
+	requestCount: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadInputTokens: number;
+	cacheCreationInputTokens: number;
+	costUsd: number;
+}
+
+export interface SdkBridgeHealthFailureRow {
+	id: string;
+	kind: string;
+	status: string;
+	startedAt: number;
+	httpStatus: number | null;
+	errorType: string | null;
+	errorMessage: string | null;
+	clientHarness: string | null;
+	model: string | null;
+}
+
+function placeholders(values: readonly unknown[]): string {
+	return values.map(() => "?").join(", ");
+}
+
 function toTurn(row: TurnRow): SdkBridgeTurn {
 	return {
 		id: row.id,
@@ -422,6 +487,208 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 			cacheReadInputTokens: row.cache_read_input_tokens,
 			cacheCreationInputTokens: row.cache_creation_input_tokens,
 			costUsd: row.cost_usd,
+		}));
+	}
+
+	// Health reads for the analytics card. Each is bounded by
+	// `started_at >= sinceMs` through idx_sdk_bridge_turns_started.
+
+	async countHealthGroups(sinceMs: number): Promise<SdkBridgeHealthGroupRow[]> {
+		const rows = await this.query<{
+			kind: string;
+			status: string;
+			history_mode: string;
+			rebuild_reason: string | null;
+			client_harness: string | null;
+			account_id: string | null;
+			account_name: string | null;
+			count: number;
+		}>(
+			`SELECT t.kind, t.status, t.history_mode, t.rebuild_reason,
+				t.client_harness, t.account_id, MAX(a.name) AS account_name,
+				COUNT(*) AS count
+			FROM sdk_bridge_turns t
+			LEFT JOIN accounts a ON a.id = t.account_id
+			WHERE t.started_at >= ?
+			GROUP BY t.kind, t.status, t.history_mode, t.rebuild_reason,
+				t.client_harness, t.account_id`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			kind: row.kind,
+			status: row.status,
+			historyMode: row.history_mode,
+			rebuildReason: row.rebuild_reason,
+			clientHarness: row.client_harness,
+			accountId: row.account_id,
+			accountName: row.account_name,
+			count: row.count,
+		}));
+	}
+
+	/** Biggest group first. */
+	async countHealthErrors(
+		sinceMs: number,
+		statuses: readonly SdkBridgeTurnStatus[],
+	): Promise<SdkBridgeHealthErrorRow[]> {
+		if (statuses.length === 0) return [];
+		const rows = await this.query<{
+			status: string;
+			error_type: string | null;
+			http_status: number | null;
+			count: number;
+		}>(
+			`SELECT status, error_type, http_status, COUNT(*) AS count
+			FROM sdk_bridge_turns
+			WHERE started_at >= ? AND status IN (${placeholders(statuses)})
+			GROUP BY status, error_type, http_status
+			ORDER BY count DESC, status, error_type, http_status`,
+			[sinceMs, ...statuses],
+		);
+		return rows.map((row) => ({
+			status: row.status,
+			errorType: row.error_type,
+			httpStatus: row.http_status,
+			count: row.count,
+		}));
+	}
+
+	/**
+	 * Nearest rank: the smallest value whose rank reaches p × n, so the median
+	 * of an even count is the lower one. Nulls are not samples.
+	 */
+	async healthPercentiles(
+		sinceMs: number,
+		metric: SdkBridgeHealthMetric,
+		scope: {
+			kind?: SdkBridgeTurnKind;
+			statuses?: readonly SdkBridgeTurnStatus[];
+		} = {},
+	): Promise<SdkBridgeHealthPercentileRow> {
+		const where = [`started_at >= ?`, `${metric} IS NOT NULL`];
+		const params: unknown[] = [sinceMs];
+		if (scope.kind) {
+			where.push("kind = ?");
+			params.push(scope.kind);
+		}
+		if (scope.statuses) {
+			if (scope.statuses.length === 0)
+				return { samples: 0, p50: null, p95: null, total: 0 };
+			where.push(`status IN (${placeholders(scope.statuses)})`);
+			params.push(...scope.statuses);
+		}
+		const row = await this.get<{
+			samples: number;
+			p50: number | null;
+			p95: number | null;
+			total: number | null;
+		}>(
+			`WITH ranked AS (
+				SELECT ${metric} AS x,
+					ROW_NUMBER() OVER (ORDER BY ${metric}) AS rn,
+					COUNT(*) OVER () AS n
+				FROM sdk_bridge_turns
+				WHERE ${where.join(" AND ")}
+			)
+			SELECT COUNT(*) AS samples,
+				MIN(CASE WHEN rn * 100 >= n * 50 THEN x END) AS p50,
+				MIN(CASE WHEN rn * 100 >= n * 95 THEN x END) AS p95,
+				SUM(x) AS total
+			FROM ranked`,
+			params,
+		);
+		return {
+			samples: row?.samples ?? 0,
+			p50: row?.p50 ?? null,
+			p95: row?.p95 ?? null,
+			total: row?.total ?? 0,
+		};
+	}
+
+	/**
+	 * Inner `requests` rows of the range's turns, by the turn's harness and
+	 * the account that served each call. CROSS JOIN pins the turns as the outer loop, so each is probed through
+	 * the partial turn-id index instead of the planner walking every inner row
+	 * ever retained.
+	 */
+	async sumHealthInnerUsage(
+		sinceMs: number,
+	): Promise<SdkBridgeHealthInnerRow[]> {
+		const rows = await this.query<{
+			client_harness: string | null;
+			account_used: string | null;
+			account_name: string | null;
+			request_count: number;
+			input_tokens: number | null;
+			output_tokens: number | null;
+			cache_read_input_tokens: number | null;
+			cache_creation_input_tokens: number | null;
+			cost_usd: number | null;
+		}>(
+			`SELECT t.client_harness, r.account_used, MAX(a.name) AS account_name,
+				COUNT(*) AS request_count,
+				SUM(r.input_tokens) AS input_tokens,
+				SUM(r.output_tokens) AS output_tokens,
+				SUM(r.cache_read_input_tokens) AS cache_read_input_tokens,
+				SUM(r.cache_creation_input_tokens) AS cache_creation_input_tokens,
+				SUM(r.cost_usd) AS cost_usd
+			FROM sdk_bridge_turns t
+			CROSS JOIN requests r ON r.sdk_bridge_turn_id = t.id
+			LEFT JOIN accounts a ON a.id = r.account_used
+			WHERE t.started_at >= ?
+			GROUP BY t.client_harness, r.account_used
+			ORDER BY t.client_harness, r.account_used`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			clientHarness: row.client_harness,
+			servedAccountId: row.account_used,
+			servedAccountName: row.account_name,
+			requestCount: row.request_count,
+			inputTokens: row.input_tokens ?? 0,
+			outputTokens: row.output_tokens ?? 0,
+			cacheReadInputTokens: row.cache_read_input_tokens ?? 0,
+			cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+			costUsd: row.cost_usd ?? 0,
+		}));
+	}
+
+	/** Newest first. */
+	async listHealthFailures(
+		sinceMs: number,
+		statuses: readonly SdkBridgeTurnStatus[],
+		limit: number,
+	): Promise<SdkBridgeHealthFailureRow[]> {
+		if (statuses.length === 0) return [];
+		const rows = await this.query<{
+			id: string;
+			kind: string;
+			status: string;
+			started_at: number;
+			http_status: number | null;
+			error_type: string | null;
+			error_message: string | null;
+			client_harness: string | null;
+			model: string | null;
+		}>(
+			`SELECT id, kind, status, started_at, http_status, error_type,
+				error_message, client_harness, model
+			FROM sdk_bridge_turns
+			WHERE started_at >= ? AND status IN (${placeholders(statuses)})
+			ORDER BY started_at DESC, id DESC
+			LIMIT ?`,
+			[sinceMs, ...statuses, limit],
+		);
+		return rows.map((row) => ({
+			id: row.id,
+			kind: row.kind,
+			status: row.status,
+			startedAt: Number(row.started_at),
+			httpStatus: row.http_status,
+			errorType: row.error_type,
+			errorMessage: row.error_message,
+			clientHarness: row.client_harness,
+			model: row.model,
 		}));
 	}
 }

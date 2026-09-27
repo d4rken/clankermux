@@ -840,7 +840,7 @@ export class ReleasedParkStore {
 				)
 					throw new Error(`the stale claim of turn ${park.turnId} was refused`);
 			if (park.expiresAt <= now) {
-				await end(park, errors.expired, "timed_out");
+				await end(park, errors.expired, "expired");
 				continue;
 			}
 			let descriptor: ResumeDescriptor | null = null;

@@ -616,23 +616,47 @@ describe("released parks and their conversation", () => {
 });
 
 describe("expiry", () => {
-	it("ends a released park whose results never came, turn timed out and file gone", async () => {
+	it("ends a released park whose results never came, turn expired and file gone", async () => {
 		const h = await releaseHarness({
 			limits: { releasedParkTtlMs: 200 },
 			timing: { maintenanceIntervalMs: 50 },
 		});
 		const p = await parkTurn(h);
 		await released(h, p);
-		await waitFor(
-			() => h.repo.turns.get(p.turnId)?.status === "timed_out",
-			3_000,
-		);
+		await waitFor(() => h.repo.turns.get(p.turnId)?.finishedAt != null, 3_000);
+		expect(h.repo.turns.get(p.turnId)).toMatchObject({
+			status: "expired",
+			httpStatus: 504,
+			errorType: "timeout_error",
+		});
 		expect(h.parkRepo.parks.size).toBe(0);
 		expect(parkFiles(h)).toEqual([]);
 		expect(h.bridge.status().counters.releasedExpired).toBe(1);
 		expect(
 			h.bridge.findContinuation(p.ids, { apiKeyId: "key-1", model: MODEL }),
 		).toBeNull();
+	});
+});
+
+describe("expiry found at recovery", () => {
+	it("ends a park that expired while no process held it as expired", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, { expiresAt: 1 });
+
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+
+		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(repo.turns.get(p.turnId)).toMatchObject({
+			status: "expired",
+			httpStatus: 504,
+			errorType: "timeout_error",
+		});
 	});
 });
 

@@ -14,6 +14,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import { queryKeys } from "../../../lib/query-keys";
+import { healthFixture } from "../__fixtures__/sdk-bridge-health";
 import { EMPTY_FILTERS, type FilterState } from "../AnalyticsFilters";
 import { ProjectsReliabilityTab } from "./ProjectsReliabilityTab";
 
@@ -151,5 +152,33 @@ describe("ProjectsReliabilityTab stops card", () => {
 		// titles in their loading branch.
 		expect(html).toContain("Routing");
 		expect(html).toContain("Tool");
+	});
+});
+
+describe("ProjectsReliabilityTab Agent SDK bridge card", () => {
+	it("renders the bridge read seeded under the tab's range", () => {
+		const queryClient = client(false);
+		queryClient.setQueryData(queryKeys.sdkBridgeHealth(RANGE), healthFixture());
+
+		const html = render(queryClient, FILTERS);
+
+		expect(html).toContain("Agent SDK bridge");
+		expect(html).toContain(
+			"2 of 8 finished turns and side requests failed (25.0%)",
+		);
+	});
+
+	it("blanks only the bridge card when its own read fails", () => {
+		const queryClient = client(false);
+		queryClient.setQueryData(
+			queryKeys.stopsHistory(RANGE, FILTERS),
+			stopsResponse(),
+		);
+		seedError(queryClient, queryKeys.sdkBridgeHealth(RANGE));
+
+		const html = render(queryClient, FILTERS);
+
+		expect(html).toContain("Agent SDK bridge data unavailable");
+		expect(html).toContain("7 of 500 recorded requests did not complete");
 	});
 });

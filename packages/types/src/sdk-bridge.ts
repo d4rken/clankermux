@@ -7,7 +7,8 @@
 /**
  * `released`: parked on the client's tool calls with no Claude Code process;
  * its session is stored in `sdk_bridge_released_parks` until the results
- * resume it or the park expires.
+ * resume it or the park expires. `expired`: a released park whose tool
+ * results never came.
  */
 export type SdkBridgeTurnStatus =
 	| "running"
@@ -16,8 +17,32 @@ export type SdkBridgeTurnStatus =
 	| "failed"
 	| "aborted"
 	| "timed_out"
+	| "expired"
 	| "shutdown"
 	| "rejected";
+
+// Key order is display order: outcomes first, open turns last.
+const TURN_STATUS_SET = {
+	completed: true,
+	failed: true,
+	timed_out: true,
+	rejected: true,
+	aborted: true,
+	expired: true,
+	shutdown: true,
+	running: true,
+	released: true,
+} satisfies Record<SdkBridgeTurnStatus, true>;
+
+export const SDK_BRIDGE_TURN_STATUSES = Object.keys(
+	TURN_STATUS_SET,
+) as SdkBridgeTurnStatus[];
+
+export function isSdkBridgeTurnStatus(
+	value: string,
+): value is SdkBridgeTurnStatus {
+	return Object.hasOwn(TURN_STATUS_SET, value);
+}
 
 /**
  * `side_request`: a client's auxiliary request (recap, title) run on a copy
@@ -25,12 +50,24 @@ export type SdkBridgeTurnStatus =
  */
 export type SdkBridgeTurnKind = "turn" | "side_request";
 
+export const SDK_BRIDGE_TURN_KINDS = Object.keys({
+	turn: true,
+	side_request: true,
+} satisfies Record<SdkBridgeTurnKind, true>) as SdkBridgeTurnKind[];
+
 /** How the turn's conversation history reached Claude Code. */
 export type SdkBridgeHistoryMode =
 	| "fresh"
 	| "resume"
 	| "rebuild_transcript"
 	| "rebuild_flattened";
+
+export const SDK_BRIDGE_HISTORY_MODES = Object.keys({
+	fresh: true,
+	resume: true,
+	rebuild_transcript: true,
+	rebuild_flattened: true,
+} satisfies Record<SdkBridgeHistoryMode, true>) as SdkBridgeHistoryMode[];
 
 /**
  * Why a turn rebuilt its conversation's Claude Code session from the
@@ -47,6 +84,15 @@ export type SdkBridgeRebuildReason =
 	| "unknown"
 	| "account_change"
 	| "dead_continuation";
+
+export const SDK_BRIDGE_REBUILD_REASONS = Object.keys({
+	continuation: true,
+	compaction: true,
+	edit: true,
+	unknown: true,
+	account_change: true,
+	dead_continuation: true,
+} satisfies Record<SdkBridgeRebuildReason, true>) as SdkBridgeRebuildReason[];
 
 /** `start` opens a turn; `continue` delivers tool results to a parked one. */
 export type SdkBridgeLegKind = "start" | "continue";

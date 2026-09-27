@@ -9,6 +9,15 @@ function availabilityText(status: SdkBridgeStatus): string {
 	return `Unavailable: ${availability.reason}`;
 }
 
+/** The process's own counters, which start at zero on every restart. */
+function sinceRestart(status: SdkBridgeStatus): string | null {
+	const { counters } = status;
+	const rejected = Object.values(counters.rejected).reduce((n, c) => n + c, 0);
+	const any = counters.turnsFailed + rejected + counters.rebuilds > 0;
+	if (status.availability.state !== "available" && !any) return null;
+	return `Since restart: ${counters.turnsFailed} not completed · ${rejected} rejected · ${counters.rebuilds} rebuilds`;
+}
+
 /**
  * One line for the Claude Agent SDK bridge, which serves /wire/openai clients
  * on official Anthropic accounts.
@@ -28,6 +37,7 @@ export function SdkBridgeStatusLine({ status }: { status: SdkBridgeStatus }) {
 					: []),
 			]
 		: [];
+	const counts = sinceRestart(status);
 	return (
 		<div
 			className="flex flex-wrap items-center gap-item text-sm"
@@ -48,6 +58,9 @@ export function SdkBridgeStatusLine({ status }: { status: SdkBridgeStatus }) {
 				<span className="text-muted-foreground tabular-nums">
 					{parts.join(" · ")}
 				</span>
+			)}
+			{counts && (
+				<span className="text-muted-foreground tabular-nums">{counts}</span>
 			)}
 			{available && status.releaseBlocked && (
 				<span className="text-warning-strong">

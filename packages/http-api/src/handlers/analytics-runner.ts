@@ -25,6 +25,7 @@ import { createModelSubstitutionsHandler as createDirectModelSubstitutionsHandle
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createPoolSizingHandler as createDirectPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
+import { createSdkBridgeHealthHandler as createDirectSdkBridgeHealthHandler } from "./sdk-bridge-health-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler as createDirectStopsHistoryHandler } from "./stops-history-direct";
 import { createToolErrorsHandler as createDirectToolErrorsHandler } from "./tool-errors-direct";
@@ -68,6 +69,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"quota-drift": DEFAULT_WORKER_TIMEOUT_MS,
 	"pool-sizing": DEFAULT_WORKER_TIMEOUT_MS,
 	"model-substitutions": DEFAULT_WORKER_TIMEOUT_MS,
+	"sdk-bridge-health": DEFAULT_WORKER_TIMEOUT_MS,
 };
 
 // Per-kind response-cache TTL. The filter-options lists change only when a new
@@ -211,6 +213,8 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	"pool-sizing": "light",
 	// One indexed window scan over routing_attempts, three groupings.
 	"model-substitutions": "light",
+	// Index range scans over sdk_bridge_turns, one row per Claude Code query.
+	"sdk-bridge-health": "light",
 };
 
 const WORKER_LANES: readonly WorkerLane[] = ["heavy", "light"];
@@ -313,6 +317,11 @@ const KIND_LABELS: Record<
 		timeoutMessage: "Model substitution request timed out",
 		failureMessage: "Failed to fetch model substitution data",
 		tooManyMessage: "Too many model substitution requests",
+	},
+	"sdk-bridge-health": {
+		timeoutMessage: "SDK bridge health request timed out",
+		failureMessage: "Failed to fetch SDK bridge health data",
+		tooManyMessage: "Too many SDK bridge health requests",
 	},
 };
 
@@ -440,6 +449,14 @@ export function createIsolatedModelSubstitutionsHandler(context: APIContext) {
 		context,
 		"model-substitutions",
 		createDirectModelSubstitutionsHandler(context),
+	);
+}
+
+export function createIsolatedSdkBridgeHealthHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"sdk-bridge-health",
+		createDirectSdkBridgeHealthHandler(context),
 	);
 }
 

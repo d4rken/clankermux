@@ -167,6 +167,149 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(html).toContain("$0.1234");
 	});
 
+	it("shows what a forwarded system prompt kept, never its text", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						systemPromptPolicy: "pi-head-v1",
+						systemPromptDetail: {
+							outcome: "forwarded",
+							version: "0.80.1",
+							headStripped: true,
+							forwardedLength: 4_210,
+							sectionsSeen: ["<cwd>", "<advertised_subagents>"],
+						},
+					},
+				}}
+			/>,
+		);
+		const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+		expect(text).toContain("System prompt policy pi-head-v1");
+		expect(text).toContain("Prompt layout 0.80.1");
+		expect(text).toContain("pi head removed · 4,210 characters appended");
+		expect(text).toContain(
+			"Sections seen &lt;cwd&gt;, &lt;advertised_subagents&gt;",
+		);
+	});
+
+	it("shows a refused system prompt's reason, section and digest", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						status: "rejected",
+						systemPromptPolicy: "pi-head-v1",
+						systemPromptDetail: {
+							outcome: "refused",
+							version: null,
+							code: "sdk_bridge_prompt_unsupported",
+							reason: "missing_version",
+							section: "tools",
+							promptLength: 12_000,
+							promptSha256: "ab".repeat(32),
+						},
+					},
+				}}
+			/>,
+		);
+		const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+		expect(text).toContain("Prompt layout None declared");
+		expect(text).toContain(
+			"Refused sdk_bridge_prompt_unsupported: missing_version (section tools)",
+		);
+		expect(text).toContain("12,000 characters · SHA-256 abababababab");
+	});
+
+	it("names an outcome it does not know instead of calling it a refusal", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						systemPromptPolicy: "pi-head-v2",
+						systemPromptDetail: {
+							outcome: "rewritten",
+							version: "0.90.0",
+						} as unknown as SdkBridgeTurnView["turn"]["systemPromptDetail"],
+					},
+				}}
+			/>,
+		);
+		const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+		expect(text).toContain("Prompt layout 0.90.0");
+		expect(text).toContain("Prompt outcome rewritten, not shown");
+		expect(text).not.toContain("Refused");
+	});
+
+	for (const [name, detail] of [
+		[
+			"a forwarded detail without its lengths",
+			{ outcome: "forwarded", version: "0.80.1" },
+		],
+		[
+			"a refused detail without its digest",
+			{ outcome: "refused", version: null, code: "c", reason: "r" },
+		],
+	] as const)
+		it(`renders ${name} as unavailable`, () => {
+			const base = view();
+			const html = renderToStaticMarkup(
+				<SdkBridgeTurnDetails
+					view={{
+						...base,
+						turn: {
+							...base.turn,
+							systemPromptPolicy: "pi-head-v1",
+							systemPromptDetail:
+								detail as unknown as SdkBridgeTurnView["turn"]["systemPromptDetail"],
+						},
+					}}
+				/>,
+			);
+			const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+			expect(text).toContain("Prompt detail unavailable");
+			expect(text).not.toContain("undefined");
+		});
+
+	it("labels an expired turn", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{ ...base, turn: { ...base.turn, status: "expired" } }}
+			/>,
+		);
+		expect(html).toContain("Expired, tool results never came");
+		expect(html).toContain("bg-warning");
+	});
+
+	it("shows no prompt detail for the drop policy", () => {
+		const html = renderToStaticMarkup(<SdkBridgeTurnDetails view={view()} />);
+		expect(html).not.toContain("Prompt layout");
+		expect(html).not.toContain("Refused");
+	});
+
+	it("marks a side request", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{ ...base, turn: { ...base.turn, kind: "side_request" } }}
+			/>,
+		);
+		expect(html).toContain("Side request");
+		expect(
+			renderToStaticMarkup(<SdkBridgeTurnDetails view={view()} />),
+		).not.toContain("Side request");
+	});
+
 	it("says there were no ignored fields", () => {
 		const base = view();
 		const html = renderToStaticMarkup(

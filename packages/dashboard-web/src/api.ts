@@ -27,6 +27,7 @@ import type {
 	RetentionGetResponse,
 	RetentionSetRequest,
 	RunwayResponse,
+	SdkBridgeHealthResponse,
 	SdkBridgeTurnView,
 	StatsWithErrors,
 	StopsHistoryResponse,
@@ -1295,6 +1296,20 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<ModelSubstitutionsResponse>(url);
+			this.logger.debug(`← GET ${url} - 200 (${Date.now() - startTime}ms)`);
+			return response;
+		} catch (error) {
+			this.logger.debug(`← GET ${url} - failed (${Date.now() - startTime}ms)`);
+			throw error;
+		}
+	}
+
+	async getSdkBridgeHealth(range: string): Promise<SdkBridgeHealthResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/sdk-bridge-health?${new URLSearchParams({ range }).toString()}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<SdkBridgeHealthResponse>(url);
 			this.logger.debug(`← GET ${url} - 200 (${Date.now() - startTime}ms)`);
 			return response;
 		} catch (error) {

@@ -1,7 +1,6 @@
 import type {
-	SdkBridgeHistoryMode,
 	SdkBridgeLegErrorPhase,
-	SdkBridgeRebuildReason,
+	SdkBridgeSystemPromptDetail,
 	SdkBridgeTurnStatus,
 	SdkBridgeTurnView,
 } from "@clankermux/types";
@@ -13,6 +12,11 @@ import {
 } from "@clankermux/ui-common";
 import type { ReactNode } from "react";
 import { useSdkBridgeTurn } from "../hooks/queries";
+import {
+	SDK_BRIDGE_HISTORY_LABEL,
+	SDK_BRIDGE_REBUILD_REASON_LABEL,
+	SDK_BRIDGE_STATUS_LABEL,
+} from "../lib/sdk-bridge-labels";
 import { cn } from "../lib/utils";
 import { Badge, badgeVariants } from "./ui/badge";
 import {
@@ -49,33 +53,6 @@ export function SdkBridgeTurnChip({ onOpen }: { onOpen: () => void }) {
 	);
 }
 
-const STATUS_LABEL: Record<SdkBridgeTurnStatus, string> = {
-	running: "Running",
-	released: "Waiting for tool results",
-	completed: "Completed",
-	failed: "Failed",
-	aborted: "Aborted",
-	timed_out: "Timed out",
-	shutdown: "Shut down",
-	rejected: "Rejected",
-};
-
-const HISTORY_LABEL: Record<SdkBridgeHistoryMode, string> = {
-	fresh: "Fresh session",
-	resume: "Resumed session",
-	rebuild_transcript: "Rebuilt from history",
-	rebuild_flattened: "Rebuilt from history, flattened",
-};
-
-const REBUILD_REASON_LABEL: Record<SdkBridgeRebuildReason, string> = {
-	continuation: "continuation",
-	compaction: "compaction",
-	edit: "edit",
-	unknown: "unknown",
-	account_change: "account change",
-	dead_continuation: "tool results after their query ended",
-};
-
 const PHASE_LABEL: Record<SdkBridgeLegErrorPhase, string> = {
 	pre_head: "before response",
 	mid_stream: "mid-stream",
@@ -86,7 +63,8 @@ function statusVariant(
 ): "success" | "warning" | "destructive" | "secondary" {
 	if (status === "completed") return "success";
 	if (status === "running" || status === "released") return "secondary";
-	if (status === "aborted" || status === "shutdown") return "warning";
+	if (status === "aborted" || status === "shutdown" || status === "expired")
+		return "warning";
 	return "destructive";
 }
 
@@ -106,20 +84,100 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 	);
 }
 
+/** The stored JSON is not type-checked on read; a malformed row is refused. */
+function wellFormed(detail: SdkBridgeSystemPromptDetail): boolean {
+	const d = detail as Partial<Record<string, unknown>>;
+	if (d.outcome === "forwarded")
+		return (
+			typeof d.forwardedLength === "number" &&
+			typeof d.headStripped === "boolean" &&
+			Array.isArray(d.sectionsSeen)
+		);
+	if (d.outcome === "refused")
+		return (
+			typeof d.code === "string" &&
+			typeof d.reason === "string" &&
+			typeof d.promptLength === "number" &&
+			typeof d.promptSha256 === "string"
+		);
+	return true;
+}
+
+/** What the system-prompt policy recorded; never the prompt's text. */
+function PromptDetailFields({
+	detail,
+}: {
+	detail: SdkBridgeSystemPromptDetail;
+}) {
+	const layout = (
+		<Field label="Prompt layout">
+			{typeof detail.version === "string" ? detail.version : "None declared"}
+		</Field>
+	);
+	if (!wellFormed(detail))
+		return (
+			<>
+				{layout}
+				<Field label="Prompt detail">unavailable</Field>
+			</>
+		);
+	if (detail.outcome === "forwarded")
+		return (
+			<>
+				{layout}
+				<Field label="Forwarded">
+					{detail.headStripped ? "pi head removed" : "no pi head found"} ·{" "}
+					{detail.forwardedLength.toLocaleString()} characters appended
+				</Field>
+				<Field label="Sections seen">
+					{detail.sectionsSeen.length ? detail.sectionsSeen.join(", ") : "None"}
+				</Field>
+			</>
+		);
+	if (detail.outcome !== "refused")
+		// A row written by a newer policy than this dashboard knows.
+		return (
+			<>
+				{layout}
+				<Field label="Prompt outcome">
+					{String((detail as { outcome: unknown }).outcome)}, not shown
+				</Field>
+			</>
+		);
+	return (
+		<>
+			{layout}
+			<Field label="Refused">
+				{detail.code}: {detail.reason}
+				{detail.section ? ` (section ${detail.section})` : ""}
+			</Field>
+			<Field label="Refused prompt">
+				<span title={detail.promptSha256}>
+					{detail.promptLength.toLocaleString()} characters · SHA-256{" "}
+					{detail.promptSha256.slice(0, 12)}
+				</span>
+			</Field>
+		</>
+	);
+}
+
 /** Everything the turn view shows, from data alone. */
 export function SdkBridgeTurnDetails({ view }: { view: SdkBridgeTurnView }) {
 	const { turn, legs, inner, innerRequests, prunedInnerCalls } = view;
 	const history = turn.rebuildReason
-		? `${HISTORY_LABEL[turn.historyMode]} (${REBUILD_REASON_LABEL[turn.rebuildReason] ?? turn.rebuildReason})`
-		: HISTORY_LABEL[turn.historyMode];
+		? `${SDK_BRIDGE_HISTORY_LABEL[turn.historyMode]} (${SDK_BRIDGE_REBUILD_REASON_LABEL[turn.rebuildReason] ?? turn.rebuildReason})`
+		: SDK_BRIDGE_HISTORY_LABEL[turn.historyMode];
 	return (
 		<div className="space-y-group text-sm">
 			<div className="flex flex-wrap items-center gap-item">
 				<Badge variant={statusVariant(turn.status)}>
-					{STATUS_LABEL[turn.status]}
+					{SDK_BRIDGE_STATUS_LABEL[turn.status]}
 				</Badge>
 				{turn.httpStatus != null && (
 					<Badge variant="outline">{turn.httpStatus}</Badge>
+				)}
+				{turn.kind === "side_request" && (
+					<Badge variant="outline">Side request</Badge>
 				)}
 				{turn.model && <Badge variant="secondary">{turn.model}</Badge>}
 				{turn.stopReason && <Badge variant="outline">{turn.stopReason}</Badge>}
@@ -135,6 +193,9 @@ export function SdkBridgeTurnDetails({ view }: { view: SdkBridgeTurnView }) {
 			<dl className="grid grid-cols-1 gap-row sm:grid-cols-2">
 				<Field label="History">{history}</Field>
 				<Field label="System prompt policy">{turn.systemPromptPolicy}</Field>
+				{turn.systemPromptDetail && (
+					<PromptDetailFields detail={turn.systemPromptDetail} />
+				)}
 				<Field label="Ignored fields">
 					{turn.ignoredFields?.length ? turn.ignoredFields.join(", ") : "None"}
 				</Field>

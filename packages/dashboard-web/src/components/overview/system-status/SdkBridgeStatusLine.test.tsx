@@ -61,6 +61,42 @@ describe("SdkBridgeStatusLine", () => {
 		expect(text(status())).not.toContain("released");
 	});
 
+	it("counts turns not completed, rejections and rebuilds since restart", () => {
+		const base = status();
+		const line = text(
+			status({
+				counters: {
+					...base.counters,
+					turnsFailed: 3,
+					rejected: { prompt_refused: 2, field_refused: 1 },
+					rebuilds: 4,
+				},
+			}),
+		);
+		expect(line).toContain(
+			"Since restart: 3 not completed · 3 rejected · 4 rebuilds",
+		);
+		expect(text(status())).toContain(
+			"Since restart: 0 not completed · 0 rejected · 0 rebuilds",
+		);
+	});
+
+	it("keeps counts since restart while unavailable, once there are any", () => {
+		const base = status();
+		const unavailable = { state: "unavailable", reason: "recovering" } as const;
+		expect(
+			text(
+				status({
+					availability: unavailable,
+					counters: { ...base.counters, turnsFailed: 1 },
+				}),
+			),
+		).toContain("Since restart: 1 not completed · 0 rejected · 0 rebuilds");
+		expect(text(status({ availability: unavailable }))).not.toContain(
+			"Since restart",
+		);
+	});
+
 	it("leaves out peak RSS where it cannot be measured", () => {
 		expect(text(status({ peakRssBytes: null }))).not.toContain("peak");
 	});
