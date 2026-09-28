@@ -562,7 +562,12 @@ still refused, and stale or partial ones keep their own 409.
 
 Every finished turn logs one line, `SDK bridge turn <id> <status>`, whose
 JSON payload has `"event":"sdk_bridge_turn"`: warn for `failed`,
-`timed_out` and `expired`, info otherwise.
+`timed_out` and `expired`, info otherwise. It is logged only when the write
+that finished the row landed, in the same queued step, so a finish that
+lost to another path or was fenced out logs nothing. The step is not atomic
+across SQLite and the journal: a crash between the commit and the log loses
+the line, and the row stays authoritative. A finish write that throws logs
+`"event":"sdk_bridge_turn_finish_failed"` at warn instead.
 
 ```
 journalctl -u clankermux --since "-1h" -o cat --no-pager | grep '"event":"sdk_bridge_turn"'
@@ -573,19 +578,26 @@ The logger writes to the console, and so to the journal, only at
 Without either, lines go only to `$CLANKERMUX_LOG_DIR/app.log`, by default
 `clankermux-logs/app.log` in the unit's private `/tmp`.
 
+- `source`: `live` (the process that inserted the turn), `resumed_park` (a
+  released park's resume) or `park_close` (a released park ended by expiry,
+  supersession or recovery).
 - `historyMode` / `rebuildReason`: `resume` continues the conversation's
   stored session; `rebuild_*` rebuilt it from the client's history, and the
   reason says why.
 - `firstCall`: `input`, `cacheRead` and `cacheCreation` of the query's first
-  model call. On a `resume` turn it should read almost the whole
-  conversation from cache. `cacheRead: 0` with a large `cacheCreation` means
-  the resumed prompt missed the cached prefix.
+  top-level model call, by message id, filled in from its `message_delta`
+  and its assistant envelope. On a `resume` turn it should read almost the
+  whole conversation from cache. `cacheRead: 0` with a large
+  `cacheCreation` means the resumed prompt missed the cached prefix.
 - `tokens`: Claude Code's own totals for the query, a cross-check. Billing
   truth is the inner `requests` rows.
-- `legs`, `toolRounds`, `innerCalls`, `innerErrors`: the row's counters.
-- `resumedFromRelease: true`: the line comes from a released park (its
-  resume, expiry or recovery), whose insert this process never saw. Identity
-  and counters are left out; read them from the row.
+- `legs`, `toolRounds`, `innerCalls`, `innerErrors`: the row's counters as
+  written before the finish; `live` lines only.
+- On `resumed_park` and `park_close` lines the identity comes from the
+  park's resume descriptor: `model` is the upstream model of the preferred
+  account's candidate, `historyMode` the turn's own decision (null for parks
+  stored before it was kept), and `systemPromptPolicy` is null. A
+  descriptor that cannot be read leaves the identity out.
 
 Startup closes turns whose process is gone without listing them: one warn
 line, `"event":"sdk_bridge_turns_closed"`, with `count`.
