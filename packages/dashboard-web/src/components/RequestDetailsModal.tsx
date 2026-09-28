@@ -1,4 +1,5 @@
 import { HttpError } from "@clankermux/http-common";
+import { CLIENT_CLOSED_REQUEST, isPreHeadClientAbort } from "@clankermux/types";
 import {
 	formatBytes,
 	formatTimestamp,
@@ -19,7 +20,7 @@ import {
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
 import { RequestCostDetails } from "./RequestCostDetails";
-import { RoutingAttempts } from "./routing/RoutingAttempts";
+import { RoutingAttempts, useRoutingAttempts } from "./routing/RoutingAttempts";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
@@ -59,6 +60,34 @@ export function shouldHydrateRequestPayload(
 		hydratedId !== request.id &&
 		(!request.request || request.meta?.bodiesOmitted === true) &&
 		failedId !== request.id
+	);
+}
+
+/**
+ * The notice for a request whose client left before any response started.
+ * Not a failure, so it is neutral. The attempt the client abandoned in flight
+ * is the one stamped `client_closed_request`, which is what the in-flight note
+ * reads.
+ */
+function ClientClosedNotice({
+	requestId,
+	account,
+}: {
+	requestId: string;
+	account: string | null;
+}) {
+	const attempts = useRoutingAttempts(requestId);
+	const inFlight =
+		attempts.data?.data.some((a) => a.error === CLIENT_CLOSED_REQUEST) ?? false;
+	return (
+		<Alert
+			tone="info"
+			title={`Client disconnected before the response started.${
+				account
+					? ` Last upstream attempt: ${account}${inFlight ? " (still in flight)" : ""}`
+					: ""
+			}`}
+		/>
 	);
 }
 
@@ -209,6 +238,7 @@ export function RequestDetailsModal({
 	const modelPresentation = getRequestModelPresentation(summary);
 	const refusalBadge = getRefusalFallbackBadge(summary);
 	const requestSucceeded = summary?.success ?? effective.meta?.success;
+	const clientClosed = isPreHeadClientAbort(statusCode, executionError);
 	// Live summaries carry the source; hydrated historical rows only have the
 	// stored envelope's meta block. Falling back keeps both views in agreement.
 	const attributionLabel = projectAttributionLabel(
@@ -243,13 +273,15 @@ export function RequestDetailsModal({
 							{statusCode && (
 								<Badge
 									variant={
-										requestSucceeded === false
-											? "destructive"
-											: statusCode >= 200 && statusCode < 300
-												? "success"
-												: statusCode >= 400 && statusCode < 500
-													? "warning"
-													: "destructive"
+										clientClosed
+											? "secondary"
+											: requestSucceeded === false
+												? "destructive"
+												: statusCode >= 200 && statusCode < 300
+													? "success"
+													: statusCode >= 400 && statusCode < 500
+														? "warning"
+														: "destructive"
 									}
 								>
 									{statusCode}
@@ -328,8 +360,20 @@ export function RequestDetailsModal({
 				</DialogHeader>
 				<RequestCostDetails summary={summary} />
 
-				{executionError && (
-					<Alert tone="destructive" title={`Error: ${executionError}`} />
+				{clientClosed ? (
+					<ClientClosedNotice
+						requestId={request.id}
+						account={
+							request.meta.accountName ??
+							summary?.accountUsed ??
+							request.meta.accountId ??
+							null
+						}
+					/>
+				) : (
+					executionError && (
+						<Alert tone="destructive" title={`Error: ${executionError}`} />
+					)
 				)}
 				{effective.meta?.synthetic && (
 					<Alert

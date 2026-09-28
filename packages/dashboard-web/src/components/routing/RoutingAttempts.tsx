@@ -155,14 +155,19 @@ export function RoutingAttemptList({
 		</ol>
 	);
 }
-export function RoutingAttempts({ requestId }: { requestId: string }) {
-	const query = useQuery({
+/** A request's routing attempts, in dispatch order. */
+export function useRoutingAttempts(requestId: string) {
+	return useQuery({
 		queryKey: ["routing-attempts", requestId],
 		queryFn: () =>
 			api.get<{ data: RoutingAttempt[] }>(
 				`/api/requests/${encodeURIComponent(requestId)}/attempts`,
 			),
 	});
+}
+
+export function RoutingAttempts({ requestId }: { requestId: string }) {
+	const query = useRoutingAttempts(requestId);
 	if (query.isPending) return <p>Loading routing attempts…</p>;
 	if (query.error) return <p role="alert">{query.error.message}</p>;
 	return <RoutingAttemptList attempts={query.data.data} />;

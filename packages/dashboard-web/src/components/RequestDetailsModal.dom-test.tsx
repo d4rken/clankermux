@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { api, type RequestPayload, type RequestSummary } from "../api";
@@ -255,5 +256,69 @@ describe("RequestDetailsModal gateway hints", () => {
 			document.body.querySelector('[aria-label="Claude Code hints"]'),
 		).toBeNull();
 		expect(document.body.textContent).not.toContain("Request class:");
+	});
+});
+
+describe("RequestDetailsModal client that left before the response", () => {
+	async function mountClosed(attempts: Array<Record<string, unknown>>) {
+		spyOn(api, "getRequestPayload").mockImplementation(
+			async () => payload() as never,
+		);
+		spyOn(api, "get").mockImplementation(
+			async () => ({ data: attempts }) as never,
+		);
+		const client = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+		host = document.createElement("div");
+		document.body.appendChild(host);
+		root = createRoot(host);
+		await act(async () => {
+			root?.render(
+				<QueryClientProvider client={client}>
+					<RequestDetailsModal
+						request={payload({
+							response: { status: 499, headers: {}, body: null },
+							error: "client_closed_request",
+							meta: {
+								timestamp: 1_700_000_000_000,
+								success: false,
+								accountName: "codex-one",
+							},
+						})}
+						summary={undefined}
+						isOpen={true}
+						onClose={() => {}}
+					/>
+				</QueryClientProvider>,
+			);
+		});
+		await settle();
+	}
+
+	const text = () => document.body.textContent ?? "";
+
+	it("names the last upstream attempt and says it was still in flight", async () => {
+		await mountClosed([
+			{ id: "a1", status: 499, error: "client_closed_request" },
+		]);
+		expect(text()).toContain(
+			"Client disconnected before the response started. Last upstream attempt: codex-one (still in flight)",
+		);
+		// Not a failure: no destructive notice and no "Error:" line.
+		expect(
+			Array.from(document.body.querySelectorAll<HTMLElement>("div")).some(
+				(el) => el.className.includes("bg-destructive/10"),
+			),
+		).toBe(false);
+		expect(text()).not.toContain("Error: client_closed_request");
+	});
+
+	it("leaves out the in-flight note when the last attempt had already answered", async () => {
+		await mountClosed([{ id: "a1", status: 429, error: "rate_limited" }]);
+		expect(text()).toContain(
+			"Client disconnected before the response started. Last upstream attempt: codex-one",
+		);
+		expect(text()).not.toContain("still in flight");
 	});
 });

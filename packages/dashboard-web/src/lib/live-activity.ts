@@ -1,5 +1,9 @@
 import { getModelShortName, type RequestStreamEvt } from "@clankermux/core";
-import { normalizeAccountId, type RequestResponse } from "@clankermux/types";
+import {
+	isPreHeadClientAbort,
+	normalizeAccountId,
+	type RequestResponse,
+} from "@clankermux/types";
 import { NO_PROJECT_LABEL } from "./project-donut";
 
 /**
@@ -18,6 +22,8 @@ export type LiveStatus =
 	| "ok"
 	| "rate_limited"
 	| "error"
+	/** The client left before any response started. Not a failure. */
+	| "client_closed"
 	/** Was in flight; ended without us seeing how. Not a failure. */
 	| "lost";
 
@@ -83,6 +89,7 @@ const STATUS_RANK: Record<LiveStatus, number> = {
 	ok: 3,
 	rate_limited: 3,
 	error: 3,
+	client_closed: 3,
 };
 
 /** A finite, non-negative number, or null. Guards charting NaN/-1/Infinity. */
@@ -197,6 +204,8 @@ function fromRequestResponse(
  * it is not a usable discriminator across both sources.
  */
 function classifyOutcome(payload: RequestResponse): LiveStatus {
+	if (isPreHeadClientAbort(payload.statusCode, payload.errorMessage))
+		return "client_closed";
 	if (payload.statusCode === 429) return "rate_limited";
 	return payload.success ? "ok" : "error";
 }

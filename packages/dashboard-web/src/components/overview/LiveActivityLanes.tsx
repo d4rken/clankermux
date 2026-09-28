@@ -102,12 +102,15 @@ const DEFAULT_PLOT_WIDTH = 720;
  * marks, and the separation above is measured against exactly these two hexes.
  * `var(--warning)` would draw the theme's amber, which sits 6.4 dE from `gold`
  * and 2.5 dE from `tan` under simulated dichromacy — a rate-limit triangle
- * indistinguishable from a model. `lost` has no such constraint: it means
- * "outcome unknown", carries no hue of its own, and takes the token.
+ * indistinguishable from a model. `lost` and `client_closed` have no such
+ * constraint: neither is a failure ("outcome unknown", and a client that left
+ * before any response), neither carries a hue of its own, and both take the
+ * token. They share the thin hollow ring and differ in the mark's label.
  */
 export const STATUS_COLOR: Partial<Record<LiveStatus, string>> = {
 	rate_limited: PINNED_MARK_COLORS.warning,
 	error: PINNED_MARK_COLORS.error,
+	client_closed: "var(--muted-foreground)",
 	lost: "var(--muted-foreground)",
 };
 
@@ -271,6 +274,7 @@ const STATUS_LABEL: Record<LiveStatus, string> = {
 	ok: "completed",
 	rate_limited: "rate limited (429)",
 	error: "failed",
+	client_closed: "client left before the response",
 	lost: "outcome unknown",
 };
 
@@ -1101,7 +1105,7 @@ function Mark({
 		);
 	}
 
-	if (event.status === "lost") {
+	if (event.status === "lost" || event.status === "client_closed") {
 		return (
 			<g opacity={opacity}>
 				<title>{label}</title>

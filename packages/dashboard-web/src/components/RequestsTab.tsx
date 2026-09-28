@@ -1,5 +1,8 @@
 import { HttpError } from "@clankermux/http-common";
-import type { ClientApplication } from "@clankermux/types";
+import {
+	type ClientApplication,
+	isPreHeadClientAbort,
+} from "@clankermux/types";
 import {
 	formatBytes,
 	formatCost,
@@ -91,6 +94,34 @@ import {
 	SelectValue,
 } from "./ui/select";
 import { Skeleton } from "./ui/skeleton";
+
+/**
+ * How a request row reads its outcome. A client that left before any response
+ * started is neither a success nor a failure, so its row and status chip are
+ * neutral; a disconnect after the response started stays an error.
+ */
+export function requestRowOutcome(
+	statusCode: number | null | undefined,
+	success: boolean | undefined,
+	error: string | undefined,
+): { isError: boolean; clientClosed: boolean; statusClass: string } {
+	const clientClosed = isPreHeadClientAbort(statusCode, error);
+	const isError = !clientClosed && (Boolean(error) || !success);
+	const statusClass = clientClosed
+		? "bg-muted text-muted-foreground"
+		: isError
+			? "bg-destructive/10 text-destructive-strong"
+			: statusCode == null
+				? ""
+				: statusCode >= 200 && statusCode < 300
+					? "bg-success/10 text-success-strong"
+					: statusCode >= 400 && statusCode < 500
+						? "bg-warning/10 text-warning-strong"
+						: statusCode >= 500
+							? "bg-destructive/10 text-destructive-strong"
+							: "bg-muted text-muted-foreground";
+	return { isError, clientClosed, statusClass };
+}
 
 /**
  * Styling for the cost chip in the requests list, keyed off the request's
@@ -1233,8 +1264,12 @@ export function RequestsTab() {
 				) : (
 					<div data-slot="request-list" className="space-y-item">
 						{requests.map((request) => {
-							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
+							const { isError, clientClosed, statusClass } = requestRowOutcome(
+								statusCode,
+								request.meta.success,
+								request.error,
+							);
 							const summary = data?.summaries.get(request.id);
 							const modelPresentation = getRequestModelPresentation(summary);
 							const refusalBadge = getRefusalFallbackBadge(summary);
@@ -1277,17 +1312,6 @@ export function RequestsTab() {
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
-							const statusClass = isError
-								? "bg-destructive/10 text-destructive-strong"
-								: statusCode == null
-									? ""
-									: statusCode >= 200 && statusCode < 300
-										? "bg-success/10 text-success-strong"
-										: statusCode >= 400 && statusCode < 500
-											? "bg-warning/10 text-warning-strong"
-											: statusCode >= 500
-												? "bg-destructive/10 text-destructive-strong"
-												: "bg-muted text-muted-foreground";
 
 							return (
 								// The card delegates POINTER clicks only, so any dead space in it
@@ -1612,10 +1636,16 @@ export function RequestsTab() {
 										</div>
 									)}
 
-									{request.error && (
-										<div className="text-xs text-destructive-strong px-row pb-item break-words">
-											Error: {request.error}
+									{clientClosed ? (
+										<div className="text-xs text-muted-foreground px-row pb-item break-words">
+											Client disconnected before the response started
 										</div>
+									) : (
+										request.error && (
+											<div className="text-xs text-destructive-strong px-row pb-item break-words">
+												Error: {request.error}
+											</div>
+										)
 									)}
 								</div>
 							);
