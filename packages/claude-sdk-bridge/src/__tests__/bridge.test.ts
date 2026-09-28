@@ -25,6 +25,7 @@ import {
 import { FileSessionStore } from "../session-store";
 import {
 	assistantMessage,
+	capturingLog,
 	type FakeQuery,
 	fakeQueryFn,
 	foldReply,
@@ -1787,6 +1788,56 @@ describe("conversations", () => {
 		});
 	});
 
+	it("logs a resumed turn with its history mode and its first model call's cache use", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const { t, r } = await firstTurn(h, header);
+		t.query.emit(resultMessage());
+		await settled(h);
+		const t2 = await start(h, second(r), { meta: header });
+		const msgId = "msg_resumed";
+		t2.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "again" }], {
+				id: msgId,
+				usage: {
+					input_tokens: 3,
+					cache_read_input_tokens: 41_000,
+					cache_creation_input_tokens: 250,
+					output_tokens: 1,
+				},
+			}),
+			// Claude Code's envelope of the same call, and a later call's.
+			assistantMessage([{ type: "text", text: "again" }], {
+				id: msgId,
+				stopReason: "end_turn",
+				usage: {
+					input_tokens: 3,
+					cache_read_input_tokens: 41_000,
+					cache_creation_input_tokens: 250,
+					output_tokens: 7,
+				},
+			}),
+			...streamedMessage([{ type: "text", text: "more" }], {
+				usage: { input_tokens: 9, cache_read_input_tokens: 5 },
+			}),
+		);
+		await reply(t2.response);
+		t2.query.emit(resultMessage());
+		await settled(h);
+		await waitFor(() => log.turns(t2.plan.turnId).length === 1);
+		expect(log.turns(t2.plan.turnId)[0]?.data).toMatchObject({
+			status: "completed",
+			httpStatus: 200,
+			historyMode: "resume",
+			rebuildReason: null,
+			firstCall: { input: 3, cacheRead: 41_000, cacheCreation: 250 },
+		});
+		expect(log.turns(t2.plan.turnId)[0]?.data).not.toHaveProperty(
+			"resumedFromRelease",
+		);
+	});
+
 	it("waits for the previous turn to settle when the next request overtakes its result", async () => {
 		const h = harness();
 		const { t, r } = await firstTurn(h, header);
@@ -3038,6 +3089,168 @@ describe("client disconnect", () => {
 		expect(turn?.legs[0]).toMatchObject({
 			httpStatus: 499,
 			errorPhase: "mid_stream",
+		});
+	});
+});
+
+describe("the turn's journal line", () => {
+	it("logs a completed turn once, with what its row records", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const t = await start(h, {
+			messages: [{ role: "user", content: "hello" }],
+		});
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "hi there" }], {
+				usage: {
+					input_tokens: 12,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 9_000,
+					output_tokens: 1,
+				},
+			}),
+		);
+		await reply(t.response);
+		t.query.emit(resultMessage());
+		await settled(h);
+		await waitFor(() => log.turns(t.plan.turnId).length === 1);
+		const [line] = log.turns(t.plan.turnId);
+		expect(line?.level).toBe("info");
+		expect(line?.message).toBe(`SDK bridge turn ${t.plan.turnId} completed`);
+		expect(line?.data).toMatchObject({
+			event: "sdk_bridge_turn",
+			turnId: t.plan.turnId,
+			kind: "turn",
+			status: "completed",
+			httpStatus: 200,
+			stopReason: "end_turn",
+			model: MODEL,
+			accountId: "acct-a",
+			clientHarness: "opencode",
+			historyMode: "fresh",
+			rebuildReason: null,
+			systemPromptPolicy: "drop",
+			legs: 1,
+			toolRounds: 0,
+			sdkNumTurns: 1,
+			tokens: { input: 10, output: 5, cacheRead: 0, cacheCreation: 0 },
+			firstCall: { input: 12, cacheRead: 0, cacheCreation: 9_000 },
+		});
+		expect(JSON.stringify(line?.data)).not.toContain("hello");
+	});
+
+	it("logs a turn refused before Claude Code started as rejected with its 400", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const plan = makePlan();
+		const res = await h.bridge.startTurn({
+			request: messagesRequest({
+				system: "You are pi",
+				messages: [{ role: "user", content: "hello" }],
+			}),
+			plan,
+			meta: makeMeta({ clientHarness: "pi", piPromptVersion: null }),
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(400);
+		await waitFor(() => log.turns(plan.turnId).length === 1);
+		const [line] = log.turns(plan.turnId);
+		expect(line?.level).toBe("info");
+		expect(line?.data).toMatchObject({
+			status: "rejected",
+			httpStatus: 400,
+			errorType: "invalid_request_error",
+			clientHarness: "pi",
+			systemPromptPolicy: "pi-head-v1",
+			legs: 1,
+		});
+		expect(line?.data).not.toHaveProperty("firstCall");
+		expect(JSON.stringify(line?.data)).not.toContain("You are pi");
+	});
+
+	it("logs a turn the client left as aborted with 499", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const t = await start(h, { messages: [{ role: "user", content: "SLOW" }] });
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "partial" }]).slice(0, 3),
+		);
+		expect((await t.response).status).toBe(200);
+		t.abort.abort();
+		await settled(h);
+		await waitFor(() => log.turns(t.plan.turnId).length === 1);
+		const [line] = log.turns(t.plan.turnId);
+		expect(line?.level).toBe("info");
+		expect(line?.data).toMatchObject({
+			status: "aborted",
+			httpStatus: 499,
+			historyMode: "fresh",
+			firstCall: { input: 10, cacheRead: null, cacheCreation: null },
+		});
+	});
+
+	it("counts a refused continuation's leg as the row does", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const first: Msg = { role: "user", content: "TOOL read" };
+		const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{ type: "tool_use", id: "toolu_1", name: "mcp__c__read", input: {} },
+			]),
+		);
+		const r1 = await reply(t.response);
+		const call = t.query.callTool("toolu_1", "read");
+		await waitFor(() => h.bridge.status().parked === 1);
+		const answer = (id: string) =>
+			continueTurn(h, t.plan.turnId, {
+				tools: [READ_TOOL],
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: id, content: "R" }],
+					},
+				],
+			});
+		expect((await answer("toolu_other").response).status).toBe(409);
+		const c = answer("toolu_1");
+		await call;
+		t.query.emit(
+			...streamedMessage([{ type: "text", text: "done" }]),
+			resultMessage(),
+		);
+		await reply(c.response);
+		await settled(h);
+		await waitFor(() => log.turns(t.plan.turnId).length === 1);
+		expect(h.repo.turns.get(t.plan.turnId)?.legs).toHaveLength(3);
+		expect(log.turns(t.plan.turnId)[0]?.data).toMatchObject({
+			status: "completed",
+			legs: 3,
+			toolRounds: 1,
+		});
+	});
+
+	it("logs a failed turn at warn", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const t = await start(h, {
+			messages: [{ role: "user", content: "hello" }],
+		});
+		t.query.emit(
+			initMessage(),
+			resultMessage({ isError: true, subtype: "error_during_execution" }),
+		);
+		expect((await t.response).status).toBeGreaterThanOrEqual(500);
+		await settled(h);
+		await waitFor(() => log.turns(t.plan.turnId).length === 1);
+		expect(log.turns(t.plan.turnId)[0]).toMatchObject({
+			level: "warn",
+			data: { status: "failed" },
 		});
 	});
 });

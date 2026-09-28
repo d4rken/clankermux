@@ -807,6 +807,11 @@ export class LiveQuery {
 		};
 	}
 
+	/** The recorder of this query's turn: its writes, and the tally its journal line reports. */
+	get recorder(): TurnRecorder {
+		return this.init.recorder;
+	}
+
 	/**
 	 * The turn is becoming a released park's: its row's writes, queued ones
 	 * included, apply from now on only under the park lease `token`.
@@ -978,6 +983,10 @@ export class LiveQuery {
 				if (message.parent_tool_use_id !== null) return;
 				if (this.firstEventMs === null)
 					this.firstEventMs = this.init.now() - this.launchedAt;
+				if (message.event.type === "message_start")
+					this.init.recorder.noteModelCall(
+						(message.event as { message?: { usage?: unknown } }).message?.usage,
+					);
 				this.sawFirstEvent = true;
 				if (!this.leg) {
 					this.init.log.debug(
@@ -1021,6 +1030,8 @@ export class LiveQuery {
 					return;
 				}
 				if (message.message.model === "<synthetic>" || message.aborted) return;
+				// A call fetched without streaming has no message_start.
+				this.init.recorder.noteModelCall(message.message.usage);
 				if (!this.leg) return;
 				this.handleEnd(
 					this.init.composer.onAssistantMessage(

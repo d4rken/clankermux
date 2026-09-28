@@ -685,10 +685,11 @@ export function memoryParkRepo(
 		},
 		async closeTurn(turnId, finish, token) {
 			await check("closeTurn");
-			if (!leased(token)) return false;
+			if (!leased(token)) return "refused";
 			parks.delete(turnId);
-			if (turnOpen(turnId)) setTurn(turnId, { ...finish });
-			return true;
+			if (!turnOpen(turnId)) return "kept";
+			setTurn(turnId, { ...finish });
+			return "closed";
 		},
 		async closeOpenTurnsWithoutPark(before, finish, token, ownerDead) {
 			await check("closeOpenTurnsWithoutPark");
@@ -727,6 +728,42 @@ export const silentLog: BridgeLog = {
 	warn() {},
 	error() {},
 };
+
+export interface LogEntry {
+	level: keyof BridgeLog;
+	message: string;
+	data: unknown;
+}
+
+/** A log that keeps what it is given; `turns()` is the `sdk_bridge_turn` lines. */
+export function capturingLog(): BridgeLog & {
+	entries: LogEntry[];
+	turns: (
+		turnId?: string,
+	) => Array<LogEntry & { data: Record<string, unknown> }>;
+} {
+	const entries: LogEntry[] = [];
+	const keep =
+		(level: keyof BridgeLog) =>
+		(message: string, data?: unknown): void => {
+			entries.push({ level, message, data });
+		};
+	return {
+		entries,
+		debug: keep("debug"),
+		info: keep("info"),
+		warn: keep("warn"),
+		error: keep("error"),
+		turns: (turnId) =>
+			entries.filter(
+				(e): e is LogEntry & { data: Record<string, unknown> } =>
+					(e.data as { event?: unknown } | undefined)?.event ===
+						"sdk_bridge_turn" &&
+					(turnId === undefined ||
+						(e.data as { turnId?: unknown }).turnId === turnId),
+			),
+	};
+}
 
 export const MODEL = "claude-sonnet-5";
 

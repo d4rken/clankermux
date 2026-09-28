@@ -413,24 +413,34 @@ export function createClaudeSdkBridge(
 		}
 		try {
 			const error = bridgeErrors.bridgeRestarted("while this turn ran");
+			const finish = {
+				finishedAt: now(),
+				status: "failed",
+				httpStatus: error.status,
+				errorType: error.type,
+				errorMessage: error.message,
+			} as const;
 			const closed = await (
 				deps.parkRepo.withBusyRetryBudget?.(timing.recoveryBusyRetryMs) ??
 				deps.parkRepo
 			).closeOpenTurnsWithoutPark(
 				createdAt,
-				{
-					finishedAt: now(),
-					status: "failed",
-					httpStatus: error.status,
-					errorType: error.type,
-					errorMessage: error.message,
-				},
+				finish,
 				parks.token,
 				(owner) => !ownerRunning(owner),
 			);
+			// The rows are closed unread, so one line counts them.
 			if (closed)
-				log.info(
+				log.warn(
 					`SDK bridge: ${closed} turn${closed === 1 ? "" : "s"} whose process is gone closed`,
+					{
+						event: "sdk_bridge_turns_closed",
+						count: closed,
+						status: finish.status,
+						httpStatus: finish.httpStatus,
+						errorType: finish.errorType,
+						errorMessage: finish.errorMessage,
+					},
 				);
 		} catch (error) {
 			log.warn("SDK bridge: could not close turns left open", error);
@@ -565,13 +575,18 @@ export function createClaudeSdkBridge(
 		/** The turn's decision for the header; absent: read from the live query or park. */
 		history?: SdkBridgeTurnHistory | null,
 	): Response {
+		// A running turn's own recorder counts the leg toward its journal line.
 		// A released park's turn is written under the lease, like its resume.
-		const recorder = new TurnRecorder(
-			deps.turnRepo,
-			log,
-			turnId,
-			parks?.get(turnId) ? parks.token : undefined,
-		);
+		const live = lives.get(turnId);
+		const recorder =
+			live && !live.closed
+				? live.recorder
+				: new TurnRecorder(
+						deps.turnRepo,
+						log,
+						turnId,
+						parks?.get(turnId) ? parks.token : undefined,
+					);
 		void recorder.insertLeg(meta.legId, "continue", startedAt);
 		void recorder.finishLeg(meta.legId, {
 			finishedAt: now(),

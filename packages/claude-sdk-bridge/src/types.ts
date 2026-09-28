@@ -8,6 +8,7 @@ import type {
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
+	SdkBridgeParkCloseOutcome,
 	SdkBridgeParkLease,
 	SdkBridgeRebuildReason,
 	SdkBridgeReleasedPark,
@@ -107,7 +108,7 @@ export interface SdkBridgeParkRepo {
 		turnId: string,
 		finish: SdkBridgeTurnFinish,
 		token: string,
-	): Promise<boolean>;
+	): Promise<SdkBridgeParkCloseOutcome>;
 	closeOpenTurnsWithoutPark(
 		startedBefore: number,
 		finish: SdkBridgeTurnFinish,

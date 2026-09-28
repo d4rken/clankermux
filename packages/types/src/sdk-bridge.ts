@@ -372,6 +372,13 @@ export type SdkBridgeReleasedParkInsert = Omit<
 	"state" | "claimOwner" | "claimId" | "claimedAt"
 >;
 
+/**
+ * What closing a released park's turn did. `kept`: the turn had already
+ * finished and keeps its outcome; its park is gone all the same. `refused`:
+ * the token does not hold the lease, and nothing changed.
+ */
+export type SdkBridgeParkCloseOutcome = "closed" | "kept" | "refused";
+
 /** The one row of `sdk_bridge_park_lease`: who may act on released parks. */
 export interface SdkBridgeParkLease {
 	/** The holder's released-parks directory. */

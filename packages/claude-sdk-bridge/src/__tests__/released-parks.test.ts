@@ -25,6 +25,7 @@ import { basename, join } from "node:path";
 import type { SdkBridgeTurnMeta } from "@clankermux/types";
 import {
 	assistantMessage,
+	capturingLog,
 	type FakeQuery,
 	foldReply,
 	type Harness,
@@ -71,6 +72,7 @@ async function releaseHarness(
 		repo?: ReturnType<typeof memoryTurnRepo>;
 		parkRepo?: ReturnType<typeof memoryParkRepo>;
 		keep?: boolean;
+		log?: ReturnType<typeof capturingLog>;
 	} = {},
 ): Promise<ReleaseHarness> {
 	const repo = opts.repo ?? memoryTurnRepo();
@@ -79,6 +81,7 @@ async function releaseHarness(
 		{
 			parkRepo,
 			parkNamespace: parkRepo.namespace,
+			...(opts.log ? { log: opts.log } : {}),
 			limits: () => ({
 				parkReleaseMs: 60,
 				releasedParkTtlMs: 60_000,
@@ -448,6 +451,43 @@ describe("resuming a released park", () => {
 		).toBeNull();
 	});
 
+	it("logs the resumed turn once, as resumed from a release, with its first call's cache use", async () => {
+		const log = capturingLog();
+		const h = await releaseHarness({ log });
+		const p = await parkTurn(h);
+		await released(h, p);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "done" }], {
+				usage: {
+					input_tokens: 2,
+					cache_read_input_tokens: 30_000,
+					cache_creation_input_tokens: 120,
+					output_tokens: 1,
+				},
+			}),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+		await waitFor(() => log.turns(p.turnId).length === 1);
+		await Bun.sleep(20);
+		// Parking and releasing did not finish the turn; only the resume did.
+		const lines = log.turns(p.turnId);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]?.level).toBe("info");
+		expect(lines[0]?.data).toMatchObject({
+			status: "completed",
+			httpStatus: 200,
+			resumedFromRelease: true,
+			firstCall: { input: 2, cacheRead: 30_000, cacheCreation: 120 },
+		});
+		expect(lines[0]?.data).not.toHaveProperty("historyMode");
+		expect(lines[0]?.data).not.toHaveProperty("legs");
+	});
+
 	it("holds results that arrive during the release until it is stored, then resumes", async () => {
 		const h = await releaseHarness({ process: "ignore-term" });
 		const p = await parkTurn(h);
@@ -617,13 +657,29 @@ describe("released parks and their conversation", () => {
 
 describe("expiry", () => {
 	it("ends a released park whose results never came, turn expired and file gone", async () => {
+		const log = capturingLog();
 		const h = await releaseHarness({
 			limits: { releasedParkTtlMs: 200 },
 			timing: { maintenanceIntervalMs: 50 },
+			log,
 		});
 		const p = await parkTurn(h);
 		await released(h, p);
 		await waitFor(() => h.repo.turns.get(p.turnId)?.finishedAt != null, 3_000);
+		await waitFor(() => log.turns(p.turnId).length === 1);
+		expect(log.turns(p.turnId)[0]).toMatchObject({
+			level: "warn",
+			message: `SDK bridge turn ${p.turnId} expired`,
+			data: {
+				event: "sdk_bridge_turn",
+				turnId: p.turnId,
+				status: "expired",
+				httpStatus: 504,
+				errorType: "timeout_error",
+				resumedFromRelease: true,
+			},
+		});
+		expect(log.turns(p.turnId)[0]?.data.durationMs).toBeNumber();
 		expect(h.repo.turns.get(p.turnId)).toMatchObject({
 			status: "expired",
 			httpStatus: 504,
@@ -649,9 +705,20 @@ describe("expiry found at recovery", () => {
 		await a.bridge.dispose();
 		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, { expiresAt: 1 });
 
-		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		const log = capturingLog();
+		const b = await releaseHarness({ workRoot, repo, parkRepo, log });
 
 		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(log.turns(p.turnId)).toEqual([
+			expect.objectContaining({
+				level: "warn",
+				data: expect.objectContaining({
+					status: "expired",
+					httpStatus: 504,
+					resumedFromRelease: true,
+				}),
+			}),
+		]);
 		expect(repo.turns.get(p.turnId)).toMatchObject({
 			status: "expired",
 			httpStatus: 504,
@@ -1639,8 +1706,26 @@ describe("the lease as the only authority", () => {
 		} as never);
 		await holder.bridge.dispose();
 
-		const next = await releaseHarness({ repo, parkRepo });
+		const log = capturingLog();
+		const next = await releaseHarness({ repo, parkRepo, log });
 		expect(next.bridge.status().releaseBlocked).toBeNull();
+		// Closed without enumerating them: one line with the count.
+		expect(
+			log.entries.filter(
+				(e) =>
+					(e.data as { event?: string } | undefined)?.event ===
+					"sdk_bridge_turns_closed",
+			),
+		).toEqual([
+			expect.objectContaining({
+				level: "warn",
+				data: expect.objectContaining({
+					status: "failed",
+					count: 1,
+					httpStatus: 502,
+				}),
+			}),
+		]);
 		expect(repo.turns.get(liveId)?.status).toBe("running");
 		expect(repo.turns.get("dead-turn")?.status).toBe("failed");
 		q.emit(

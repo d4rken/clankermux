@@ -178,7 +178,7 @@ describe("SdkBridgeReleasedParkRepository", () => {
 				{ finishedAt: 5_000, status: "timed_out", errorMessage: "expired" },
 				T,
 			),
-		).toBe(true);
+		).toBe("closed");
 		expect(await parks.find("turn-1")).toBeNull();
 		expect(statusOf()).toBe("timed_out");
 
@@ -191,7 +191,7 @@ describe("SdkBridgeReleasedParkRepository", () => {
 				{ finishedAt: 9_000, status: "failed" },
 				T,
 			),
-		).toBe(true);
+		).toBe("kept");
 		expect(await parks.find("turn-2")).toBeNull();
 		expect(statusOf("turn-2")).toBe("completed");
 	});
@@ -236,7 +236,7 @@ describe("fencing by the lease", () => {
 		expect(await parks.delete("turn-1", T)).toBe(false);
 		expect(
 			await parks.closeTurn("turn-1", { finishedAt: 1, status: "failed" }, T),
-		).toBe(false);
+		).toBe("refused");
 		expect(
 			await parks.closeOpenTurnsWithoutPark(
 				10_000,

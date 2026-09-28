@@ -22,6 +22,7 @@ import type {
 	SdkBridgeTurnFinish,
 } from "@clankermux/types";
 import { type BridgeError, errorSummary } from "./errors";
+import { logTurnFinished } from "./recorder";
 import { type FileSessionStore, rewriteSessionId } from "./session-store";
 import type { SystemPromptDecision } from "./system-prompt-policy";
 import type { ClientTool } from "./turn-request";
@@ -823,21 +824,20 @@ export class ReleasedParkStore {
 					this.unindex(turnId);
 					this.removeParkFile(entry.path);
 					return true;
-				case "close":
-					if (
-						!(await repo.closeTurn(
-							turnId,
-							this.finishOf(entry, pending.error, pending.status),
-							this.token,
-						))
-					) {
+				case "close": {
+					const finish = this.finishOf(entry, pending.error, pending.status);
+					const outcome = await repo.closeTurn(turnId, finish, this.token);
+					if (outcome === "refused") {
 						// Without the lease the park is not this process's to end.
 						if (!(await repo.holdsLease(this.token))) this.unindex(turnId);
 						return !this.entries.has(turnId);
 					}
+					if (outcome === "closed")
+						logTurnFinished(this.opts.log, turnId, finish, null);
 					this.unindex(turnId);
 					this.removeParkFile(entry.path);
 					return true;
+				}
 				case "resync": {
 					if (!(await repo.holdsLease(this.token))) {
 						this.unindex(turnId);
@@ -920,21 +920,19 @@ export class ReleasedParkStore {
 				startedAt = (JSON.parse(park.descriptor) as ResumeDescriptor)
 					.turnStartedAt;
 			} catch {}
-			if (
-				!(await repo.closeTurn(
-					park.turnId,
-					{
-						finishedAt: now,
-						status,
-						httpStatus: error.status,
-						errorType: error.type,
-						errorMessage: error.message,
-						durationMs: now - startedAt,
-					},
-					this.token,
-				))
-			)
+			const finish: SdkBridgeTurnFinish = {
+				finishedAt: now,
+				status,
+				httpStatus: error.status,
+				errorType: error.type,
+				errorMessage: error.message,
+				durationMs: now - startedAt,
+			};
+			const outcome = await repo.closeTurn(park.turnId, finish, this.token);
+			if (outcome === "refused")
 				throw new Error("the park lease moved on during recovery");
+			if (outcome === "closed")
+				logTurnFinished(this.opts.log, park.turnId, finish, null);
 			this.removeParkFile(park.sessionPath);
 		};
 		for (const park of await repo.list()) {
