@@ -125,14 +125,26 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 3.75,
 				},
 			},
+			// Sonnet 5's $2/$10 launch rate became its standard price; Sonnet 5.5
+			// launched on it. Source: the pricing docs' model table, 2026-09-28.
 			[CLAUDE_MODEL_IDS.SONNET_5]: {
 				id: CLAUDE_MODEL_IDS.SONNET_5,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_5],
 				cost: {
-					input: 3,
-					output: 15,
-					cache_read: 0.3,
-					cache_write: 3.75,
+					input: 2,
+					output: 10,
+					cache_read: 0.2,
+					cache_write: 2.5,
+				},
+			},
+			[CLAUDE_MODEL_IDS.SONNET_5_5]: {
+				id: CLAUDE_MODEL_IDS.SONNET_5_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_5_5],
+				cost: {
+					input: 2,
+					output: 10,
+					cache_read: 0.2,
+					cache_write: 2.5,
 				},
 			},
 			[CLAUDE_MODEL_IDS.OPUS_4]: {

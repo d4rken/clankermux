@@ -664,10 +664,9 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 	});
 });
 
-describe("bundled Sonnet 5 pricing (offline fallback)", () => {
-	// Sonnet 5 prices at $3/M input, $15/M output, $0.30/M cache read,
-	// $3.75/M cache write — same tier as Sonnet 4.5/4.6 (standard, post
-	// introductory-period pricing).
+describe("bundled Sonnet 5 and 5.5 pricing (offline fallback)", () => {
+	// Both price at $2/M input, $10/M output, $0.20/M cache read, $2.50/M
+	// cache write.
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -677,19 +676,15 @@ describe("bundled Sonnet 5 pricing (offline fallback)", () => {
 		cacheCreationInputTokens: 1_000_000,
 	};
 
-	it("prices claude-sonnet-5 input/output from bundled data", async () => {
-		expect(await estimateCostUSD("claude-sonnet-5", ioTokens)).toBeCloseTo(
-			18,
-			6,
-		);
-	});
+	for (const model of ["claude-sonnet-5", "claude-sonnet-5-5"]) {
+		it(`prices ${model} input/output from bundled data`, async () => {
+			expect(await estimateCostUSD(model, ioTokens)).toBeCloseTo(12, 6);
+		});
 
-	it("prices claude-sonnet-5 cache tokens from bundled data", async () => {
-		expect(await estimateCostUSD("claude-sonnet-5", cacheTokens)).toBeCloseTo(
-			4.05,
-			6,
-		);
-	});
+		it(`prices ${model} cache tokens from bundled data`, async () => {
+			expect(await estimateCostUSD(model, cacheTokens)).toBeCloseTo(2.7, 6);
+		});
+	}
 });
 
 describe("bundled Mythos-class pricing (offline fallback)", () => {
@@ -940,9 +935,9 @@ describe("getModelCacheRates", () => {
 
 	it("returns Sonnet 5 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-sonnet-5")).toEqual({
-			inputPer1M: 3,
-			cacheReadPer1M: 0.3,
-			cacheWritePer1M: 3.75,
+			inputPer1M: 2,
+			cacheReadPer1M: 0.2,
+			cacheWritePer1M: 2.5,
 		});
 	});
 
