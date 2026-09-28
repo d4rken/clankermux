@@ -2,6 +2,7 @@ import { stripDatedModelSuffix } from "@clankermux/core";
 import {
 	MODEL_SUBSTITUTION_EXCEPTION_WILDCARD,
 	type ModelSubstitutionException,
+	sdkBridgeWireModel,
 } from "@clankermux/types";
 
 /**
@@ -127,8 +128,15 @@ function pairedIds(
 	return out;
 }
 
+/**
+ * `claude-opus-5-5[1m]` asks for the 1M context window of `claude-opus-5-5`,
+ * and Anthropic answers it as `claude-opus-5-5`: one model, so the suffix is
+ * dropped the way the SDK bridge's wire id drops it.
+ */
 function normalizedAliases(model: string): string[] {
-	const base = stripRouteVariant(stripVendorPrefix(model.toLowerCase().trim()));
+	const base = stripRouteVariant(
+		sdkBridgeWireModel(stripVendorPrefix(model.toLowerCase().trim())),
+	);
 	const undated =
 		stripDatedModelSuffix(base) ?? COMPACT_DATED_SUFFIX.exec(base)?.[1] ?? null;
 	return undated === null ? [base] : [base, undated];

@@ -75,6 +75,26 @@ describe("isModelSubstitution", () => {
 		);
 	});
 
+	it("matches a [1m] id against the bare id Anthropic reports", () => {
+		expect(
+			isModelSubstitution(
+				"claude-opus-5-5[1m]",
+				"claude-opus-5-5",
+				"anthropic",
+			),
+		).toBe(false);
+		expect(
+			isModelSubstitution("claude-fable-5-1[1M]", "claude-fable-5-1"),
+		).toBe(false);
+		expect(
+			isModelSubstitution(
+				"claude-opus-5-5[1m]",
+				"claude-sonnet-5",
+				"anthropic",
+			),
+		).toBe(true);
+	});
+
 	// The normalisations must not become a way for a real swap to pass.
 
 	it("still separates genuinely different models", () => {

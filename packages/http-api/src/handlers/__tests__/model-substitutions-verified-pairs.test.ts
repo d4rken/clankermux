@@ -101,6 +101,35 @@ describe("computeModelSubstitutions — verified served-model pairs", () => {
 		expect(result.degraded).toHaveLength(1);
 	});
 
+	// An SDK bridge turn routed to `claude-opus-5-5[1m]`, which Anthropic
+	// reports under the bare id.
+	it("does not report a [1m] id answered as its bare id", () => {
+		const result = computeModelSubstitutions(
+			raw({
+				pairs: [
+					pairRow({
+						provider: "anthropic",
+						outgoingModel: "claude-opus-5-5[1m]",
+						reportedModel: "claude-opus-5-5",
+						substituted: 12,
+					}),
+				],
+				comparable: [
+					{
+						accountId: "a",
+						outgoingModel: "claude-opus-5-5[1m]",
+						comparable: 12,
+					},
+				],
+			}),
+			[{ id: "a", name: "Claude-me", provider: "anthropic" } as Account],
+			NOW,
+		);
+
+		expect(result.pairs).toEqual([]);
+		expect(result.degraded).toEqual([]);
+	});
+
 	// The reverse direction is the same model under the same two names: the
 	// proxy may send either spelling once a catalogue publishes the renamed id.
 	it("does not report the pair in the direction it was not observed in", () => {
