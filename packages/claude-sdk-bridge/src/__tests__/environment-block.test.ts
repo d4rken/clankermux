@@ -98,25 +98,33 @@ describe("stripEnvironmentBlocks", () => {
 		}
 	});
 
-	it("keeps a user message's own text around a wrapped block", () => {
-		const { messages } = strip([
-			{
-				role: "user",
-				content: [
-					{ type: "tool_result", tool_use_id: "t1", content: "R" },
-					{ type: "text", text: `${wrap(ENV)}\n\n${wrap(MODEL)}` },
-				],
-			},
-		]);
-		expect(messages).toEqual([
-			{
-				role: "user",
-				content: [
-					{ type: "tool_result", tool_use_id: "t1", content: "R" },
-					{ type: "text", text: wrap(MODEL) },
-				],
-			},
-		]);
+	describe("user messages", () => {
+		// Claude Code puts the block only in system messages; the real-binary
+		// test "never shows the model Claude Code's own directories, only the
+		// client's" covers where it lands. Text in a user message is the
+		// client's, even when it names this bridge's sandboxes.
+		it("are never changed, even naming this bridge's own sandboxes", () => {
+			const pasted = `Explain this:\n\n${wrap(updateOf(`${ROOT}/gen-new/cwd`, `${ROOT}/gen-old/cwd`))}`;
+			const result = expectUntouched([
+				{ role: "user", content: pasted },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "t1", content: "R" },
+						{ type: "text", text: `${wrap(ENV)}\n\n${wrap(MODEL)}` },
+					],
+				},
+				{ role: "user", content: wrap(ENV) },
+			]);
+			expect(result.inUserMessages).toBe(true);
+		});
+
+		it("are reported only for a block under a root", () => {
+			const result = expectUntouched([
+				{ role: "user", content: wrap(envOf("/home/alice/project")) },
+			]);
+			expect(result.inUserMessages).toBe(false);
+		});
 	});
 
 	describe("ownership", () => {
@@ -166,14 +174,6 @@ describe("stripEnvironmentBlocks", () => {
 	});
 
 	describe("never makes an invalid request", () => {
-		it("leaves a user message that stripping would empty", () => {
-			const result = expectUntouched([
-				{ role: "user", content: wrap(ENV) },
-				{ role: "user", content: [{ type: "text", text: wrap(ENV) }] },
-			]);
-			expect(result.keptInUserMessages).toBe(2);
-		});
-
 		it("keeps a system message whose removal would end the request on an assistant turn or empty it", () => {
 			expectUntouched([{ role: "system", content: ENV }]);
 			expectUntouched([TOOL_USE, { role: "system", content: ENV }]);
@@ -326,13 +326,13 @@ describe("stripEnvironmentBlocks", () => {
 				{ role: "system", content: wrap(`${ENV}\n\n${MODEL}`) },
 				{ role: "system", content: wrap(`${MODEL}\n\n${UPDATE}`) },
 				{ role: "system", content: wrap(`${ENV}\n\n${UPDATE}`) },
-				{ role: "user", content: `${wrap(`${ENV}\n\n${MODEL}`)}\n\nhello` },
+				{ role: "system", content: `${wrap(`${ENV}\n\n${MODEL}`)}\n\nhello` },
 			]);
 			expect(messages).toEqual([
 				{ role: "user", content: "hi" },
 				{ role: "system", content: wrap(MODEL) },
 				{ role: "system", content: wrap(MODEL) },
-				{ role: "user", content: `${wrap(MODEL)}\n\nhello` },
+				{ role: "system", content: `${wrap(MODEL)}\n\nhello` },
 			]);
 		});
 

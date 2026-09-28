@@ -269,7 +269,7 @@ export class InnerListener {
 		});
 		if (environment.changed) body = JSON.stringify(parsed);
 		if (
-			(environment.drift || environment.keptInUserMessages > 0) &&
+			(environment.drift || environment.inUserMessages) &&
 			!entry.environmentNoted
 		) {
 			entry.environmentNoted = true;
@@ -277,7 +277,7 @@ export class InnerListener {
 				`SDK bridge turn ${entry.context.turnId}: Claude Code's environment block left in a model call (${
 					environment.drift
 						? "a text under the work root looks like it but did not match"
-						: "it was all a user message held"
+						: "a user message holds text like it, which is the client's"
 				})`,
 			);
 		}

@@ -6,9 +6,10 @@
  * really driving. The block is removed from every model call; everything
  * else in the message that carries it stays as it was.
  *
- * Only a block naming one of the bridge's own sandboxes
- * (`<root>/gen-<id>/cwd`) is Claude Code's; the same text naming any other
- * directory is the client's and passes untouched. The shapes are Claude
+ * Only a block in a `role: "system"` message naming one of the bridge's
+ * own sandboxes (`<root>/gen-<id>/cwd`) is Claude Code's; the same text
+ * naming any other directory, or in a user message, is the client's and
+ * passes untouched. The shapes are Claude
  * Code's own renderings, pinned against the real binary by "never shows the
  * model Claude Code's own directories, only the client's" in
  * `real-claude.integration.test.ts`.
@@ -28,8 +29,8 @@ export interface EnvironmentStripResult {
 	 * Claude Code's wording may have changed.
 	 */
 	drift: boolean;
-	/** User messages left as they were because the block was all they held. */
-	keptInUserMessages: number;
+	/** A user message, left as it is, holds text like the block under a root. */
+	inUserMessages: boolean;
 }
 
 const LIST_LINE = String.raw` {1,2}- [^\n]*`;
@@ -112,15 +113,10 @@ function stripWrap(
 }
 
 /**
- * `text` without the environment paragraphs. A paragraph inside a
- * `<system-reminder>` wrap is Claude Code's in any message; a bare one only
- * in a `role: "system"` message.
+ * `text` without the environment paragraphs, bare or inside a
+ * `<system-reminder>` wrap.
  */
-function stripText(
-	text: string,
-	bareAllowed: boolean,
-	owned: (path: string) => boolean,
-): string {
+function stripText(text: string, owned: (path: string) => boolean): string {
 	if (!MARKERS.some((m) => text.includes(m))) return text;
 	const pieces = text.split(SEPARATOR);
 	const paragraphs: string[] = [];
@@ -145,7 +141,7 @@ function stripText(
 				}
 			}
 		if (end < 0) {
-			const removed = bareAllowed && isBlock(first, owned);
+			const removed = isBlock(first, owned);
 			removedAny ||= removed;
 			units.push({ before: separators[i] ?? "", text: first, removed });
 			i++;
@@ -246,7 +242,7 @@ interface Pass {
 	messages: Json[];
 	changed: boolean;
 	drift: boolean;
-	keptInUserMessages: number;
+	inUserMessages: boolean;
 	/** Indexes of the system messages dropped, ascending. */
 	dropped: number[];
 }
@@ -262,37 +258,41 @@ function stripMessages(
 		messages: [],
 		changed: false,
 		drift: false,
-		keptInUserMessages: 0,
+		inUserMessages: false,
 		dropped: [],
 	};
 	const kept = pass.messages;
-	const strip = (text: string, system: boolean) => {
-		const out = stripText(text, system, owned);
+	const strip = (text: string) => {
+		const out = stripText(text, owned);
 		if (looksLikeBlock(out, roots)) pass.drift = true;
 		return out;
 	};
 	messages.forEach((message, index) => {
-		if (
-			!isObject(message) ||
-			keep.has(index) ||
-			(message.role !== "system" && message.role !== "user")
-		) {
+		if (isObject(message) && message.role === "user") {
+			const texts =
+				typeof message.content === "string"
+					? [message.content]
+					: Array.isArray(message.content)
+						? message.content.flatMap((b) =>
+								isObject(b) && b.type === "text" && typeof b.text === "string"
+									? [b.text]
+									: [],
+							)
+						: [];
+			if (texts.some((text) => looksLikeBlock(text, roots)))
+				pass.inUserMessages = true;
+		}
+		if (!isObject(message) || keep.has(index) || message.role !== "system") {
 			kept.push(message as Json);
 			return;
 		}
-		const system = message.role === "system";
 		if (typeof message.content === "string") {
-			const text = strip(message.content, system);
+			const text = strip(message.content);
 			if (text === message.content) kept.push(message);
-			else if (text !== "") {
+			else {
 				pass.changed = true;
-				kept.push({ ...message, content: text });
-			} else if (system) {
-				pass.changed = true;
-				pass.dropped.push(index);
-			} else {
-				pass.keptInUserMessages++;
-				kept.push(message);
+				if (text !== "") kept.push({ ...message, content: text });
+				else pass.dropped.push(index);
 			}
 			return;
 		}
@@ -312,7 +312,7 @@ function stripMessages(
 				blocks.push(block);
 				continue;
 			}
-			const text = strip(block.text, system);
+			const text = strip(block.text);
 			if (text === block.text) blocks.push(block);
 			else {
 				removed = true;
@@ -322,11 +322,6 @@ function stripMessages(
 			}
 		}
 		if (!removed) {
-			kept.push(message);
-			return;
-		}
-		if (blocks.length === 0 && !system) {
-			pass.keptInUserMessages++;
 			kept.push(message);
 			return;
 		}
@@ -342,17 +337,17 @@ function stripMessages(
 /**
  * Remove Claude Code's environment block from a Messages API body (a
  * `/v1/messages` or `/v1/messages/count_tokens` call), in place. Only
- * system messages are ever dropped, and never so that the request would
- * end on an assistant turn or hold no messages; a user message the block
- * would empty keeps it. An emptied block's cache breakpoint moves to the
- * nearest earlier block that can take it.
+ * system messages are changed, and one is never dropped so that the
+ * request would end on an assistant turn or hold no messages. An emptied
+ * block's cache breakpoint moves to the nearest earlier block that can
+ * take it.
  */
 export function stripEnvironmentBlocks(
 	body: unknown,
 	options: EnvironmentStripOptions,
 ): EnvironmentStripResult {
 	if (!isObject(body) || !Array.isArray(body.messages))
-		return { changed: false, drift: false, keptInUserMessages: 0 };
+		return { changed: false, drift: false, inUserMessages: false };
 	const owned = sandboxMatcher(options.roots);
 	const keep = new Set<number>();
 	for (;;) {
@@ -369,7 +364,7 @@ export function stripEnvironmentBlocks(
 		return {
 			changed: pass.changed,
 			drift: pass.drift,
-			keptInUserMessages: pass.keptInUserMessages,
+			inUserMessages: pass.inUserMessages,
 		};
 	}
 }
