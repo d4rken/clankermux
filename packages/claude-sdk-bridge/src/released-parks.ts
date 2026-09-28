@@ -68,11 +68,17 @@ function stringOrNull(value: unknown): string | null {
 
 /**
  * A released park's turn as its resume descriptor (parsed, or its JSON)
- * names it, for the journal. Null for a descriptor that does not parse or
- * has no route plan. The descriptor keeps no policy name, and parks stored
- * before it kept its history decision have none.
+ * names it, for the journal. `model` is the park's `requestedModel`, the id
+ * the client named, as a live turn's row records it; the preferred
+ * candidate's upstream model stands in only without one. Null for a
+ * descriptor that does not parse or has no route plan. The descriptor keeps
+ * no policy name, and parks stored before it kept its history decision have
+ * none.
  */
-export function parkTurnIdentity(descriptor: unknown): TurnLogIdentity | null {
+export function parkTurnIdentity(
+	descriptor: unknown,
+	requestedModel: string | null = null,
+): TurnLogIdentity | null {
 	let value = descriptor;
 	if (typeof value === "string")
 		try {
@@ -97,7 +103,7 @@ export function parkTurnIdentity(descriptor: unknown): TurnLogIdentity | null {
 	const mode = SDK_BRIDGE_HISTORY_MODES.find((m) => m === history.mode);
 	return {
 		kind: "turn",
-		model: stringOrNull(target?.upstreamModel),
+		model: requestedModel ?? stringOrNull(target?.upstreamModel),
 		accountId,
 		clientHarness: stringOrNull(d.clientHarness),
 		historyMode: mode ?? null,
@@ -874,7 +880,10 @@ export class ReleasedParkStore {
 					return true;
 				case "close": {
 					const finish = this.finishOf(entry, pending.error, pending.status);
-					const identity = parkTurnIdentity(entry.descriptor);
+					const identity = parkTurnIdentity(
+						entry.descriptor,
+						entry.park.requestedModel,
+					);
 					const outcome = await repo.closeTurn(turnId, finish, this.token);
 					if (outcome === "refused") {
 						// Without the lease the park is not this process's to end.
@@ -980,7 +989,7 @@ export class ReleasedParkStore {
 				errorMessage: error.message,
 				durationMs: now - startedAt,
 			};
-			const identity = parkTurnIdentity(park.descriptor);
+			const identity = parkTurnIdentity(park.descriptor, park.requestedModel);
 			const outcome = await repo.closeTurn(park.turnId, finish, this.token);
 			if (outcome === "refused")
 				throw new Error("the park lease moved on during recovery");

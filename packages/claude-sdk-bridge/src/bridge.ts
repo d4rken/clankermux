@@ -1990,7 +1990,9 @@ export function createClaudeSdkBridge(
 		// the turn: every write carries the lease token and changes nothing
 		// once the lease has moved on.
 		const recorder = new TurnRecorder(deps.turnRepo, log, turnId, store.token);
-		recorder.adoptIdentity(parkTurnIdentity(descriptor));
+		recorder.adoptIdentity(
+			parkTurnIdentity(descriptor, entry.park.requestedModel),
+		);
 		let live: LiveQuery;
 		try {
 			try {

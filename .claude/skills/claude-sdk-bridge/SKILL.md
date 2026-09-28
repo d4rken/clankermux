@@ -594,8 +594,8 @@ Without either, lines go only to `$CLANKERMUX_LOG_DIR/app.log`, by default
 - `legs`, `toolRounds`, `innerCalls`, `innerErrors`: the row's counters as
   written before the finish; `live` lines only.
 - On `resumed_park` and `park_close` lines the identity comes from the
-  park's resume descriptor: `model` is the upstream model of the preferred
-  account's candidate, `historyMode` the turn's own decision (null for parks
+  park's resume descriptor and row: `model` is the id the client named,
+  as on `live` lines, `historyMode` the turn's own decision (null for parks
   stored before it was kept), and `systemPromptPolicy` is null. A
   descriptor that cannot be read leaves the identity out.
 

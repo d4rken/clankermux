@@ -805,6 +805,11 @@ describe("a park's identity on its journal line", () => {
 		} as const;
 		expect(parkTurnIdentity(descriptor)).toEqual(identity);
 		expect(parkTurnIdentity(JSON.stringify(descriptor))).toEqual(identity);
+		// The id the client named, as a live turn's line reports it.
+		expect(parkTurnIdentity(descriptor, "alias-opus")).toEqual({
+			...identity,
+			model: "alias-opus",
+		});
 		// Stored before the history decision was kept; an unknown preferred account.
 		expect(
 			parkTurnIdentity({
