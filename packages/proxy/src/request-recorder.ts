@@ -295,10 +295,12 @@ interface SaveRequestData extends GatewayHintMetadata {
 	path: string;
 	accountUsed: string | null;
 	statusCode: number | null;
-	success: boolean;
+	success: boolean | null;
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
+	/** Row model when no usage names one — mirrors `RequestData.model`. */
+	model?: string | null;
 	usage?: unknown;
 	apiKeyId?: string;
 	apiKeyName?: string;

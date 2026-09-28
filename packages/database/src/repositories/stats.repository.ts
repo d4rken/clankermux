@@ -10,6 +10,7 @@ import type {
 } from "@clankermux/types";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
+import { ratedOutcomeSql } from "./request-filters";
 
 /**
  * Distinct active client-session counts split by affinity scope.
@@ -75,7 +76,7 @@ export class StatsRepository {
 				SUM(cost_usd) as "totalCostUsd",
 				AVG(CASE WHEN output_tokens_per_second > 0 AND output_tokens_per_second <= ${MAX_PLAUSIBLE_TOKENS_PER_SECOND} THEN output_tokens_per_second END) as "avgTokensPerSecond"
 			FROM requests
-			WHERE timestamp > ?`,
+			WHERE timestamp > ? AND ${ratedOutcomeSql("requests")}`,
 			[since],
 		);
 
@@ -265,6 +266,7 @@ export class StatsRepository {
 				WHERE r.error_message IS NOT NULL
 				  AND r.error_message != ''
 				  AND r.timestamp > ?
+				  AND ${ratedOutcomeSql("r")}
 			)
 			SELECT
 				ranked.id              AS latest_request_id,
@@ -357,7 +359,7 @@ export class StatsRepository {
 				COUNT(*) as requests
 			FROM requests r
 			LEFT JOIN api_keys k ON k.id = r.api_key_id
-			WHERE r.api_key_id IS NOT NULL
+			WHERE r.api_key_id IS NOT NULL AND ${ratedOutcomeSql("r")}
 			GROUP BY r.api_key_id
 			HAVING COUNT(*) > 0
 			ORDER BY requests DESC`,
@@ -391,7 +393,7 @@ export class StatsRepository {
 				COUNT(*) as total,
 				SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) as successful
 			FROM requests
-			WHERE api_key_id IN (${placeholders})
+			WHERE api_key_id IN (${placeholders}) AND ${ratedOutcomeSql("requests")}
 			GROUP BY api_key_id`,
 			apiKeyIds,
 		);

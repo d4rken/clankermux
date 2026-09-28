@@ -15,6 +15,7 @@ import {
 	buildRequestFilterConditions,
 	hasRequestFilters,
 	type RequestFilters,
+	ratedOutcomeSql,
 } from "./request-filters";
 
 const log = new Logger("RequestRepository");
@@ -47,10 +48,19 @@ export interface RequestData extends GatewayHintMetadata {
 	path: string;
 	accountUsed: string | null;
 	statusCode: number | null;
-	success: boolean;
+	/**
+	 * NULL when the request has no outcome: its client left before any
+	 * response started. See {@link ratedOutcomeSql}.
+	 */
+	success: boolean | null;
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
+	/**
+	 * The model the row names when no usage summary does: the model the last
+	 * attempt was sent, for a request that never produced usage.
+	 */
+	model?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string | null;
@@ -372,7 +382,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.errorMessage,
 				data.responseTime,
 				data.failoverAttempts,
-				usage?.model || null,
+				usage?.model || data.model || null,
 				data.requestedModel || null,
 				// `?? null` for every token count, NEVER `|| null`: a provider that
 				// reports 0 is stating that none of that class was consumed, and a
@@ -887,7 +897,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		failedRequests: number;
 		avgResponseTime: number | null;
 	}> {
-		const whereClause = since ? "WHERE timestamp > ?" : "";
+		const whereClause = `WHERE ${ratedOutcomeSql("requests")}${since ? " AND timestamp > ?" : ""}`;
 		const params = since ? [since] : [];
 
 		const result = await this.get<{
@@ -932,7 +942,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		cacheCreationInputTokens: number;
 		avgTokensPerSecond: number | null;
 	}> {
-		const whereClause = rangeMs ? "WHERE timestamp > ?" : "";
+		const whereClause = `WHERE ${ratedOutcomeSql("requests")}${rangeMs ? " AND timestamp > ?" : ""}`;
 		const params = rangeMs ? [Date.now() - rangeMs] : [];
 
 		const result = await this.get<{
@@ -1004,7 +1014,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			successRate: number;
 		}>
 	> {
-		const whereClause = since ? "WHERE r.timestamp > ?" : "";
+		const whereClause = `WHERE ${ratedOutcomeSql("r")}${since ? " AND r.timestamp > ?" : ""}`;
 		const params = since ? [since] : [];
 
 		const rows = await this.query<{
@@ -1207,7 +1217,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}): Promise<number> {
 		const filter = buildRequestFilterConditions(opts.filters, "r");
 		const row = await this.get<{ c: number }>(
-			`SELECT COUNT(*) AS c FROM requests r WHERE r.timestamp >= ?${filter.conditions
+			`SELECT COUNT(*) AS c FROM requests r WHERE r.timestamp >= ? AND ${ratedOutcomeSql("r")}${filter.conditions
 				.map((condition) => ` AND ${condition}`)
 				.join("")}`,
 			[opts.sinceMs, ...filter.binds],

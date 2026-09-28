@@ -20,7 +20,11 @@ export interface RequestFilters {
 	 * can sit outside whatever slice the list view happens to have loaded.
 	 */
 	id?: string;
-	/** Recorded success/error outcome. Ignored when `codes` is non-empty. */
+	/**
+	 * Recorded success/error outcome. Ignored when `codes` is non-empty.
+	 * A request whose client left before the response started has no outcome
+	 * (`success` NULL), so neither category lists it; `codes=499` does.
+	 */
 	status?: StatusFilter;
 	/** Explicit status codes; when present these win over `status`. */
 	codes?: number[];
@@ -73,7 +77,9 @@ export interface RequestFilters {
 	 *
 	 * Implies `r.success = 0` (see the clause builder) — a failure reason only
 	 * exists on a failed row, and stating it lets the planner use an index
-	 * instead of reading the whole table on a synchronous connection.
+	 * instead of reading the whole table on a synchronous connection. The one
+	 * reason on a row without an outcome, `client_closed_request`, is therefore
+	 * not found here; `codes=499` finds those rows.
 	 */
 	error?: string;
 }
@@ -120,7 +126,8 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		// `r.success = 0` is not an optimization bolted on here — a failure reason
 		// only ever exists on a failed row (`recordSynthetic` nulls it on success,
 		// and every `finishTransport` call that passes one also passes an error
-		// outcome), so it is implied by asking about one at all. Stating it
+		// outcome), so it is implied by asking about one at all. A row without an
+		// outcome is not a failure, so leaving it out is the intended answer. Stating it
 		// explicitly is what makes the query survivable: `error_message` is
 		// unindexed, the requests table runs to hundreds of thousands of rows, and
 		// bun:sqlite's `.all()` is SYNCHRONOUS — an unbounded scan blocks the event

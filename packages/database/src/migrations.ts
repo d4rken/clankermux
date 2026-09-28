@@ -103,6 +103,8 @@ export function ensureSchema(db: Database): void {
 			path TEXT NOT NULL,
 			account_used TEXT,
 			status_code INTEGER,
+			-- NULL = no outcome: the client left before any response started.
+			-- Outcome-rated reads and totals exclude these rows.
 			success BOOLEAN,
 			error_message TEXT,
 			response_time_ms INTEGER,

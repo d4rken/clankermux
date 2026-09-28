@@ -1,5 +1,8 @@
 import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
-import { buildRequestFilterConditions } from "@clankermux/database";
+import {
+	buildRequestFilterConditions,
+	ratedOutcomeSql,
+} from "@clankermux/database";
 import {
 	BadRequest,
 	errorResponse,
@@ -679,11 +682,10 @@ export function createAnalyticsHandler(context: APIContext) {
 		const filterSql = buildRequestFilterConditions(filters, "r");
 		conditions.push(...filterSql.conditions);
 		queryParams.push(...filterSql.binds);
+		// Bind-free, so it can sit last without shifting a positional bind.
+		conditions.push(ratedOutcomeSql("r"));
 
-		// range=all with no filters leaves no conditions; keep the WHERE slot
-		// valid with a constant-true predicate.
-		const whereClause =
-			conditions.length > 0 ? conditions.join(" AND ") : "1=1";
+		const whereClause = conditions.join(" AND ");
 
 		try {
 			const analyticsStartedAt = performance.now();
