@@ -16,6 +16,7 @@ import {
 	hasRequestFilters,
 	type RequestFilters,
 	ratedOutcomeSql,
+	withoutUnratedParentSql,
 } from "./request-filters";
 
 const log = new Logger("RequestRepository");
@@ -1253,9 +1254,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			SELECT rr.candidates_count AS candidates_count, COUNT(*) AS c
 			FROM request_routing rr
 			JOIN requests r ON r.id = rr.request_id
-			WHERE rr.created_at >= ? AND rr.candidates_count IS NOT NULL${filter.conditions
-				.map((condition) => ` AND ${condition}`)
-				.join("")}
+			WHERE rr.created_at >= ? AND rr.candidates_count IS NOT NULL
+				AND ${ratedOutcomeSql("r")}${filter.conditions
+					.map((condition) => ` AND ${condition}`)
+					.join("")}
 			GROUP BY rr.candidates_count
 			ORDER BY rr.candidates_count ASC
 		`
@@ -1263,6 +1265,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			SELECT candidates_count, COUNT(*) AS c
 			FROM request_routing
 			WHERE created_at >= ? AND candidates_count IS NOT NULL
+				AND ${withoutUnratedParentSql("request_routing")}
 			GROUP BY candidates_count
 			ORDER BY candidates_count ASC
 		`;

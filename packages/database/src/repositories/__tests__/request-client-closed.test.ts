@@ -9,7 +9,7 @@ import { CLIENT_CLOSED_REQUEST } from "@clankermux/types";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { ensureSchema } from "../../migrations";
 import { type RequestData, RequestRepository } from "../request.repository";
-import { ratedOutcomeSql } from "../request-filters";
+import { EMPTY_REQUEST_FILTERS, ratedOutcomeSql } from "../request-filters";
 import { StatsRepository } from "../stats.repository";
 
 function requestData(overrides: Partial<RequestData> = {}): RequestData {
@@ -155,5 +155,107 @@ describe("pre-head client abort rows", () => {
 		expect(result.avgResponseTime).toBe(0);
 		expect(await stats.getRecentErrorGroups(0)).toEqual([]);
 		expect(await requests.countRequestsSince({ sinceMs: 0 })).toBe(0);
+	});
+
+	async function route(
+		requestId: string,
+		accountId: string,
+		scope: string,
+		hash: string,
+		candidates: number,
+	): Promise<void> {
+		await requests.saveRouting({
+			requestId,
+			strategy: "session",
+			decision: "affinity_hit",
+			affinityScope: scope,
+			affinityKeyHash: hash,
+			selectedAccountId: accountId,
+			candidatesCount: candidates,
+			createdAt: Date.now(),
+		});
+	}
+
+	it("leaves an abort's routing out of the active-session counts", async () => {
+		await requests.save(requestData({ id: "ok" }));
+		await route("ok", "acct-a", "claude_session", "h-ok", 2);
+		await requests.save(clientClosed("abort"));
+		await route("abort", "acct-b", "codex_thread", "h-abort", 3);
+		// A routing row whose request was pruned still counts, as before.
+		await route("pruned", "acct-c", "client_session", "h-pruned", 1);
+
+		expect(await stats.getActiveSessionCounts(0)).toEqual({
+			claude: 1,
+			codex: 0,
+			client: 1,
+			other: 0,
+			total: 2,
+		});
+		const byAccount = await stats.getActiveSessionCountsByAccount(0);
+		expect(Object.fromEntries(byAccount)).toEqual({
+			"acct-a": 1,
+			"acct-c": 1,
+		});
+	});
+
+	it("an abort-only range has no active sessions", async () => {
+		await requests.save(clientClosed("abort"));
+		await route("abort", "acct-b", "codex_thread", "h-abort", 3);
+		expect((await stats.getActiveSessionCounts(0)).total).toBe(0);
+		expect((await stats.getActiveSessionCountsByAccount(0)).size).toBe(0);
+	});
+
+	it("leaves an abort out of the candidate-count distribution", async () => {
+		await requests.save(requestData({ id: "ok" }));
+		await route("ok", "acct-a", "claude_session", "h-ok", 2);
+		await requests.save(clientClosed("abort"));
+		await route("abort", "acct-a", "codex_thread", "h-abort", 3);
+		await route("pruned", "acct-a", "client_session", "h-pruned", 1);
+
+		// Unfiltered: pruned parents stay, aborts go.
+		expect(
+			await requests.getCandidateCountDistribution({ sinceMs: 0 }),
+		).toEqual([
+			{ candidatesCount: 1, requests: 1 },
+			{ candidatesCount: 2, requests: 1 },
+		]);
+		// Filtered: the join to requests already drops pruned parents.
+		expect(
+			await requests.getCandidateCountDistribution({
+				sinceMs: 0,
+				filters: { ...EMPTY_REQUEST_FILTERS, accounts: ["acct-a"] },
+			}),
+		).toEqual([{ candidatesCount: 2, requests: 1 }]);
+	});
+
+	it("an abort-only range has no candidate counts", async () => {
+		await requests.save(clientClosed("abort"));
+		await route("abort", "acct-a", "codex_thread", "h-abort", 3);
+		expect(
+			await requests.getCandidateCountDistribution({ sinceMs: 0 }),
+		).toEqual([]);
+		expect(
+			await requests.getCandidateCountDistribution({
+				sinceMs: 0,
+				filters: { ...EMPTY_REQUEST_FILTERS, accounts: ["acct-a"] },
+			}),
+		).toEqual([]);
+	});
+
+	it("leaves aborts out of every account's session stats", async () => {
+		const since = Date.now() - 60_000;
+		await requests.save(requestData({ id: "a-ok", accountUsed: "acct-a" }));
+		await requests.save(clientClosed("a-abort", { accountUsed: "acct-a" }));
+		await requests.save(clientClosed("b-abort", { accountUsed: "acct-b" }));
+		await requests.save(requestData({ id: "c-ok", accountUsed: "acct-c" }));
+		await requests.save(clientClosed("c-abort", { accountUsed: "acct-c" }));
+		const sessions = await stats.getSessionStats([
+			{ id: "acct-a", session_start: since },
+			{ id: "acct-b", session_start: since },
+			{ id: "acct-c", session_start: since },
+		]);
+		expect(sessions.get("acct-a")?.requests).toBe(1);
+		expect(sessions.has("acct-b")).toBe(false);
+		expect(sessions.get("acct-c")?.requests).toBe(1);
 	});
 });

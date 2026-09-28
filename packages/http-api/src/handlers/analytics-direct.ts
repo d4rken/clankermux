@@ -801,7 +801,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					MIN(CASE WHEN billing_type = 'plan' THEN timestamp ELSE NULL END) as first_plan_ts,
 					MIN(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN timestamp ELSE NULL END) as first_api_ts
 				FROM requests
-				WHERE timestamp > ?
+				WHERE timestamp > ? AND ${ratedOutcomeSql("requests")}
 			`,
 					[sevenDayStart, sevenDayStart, thirtyDayStart],
 				),

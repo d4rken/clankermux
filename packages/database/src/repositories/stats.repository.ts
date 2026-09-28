@@ -10,7 +10,9 @@ import type {
 } from "@clankermux/types";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
-import { ratedOutcomeSql } from "./request-filters";
+import { ratedOutcomeSql, withoutUnratedParentSql } from "./request-filters";
+
+const WITHOUT_UNRATED_PARENT = withoutUnratedParentSql("request_routing");
 
 /**
  * Distinct active client-session counts split by affinity scope.
@@ -168,7 +170,8 @@ export class StatsRepository {
 				COUNT(DISTINCT CASE WHEN affinity_scope = 'project'       THEN affinity_key_hash END) as other,
 				COUNT(DISTINCT affinity_key_hash) as total
 			FROM request_routing
-			WHERE affinity_key_hash IS NOT NULL AND created_at > ?`,
+			WHERE affinity_key_hash IS NOT NULL AND created_at > ?
+				AND ${WITHOUT_UNRATED_PARENT}`,
 			[sinceMs],
 		);
 
@@ -213,6 +216,7 @@ export class StatsRepository {
 				COUNT(DISTINCT affinity_key_hash) as sessions
 			FROM request_routing
 			WHERE affinity_key_hash IS NOT NULL AND created_at > ?
+				AND ${WITHOUT_UNRATED_PARENT}
 			GROUP BY selected_account_id`,
 			[NO_ACCOUNT_ID, sinceMs],
 		);
@@ -461,7 +465,7 @@ export class StatsRepository {
 				COALESCE(SUM(CASE WHEN billing_type = 'plan' THEN cost_usd ELSE 0 END), 0) as plan_cost_usd,
 				COALESCE(SUM(CASE WHEN billing_type != 'plan' OR billing_type IS NULL THEN cost_usd ELSE 0 END), 0) as api_cost_usd
 			FROM requests
-			WHERE ${clauses}
+			WHERE (${clauses}) AND ${ratedOutcomeSql("requests")}
 			GROUP BY account_used`,
 			params,
 		);

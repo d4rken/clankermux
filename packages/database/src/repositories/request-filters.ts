@@ -60,6 +60,15 @@ export function ratedOutcomeSql(alias: string): string {
 	return `${alias}.success IS NOT NULL`;
 }
 
+/**
+ * {@link ratedOutcomeSql} for a table that references `requests` by
+ * `request_id`: drops rows whose request has no outcome, and keeps rows whose
+ * request was already pruned, as those reads always have.
+ */
+export function withoutUnratedParentSql(table: string): string {
+	return `NOT EXISTS (SELECT 1 FROM requests r WHERE r.id = ${table}.request_id AND NOT (${ratedOutcomeSql("r")}))`;
+}
+
 /** Does this selection narrow anything at all? */
 export function hasRequestFilters(
 	filters: RequestFilters | undefined,

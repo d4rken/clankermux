@@ -126,4 +126,45 @@ describe("analytics leave out requests without an outcome", () => {
 		expect(body.apiKeyPerformance).toEqual([]);
 		expect(body.projectBreakdown).toEqual([]);
 	});
+
+	it("does not let an older abort stretch the burn-rate averages", async () => {
+		const DAY = 24 * HOUR;
+		const insert = (
+			id: string,
+			timestamp: number,
+			billing: "plan" | "api",
+			cost: number,
+			rated: boolean,
+		) =>
+			db.run(
+				`INSERT INTO requests (
+					id, timestamp, method, path, status_code, success, error_message,
+					cost_usd, billing_type
+				) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?)`,
+				[
+					id,
+					timestamp,
+					rated ? 200 : 499,
+					rated ? 1 : null,
+					rated ? null : CLIENT_CLOSED_REQUEST,
+					cost,
+					billing,
+				],
+			);
+		insert("plan-ok", FIXED_NOW - HOUR, "plan", 2, true);
+		insert("api-ok", FIXED_NOW - HOUR, "api", 3, true);
+		insert("plan-abort", FIXED_NOW - 20 * DAY, "plan", 0, false);
+		insert("api-abort", FIXED_NOW - 20 * DAY, "api", 0, false);
+
+		// The averages divide by the age of the data; only rated rows date it.
+		for (const query of ["range=24h", "range=24h&models=absent-model"]) {
+			const body = await fetchAnalytics(query);
+			expect(body.totals).toMatchObject({
+				avgDailyPlanCostUsd: 2,
+				avgWeeklyPlanCostUsd: 14,
+				avgDailyApiCostUsd: 3,
+				avgWeeklyApiCostUsd: 21,
+			});
+		}
+	});
 });
