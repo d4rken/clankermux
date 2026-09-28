@@ -60,6 +60,7 @@ import { PromptStream } from "./prompt-stream";
 import { TurnRecorder } from "./recorder";
 import {
 	LeaseHeldElsewhere,
+	parkTurnIdentity,
 	type ReleasedEntry,
 	ReleasedParkStore,
 	type ResumeDescriptor,
@@ -413,24 +414,34 @@ export function createClaudeSdkBridge(
 		}
 		try {
 			const error = bridgeErrors.bridgeRestarted("while this turn ran");
+			const finish = {
+				finishedAt: now(),
+				status: "failed",
+				httpStatus: error.status,
+				errorType: error.type,
+				errorMessage: error.message,
+			} as const;
 			const closed = await (
 				deps.parkRepo.withBusyRetryBudget?.(timing.recoveryBusyRetryMs) ??
 				deps.parkRepo
 			).closeOpenTurnsWithoutPark(
 				createdAt,
-				{
-					finishedAt: now(),
-					status: "failed",
-					httpStatus: error.status,
-					errorType: error.type,
-					errorMessage: error.message,
-				},
+				finish,
 				parks.token,
 				(owner) => !ownerRunning(owner),
 			);
+			// The rows are closed unread, so one line counts them.
 			if (closed)
-				log.info(
+				log.warn(
 					`SDK bridge: ${closed} turn${closed === 1 ? "" : "s"} whose process is gone closed`,
+					{
+						event: "sdk_bridge_turns_closed",
+						count: closed,
+						status: finish.status,
+						httpStatus: finish.httpStatus,
+						errorType: finish.errorType,
+						errorMessage: finish.errorMessage,
+					},
 				);
 		} catch (error) {
 			log.warn("SDK bridge: could not close turns left open", error);
@@ -565,13 +576,18 @@ export function createClaudeSdkBridge(
 		/** The turn's decision for the header; absent: read from the live query or park. */
 		history?: SdkBridgeTurnHistory | null,
 	): Response {
+		// A running turn's own recorder counts the leg toward its journal line.
 		// A released park's turn is written under the lease, like its resume.
-		const recorder = new TurnRecorder(
-			deps.turnRepo,
-			log,
-			turnId,
-			parks?.get(turnId) ? parks.token : undefined,
-		);
+		const live = lives.get(turnId);
+		const recorder =
+			live && !live.closed
+				? live.recorder
+				: new TurnRecorder(
+						deps.turnRepo,
+						log,
+						turnId,
+						parks?.get(turnId) ? parks.token : undefined,
+					);
 		void recorder.insertLeg(meta.legId, "continue", startedAt);
 		void recorder.finishLeg(meta.legId, {
 			finishedAt: now(),
@@ -1775,12 +1791,13 @@ export function createClaudeSdkBridge(
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.
 			if (meta.model !== live.requestedModel) {
-				const history = live.turnHistory;
-				live.teardown("superseded", bridgeErrors.superseded());
-				return refuse(
+				// Refused first: its leg is queued on the turn before the finish.
+				const refused = refuse(
 					bridgeErrors.modelChanged(live.requestedModel, meta.model),
-					history,
+					live.turnHistory,
 				);
+				live.teardown("superseded", bridgeErrors.superseded());
+				return refused;
 			}
 			counters.continuations++;
 			const leg = newLeg(
@@ -1973,6 +1990,9 @@ export function createClaudeSdkBridge(
 		// the turn: every write carries the lease token and changes nothing
 		// once the lease has moved on.
 		const recorder = new TurnRecorder(deps.turnRepo, log, turnId, store.token);
+		recorder.adoptIdentity(
+			parkTurnIdentity(descriptor, entry.park.requestedModel),
+		);
 		let live: LiveQuery;
 		try {
 			try {

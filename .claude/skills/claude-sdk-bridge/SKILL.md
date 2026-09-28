@@ -558,6 +558,94 @@ still refused, and stale or partial ones keep their own 409.
   (production, 46 days: no signature 400 across 5 orgs). A rebuild would
   gain nothing: `/wire/openai` clients never return signed thinking.
 
+## Monitoring and troubleshooting
+
+Every finished turn logs one line, `SDK bridge turn <id> <status>`, whose
+JSON payload has `"event":"sdk_bridge_turn"`: warn for `failed`,
+`timed_out` and `expired`, info otherwise. It is logged only when the write
+that finished the row landed, in the same queued step, so a finish that
+lost to another path or was fenced out logs nothing. The step is not atomic
+across SQLite and the journal: a crash between the commit and the log loses
+the line, and the row stays authoritative. A finish write that throws logs
+`"event":"sdk_bridge_turn_finish_failed"` at warn instead.
+
+```
+journalctl -u clankermux --since "-1h" -o cat --no-pager | grep '"event":"sdk_bridge_turn"'
+```
+
+The logger writes to the console, and so to the journal, only at
+`LOG_LEVEL=DEBUG` (the `debug.conf` drop-in) or with `CLANKERMUX_DEBUG=1`.
+Without either, lines go only to `$CLANKERMUX_LOG_DIR/app.log`, by default
+`clankermux-logs/app.log` in the unit's private `/tmp`.
+
+- `source`: `live` (the process that inserted the turn), `resumed_park` (a
+  released park's resume) or `park_close` (a released park ended by expiry,
+  supersession or recovery).
+- `historyMode` / `rebuildReason`: `resume` continues the conversation's
+  stored session; `rebuild_*` rebuilt it from the client's history, and the
+  reason says why.
+- `firstCall`: `input`, `cacheRead` and `cacheCreation` of the query's first
+  top-level model call, by message id, filled in from its `message_delta`
+  and its assistant envelope. On a `resume` turn it should read almost the
+  whole conversation from cache. `cacheRead: 0` with a large
+  `cacheCreation` means the resumed prompt missed the cached prefix.
+- `tokens`: Claude Code's own totals for the query, a cross-check. Billing
+  truth is the inner `requests` rows.
+- `legs`, `toolRounds`, `innerCalls`, `innerErrors`: the row's counters as
+  written before the finish; `live` lines only.
+- On `resumed_park` and `park_close` lines the identity comes from the
+  park's resume descriptor and row: `model` is the id the client named,
+  as on `live` lines, `historyMode` the turn's own decision (null for parks
+  stored before it was kept), and `systemPromptPolicy` is null. A
+  descriptor that cannot be read leaves the identity out.
+
+Startup closes turns whose process is gone without listing them: one warn
+line, `"event":"sdk_bridge_turns_closed"`, with `count`.
+
+**Management API** on `127.0.0.1:8090`. Log in with
+`curl -c jar -H 'content-type: application/json' -d '{"password":"…"}' .../api/auth/login`,
+then pass `-b jar`:
+
+- `GET /api/analytics/sdk-bridge-health?range=24h` (`1h`, `6h`, `24h`,
+  `7d`, `30d`, `all`; default `7d`): counts by status, kind, history mode,
+  rebuild reason, harness and account, error groups, timings, recent
+  failures.
+- `GET /api/sdk-bridge-turns/<turn id or leg request id>`: the row, its legs
+  and its inner requests.
+- `GET /api/system/status`: the `sdkBridge` block (see Resources).
+
+**SQL**, read-only only. The path guard prompts on `~/.config`.
+
+```
+DB="file:$HOME/.config/clankermux/clankermux.db?mode=ro"
+
+# Turns that did not complete in the last day
+sqlite3 -header -column "$DB" "SELECT id, datetime(started_at/1000,'unixepoch','localtime') AS started, kind, status, http_status, error_type, substr(error_message,1,100) AS error FROM sdk_bridge_turns WHERE started_at >= strftime('%s','now','-1 day')*1000 AND status NOT IN ('completed','running','released') ORDER BY started_at DESC;"
+
+# History mode and rebuild reason per day
+sqlite3 -header -column "$DB" "SELECT date(started_at/1000,'unixepoch','localtime') AS day, kind, history_mode, coalesce(rebuild_reason,'-') AS reason, count(*) AS turns FROM sdk_bridge_turns WHERE started_at >= strftime('%s','now','-7 days')*1000 GROUP BY 1,2,3,4 ORDER BY 1 DESC, 5 DESC;"
+
+# Each resumed turn's first inner call: MISS read nothing, LOW read under 80% of a >10k prompt
+sqlite3 -header -column "$DB" "WITH first AS (SELECT r.sdk_bridge_turn_id AS turn_id, r.status_code, r.input_tokens AS input, r.cache_read_input_tokens AS cache_read, r.cache_creation_input_tokens AS cache_creation, row_number() OVER (PARTITION BY r.sdk_bridge_turn_id ORDER BY r.timestamp, r.id) AS n FROM requests r JOIN sdk_bridge_turns t ON t.id = r.sdk_bridge_turn_id WHERE t.history_mode = 'resume' AND t.started_at >= strftime('%s','now','-7 days')*1000) SELECT f.turn_id, datetime(t.started_at/1000,'unixepoch','localtime') AS started, t.kind, t.status, f.status_code, f.input, f.cache_read, f.cache_creation, round(100.0*f.cache_read/nullif(f.input+f.cache_read+f.cache_creation,0),1) AS read_pct, CASE WHEN f.cache_read = 0 THEN 'MISS' WHEN f.input+f.cache_read+f.cache_creation > 10000 AND f.cache_read < 0.8*(f.input+f.cache_read+f.cache_creation) THEN 'LOW' ELSE '' END AS flag FROM first f JOIN sdk_bridge_turns t ON t.id = f.turn_id WHERE f.n = 1 ORDER BY t.started_at DESC;"
+
+# Thinking-binding refusals (the upstream text is kept in requests.error_message, capped at 300 characters)
+sqlite3 -header -column "$DB" "SELECT r.sdk_bridge_turn_id, datetime(r.timestamp/1000,'unixepoch','localtime') AS at, r.account_used, t.history_mode, t.rebuild_reason, t.status AS turn_status FROM requests r JOIN sdk_bridge_turns t ON t.id = r.sdk_bridge_turn_id WHERE r.status_code = 400 AND r.error_message LIKE '%bound to a different conversation%' ORDER BY r.timestamp DESC LIMIT 20;"
+
+# Released parks, and who holds the park lease
+sqlite3 -header -column "$DB" "SELECT p.turn_id, p.state, t.status AS turn_status, datetime(p.created_at/1000,'unixepoch','localtime') AS parked, datetime(p.expires_at/1000,'unixepoch','localtime') AS expires, p.file_bytes, json_array_length(p.awaited_tool_use_ids) AS awaited FROM sdk_bridge_released_parks p LEFT JOIN sdk_bridge_turns t ON t.id = p.turn_id ORDER BY p.created_at DESC;"
+sqlite3 -header -column "$DB" "SELECT dir, pid, datetime(acquired_at/1000,'unixepoch','localtime') AS since FROM sdk_bridge_park_lease;"
+```
+
+**What normal looks like** (all 28 completed resumed turns stored on
+2026-09-28, from 2026-09-24 on). Over each turn's inner calls, 96.5% of
+prompt tokens were cache reads on average, 83.3% at the lowest. First calls
+alone averaged 88%. Small conversations (4–6k tokens) read 68–77%, because
+the new message is a large share of them. Two first calls read nothing at
+15–19k tokens, each smaller than its previous turn's last call (3cd94fee on
+09-24, a3e4dc27 on 09-28): that is the shape of a resume that missed its
+cache, and neither is explained yet. No inner call had drawn a
+thinking-binding refusal.
+
 ## Resources
 
 Measured 220–270 MB RSS per Claude Code child (about 220 MB each with four

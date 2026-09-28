@@ -207,6 +207,73 @@ describe("SdkBridgeTurnRepository", () => {
 		});
 	});
 
+	it("finishTurn reports whether it applied, and never overwrites a finished turn", async () => {
+		await insertTurn();
+		expect(
+			await repo.finishTurn("turn-1", {
+				finishedAt: 5_000,
+				status: "completed",
+				httpStatus: 200,
+				durationMs: 4_000,
+			}),
+		).toBe(true);
+		// A second finish changes nothing: the first terminal facts stand.
+		expect(
+			await repo.finishTurn("turn-1", {
+				finishedAt: 9_000,
+				status: "failed",
+				httpStatus: 502,
+				errorType: "api_error",
+				durationMs: 8_000,
+			}),
+		).toBe(false);
+		expect((await repo.getTurnWithLegs("turn-1"))?.turn).toMatchObject({
+			finishedAt: 5_000,
+			status: "completed",
+			httpStatus: 200,
+			errorType: null,
+			durationMs: 4_000,
+		});
+		expect(
+			await repo.finishTurn("missing", { finishedAt: 1, status: "failed" }),
+		).toBe(false);
+	});
+
+	it("finishTurn under a fence that holds no lease applies nothing", async () => {
+		await insertTurn();
+		expect(
+			await repo.finishTurn(
+				"turn-1",
+				{ finishedAt: 5_000, status: "failed" },
+				"token-not-held",
+			),
+		).toBe(false);
+		const turn = (await repo.getTurnWithLegs("turn-1"))?.turn;
+		expect(turn?.finishedAt).toBeNull();
+		expect(turn?.status).toBe("running");
+	});
+
+	it("insertLeg reports whether it inserted; a fenced-out leg is not counted", async () => {
+		await insertTurn();
+		expect(
+			await repo.insertLeg({
+				id: "leg-1",
+				turnId: "turn-1",
+				kind: "start",
+				startedAt: 1_000,
+			}),
+		).toBe(true);
+		expect(
+			await repo.insertLeg(
+				{ id: "leg-2", turnId: "turn-1", kind: "continue", startedAt: 2_000 },
+				"token-not-held",
+			),
+		).toBe(false);
+		const detail = await repo.getTurnWithLegs("turn-1");
+		expect(detail?.turn.legCount).toBe(1);
+		expect(detail?.legs.map((l) => l.id)).toEqual(["leg-1"]);
+	});
+
 	it("finishTurn keeps a session id learned earlier when the finish carries none", async () => {
 		await repo.insertTurn({
 			id: "turn-1",

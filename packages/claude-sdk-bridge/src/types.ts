@@ -8,6 +8,7 @@ import type {
 	SdkBridgeInnerContext,
 	SdkBridgeLegFinish,
 	SdkBridgeLegInsert,
+	SdkBridgeParkCloseOutcome,
 	SdkBridgeParkLease,
 	SdkBridgeRebuildReason,
 	SdkBridgeReleasedPark,
@@ -41,17 +42,19 @@ export type QueryFn = (params: {
  */
 export interface SdkBridgeTurnRepo {
 	insertTurn(turn: SdkBridgeTurnInsert): Promise<void>;
+	/** True when this write finished the turn: false when it was already finished, missing or fenced out. */
 	finishTurn(
 		id: string,
 		finish: SdkBridgeTurnFinish,
 		fence?: string,
-	): Promise<void>;
+	): Promise<boolean>;
 	bumpTurnCounters(
 		id: string,
 		delta: SdkBridgeTurnCounterDelta,
 		fence?: string,
 	): Promise<void>;
-	insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<void>;
+	/** False, inserting nothing, when fenced out. */
+	insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<boolean>;
 	finishLeg(
 		id: string,
 		finish: SdkBridgeLegFinish,
@@ -107,7 +110,7 @@ export interface SdkBridgeParkRepo {
 		turnId: string,
 		finish: SdkBridgeTurnFinish,
 		token: string,
-	): Promise<boolean>;
+	): Promise<SdkBridgeParkCloseOutcome>;
 	closeOpenTurnsWithoutPark(
 		startedBefore: number,
 		finish: SdkBridgeTurnFinish,

@@ -1,4 +1,5 @@
 import type {
+	SdkBridgeParkCloseOutcome,
 	SdkBridgeParkLease,
 	SdkBridgeReleasedPark,
 	SdkBridgeReleasedParkInsert,
@@ -334,27 +335,27 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 	/**
 	 * End the turn and forget its park together: expiry, supersession,
 	 * recovery. A turn that already finished keeps its outcome; its park is
-	 * deleted all the same. False, writing nothing, without the lease.
+	 * deleted all the same.
 	 */
 	async closeTurn(
 		turnId: string,
 		finish: SdkBridgeTurnFinish,
 		token: string,
-	): Promise<boolean> {
+	): Promise<SdkBridgeParkCloseOutcome> {
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
-			if (!leaseHeld(db, token)) return false;
+			if (!leaseHeld(db, token)) return "refused";
 			db.run(`DELETE FROM sdk_bridge_released_parks WHERE turn_id = ?`, [
 				turnId,
 			]);
-			db.run(
+			const { changes } = db.run(
 				`UPDATE sdk_bridge_turns SET
 					finished_at = ?, status = ?, http_status = ?, error_type = ?,
 					error_message = ?, duration_ms = COALESCE(?, duration_ms)
 				WHERE id = ? AND finished_at IS NULL`,
 				[...finishParams(finish), finish.durationMs ?? null, turnId],
 			);
-			return true;
+			return changes === 1 ? "closed" : "kept";
 		});
 	}
 

@@ -284,15 +284,17 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	}
 
 	/**
-	 * Write the turn's terminal facts. `ccSessionId` COALESCEs so a session id
-	 * learned at admission (resume) survives a finish that does not repeat it.
+	 * Write the turn's terminal facts, once: a finished turn keeps the ones it
+	 * has. `ccSessionId` COALESCEs so a session id learned at admission
+	 * (resume) survives a finish that does not repeat it. True when this
+	 * write finished the turn.
 	 */
 	async finishTurn(
 		id: string,
 		finish: SdkBridgeTurnFinish,
 		fence?: string,
-	): Promise<void> {
-		await this.run(
+	): Promise<boolean> {
+		const changed = await this.runWithChanges(
 			`UPDATE sdk_bridge_turns SET
 				finished_at = ?,
 				status = ?,
@@ -309,7 +311,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				sdk_output_tokens = ?,
 				sdk_cache_read_input_tokens = ?,
 				sdk_cache_creation_input_tokens = ?
-			WHERE id = ? AND ${FENCED}`,
+			WHERE id = ? AND finished_at IS NULL AND ${FENCED}`,
 			[
 				finish.finishedAt,
 				finish.status,
@@ -331,6 +333,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				...fenceParams(fence),
 			],
 		);
+		return changed === 1;
 	}
 
 	/** One UPDATE, so concurrent bumps from inner calls never lose an increment. */
@@ -357,10 +360,11 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 
 	/**
 	 * Insert a leg and count it on its turn in one transaction. Throws when the
-	 * turn does not exist (foreign key).
+	 * turn does not exist (foreign key); false, inserting nothing, when fenced
+	 * out.
 	 */
-	async insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<void> {
-		await this.adapter.runTransaction(() => {
+	async insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<boolean> {
+		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
 			if (fence !== undefined) {
 				const held = db
@@ -368,7 +372,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 					.get(...(fenceParams(fence) as [string, string])) as {
 					held: number;
 				} | null;
-				if (held?.held !== 1) return;
+				if (held?.held !== 1) return false;
 			}
 			db.run(
 				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at)
@@ -379,6 +383,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				`UPDATE sdk_bridge_turns SET leg_count = leg_count + 1 WHERE id = ?`,
 				[leg.turnId],
 			);
+			return true;
 		});
 	}
 

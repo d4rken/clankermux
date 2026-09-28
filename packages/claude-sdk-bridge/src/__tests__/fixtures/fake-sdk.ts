@@ -502,9 +502,11 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			});
 		},
 		async finishTurn(id: string, finish: SdkBridgeTurnFinish, fence?: string) {
-			if (fenced(fence)) return;
+			if (fenced(fence)) return false;
 			const turn = turns.get(id);
-			if (turn) Object.assign(turn, finish);
+			if (!turn || turn.finishedAt != null) return false;
+			Object.assign(turn, finish);
+			return true;
 		},
 		async bumpTurnCounters(
 			id: string,
@@ -524,13 +526,14 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 				legInsertHold.next = null;
 				await wait;
 			}
-			if (fenced(fence)) return;
+			if (fenced(fence)) return false;
 			const turn = turns.get(leg.turnId);
 			if (!turn) throw new Error(`FOREIGN KEY: no turn ${leg.turnId}`);
 			if (legs.has(leg.id)) throw new Error(`UNIQUE: leg ${leg.id}`);
 			const row = { ...leg } as Record<string, unknown>;
 			legs.set(leg.id, row);
 			turn.legs.push(row);
+			return true;
 		},
 		async finishLeg(id: string, finish: SdkBridgeLegFinish, fence?: string) {
 			if (fenced(fence)) return;
@@ -579,7 +582,7 @@ export function memoryParkRepo(
 	};
 	const leased = (token: string) => lease?.token === token;
 	leaseChecks.set(turns, leased);
-	const turnOpen = (id: string) => !turns.get(id)?.finishedAt;
+	const turnOpen = (id: string) => turns.get(id)?.finishedAt == null;
 	const setTurn = (id: string, fields: Record<string, unknown>) => {
 		const turn = turns.get(id);
 		if (turn) Object.assign(turn, fields);
@@ -685,10 +688,11 @@ export function memoryParkRepo(
 		},
 		async closeTurn(turnId, finish, token) {
 			await check("closeTurn");
-			if (!leased(token)) return false;
+			if (!leased(token)) return "refused";
 			parks.delete(turnId);
-			if (turnOpen(turnId)) setTurn(turnId, { ...finish });
-			return true;
+			if (!turns.has(turnId) || !turnOpen(turnId)) return "kept";
+			setTurn(turnId, { ...finish });
+			return "closed";
 		},
 		async closeOpenTurnsWithoutPark(before, finish, token, ownerDead) {
 			await check("closeOpenTurnsWithoutPark");
@@ -727,6 +731,42 @@ export const silentLog: BridgeLog = {
 	warn() {},
 	error() {},
 };
+
+export interface LogEntry {
+	level: keyof BridgeLog;
+	message: string;
+	data: unknown;
+}
+
+/** A log that keeps what it is given; `turns()` is the `sdk_bridge_turn` lines. */
+export function capturingLog(): BridgeLog & {
+	entries: LogEntry[];
+	turns: (
+		turnId?: string,
+	) => Array<LogEntry & { data: Record<string, unknown> }>;
+} {
+	const entries: LogEntry[] = [];
+	const keep =
+		(level: keyof BridgeLog) =>
+		(message: string, data?: unknown): void => {
+			entries.push({ level, message, data });
+		};
+	return {
+		entries,
+		debug: keep("debug"),
+		info: keep("info"),
+		warn: keep("warn"),
+		error: keep("error"),
+		turns: (turnId) =>
+			entries.filter(
+				(e): e is LogEntry & { data: Record<string, unknown> } =>
+					(e.data as { event?: unknown } | undefined)?.event ===
+						"sdk_bridge_turn" &&
+					(turnId === undefined ||
+						(e.data as { turnId?: unknown }).turnId === turnId),
+			),
+	};
+}
 
 export const MODEL = "claude-sonnet-5";
 

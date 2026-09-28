@@ -23,8 +23,10 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import { parkTurnIdentity } from "../released-parks";
 import {
 	assistantMessage,
+	capturingLog,
 	type FakeQuery,
 	foldReply,
 	type Harness,
@@ -71,6 +73,7 @@ async function releaseHarness(
 		repo?: ReturnType<typeof memoryTurnRepo>;
 		parkRepo?: ReturnType<typeof memoryParkRepo>;
 		keep?: boolean;
+		log?: ReturnType<typeof capturingLog>;
 	} = {},
 ): Promise<ReleaseHarness> {
 	const repo = opts.repo ?? memoryTurnRepo();
@@ -79,6 +82,7 @@ async function releaseHarness(
 		{
 			parkRepo,
 			parkNamespace: parkRepo.namespace,
+			...(opts.log ? { log: opts.log } : {}),
 			limits: () => ({
 				parkReleaseMs: 60,
 				releasedParkTtlMs: 60_000,
@@ -448,6 +452,51 @@ describe("resuming a released park", () => {
 		).toBeNull();
 	});
 
+	it("logs the resumed turn once, as resumed from a release, with its first call's cache use", async () => {
+		const log = capturingLog();
+		const h = await releaseHarness({ log });
+		const p = await parkTurn(h);
+		await released(h, p);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		q2.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "done" }], {
+				usage: {
+					input_tokens: 2,
+					cache_read_input_tokens: 30_000,
+					cache_creation_input_tokens: 120,
+					output_tokens: 1,
+				},
+			}),
+			resultMessage(),
+		);
+		expect((await reply(response)).status).toBe(200);
+		await waitFor(() => log.turns(p.turnId).length === 1);
+		await Bun.sleep(20);
+		// Parking and releasing did not finish the turn; only the resume did.
+		const lines = log.turns(p.turnId);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]?.level).toBe("info");
+		expect(lines[0]?.data).toMatchObject({
+			source: "resumed_park",
+			kind: "turn",
+			status: "completed",
+			httpStatus: 200,
+			model: MODEL,
+			accountId: "acct-a",
+			clientHarness: "opencode",
+			// The turn's own decision, from its descriptor.
+			historyMode: "fresh",
+			rebuildReason: null,
+			firstCall: { input: 2, cacheRead: 30_000, cacheCreation: 120 },
+		});
+		// This process saw only the resume's share of the counters.
+		expect(lines[0]?.data).not.toHaveProperty("legs");
+		expect(lines[0]?.data).not.toHaveProperty("toolRounds");
+	});
+
 	it("holds results that arrive during the release until it is stored, then resumes", async () => {
 		const h = await releaseHarness({ process: "ignore-term" });
 		const p = await parkTurn(h);
@@ -617,13 +666,34 @@ describe("released parks and their conversation", () => {
 
 describe("expiry", () => {
 	it("ends a released park whose results never came, turn expired and file gone", async () => {
+		const log = capturingLog();
 		const h = await releaseHarness({
 			limits: { releasedParkTtlMs: 200 },
 			timing: { maintenanceIntervalMs: 50 },
+			log,
 		});
 		const p = await parkTurn(h);
 		await released(h, p);
 		await waitFor(() => h.repo.turns.get(p.turnId)?.finishedAt != null, 3_000);
+		await waitFor(() => log.turns(p.turnId).length === 1);
+		expect(log.turns(p.turnId)[0]).toMatchObject({
+			level: "warn",
+			message: `SDK bridge turn ${p.turnId} expired`,
+			data: {
+				event: "sdk_bridge_turn",
+				turnId: p.turnId,
+				status: "expired",
+				httpStatus: 504,
+				errorType: "timeout_error",
+				source: "park_close",
+				model: MODEL,
+				accountId: "acct-a",
+				clientHarness: "opencode",
+				historyMode: "fresh",
+			},
+		});
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("legs");
+		expect(log.turns(p.turnId)[0]?.data.durationMs).toBeNumber();
 		expect(h.repo.turns.get(p.turnId)).toMatchObject({
 			status: "expired",
 			httpStatus: 504,
@@ -649,14 +719,123 @@ describe("expiry found at recovery", () => {
 		await a.bridge.dispose();
 		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, { expiresAt: 1 });
 
-		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		const log = capturingLog();
+		const b = await releaseHarness({ workRoot, repo, parkRepo, log });
 
 		expect(b.bridge.status().releasedParks).toBe(0);
+		expect(log.turns(p.turnId)).toEqual([
+			expect.objectContaining({
+				level: "warn",
+				data: expect.objectContaining({
+					status: "expired",
+					httpStatus: 504,
+					source: "park_close",
+					model: MODEL,
+					accountId: "acct-a",
+				}),
+			}),
+		]);
 		expect(repo.turns.get(p.turnId)).toMatchObject({
 			status: "expired",
 			httpStatus: 504,
 			errorType: "timeout_error",
 		});
+	});
+});
+
+describe("a park's identity on its journal line", () => {
+	it("still logs a close whose descriptor cannot be read, without identity", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, {
+			expiresAt: 1,
+			descriptor: "{not json",
+		});
+
+		const log = capturingLog();
+		await releaseHarness({ workRoot, repo, parkRepo, log });
+
+		expect(log.turns(p.turnId).map((l) => l.data)).toEqual([
+			expect.objectContaining({ source: "park_close", status: "expired" }),
+		]);
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("model");
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("kind");
+	});
+
+	it("the fake park repository closes a missing turn as kept, like the real one", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const lease = { dir: "d", pid: 1, startTime: null, token: "T", at: 1 };
+		expect(await parkRepo.acquireLease(lease, () => true)).toBe(true);
+		const finish = { finishedAt: 5, status: "expired" } as const;
+		expect(await parkRepo.closeTurn("missing", finish, "T")).toBe("kept");
+		expect(repo.turns.has("missing")).toBe(false);
+		expect(await parkRepo.closeTurn("missing", finish, "other")).toBe(
+			"refused",
+		);
+	});
+
+	it("reads the turn from a descriptor, and nothing from one of the wrong shape", () => {
+		const plan = makePlan({
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: "m-b" },
+				{ accountId: "acct-a", provider: "anthropic", upstreamModel: "m-a" },
+			],
+			preferredAccountId: "acct-a",
+		});
+		const descriptor = {
+			v: 1,
+			plan,
+			clientHarness: "pi",
+			history: { mode: "rebuild_transcript", reason: "edit" },
+		};
+		const identity = {
+			kind: "turn",
+			model: "m-a",
+			accountId: "acct-a",
+			clientHarness: "pi",
+			historyMode: "rebuild_transcript",
+			rebuildReason: "edit",
+			systemPromptPolicy: null,
+		} as const;
+		expect(parkTurnIdentity(descriptor)).toEqual(identity);
+		expect(parkTurnIdentity(JSON.stringify(descriptor))).toEqual(identity);
+		// The id the client named, as a live turn's line reports it.
+		expect(parkTurnIdentity(descriptor, "alias-opus")).toEqual({
+			...identity,
+			model: "alias-opus",
+		});
+		// Stored before the history decision was kept; an unknown preferred account.
+		expect(
+			parkTurnIdentity({
+				plan: { ...plan, preferredAccountId: "acct-z" },
+				clientHarness: 7,
+			}),
+		).toEqual({
+			...identity,
+			model: "m-b",
+			accountId: "acct-z",
+			clientHarness: null,
+			historyMode: null,
+			rebuildReason: null,
+		});
+		for (const bad of [
+			"{not json",
+			"null",
+			"[]",
+			"{}",
+			null,
+			{},
+			{ plan: null },
+			{ plan: {} },
+			{ plan: { candidates: "m-a" } },
+		])
+			expect(parkTurnIdentity(bad)).toBeNull();
 	});
 });
 
@@ -1639,8 +1818,26 @@ describe("the lease as the only authority", () => {
 		} as never);
 		await holder.bridge.dispose();
 
-		const next = await releaseHarness({ repo, parkRepo });
+		const log = capturingLog();
+		const next = await releaseHarness({ repo, parkRepo, log });
 		expect(next.bridge.status().releaseBlocked).toBeNull();
+		// Closed without enumerating them: one line with the count.
+		expect(
+			log.entries.filter(
+				(e) =>
+					(e.data as { event?: string } | undefined)?.event ===
+					"sdk_bridge_turns_closed",
+			),
+		).toEqual([
+			expect.objectContaining({
+				level: "warn",
+				data: expect.objectContaining({
+					status: "failed",
+					count: 1,
+					httpStatus: 502,
+				}),
+			}),
+		]);
 		expect(repo.turns.get(liveId)?.status).toBe("running");
 		expect(repo.turns.get("dead-turn")?.status).toBe("failed");
 		q.emit(
