@@ -726,19 +726,19 @@ const TRANSIENT_SERVER_ERROR_STATUSES: ReadonlySet<number> = new Set([
 ]);
 
 /**
- * Checks if a response error is due to invalid thinking block signatures or thinking-related errors
- * @param response - The response to check
- * @returns True if the error is about invalid thinking blocks
+ * Whether a response error is about thinking blocks, and whether it is the
+ * API refusing signed thinking bound to a different conversation (history
+ * that changed before the block) or another thinking error.
  */
-async function isInvalidThinkingSignatureError(
+async function thinkingSignatureError(
 	response: Response,
-): Promise<boolean> {
-	if (response.status !== 400) return false;
+): Promise<"binding" | "other" | null> {
+	if (response.status !== 400) return null;
 
 	try {
 		const contentType = response.headers.get("content-type");
 
-		if (!contentType?.includes("application/json")) return false;
+		if (!contentType?.includes("application/json")) return null;
 
 		// Clone only AFTER the content-type guard: a clone() tees the body, so
 		// cloning before an early return orphans an unconsumed tee branch (leak).
@@ -751,7 +751,9 @@ async function isInvalidThinkingSignatureError(
 			const message = json.error.message;
 			// Check for invalid signature error
 			if (message.includes("Invalid `signature` in `thinking` block")) {
-				return true;
+				return message.includes("bound to a different conversation")
+					? "binding"
+					: "other";
 			}
 			// Check for final message must start with thinking block error
 			if (
@@ -759,14 +761,14 @@ async function isInvalidThinkingSignatureError(
 					"final `assistant` message must start with a thinking block",
 				)
 			) {
-				return true;
+				return "other";
 			}
 		}
 	} catch {
 		// Ignore parse errors
 	}
 
-	return false;
+	return null;
 }
 
 /**
@@ -1830,17 +1832,22 @@ export async function proxyWithAccount(
 		liveUpstream = rawResponse;
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error.
-		// A bridged Claude Code call gets the 400 itself: Claude Code drops the
-		// refused thinking from its session and asks again, where a retry here
-		// would leave it to be refused on every later call ("recovers a released
-		// park whose thinking was signed before the cut, with one refused call"
-		// in claude-sdk-bridge's real-claude.integration.test.ts).
+		// A bridged Claude Code call refused for thinking bound to a different
+		// conversation gets the 400 itself: Claude Code drops that thinking from
+		// its session and asks again, where a retry here would leave it to be
+		// refused on every later call ("recovers a released park whose thinking
+		// was signed before the cut, with one refused call" in claude-sdk-bridge's
+		// real-claude.integration.test.ts).
 		const isClaudeProvider =
 			provider.name === "anthropic" || account.provider === "claude-oauth";
+		const thinkingError = isClaudeProvider
+			? await thinkingSignatureError(rawResponse)
+			: null;
 		if (
-			isClaudeProvider &&
-			!getSdkBridgeInnerMetaContext(requestMeta) &&
-			(await isInvalidThinkingSignatureError(rawResponse))
+			thinkingError &&
+			!(
+				thinkingError === "binding" && getSdkBridgeInnerMetaContext(requestMeta)
+			)
 		) {
 			log.info(
 				`Detected invalid thinking block signature error for account ${account.name}, retrying with thinking blocks filtered`,

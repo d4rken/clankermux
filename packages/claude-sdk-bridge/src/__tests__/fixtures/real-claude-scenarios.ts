@@ -46,7 +46,7 @@ import {
 	READ_TOOL,
 	silentLog,
 } from "./fake-sdk";
-import { startMockUpstream } from "./mock-upstream";
+import { startMockUpstream, thinkingBindingRefusal } from "./mock-upstream";
 import { loadPiPromptFixture } from "./pi-prompt-fixtures";
 
 type Block = { type: string; [key: string]: unknown };
@@ -2009,14 +2009,7 @@ await scenario("thinkingCutover", async () => {
 					marker: signature,
 					fail: {
 						status: 400,
-						body: {
-							type: "error",
-							error: {
-								type: "invalid_request_error",
-								message:
-									"messages.2.content.0: Invalid `signature` in `thinking` block: it is bound to a different conversation",
-							},
-						},
+						body: thinkingBindingRefusal("messages.2.content.0"),
 					},
 				});
 			const use = (parked.content ?? []).find((b) => b.type === "tool_use");

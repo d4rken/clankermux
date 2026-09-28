@@ -22,6 +22,7 @@ import { clearProviderOverloadCooldown } from "@clankermux/proxy";
 import {
 	type MockRequest,
 	startMockUpstream,
+	thinkingBindingRefusal,
 } from "../../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/mock-upstream";
 import { type Gateway, startGateway } from "./sdk-bridge-gateway";
 
@@ -848,14 +849,7 @@ await withGateway("thinkingCutover", async (gw, accounts) => {
 			marker: signature,
 			fail: {
 				status: 400,
-				body: {
-					type: "error",
-					error: {
-						type: "invalid_request_error",
-						message:
-							"messages.2.content.0: Invalid `signature` in `thinking` block: it is bound to a different conversation",
-					},
-				},
+				body: thinkingBindingRefusal("messages.2.content.0"),
 			},
 		});
 	const cut = mock.requests.length;

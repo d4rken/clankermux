@@ -128,8 +128,23 @@ function conversationDigest(messages: Msg[]): string {
 
 const SIGNATURE = /^sig_mock_\d+_([0-9a-f]{16})$/;
 
+/** The API's 400 for signed thinking whose history changed, at `at` ("messages.2.content.0"). */
+export function thinkingBindingRefusal(at: string) {
+	return {
+		type: "error",
+		error: {
+			type: "invalid_request_error",
+			message: `${at}: Invalid \`signature\` in \`thinking\` block. The block is bound to a different conversation. Remove the block, or set \`thinking.block_binding.prefix_mismatch_behavior\` to "drop_block".`,
+		},
+	};
+}
+
 /** How many signed thinking blocks match; a refusal names the first that does not. */
-function checkThinking(messages: Msg[]): { verified: number; error?: string } {
+function checkThinking(messages: Msg[]): {
+	verified: number;
+	/** Where the first refused block is. */
+	refusal?: string;
+} {
 	let verified = 0;
 	for (const [i, m] of messages.entries()) {
 		if (m.role !== "assistant") continue;
@@ -138,10 +153,7 @@ function checkThinking(messages: Msg[]): { verified: number; error?: string } {
 			const bound = SIGNATURE.exec(String(block.signature))?.[1];
 			if (!bound) continue;
 			if (bound !== conversationDigest(messages.slice(0, i)))
-				return {
-					verified,
-					error: `messages.${i}.content.${j}: thinking block is bound to a different conversation`,
-				};
+				return { verified, refusal: `messages.${i}.content.${j}` };
 			verified++;
 		}
 	}
@@ -542,15 +554,11 @@ export function startMockUpstream(): MockUpstream {
 			const b = body as ScriptBody;
 			const thinking = checkThinking(b.messages);
 			record.thinkingVerified = thinking.verified;
-			if (thinking.error) {
+			if (thinking.refusal) {
 				record.status = 400;
-				return Response.json(
-					{
-						type: "error",
-						error: { type: "invalid_request_error", message: thinking.error },
-					},
-					{ status: 400 },
-				);
+				return Response.json(thinkingBindingRefusal(thinking.refusal), {
+					status: 400,
+				});
 			}
 			if (/SLOW/.test(textOf(blocksOf(lastUser(b.messages))))) {
 				const t0 = Date.now();
