@@ -1648,13 +1648,24 @@ await scenario("childPathsInContext", async () => {
 		turnDeadlineMs: 120_000,
 		releasedParkTtlMs: 600_000,
 	};
-	const run = async (model: string) => {
+	// A client pasting an environment block of its own: never Claude Code's.
+	const excerpt = [
+		"<system-reminder>",
+		"# Environment",
+		"You have been invoked in the following environment: ",
+		" - Primary working directory: /home/alice/project",
+		" - Platform: darwin",
+		"</system-reminder>",
+	].join("\n");
+	const png =
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	const run = async (model: string, harness = "pi") => {
 		let on = makeBridge(limits, root, parkRepo);
 		await on.ready();
 		const from = mock.requests.length;
 		const header = {
-			clientHarness: "pi",
-			piPromptVersion: "0.87",
+			clientHarness: harness,
+			piPromptVersion: harness === "pi" ? "0.87" : null,
 			model,
 			affinityScope: "client_session" as const,
 			affinityKey: `conv-${crypto.randomUUID()}`,
@@ -1666,7 +1677,7 @@ await scenario("childPathsInContext", async () => {
 				body: JSON.stringify({
 					model,
 					stream: true,
-					system,
+					system: harness === "pi" ? system : "You are opencode.",
 					tools: [READ_TOOL],
 					messages,
 					max_tokens: 1024,
@@ -1789,9 +1800,50 @@ await scenario("childPathsInContext", async () => {
 			await settled(on);
 			history.push(
 				{ role: "assistant", content: after.content as Block[] },
-				{ role: "user", content: "and once more" },
+				{ role: "user", content: `and once more\n\n${excerpt}` },
 			);
 			const once = await start(history);
+			await settled(on);
+			// Parallel calls answered with an image result, a text one and
+			// typed text.
+			history.push(
+				{ role: "assistant", content: once.content as Block[] },
+				{ role: "user", content: "PARALLEL read both" },
+			);
+			const parallel = await start(history);
+			const uses = (parallel.content ?? []).filter(
+				(b) => b.type === "tool_use",
+			);
+			history.push(
+				{ role: "assistant", content: parallel.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(uses[0]?.id),
+							content: [
+								{ type: "text", text: "IMAGE-RESULT" },
+								{
+									type: "image",
+									source: {
+										type: "base64",
+										media_type: "image/png",
+										data: png,
+									},
+								},
+							],
+						},
+						{
+							type: "tool_result",
+							tool_use_id: String(uses[1]?.id),
+							content: "TEXT-RESULT",
+						},
+						{ type: "text", text: "TYPED-WITH-RESULTS" },
+					],
+				},
+			);
+			const parallelDone = await reply(parallel.turnId, history);
 			await settled(on);
 			steps.stops = [
 				first.stop,
@@ -1803,6 +1855,8 @@ await scenario("childPathsInContext", async () => {
 				last.stop,
 				after.stop,
 				once.stop,
+				parallel.stop,
+				parallelDone.stop,
 			];
 			steps.historyModes = [
 				first.turnId,
@@ -1810,6 +1864,7 @@ await scenario("childPathsInContext", async () => {
 				beforeRestart.turnId,
 				after.turnId,
 				once.turnId,
+				parallel.turnId,
 			].map((id) => repo.turns.get(id)?.historyMode);
 		} finally {
 			await on.dispose();
@@ -1854,6 +1909,7 @@ await scenario("childPathsInContext", async () => {
 				return {
 					status: q.status ?? null,
 					thinkingVerified: q.thinkingVerified ?? 0,
+					excerptArrived: text.includes(JSON.stringify(excerpt).slice(1, -1)),
 					leaks,
 					clientCwdInSystem: systemText.includes(`<cwd>\n${clientCwd}\n</cwd>`),
 				};
@@ -1865,6 +1921,172 @@ await scenario("childPathsInContext", async () => {
 			root,
 			// Claude Code renders its own context differently per model family.
 			sonnet: await run(MODEL),
+			opus: await run("claude-opus-5-5"),
+			fable: await run("claude-fable-5-1"),
+			// The drop policy: the client's system text never reaches the model.
+			drop: await run("claude-opus-5-5", "opencode"),
+		};
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("thinkingCutover", async () => {
+	// Thinking signed before the environment block was stripped is bound to
+	// a history that held the block, so the API refuses it once the block is
+	// gone: here, every signature the conversation drew before the cut is
+	// refused from then on. The park is released before the cut and resumed
+	// after it, as a promotion would leave it.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-cutover-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const limits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const run = async (model: string) => {
+		const on = makeBridge(limits, root, parkRepo);
+		await on.ready();
+		const header = {
+			model,
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const req = (messages: Msg[]) =>
+			new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					stream: true,
+					system: "You are opencode.",
+					tools: [READ_TOOL],
+					messages,
+					max_tokens: 1024,
+				}),
+			});
+		const start = async (messages: Msg[]) => {
+			const p = {
+				...plan(),
+				candidates: [
+					{
+						accountId: "acct-a",
+						provider: "anthropic" as const,
+						upstreamModel: model,
+					},
+				],
+			};
+			const r = await read(
+				on.startTurn({
+					request: req(messages),
+					plan: p,
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			return { ...r, turnId: p.turnId };
+		};
+		const from = mock.requests.length;
+		const signedFrom = mock.signatures.length;
+		try {
+			const history: Msg[] = [
+				{ role: "user", content: "THINK TOOL read cutover.txt" },
+			];
+			const parked = await start(history);
+			const until = Date.now() + 20_000;
+			while (
+				repo.turns.get(parked.turnId)?.status !== "released" &&
+				Date.now() < until
+			)
+				await Bun.sleep(50);
+			const released = repo.turns.get(parked.turnId)?.status;
+			const cut = mock.requests.length;
+			const old = mock.signatures.slice(signedFrom);
+			for (const signature of old)
+				mock.addRule({
+					marker: signature,
+					fail: {
+						status: 400,
+						body: {
+							type: "error",
+							error: {
+								type: "invalid_request_error",
+								message:
+									"messages.2.content.0: Invalid `signature` in `thinking` block: it is bound to a different conversation",
+							},
+						},
+					},
+				});
+			const use = (parked.content ?? []).find((b) => b.type === "tool_use");
+			history.push(
+				{ role: "assistant", content: parked.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(use?.id),
+							content: "CUTOVER-RESULT",
+						},
+					],
+				},
+			);
+			const resumed = await read(
+				on.continueTurn({
+					turnId: parked.turnId,
+					request: req(history),
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: resumed.content as Block[] },
+				{ role: "user", content: "THINK and then" },
+			);
+			const next = await start(history);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: next.content as Block[] },
+				{ role: "user", content: "last" },
+			);
+			const last = await start(history);
+			await settled(on);
+			const row = repo.turns.get(parked.turnId);
+			return {
+				released,
+				signedBeforeCut: old.length,
+				replies: [resumed, next, last].map((r) => ({
+					status: r.status,
+					stop: r.stop,
+					text: (r.content ?? [])
+						.filter((b) => b.type === "text")
+						.map((b) => String(b.text))
+						.join(""),
+				})),
+				turn: { status: row?.status, counters: row?.counters },
+				// Each model call from the cut on: its status, and whether it
+				// still carried thinking signed before the cut.
+				afterCut: mock.requests
+					.slice(cut)
+					.filter((q) => q.path.startsWith("/v1/messages"))
+					.map((q) => ({
+						status: q.status ?? null,
+						carriesOld: old.some((sig) => JSON.stringify(q.body).includes(sig)),
+						cacheRead: q.cache?.read ?? null,
+					})),
+				callsBeforeCut: mock.requests
+					.slice(from, cut)
+					.filter((q) => q.path.startsWith("/v1/messages")).length,
+			};
+		} finally {
+			await on.dispose();
+		}
+	};
+	try {
+		return {
 			opus: await run("claude-opus-5-5"),
 			fable: await run("claude-fable-5-1"),
 		};

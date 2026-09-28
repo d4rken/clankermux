@@ -88,6 +88,8 @@ export interface MockRule {
 export interface MockUpstream {
 	url: string;
 	requests: MockRequest[];
+	/** Every thinking signature issued, in order. */
+	signatures: string[];
 	addRule(rule: MockRule): void;
 	/**
 	 * The next `times` /v1/messages calls answer with this status and body;
@@ -107,6 +109,7 @@ export interface MockUpstream {
 }
 
 let toolSeq = 0;
+const issuedSignatures: string[] = [];
 
 /** The messages as the signature check compares them. */
 function conversationDigest(messages: Msg[]): string {
@@ -334,12 +337,15 @@ function script(
 		content.push({ type: "text", text: `echo: ${text.slice(-200)}` });
 	}
 
-	if (toolResults.length === 0 && /THINK/.test(text))
+	if (toolResults.length === 0 && /THINK/.test(text)) {
+		const signature = `sig_mock_${toolSeq}_${conversationDigest(body.messages)}`;
+		issuedSignatures.push(signature);
 		content.unshift({
 			type: "thinking",
 			thinking: "mock reasoning",
-			signature: `sig_mock_${toolSeq}_${conversationDigest(body.messages)}`,
+			signature,
 		});
+	}
 
 	const stopReason =
 		shape.stopReason ??
@@ -599,6 +605,7 @@ export function startMockUpstream(): MockUpstream {
 	return {
 		url: `http://127.0.0.1:${server.port}`,
 		requests,
+		signatures: issuedSignatures,
 		addRule(rule) {
 			rules.push({ ...rule, used: 0 });
 		},
