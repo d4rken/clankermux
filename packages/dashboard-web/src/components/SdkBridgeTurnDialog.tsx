@@ -1,8 +1,9 @@
-import type {
-	SdkBridgeLegErrorPhase,
-	SdkBridgeSystemPromptDetail,
-	SdkBridgeTurnStatus,
-	SdkBridgeTurnView,
+import {
+	isPreHeadClientAbort,
+	type SdkBridgeLegErrorPhase,
+	type SdkBridgeSystemPromptDetail,
+	type SdkBridgeTurnStatus,
+	type SdkBridgeTurnView,
 } from "@clankermux/types";
 import {
 	formatCost,
@@ -295,7 +296,9 @@ export function SdkBridgeTurnDetails({ view }: { view: SdkBridgeTurnView }) {
 										<TableCell
 											className={cn(
 												"figure",
-												!r.success && "text-destructive-strong",
+												isPreHeadClientAbort(r.statusCode, r.errorMessage)
+													? "text-muted-foreground"
+													: !r.success && "text-destructive-strong",
 											)}
 										>
 											{r.statusCode ?? "—"}

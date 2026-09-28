@@ -403,6 +403,7 @@ describe("RequestsTab — SDK bridge turns", () => {
 				model: "claude-opus-5-5",
 				statusCode: 200,
 				success: true,
+				errorMessage: null,
 				inputTokens: 10,
 				outputTokens: 20,
 				cacheReadInputTokens: 0,
