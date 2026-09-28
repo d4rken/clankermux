@@ -302,7 +302,6 @@ export async function sendAuthorizedRequest(
 							account,
 							providerName: (getProvider(account.provider) ?? ctx.provider)
 								.name,
-							resolvedModel: target.upstreamModel,
 						}),
 				);
 		// An error status is the upstream's answer, even with its body unread,

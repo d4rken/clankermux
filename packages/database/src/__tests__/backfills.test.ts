@@ -162,6 +162,77 @@ describe("auto-pause-on-overage default backfill", () => {
 	});
 });
 
+describe("unrated request model backfill", () => {
+	const UNRATED_MARKER = "backfill:unrated-request-model";
+
+	function insertRequest(
+		db: Database,
+		id: string,
+		success: number | null,
+		model: string | null,
+	): void {
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model)
+			 VALUES (?, 1, 'POST', '/v1/messages', ?, ?, ?)`,
+			[id, success === null ? 499 : 200, success, model],
+		);
+	}
+
+	function model(db: Database, id: string): string | null {
+		return (
+			db.prepare(`SELECT model FROM requests WHERE id = ?`).get(id) as {
+				model: string | null;
+			}
+		).model;
+	}
+
+	it("clears the model on rows without an outcome, once", () => {
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			insertRequest(db, "abort", null, "gpt-6-astra");
+			insertRequest(db, "ok", 1, "gpt-6-astra");
+			insertRequest(db, "failed", 0, "gpt-6-luna");
+
+			runOneShotBackfills(db);
+
+			expect(model(db, "abort")).toBeNull();
+			expect(model(db, "ok")).toBe("gpt-6-astra");
+			expect(model(db, "failed")).toBe("gpt-6-luna");
+			const config = db
+				.prepare(`SELECT config FROM strategies WHERE name = ?`)
+				.get(UNRATED_MARKER) as { config: string };
+			expect(JSON.parse(config.config).requestsCleared).toBe(1);
+
+			// A row written with a model afterwards is not the pass's business.
+			insertRequest(db, "later", null, "gpt-6-astra");
+			runOneShotBackfills(db);
+			expect(model(db, "later")).toBe("gpt-6-astra");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("seeks the rows through the success index", () => {
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			const plan = (
+				db
+					.query(
+						"EXPLAIN QUERY PLAN UPDATE requests SET model = NULL WHERE success IS NULL AND model IS NOT NULL",
+					)
+					.all() as { detail: string }[]
+			).map((row) => row.detail);
+			expect(plan.join("\n")).toContain(
+				"USING INDEX idx_requests_success_timestamp (success=?)",
+			);
+		} finally {
+			db.close();
+		}
+	});
+});
+
 /**
  * The one-shot pass that physically rewrote `target_kind = 'default'` rows to
  * `'requested'` is gone. What replaced it is not a rewrite at all: the rule

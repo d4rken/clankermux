@@ -4,7 +4,14 @@
  * round trip and that the outcome-rated readers leave it out.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
 import { CLIENT_CLOSED_REQUEST } from "@clankermux/types";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { ensureSchema } from "../../migrations";
@@ -35,7 +42,6 @@ const clientClosed = (id: string, overrides: Partial<RequestData> = {}) =>
 		success: null,
 		errorMessage: CLIENT_CLOSED_REQUEST,
 		responseTime: 60_000,
-		model: "gpt-6-astra",
 		...overrides,
 	});
 
@@ -71,23 +77,9 @@ describe("pre-head client abort rows", () => {
 			success: null,
 			status_code: 499,
 			error_message: CLIENT_CLOSED_REQUEST,
-			model: "gpt-6-astra",
+			// No usage, so no model.
+			model: null,
 		});
-	});
-
-	it("falls back to the row's model when no usage names one", async () => {
-		await requests.save(requestData({ id: "a", model: "gpt-6-astra" }));
-		await requests.save(
-			requestData({
-				id: "b",
-				model: "gpt-6-astra",
-				usage: { model: "gpt-6-luna" },
-			}),
-		);
-		await requests.save(requestData({ id: "c" }));
-		expect(row("a").model).toBe("gpt-6-astra");
-		expect(row("b").model).toBe("gpt-6-luna");
-		expect(row("c").model).toBeNull();
 	});
 
 	async function seedMixed(): Promise<void> {
@@ -196,6 +188,35 @@ describe("pre-head client abort rows", () => {
 			"acct-a": 1,
 			"acct-c": 1,
 		});
+	});
+
+	it("finds an abort whose routing row is dated at arrival", async () => {
+		// The routing row carries the request's arrival; the request row is
+		// stamped when it is written, a minute later for a client that waited
+		// that long. A read bounded between the two must still drop the abort.
+		const arrival = 1_000_000;
+		setSystemTime(new Date(arrival + 60_000));
+		try {
+			await requests.save(clientClosed("abort"));
+			await requests.saveRouting({
+				requestId: "abort",
+				strategy: "session",
+				decision: "affinity_hit",
+				affinityScope: "codex_thread",
+				affinityKeyHash: "h-abort",
+				selectedAccountId: "acct-a",
+				candidatesCount: 3,
+				createdAt: arrival,
+			});
+			const since = arrival - 1;
+			expect((await stats.getActiveSessionCounts(since)).total).toBe(0);
+			expect((await stats.getActiveSessionCountsByAccount(since)).size).toBe(0);
+			expect(
+				await requests.getCandidateCountDistribution({ sinceMs: since }),
+			).toEqual([]);
+		} finally {
+			setSystemTime();
+		}
 	});
 
 	it("an abort-only range has no active sessions", async () => {

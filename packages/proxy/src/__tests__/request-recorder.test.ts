@@ -39,7 +39,6 @@ interface SaveRequestCall {
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
-	model: string | null | undefined;
 	usage: unknown;
 	apiKeyId: string | undefined;
 	apiKeyName: string | undefined;
@@ -107,7 +106,6 @@ class FakeDbOps {
 		errorMessage: string | null;
 		responseTime: number;
 		failoverAttempts: number;
-		model?: string | null;
 		usage?: unknown;
 		apiKeyId?: string;
 		apiKeyName?: string;
@@ -141,7 +139,6 @@ class FakeDbOps {
 			errorMessage: data.errorMessage,
 			responseTime: data.responseTime,
 			failoverAttempts: data.failoverAttempts,
-			model: data.model,
 			usage: data.usage,
 			apiKeyId: data.apiKeyId,
 			apiKeyName: data.apiKeyName,
@@ -1596,14 +1593,13 @@ describe("RequestRecorder — recordClientClosedBeforeHead", () => {
 			responseStatus: 499,
 			providerName: "codex",
 			requestedModel: "gpt-6-astra",
-			model: "gpt-6-astra-resolved",
 			failureSource: "client_closed_request",
 			// The fake clock reads 1_000_000: a minute after arrival.
 			timestamp: 940_000,
 			failoverAttempts: 1,
 		});
 
-	it("writes a row with no outcome, the dispatched model and no usage", async () => {
+	it("writes a row with no outcome and no usage, so no model", async () => {
 		const h = makeHarness();
 		h.recorder.recordClientClosedBeforeHead(clientClosedMeta(), {
 			responseBody: makeArrayBuffer('{"error":"closed"}'),
@@ -1618,10 +1614,10 @@ describe("RequestRecorder — recordClientClosedBeforeHead", () => {
 			success: null,
 			errorMessage: "client_closed_request",
 			failoverAttempts: 1,
-			model: "gpt-6-astra-resolved",
 			requestedModel: "gpt-6-astra",
 			usageSource: "none",
 		});
+		// The row's model comes only from usage, so it is stored NULL.
 		expect(row.usage).toBeUndefined();
 		// Arrival to departure: the wait the client gave up on.
 		expect(row.responseTime).toBe(60_000);
@@ -1644,7 +1640,32 @@ describe("RequestRecorder — recordClientClosedBeforeHead", () => {
 			success: false,
 			statusCode: 499,
 			errorMessage: "client_closed_request",
-			model: "gpt-6-astra-resolved",
+		});
+		expect(h.emitted[0].model).toBeUndefined();
+	});
+
+	it("dates its routing row at the arrival", async () => {
+		// Routing reads bound by created_at find the request row in the same
+		// range because that row is stamped later, when it is written.
+		const h = makeHarness();
+		h.recorder.recordClientClosedBeforeHead({
+			...clientClosedMeta(),
+			routing: {
+				strategy: "session",
+				decision: "affinity_hit",
+				affinityScope: "codex_thread",
+				affinityKeyHash: "h-abort",
+				selectedAccountId: "acct-codex",
+				previousAccountId: null,
+				candidatesCount: 2,
+				failoverReason: null,
+			},
+		});
+		await h.flush();
+		expect(h.dbOps.saveRoutingCalls).toHaveLength(1);
+		expect(h.dbOps.saveRoutingCalls[0]).toMatchObject({
+			requestId: "closed-1",
+			createdAt: 940_000,
 		});
 	});
 

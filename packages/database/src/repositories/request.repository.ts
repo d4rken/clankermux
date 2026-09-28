@@ -16,7 +16,7 @@ import {
 	hasRequestFilters,
 	type RequestFilters,
 	ratedOutcomeSql,
-	withoutUnratedParentSql,
+	withoutUnratedRequestSinceSql,
 } from "./request-filters";
 
 const log = new Logger("RequestRepository");
@@ -57,11 +57,6 @@ export interface RequestData extends GatewayHintMetadata {
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
-	/**
-	 * The model the row names when no usage summary does: the model the last
-	 * attempt was sent, for a request that never produced usage.
-	 */
-	model?: string | null;
 	apiKeyId?: string;
 	apiKeyName?: string;
 	project?: string | null;
@@ -383,7 +378,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.errorMessage,
 				data.responseTime,
 				data.failoverAttempts,
-				usage?.model || data.model || null,
+				usage?.model || null,
 				data.requestedModel || null,
 				// `?? null` for every token count, NEVER `|| null`: a provider that
 				// reports 0 is stating that none of that class was consumed, and a
@@ -1249,7 +1244,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		filters?: RequestFilters;
 	}): Promise<Array<{ candidatesCount: number; requests: number }>> {
 		const filter = buildRequestFilterConditions(opts.filters, "r");
-		const sql = hasRequestFilters(opts.filters)
+		const filtered = hasRequestFilters(opts.filters);
+		const sql = filtered
 			? `
 			SELECT rr.candidates_count AS candidates_count, COUNT(*) AS c
 			FROM request_routing rr
@@ -1265,13 +1261,13 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			SELECT candidates_count, COUNT(*) AS c
 			FROM request_routing
 			WHERE created_at >= ? AND candidates_count IS NOT NULL
-				AND ${withoutUnratedParentSql("request_routing")}
+				AND ${withoutUnratedRequestSinceSql("request_id")}
 			GROUP BY candidates_count
 			ORDER BY candidates_count ASC
 		`;
 		const rows = await this.query<{ candidates_count: number; c: number }>(
 			sql,
-			[opts.sinceMs, ...filter.binds],
+			filtered ? [opts.sinceMs, ...filter.binds] : [opts.sinceMs, opts.sinceMs],
 		);
 		return rows.map((row) => ({
 			candidatesCount: row.candidates_count,

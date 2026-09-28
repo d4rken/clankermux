@@ -225,7 +225,6 @@ describe("pre-head client abort tracking", () => {
 		attemptId,
 		account,
 		providerName: "codex",
-		resolvedModel: "gpt-6-astra",
 	});
 
 	it("keeps the routing that applied to the send", () => {
@@ -323,7 +322,6 @@ describe("recording gate", () => {
 			attemptId: "a1",
 			account,
 			providerName: "codex",
-			resolvedModel: "gpt-6-astra",
 		});
 		client.abort();
 		return { ctx, req, m };
@@ -423,9 +421,13 @@ describe("Codex prefix peek abandoned by the client", () => {
 			synthetic: false,
 			failureSource: CLIENT_CLOSED_REQUEST,
 			failoverAttempts: 0,
-			model: "gpt-5.5-codex",
 			providerName: "codex",
 		});
+		// Analytics rely on these rows carrying nothing a model, context or
+		// tool-call read could pick up.
+		expect(rows[0]).not.toHaveProperty("model");
+		expect(rows[0].contextComposition).toBeUndefined();
+		expect(rows[0].toolCallStats).toBeUndefined();
 		// Stamped with the arrival, so the row's response time is the wait.
 		expect(abortedAt - rows[0].timestamp).toBeGreaterThanOrEqual(50);
 

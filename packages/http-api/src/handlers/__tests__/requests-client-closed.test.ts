@@ -53,7 +53,7 @@ describe("Request History and pre-head client aborts", () => {
 			statusCode: 499,
 			success: null,
 			errorMessage: CLIENT_CLOSED_REQUEST,
-			model: "gpt-6-astra",
+			requestedModel: "gpt-6-astra",
 		});
 	});
 	afterEach(() => db.close());
@@ -67,6 +67,7 @@ describe("Request History and pre-head client aborts", () => {
 			statusCode: number | null;
 			errorMessage: string | null;
 			model?: string;
+			requestedModel?: string;
 		}>;
 	const count = async (filters: RequestFilters = {}) =>
 		(
@@ -81,8 +82,10 @@ describe("Request History and pre-head client aborts", () => {
 			success: false,
 			statusCode: 499,
 			errorMessage: CLIENT_CLOSED_REQUEST,
-			model: "gpt-6-astra",
+			requestedModel: "gpt-6-astra",
 		});
+		// No usage, so no model: the list shows the requested one instead.
+		expect(abort?.model ?? null).toBeNull();
 		expect(await count()).toBe(3);
 	});
 

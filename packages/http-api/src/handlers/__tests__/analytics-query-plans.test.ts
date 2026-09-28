@@ -7,9 +7,17 @@ import {
 	it,
 	setSystemTime,
 } from "bun:test";
-import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
+import {
+	BunSqlAdapter,
+	ensureSchema,
+	RequestRepository,
+	ratedOutcomeSql,
+	StatsRepository,
+	withoutUnratedRequestSinceSql,
+} from "@clankermux/database";
 import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics-direct";
+import { createCacheEffectivenessHandler } from "../cache-effectiveness-direct";
 import { createPaymentsSummaryDataHandler } from "../payments-summary-direct";
 import {
 	ACCOUNT_A,
@@ -421,4 +429,275 @@ it("keeps payment range and per-account cost coverage scans covered by an index"
 			plan(statement).some((detail) => detail.includes("USING COVERING INDEX")),
 		).toBe(true);
 	}
+});
+
+/**
+ * `sqlite_stat1` of the production database for every table the analytics and
+ * Overview reads touch, taken 2026-09-28 (1.09M requests). The planner reads
+ * only these statistics and the schema, so with them loaded the fixture gets
+ * the plans production gets from the same SQLite build.
+ */
+const PRODUCTION_STAT1: ReadonlyArray<readonly [string, string, string]> = [
+	["requests", "idx_requests_account_timestamp", "1087289 401 1"],
+	["requests", "idx_requests_account_used", "1087289 401"],
+	[
+		"requests",
+		"idx_requests_analytics_covering",
+		"1087289 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	],
+	["requests", "idx_requests_api_key", "1084855 67"],
+	["requests", "idx_requests_api_key_timestamp", "1084855 67 1"],
+	["requests", "idx_requests_billing_type_timestamp", "1085364 401 1"],
+	["requests", "idx_requests_cleanup", "1087289 1 1"],
+	["requests", "idx_requests_correlation_tag", "73 1 1 1 1"],
+	["requests", "idx_requests_cost_coverage", "1087289 1 1 1 1 1"],
+	["requests", "idx_requests_cost_model", "1064840 2 2 1"],
+	["requests", "idx_requests_id_timestamp", "1087289 1 1"],
+	["requests", "idx_requests_model_timestamp", "1068443 401 1"],
+	["requests", "idx_requests_project_timestamp", "995581 134 1"],
+	["requests", "idx_requests_refusal_fallback", "23 1"],
+	["requests", "idx_requests_response_time", "1068443 401 2"],
+	["requests", "idx_requests_sdk_bridge_turn", "0 0"],
+	["requests", "idx_requests_success_timestamp", "1087289 401 1"],
+	[
+		"requests",
+		"idx_requests_summary_covering",
+		"1087289 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	],
+	["requests", "idx_requests_timestamp", "1087289 1"],
+	["requests", "idx_requests_timestamp_account", "1087289 1 1"],
+	["requests", "idx_requests_tokens", "1066430 1 1"],
+	["requests", "sqlite_autoindex_requests_1", "1087289 1"],
+	["request_routing", "idx_request_routing_affinity", "368419 201 1"],
+	["request_routing", "idx_request_routing_decision", "368728 401 1"],
+	["request_routing", "sqlite_autoindex_request_routing_1", "368728 1"],
+	["request_tool_calls", "sqlite_autoindex_request_tool_calls_1", "89111 1 1"],
+	["request_tool_errors", "idx_request_tool_errors_request_id", "3974 1"],
+	["routing_attempts", "idx_routing_attempts_request", "75706 1 1"],
+	["routing_attempts", "idx_routing_attempts_snapshot", "75706 37"],
+	["routing_attempts", "idx_routing_attempts_started", "75706 1"],
+	["routing_attempts", "sqlite_autoindex_routing_attempts_1", "75706 1"],
+	["accounts", "idx_accounts_name", "4 1"],
+	["accounts", "idx_accounts_paused", "4 4"],
+	["accounts", "idx_accounts_priority", "4 2 1 1"],
+	["accounts", "idx_accounts_rate_limited", "0 0"],
+	["accounts", "idx_accounts_request_count", "4 1 1"],
+	["accounts", "idx_accounts_session", "4 1 1"],
+	["accounts", "sqlite_autoindex_accounts_1", "4 1"],
+	["api_keys", "idx_api_keys_active", "4 4"],
+	["api_keys", "idx_api_keys_hashed_key", "4 1"],
+	["api_keys", "sqlite_autoindex_api_keys_1", "4 1"],
+	["api_keys", "sqlite_autoindex_api_keys_2", "4 1"],
+	["api_keys", "sqlite_autoindex_api_keys_3", "4 1"],
+	["client_profiles", "sqlite_autoindex_client_profiles_1", "16 1"],
+];
+
+/**
+ * The order the production database holds its `requests` indexes in, which is
+ * the order they were added over time, not the order a fresh schema creates
+ * them in. The planner breaks cost ties by that order: on the fresh order a
+ * bare `success IS NOT NULL` at range=all reads the refusal partial index, on
+ * production's it drives the read off `(success, timestamp)` instead.
+ */
+const PRODUCTION_REQUESTS_INDEX_ORDER = [
+	"idx_requests_timestamp",
+	"idx_requests_account_used",
+	"idx_requests_timestamp_account",
+	"idx_requests_model_timestamp",
+	"idx_requests_success_timestamp",
+	"idx_requests_account_timestamp",
+	"idx_requests_cost_model",
+	"idx_requests_response_time",
+	"idx_requests_tokens",
+	"idx_requests_api_key",
+	"idx_requests_api_key_timestamp",
+	"idx_requests_project_timestamp",
+	"idx_requests_cleanup",
+	"idx_requests_summary_covering",
+	"idx_requests_analytics_covering",
+	"idx_requests_billing_type_timestamp",
+	"idx_requests_id_timestamp",
+	"idx_requests_refusal_fallback",
+	"idx_requests_cost_coverage",
+	"idx_requests_correlation_tag",
+	"idx_requests_sdk_bridge_turn",
+];
+
+function loadProductionStats(): void {
+	const definitions = new Map(
+		(
+			db
+				.query(
+					"SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NOT NULL",
+				)
+				.all() as { name: string; sql: string }[]
+		).map((row) => [row.name, row.sql]),
+	);
+	expect([...definitions.keys()].sort()).toEqual(
+		[...PRODUCTION_REQUESTS_INDEX_ORDER].sort(),
+	);
+	for (const name of PRODUCTION_REQUESTS_INDEX_ORDER)
+		db.exec(`DROP INDEX ${name}`);
+	for (const name of PRODUCTION_REQUESTS_INDEX_ORDER)
+		db.exec(definitions.get(name) as string);
+	const tables = [...new Set(PRODUCTION_STAT1.map(([table]) => table))];
+	db.run(
+		`DELETE FROM sqlite_stat1 WHERE tbl IN (${tables.map(() => "?").join(",")})`,
+		tables,
+	);
+	const insert = db.prepare(
+		"INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES (?, ?, ?)",
+	);
+	for (const row of PRODUCTION_STAT1) insert.run(...row);
+	db.exec("ANALYZE sqlite_schema");
+}
+
+const RATED = [ratedOutcomeSql("r"), ratedOutcomeSql("requests")];
+const UNRATED_REQUESTS = (() => {
+	const clause = withoutUnratedRequestSinceSql("request_id");
+	return clause.slice(clause.indexOf("(") + 1, -1);
+})();
+
+/**
+ * The statement as it would read without excluding requests that have no
+ * outcome. The routing exclusion keeps its bind but selects nothing.
+ */
+function withoutOutcomeExclusion(sql: string): string {
+	let out = sql;
+	for (const predicate of RATED) {
+		out = out
+			.split(`WHERE ${predicate} AND `)
+			.join("WHERE ")
+			.split(` AND ${predicate}`)
+			.join("");
+	}
+	return out.split(UNRATED_REQUESTS).join("SELECT NULL WHERE ? IS NULL AND 0");
+}
+
+/** The plan lines that read `requests`, in plan order. */
+function requestReads(sql: string, binds: SQLQueryBindings[]): string[] {
+	return plan({ sql, binds })
+		.filter((detail) => /^(SEARCH|SCAN) (r|requests)\b/.test(detail))
+		.map((detail) => detail.replace(/^(SEARCH|SCAN) requests\b/, "$1 r"));
+}
+
+const covering = (read: string) => read.includes("COVERING INDEX");
+const indexOf = (read: string) => /INDEX (\w+)/.exec(read)?.[1] ?? "table";
+/** The one read the exclusion may add: the unrated rows, off (success, timestamp). */
+const unratedLookup = (read: string) =>
+	/USING INDEX idx_requests_success_timestamp \(success=\?/.test(read);
+
+/**
+ * Excluding requests without an outcome must cost no read its covering index,
+ * and must not move a read onto another index unless both are covering. Each
+ * statement is compared with its own text minus the exclusion, which is how
+ * it read before the exclusion existed.
+ */
+function expectExclusionFree(): void {
+	expect(statements.length).toBeGreaterThan(0);
+	for (const { sql, binds } of statements) {
+		const bare = withoutOutcomeExclusion(sql);
+		if (bare === sql) continue;
+		const before = requestReads(bare, binds);
+		const after = requestReads(sql, binds).filter(
+			(read) => !unratedLookup(read),
+		);
+		const context = `${sql.replace(/\s+/g, " ").slice(0, 160)}\nbefore: ${before.join(" | ")}\nafter:  ${after.join(" | ")}`;
+		expect(after.length, context).toBe(before.length);
+		before.forEach((read, i) => {
+			const now = after[i] ?? "";
+			if (covering(read)) expect(covering(now), context).toBe(true);
+			else if (!covering(now))
+				expect(indexOf(now), context).toBe(indexOf(read));
+		});
+	}
+}
+
+describe("excluding requests without an outcome keeps production plans", () => {
+	beforeEach(loadProductionStats);
+
+	it.each([
+		"range=1h",
+		"range=24h",
+		"range=7d",
+		"range=30d",
+		"range=all",
+		"range=7d&modelBreakdown=true",
+		`range=7d&accounts=${ACCOUNT_A}&projects=alpha&status=error`,
+		"range=all&models=model-a",
+	])("analytics %s", async (query) => {
+		await fetch(query);
+		expectExclusionFree();
+	});
+
+	it.each([
+		"24h",
+		"7d",
+	])("tool-error reads stay covered on the request side for %s", async (range) => {
+		await fetch(`range=${range}&sections=toolCallErrors`);
+		const reads = statements.flatMap(({ sql, binds }) =>
+			requestReads(sql, binds),
+		);
+		expect(reads).toHaveLength(4);
+		for (const read of reads) expect(read).toContain("COVERING INDEX");
+	});
+
+	it("ranks models off the covering model index", async () => {
+		await fetch("range=7d&sections=modelDistribution");
+		expect(
+			requestReads(firstStatement().sql, firstStatement().binds),
+		).toContain(
+			"SEARCH r USING COVERING INDEX idx_requests_model_timestamp (ANY(model) AND timestamp>?)",
+		);
+	});
+
+	it("reads refusals off their partial index at range=all", async () => {
+		await fetch("range=all&sections=refusalFallbacks");
+		const reads = statements
+			.filter(({ sql }) => sql.includes("fallback_credit_claimed"))
+			.flatMap(({ sql, binds }) => requestReads(sql, binds));
+		expect(reads.length).toBeGreaterThan(0);
+		for (const read of reads)
+			expect(read).toContain("idx_requests_refusal_fallback");
+	});
+
+	it("cache effectiveness", async () => {
+		await createCacheEffectivenessHandler(context)(
+			new URLSearchParams("range=7d"),
+		);
+		expectExclusionFree();
+	});
+
+	it("Overview and stops-history reads", async () => {
+		const adapter = context.dbOps.getAdapter();
+		const stats = new StatsRepository(adapter);
+		const requests = new RequestRepository(adapter);
+		const since = FIXED_NOW - 7 * 24 * 60 * 60 * 1000;
+		await stats.getAggregatedStats(since);
+		await stats.getActiveSessionCounts(FIXED_NOW - 15 * 60 * 1000);
+		await stats.getActiveSessionCountsByAccount(FIXED_NOW - 15 * 60 * 1000);
+		await stats.getRecentErrorGroups(since);
+		await stats.getApiKeyStats();
+		await stats.getSessionStats([{ id: ACCOUNT_A, session_start: since }]);
+		await requests.getRequestStats(since);
+		await requests.getRequestStats();
+		await requests.aggregateStats(7 * 24 * 60 * 60 * 1000);
+		await requests.aggregateStats();
+		await requests.getRequestsByAccount(since);
+		await requests.countRequestsSince({ sinceMs: since });
+		await requests.getCandidateCountDistribution({ sinceMs: since });
+		await requests.getCandidateCountDistribution({
+			sinceMs: since,
+			filters: {
+				accounts: [ACCOUNT_A],
+				accountsNone: false,
+				models: [],
+				apiKeys: [],
+				projects: [],
+				projectsNone: false,
+				status: "all",
+			},
+		});
+		expectExclusionFree();
+	});
 });

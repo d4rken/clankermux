@@ -87,11 +87,6 @@ export interface RecordMeta {
 	/** Model named by the request, independent of any provider-reported model. */
 	requestedModel?: string | null;
 	/**
-	 * The row's model when no usage summary names one: for a request that got
-	 * no response, the model its last attempt was sent.
-	 */
-	model?: string | null;
-	/**
 	 * True when the request body carried a fallback credit token (see
 	 * `RequestMeta.fallbackCreditClaimed`). Optional: synthetic/audit rows may
 	 * omit it and stay NULL-covered.
@@ -305,8 +300,6 @@ interface SaveRequestData extends GatewayHintMetadata {
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
-	/** Row model when no usage names one — mirrors `RequestData.model`. */
-	model?: string | null;
 	usage?: unknown;
 	apiKeyId?: string;
 	apiKeyName?: string;
@@ -904,7 +897,8 @@ export class RequestRecorder {
 	 * Record a request whose client left after an upstream attempt was sent
 	 * but before any response reached it. The row has no outcome (`success`
 	 * NULL), so outcome-rated reads leave it out; the payload envelope and the
-	 * live event keep their boolean `success: false`.
+	 * live event keep their boolean `success: false`. It has no usage either,
+	 * so no model: the model the attempt was sent is on its routing attempt.
 	 */
 	recordClientClosedBeforeHead(
 		meta: RecordMeta,
@@ -1248,7 +1242,6 @@ export class RequestRecorder {
 			errorMessage,
 			responseTime,
 			failoverAttempts: meta.failoverAttempts,
-			model: meta.model ?? null,
 			usage,
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,
@@ -1679,7 +1672,7 @@ export class RequestRecorder {
 					this.outcomeToErrorString(errorSource?.outcome)),
 			responseTimeMs: responseTime,
 			failoverAttempts: meta.failoverAttempts,
-			model: usage?.model ?? meta.model ?? undefined,
+			model: usage?.model,
 			requestedModel: meta.requestedModel ?? undefined,
 			promptTokens: usage?.inputTokens,
 			completionTokens: usage?.outputTokens,

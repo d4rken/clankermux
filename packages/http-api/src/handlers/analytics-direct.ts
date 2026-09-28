@@ -2,6 +2,7 @@ import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
 import {
 	buildRequestFilterConditions,
 	ratedOutcomeSql,
+	withoutUnratedRequestSinceSql,
 } from "@clankermux/database";
 import {
 	BadRequest,
@@ -352,7 +353,15 @@ function foldSubstitutedModelRows<T extends { model: string }>(
 	return [...byKey.values()];
 }
 
-function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
+/**
+ * `whereClause` is the range and filter selection; `ratedWhereClause` is the
+ * same narrowed to requests with an outcome (see ratedOutcomeSql). A branch
+ * whose own predicate already leaves those rows out takes the plain one.
+ */
+function additionalDataBranches(
+	whereClause: string,
+	ratedWhereClause: string,
+): AdditionalDataBranch[] {
 	return [
 		{
 			section: "modelDistribution",
@@ -436,7 +445,7 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
 						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd
 					FROM requests r
-					WHERE ${whereClause}
+					WHERE ${ratedWhereClause}
 					GROUP BY r.account_used
 					HAVING COUNT(r.id) > 0
 				) r
@@ -519,7 +528,7 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					CAST(NULL AS BIGINT) as ambiguous_requests
 				FROM requests r
 				LEFT JOIN api_keys k ON k.id = r.api_key_id
-				WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+				WHERE ${ratedWhereClause} AND r.api_key_id IS NOT NULL
 				GROUP BY r.api_key_id
 				HAVING COUNT(*) > 0
 				ORDER BY requests DESC
@@ -583,7 +592,7 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
 					SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
 				FROM requests r
-				WHERE ${whereClause} AND r.project IS NOT NULL
+				WHERE ${ratedWhereClause} AND r.project IS NOT NULL
 				-- Positional: "GROUP BY name" would bind to a source column if
 				-- one existed; 2 pins the grouping to the project label
 				-- (column 1 is the constant data_type).
@@ -617,7 +626,7 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 					SUM(CASE WHEN r.project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as inferred_requests,
 					SUM(CASE WHEN r.project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as ambiguous_requests
 				FROM requests r
-				WHERE ${whereClause} AND r.project IS NULL
+				WHERE ${ratedWhereClause} AND r.project IS NULL
 				HAVING COUNT(*) > 0
 			) q7`,
 			binds: (qp) => [...qp],
@@ -682,10 +691,22 @@ export function createAnalyticsHandler(context: APIContext) {
 		const filterSql = buildRequestFilterConditions(filters, "r");
 		conditions.push(...filterSql.conditions);
 		queryParams.push(...filterSql.binds);
-		// Bind-free, so it can sit last without shifting a positional bind.
-		conditions.push(ratedOutcomeSql("r"));
 
-		const whereClause = conditions.join(" AND ");
+		// range=all with no filters leaves no conditions; keep the WHERE slot
+		// valid with a constant-true predicate.
+		const whereClause =
+			conditions.length > 0 ? conditions.join(" AND ") : "1=1";
+		// The selection narrowed to requests with an outcome. Chosen per query
+		// rather than folded into whereClause: a query whose own predicate
+		// already leaves the unrated rows out keeps its index covering by
+		// taking whereClause (see ratedOutcomeSql). Bind-free, so it sits last
+		// without shifting a positional bind.
+		const ratedWhereClause = `${whereClause} AND ${ratedOutcomeSql("r")}`;
+		// The same exclusion for a read that joins request_routing, keyed on
+		// rr.request_id so the requests side stays on the index it covers; one
+		// bind, placed where the clause sits.
+		const ratedRoutingClause = withoutUnratedRequestSinceSql("rr.request_id");
+		const ratedRoutingBind = startMs ?? 0;
 
 		try {
 			const analyticsStartedAt = performance.now();
@@ -740,7 +761,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					`
 				WITH filtered_requests AS (
 					SELECT * FROM requests r
-					WHERE ${whereClause}
+					WHERE ${ratedWhereClause}
 				)
 				SELECT
 					COUNT(*) as total_requests,
@@ -905,7 +926,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					AVG(response_time_ms) as avg_response_time,
 					AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) as avg_tokens_per_second
 				FROM requests r
-				WHERE ${whereClause} ${includeModelBreakdown ? "AND model IS NOT NULL" : ""}
+				WHERE ${ratedWhereClause} ${includeModelBreakdown ? "AND model IS NOT NULL" : ""}
 				GROUP BY ts${includeModelBreakdown ? ", model" : ""}
 				ORDER BY ts${includeModelBreakdown ? ", model" : ""}
 			`,
@@ -917,9 +938,10 @@ export function createAnalyticsHandler(context: APIContext) {
 			// model, api key performance, account model usage, project breakdown).
 			// Only the requested branches are emitted, and each contributes its own
 			// binds in branch order — see AdditionalDataBranch.
-			const additionalBranches = additionalDataBranches(whereClause).filter(
-				(branch) => want(branch.section),
-			);
+			const additionalBranches = additionalDataBranches(
+				whereClause,
+				ratedWhereClause,
+			).filter((branch) => want(branch.section));
 			const additionalData =
 				(await runPhase("additional_data", additionalBranches.length > 0, () =>
 					db.query<AdditionalDataRow>(
@@ -1039,7 +1061,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					COUNT(*) AS count
 				FROM requests r
 				LEFT JOIN api_keys k ON k.id = r.api_key_id
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				GROUP BY r.api_key_id, COALESCE(r.model, 'Unknown')
 				ORDER BY count DESC`,
 						queryParams,
@@ -1325,7 +1347,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(refusal_category IS NOT NULL) AS refusals,
 					SUM(fallback_credit_claimed = 1) AS fallback_retries
 				FROM requests r
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 					AND (refusal_category IS NOT NULL OR fallback_credit_claimed = 1)
 				GROUP BY ts
 				ORDER BY ts`,
@@ -1354,7 +1376,7 @@ export function createAnalyticsHandler(context: APIContext) {
 							}>(
 								`SELECT fallback_from_model AS from_model, requested_model AS to_model, COUNT(*) AS count
 				FROM requests r
-				WHERE ${whereClause} AND fallback_credit_claimed = 1
+				WHERE ${ratedWhereClause} AND fallback_credit_claimed = 1
 				GROUP BY fallback_from_model, requested_model
 				ORDER BY count DESC`,
 								queryParams,
@@ -1445,9 +1467,9 @@ export function createAnalyticsHandler(context: APIContext) {
 			// 'total' row is a separate COUNT(DISTINCT hash) across the whole filtered
 			// range, counting each session exactly once — that is the honest headline.
 			//
-			// Param order: queryParams (whereClause lives inside the CTE, which is
-			// emitted first in the SQL string) precede the two bucket placeholders
-			// (the bucket sub-select comes after the CTE).
+			// Param order: queryParams and the rated-routing bind (both inside the
+			// CTE, which is emitted first in the SQL string) precede the two bucket
+			// placeholders (the bucket sub-select comes after the CTE).
 			//
 			// The CTE is MATERIALIZED: both the total and the buckets read it, and
 			// inlined into each UNION branch the join ran twice.
@@ -1485,6 +1507,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						r.timestamp AS ts_source
 					FROM requests r ${pinRequestsFirst ? "CROSS JOIN" : "JOIN"} request_routing rr ON rr.request_id = r.id
 					WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
+						AND ${ratedRoutingClause}
 				)
 				SELECT
 					'total' AS row_type,
@@ -1507,7 +1530,12 @@ export function createAnalyticsHandler(context: APIContext) {
 					ORDER BY ts, scope
 				)
 			`,
-						[...queryParams, bucket.bucketMs, bucket.bucketMs],
+						[
+							...queryParams,
+							ratedRoutingBind,
+							bucket.bucketMs,
+							bucket.bucketMs,
+						],
 					),
 				)) ?? [];
 
@@ -1549,10 +1577,11 @@ export function createAnalyticsHandler(context: APIContext) {
 				FROM requests r ${pinRequestsFirst ? "CROSS JOIN" : "JOIN"} request_routing rr ON rr.request_id = r.id
 				LEFT JOIN accounts a ON a.id = rr.selected_account_id
 				WHERE rr.affinity_key_hash IS NOT NULL AND ${whereClause}
+					AND ${ratedRoutingClause}
 				GROUP BY rr.selected_account_id, a.name
 				ORDER BY sessions DESC
 				LIMIT ${ACTIVE_SESSIONS_BY_ACCOUNT_LIMIT}`,
-							[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams],
+							[NO_ACCOUNT_ID, NO_ACCOUNT_ID, ...queryParams, ratedRoutingBind],
 						),
 				)) ?? [];
 
@@ -1628,7 +1657,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				LEFT JOIN request_routing rr ON rr.request_id = r.id
 				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
 				LEFT JOIN accounts ua ON ua.id = r.account_used
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				GROUP BY strategy, decision, account_id, account_name, outcome
 				ORDER BY requests DESC
 				LIMIT 120
@@ -1652,7 +1681,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(COALESCE(rr.failover_attempts, 0)) as failover_attempts
 				FROM requests r
 				LEFT JOIN request_routing rr ON rr.request_id = r.id
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				GROUP BY strategy, decision
 				ORDER BY requests DESC
 				LIMIT 20
@@ -1678,7 +1707,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				LEFT JOIN request_routing rr ON rr.request_id = r.id
 				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
 				LEFT JOIN accounts ua ON ua.id = r.account_used
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				GROUP BY account_id, account_name
 				ORDER BY requests DESC
 				LIMIT 12
@@ -1706,7 +1735,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				LEFT JOIN request_routing rr ON rr.request_id = r.id
 				LEFT JOIN accounts sa ON sa.id = rr.selected_account_id
 				LEFT JOIN accounts ua ON ua.id = r.account_used
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				GROUP BY ts, account_id, account_name, decision
 				ORDER BY ts ASC, requests DESC
 				LIMIT 1000
@@ -1748,7 +1777,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(COALESCE(r.input_tokens, 0)) as uncached_tokens
 				FROM requests r
 				LEFT JOIN accounts a ON a.id = r.account_used
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 				-- Positional: "GROUP BY model" would bind to the raw r.model column
 				-- (SQLite prefers source columns over aliases), splitting NULL
 				-- models from the 'unknown' label they coalesce into.
@@ -1854,7 +1883,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					-- client_profiles.api_key_id is that table's PRIMARY KEY, so this
 					-- join can never multiply a request row.
 					LEFT JOIN client_profiles cp ON cp.api_key_id = r.api_key_id
-					WHERE ${whereClause}
+					WHERE ${ratedWhereClause}
 				)
 				SELECT
 					resolved.api_key_id AS api_key_id,
@@ -1933,7 +1962,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					${costCoverageSql()}
 				FROM requests r
 				LEFT JOIN api_keys k ON k.id = r.api_key_id
-				WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+				WHERE ${ratedWhereClause} AND r.api_key_id IS NOT NULL
 				GROUP BY r.api_key_id, COALESCE(r.model, 'Unknown')
 				HAVING COUNT(*) >= ${CLIENT_MODEL_EFFICIENCY_MIN_REQUESTS}
 				ORDER BY COUNT(*) DESC
@@ -2123,7 +2152,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				WITH top_projects AS (
 					SELECT r.project as project
 					FROM requests r
-					WHERE ${whereClause}
+					WHERE ${ratedWhereClause}
 					GROUP BY r.project
 					ORDER BY COUNT(*) DESC
 					LIMIT ${GROWTH_CURVE_PROJECT_LIMIT}
@@ -2135,7 +2164,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					MAX(${CONTEXT_TOKENS_SQL}) as max_context_tokens,
 					COUNT(*) as requests
 				FROM requests r
-				WHERE ${whereClause}
+				WHERE ${ratedWhereClause}
 					AND (
 						r.project IN (SELECT project FROM top_projects WHERE project IS NOT NULL)
 						OR (r.project IS NULL AND EXISTS (SELECT 1 FROM top_projects WHERE project IS NULL))
