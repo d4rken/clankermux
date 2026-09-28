@@ -304,18 +304,49 @@ Code's requests is changed.
   `CLAUDE_CODE_DISABLE_ATTACHMENTS` and `excludeDynamicSections` leave it.
   The directory is `realpath(process.cwd())`, so it cannot name the
   client's path without that path existing on this host.
-- **Shapes removed.** Opus and Fable get it bare in a `role: "system"`
-  message, Sonnet wrapped in `<system-reminder>`; a user message's
-  wrapped copy goes too. It shares its message, often its text block, with
-  the model-identity reminder, which stays. Only a whole blank-line
-  paragraph of exactly that shape goes (bare only in a system message), so
-  client text naming a directory is never touched. An emptied block or
-  message goes, and its `cache_control` moves to the block before it
-  unless that one has its own or cannot take one (thinking). The same input
-  always gives the same output, so earlier messages stay identical across
-  calls, resumes and released-park resumes: Opus 5.5 and Fable 5.1 refuse
-  signed thinking whose history changed ("bound to a different
-  conversation"), and the mock upstream does the same.
+- **Where it lands.** Always in a `role: "system"` message: bare for Opus
+  and Fable, wrapped in `<system-reminder>` for Sonnet, sharing its message
+  and often its text block with the model-identity reminder (which stays)
+  and with text the client typed alongside tool results. Never inside a
+  `tool_result` (parallel calls with image results included) and never in
+  the top-level `system`, drop policy included.
+- **Ownership.** Only a block whose working directory (both paths, for an
+  update) is one of this bridge's sandboxes, `<workRoot>/gen-<id>/cwd`
+  under the work root as configured or as resolved, is taken. The same
+  block naming any other directory is the client's (a pasted excerpt, a
+  flattened history) and passes untouched. A paragraph is taken bare only
+  in a system message, and inside a `<system-reminder>` wrap in any
+  message; a wrap it shares keeps its other paragraphs. Trailing
+  whitespace and CRLF line ends are tolerated. Parks recovered from another
+  work root keep their old generation's block.
+- **Never an invalid request.** Only system messages are dropped, and not
+  one whose removal would leave no message or end the request on an
+  assistant turn; a user message the block would empty keeps it. An
+  emptied block's `cache_control` moves to the nearest earlier block that
+  can take one: block-form messages only (a string message is never turned
+  into blocks), passing over thinking and empty text, stopping at a block
+  that has its own. With none, the breakpoint goes.
+- **Deterministic.** The same input always gives the same output, so
+  earlier messages stay identical across calls, resumes and released-park
+  resumes: Opus 5.5 and Fable 5.1 refuse signed thinking whose history
+  changed ("bound to a different conversation"), and the mock upstream
+  does the same. A stripped body is parsed and re-serialised once per call;
+  an untouched one is forwarded byte for byte.
+- **Drift.** A text left in place that still names the work root next to
+  `Primary working directory:` or `# Environment` is logged once per turn
+  at debug, as is a user message that kept the block: a new CLI wording
+  shows up there before anyone reads a transcript.
+- **The cut.** Thinking signed before this change is bound to a history
+  that held the block, so the first call of such a conversation after
+  promotion (in practice a released park, the only session that survives a
+  restart) gets the 400 "Invalid `signature` in `thinking` block". Claude
+  Code drops the refused thinking from its session and asks again at once,
+  reading the cached prefix; it never sends that thinking again. The proxy
+  passes that 400 to a bridged call instead of retrying it without
+  thinking (`proxyWithAccount`): its retry left the thinking in Claude
+  Code's session, and every later call was refused and retried (measured:
+  three refusals in three calls). Cost of the cut: one refused call per
+  such conversation, and the turn's `inner_error_count` counts it.
 - **Decision.** The user chose stripping on 2026-09-28 over leaving it
   (and over a stable directory under the work root, which the model would
   still read as a second cwd). Cited for it: Anthropic's LLM gateway guide
@@ -328,11 +359,15 @@ Code's requests is changed.
 
 Run the real-binary suites (the two `real-claude*.integration.test.ts`
 files here and the server's `claude-sdk-bridge.integration.test.ts`) in the
-namespace, not skipped, before landing a bump. "never shows the model Claude Code's own directories, only the
-client's" in `real-claude.integration.test.ts` fails if a new CLI renders
-the environment block in a wording `stripEnvironmentBlocks` no longer
-matches; update the patterns and the unit fixtures in
-`environment-block.test.ts` from what the new binary sends.
+namespace before landing a bump. Where user namespaces are unavailable they
+skip, printing why, and prove nothing: run them on a host that has them.
+"never shows the model Claude Code's own directories, only the client's" in
+`real-claude.integration.test.ts` fails if a new CLI renders the
+environment block in a wording `stripEnvironmentBlocks` no longer matches;
+update the patterns and the unit fixtures in `environment-block.test.ts`
+from what the new binary sends. "recovers a released park whose thinking
+was signed before the cut, with one refused call" fails if Claude Code
+stops recovering refused thinking on its own.
 
 ## System prompt policies
 
