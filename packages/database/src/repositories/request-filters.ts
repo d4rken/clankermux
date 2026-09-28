@@ -54,8 +54,7 @@ export const EMPTY_REQUEST_FILTERS: RequestFilters = {
  * column. Volume, latency, active accounts, cost and project-attribution
  * coverage all leave these rows out, since a `COUNT(*)` or `AVG()` over
  * `requests` would otherwise count a request that never got an answer. The
- * rows stay visible in Request History and in the stops history's own
- * causes; only denominators and totals ignore them.
+ * rows stay visible in Request History.
  */
 export function ratedOutcomeSql(alias: string): string {
 	return `${alias}.success IS NOT NULL`;
