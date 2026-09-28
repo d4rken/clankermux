@@ -5,6 +5,7 @@ import {
 } from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
+	ATTEMPT_TRANSPORT_FAILED,
 	getChatContext,
 	readReasoningEffortAdaptation,
 	SdkBridgeCapacityError,
@@ -300,7 +301,7 @@ export async function sendAuthorizedRequest(
 					? `SDK bridge at capacity: ${error.message}`
 					: error instanceof SdkBridgeUnavailableError
 						? `SDK bridge unavailable: ${error.message}`
-						: "Upstream transport failed";
+						: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else

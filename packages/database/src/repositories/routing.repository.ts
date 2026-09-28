@@ -10,7 +10,12 @@ import type {
 	RoutingAttempt,
 	RoutingRule,
 } from "@clankermux/types";
-import { isKnownProvider, parsePinnedProviders } from "@clankermux/types";
+import {
+	ATTEMPT_TRANSPORT_ENDINGS,
+	CLIENT_CLOSED_REQUEST,
+	isKnownProvider,
+	parsePinnedProviders,
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 type RuleRow = Omit<RoutingRule, "enabled" | "pool_account_ids"> & {
@@ -573,9 +578,31 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		reportedModel: string | null,
 	): Promise<void> {
 		await this.run(
-			"UPDATE routing_attempts SET finished_at=?,status=?,error=COALESCE(error,?),reported_model=? WHERE id=?",
-			[finishedAt, status, error, reportedModel, id],
+			"UPDATE routing_attempts SET finished_at=?,status=?,error=COALESCE(error,?),reported_model=? WHERE id=? AND error IS NOT ?",
+			[finishedAt, status, error, reportedModel, id, CLIENT_CLOSED_REQUEST],
 		);
+	}
+	/**
+	 * The client left while this send was still in flight. Stamps it 499 only
+	 * if nothing has settled what the send meant: a row that is still open, or
+	 * one that only ended in the transport failure the abort itself causes.
+	 * A completed status (a 429, an in-band failure at HTTP 200, a success) or
+	 * a failover reason keeps its own verdict. Returns whether it stamped.
+	 *
+	 * Once stamped, {@link finishAttempt} and {@link annotateAttempt} leave the
+	 * row alone, so a late observer write cannot turn it back.
+	 */
+	async finishAttemptClientClosed(
+		id: string,
+		finishedAt: number,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE routing_attempts SET status=499,error=?,finished_at=COALESCE(finished_at,?)
+			WHERE id=? AND kind='upstream_send'
+				AND (status IS NULL OR error IN (${ATTEMPT_TRANSPORT_ENDINGS.map(() => "?").join(",")}))`,
+			[CLIENT_CLOSED_REQUEST, finishedAt, id, ...ATTEMPT_TRANSPORT_ENDINGS],
+		);
+		return changes > 0;
 	}
 	/**
 	 * `reportedModel` fills the served model for an attempt whose body was
@@ -592,8 +619,8 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		reportedModel: string | null = null,
 	): Promise<void> {
 		await this.run(
-			"UPDATE routing_attempts SET error=?,status=COALESCE(status,?),reported_model=COALESCE(reported_model,?) WHERE id=?",
-			[error, status, reportedModel, id],
+			"UPDATE routing_attempts SET error=?,status=COALESCE(status,?),reported_model=COALESCE(reported_model,?) WHERE id=? AND error IS NOT ?",
+			[error, status, reportedModel, id, CLIENT_CLOSED_REQUEST],
 		);
 	}
 
