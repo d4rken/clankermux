@@ -36,9 +36,9 @@ function withConfig<T>(
 
 const turnRepo = {
 	insertTurn: async () => {},
-	finishTurn: async () => {},
+	finishTurn: async () => true,
 	bumpTurnCounters: async () => {},
-	insertLeg: async () => {},
+	insertLeg: async () => true,
 	finishLeg: async () => {},
 };
 

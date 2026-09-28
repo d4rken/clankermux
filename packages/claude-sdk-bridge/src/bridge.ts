@@ -60,6 +60,7 @@ import { PromptStream } from "./prompt-stream";
 import { TurnRecorder } from "./recorder";
 import {
 	LeaseHeldElsewhere,
+	parkTurnIdentity,
 	type ReleasedEntry,
 	ReleasedParkStore,
 	type ResumeDescriptor,
@@ -1790,12 +1791,13 @@ export function createClaudeSdkBridge(
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.
 			if (meta.model !== live.requestedModel) {
-				const history = live.turnHistory;
-				live.teardown("superseded", bridgeErrors.superseded());
-				return refuse(
+				// Refused first: its leg is queued on the turn before the finish.
+				const refused = refuse(
 					bridgeErrors.modelChanged(live.requestedModel, meta.model),
-					history,
+					live.turnHistory,
 				);
+				live.teardown("superseded", bridgeErrors.superseded());
+				return refused;
 			}
 			counters.continuations++;
 			const leg = newLeg(
@@ -1988,6 +1990,7 @@ export function createClaudeSdkBridge(
 		// the turn: every write carries the lease token and changes nothing
 		// once the lease has moved on.
 		const recorder = new TurnRecorder(deps.turnRepo, log, turnId, store.token);
+		recorder.adoptIdentity(parkTurnIdentity(descriptor));
 		let live: LiveQuery;
 		try {
 			try {

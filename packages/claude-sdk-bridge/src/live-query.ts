@@ -237,6 +237,8 @@ export class LiveQuery {
 	/** Closed without finishing the turn row ({@link LiveQueryInit.keepTurnOpen}). */
 	keptOpen = false;
 	private deferredFinish: SdkBridgeTurnFinish | null = null;
+	/** The message the last top-level message_start opened. */
+	private streamingMessageId: string | null = null;
 
 	/**
 	 * Write the finish a kept-open close held back: the turn turned out spent
@@ -983,10 +985,7 @@ export class LiveQuery {
 				if (message.parent_tool_use_id !== null) return;
 				if (this.firstEventMs === null)
 					this.firstEventMs = this.init.now() - this.launchedAt;
-				if (message.event.type === "message_start")
-					this.init.recorder.noteModelCall(
-						(message.event as { message?: { usage?: unknown } }).message?.usage,
-					);
+				this.noteUsage(message.event as unknown as StreamEvent);
 				this.sawFirstEvent = true;
 				if (!this.leg) {
 					this.init.log.debug(
@@ -1031,7 +1030,10 @@ export class LiveQuery {
 				}
 				if (message.message.model === "<synthetic>" || message.aborted) return;
 				// A call fetched without streaming has no message_start.
-				this.init.recorder.noteModelCall(message.message.usage);
+				this.init.recorder.noteModelCall(
+					typeof message.message.id === "string" ? message.message.id : null,
+					message.message.usage,
+				);
 				if (!this.leg) return;
 				this.handleEnd(
 					this.init.composer.onAssistantMessage(
@@ -1046,6 +1048,19 @@ export class LiveQuery {
 			default:
 				return;
 		}
+	}
+
+	/** A top-level streamed call's usage, from its message_start and message_delta. */
+	private noteUsage(event: StreamEvent): void {
+		if (event.type === "message_start") {
+			const started = event.message as
+				| { id?: unknown; usage?: unknown }
+				| undefined;
+			this.streamingMessageId =
+				typeof started?.id === "string" ? started.id : null;
+			this.init.recorder.noteModelCall(this.streamingMessageId, started?.usage);
+		} else if (event.type === "message_delta")
+			this.init.recorder.noteModelCall(this.streamingMessageId, event.usage);
 	}
 
 	private onResult(message: Extract<SDKMessage, { type: "result" }>): void {

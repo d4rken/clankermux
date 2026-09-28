@@ -14,17 +14,19 @@ import type {
 	EffortLevel,
 	SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
-import type {
-	ProjectAttributionSource,
-	SdkBridgeReleasedPark,
-	SdkBridgeReleasedParkInsert,
-	SdkBridgeRoutePlan,
-	SdkBridgeTurnFinish,
+import {
+	type ProjectAttributionSource,
+	SDK_BRIDGE_HISTORY_MODES,
+	SDK_BRIDGE_REBUILD_REASONS,
+	type SdkBridgeReleasedPark,
+	type SdkBridgeReleasedParkInsert,
+	type SdkBridgeRoutePlan,
+	type SdkBridgeTurnFinish,
 } from "@clankermux/types";
 import { type BridgeError, errorSummary } from "./errors";
-import { logTurnFinished } from "./recorder";
 import { type FileSessionStore, rewriteSessionId } from "./session-store";
 import type { SystemPromptDecision } from "./system-prompt-policy";
+import { logTurnFinished, type TurnLogIdentity } from "./turn-log";
 import type { ClientTool } from "./turn-request";
 import type {
 	BridgeLog,
@@ -58,6 +60,52 @@ export interface ResumeDescriptor {
 	turnStartedAt: number;
 	/** The turn's own history decision; absent in parks stored before it was kept. */
 	history?: SdkBridgeTurnHistory;
+}
+
+function stringOrNull(value: unknown): string | null {
+	return typeof value === "string" ? value : null;
+}
+
+/**
+ * A released park's turn as its resume descriptor (parsed, or its JSON)
+ * names it, for the journal. Null for a descriptor that does not parse or
+ * has no route plan. The descriptor keeps no policy name, and parks stored
+ * before it kept its history decision have none.
+ */
+export function parkTurnIdentity(descriptor: unknown): TurnLogIdentity | null {
+	let value = descriptor;
+	if (typeof value === "string")
+		try {
+			value = JSON.parse(value);
+		} catch {
+			return null;
+		}
+	if (!value || typeof value !== "object") return null;
+	const d = value as Record<string, unknown>;
+	const plan = d.plan as Record<string, unknown> | null | undefined;
+	if (!plan || typeof plan !== "object" || !Array.isArray(plan.candidates))
+		return null;
+	const accountId = stringOrNull(plan.preferredAccountId);
+	const candidates = plan.candidates.filter(
+		(c): c is Record<string, unknown> => !!c && typeof c === "object",
+	);
+	const target =
+		candidates.find((c) => c.accountId === accountId) ?? candidates[0];
+	const history = (
+		d.history && typeof d.history === "object" ? d.history : {}
+	) as Record<string, unknown>;
+	const mode = SDK_BRIDGE_HISTORY_MODES.find((m) => m === history.mode);
+	return {
+		kind: "turn",
+		model: stringOrNull(target?.upstreamModel),
+		accountId,
+		clientHarness: stringOrNull(d.clientHarness),
+		historyMode: mode ?? null,
+		rebuildReason: mode
+			? (SDK_BRIDGE_REBUILD_REASONS.find((r) => r === history.reason) ?? null)
+			: null,
+		systemPromptPolicy: null,
+	};
 }
 
 /** A transition the database has not confirmed yet, retried until it does. */
@@ -826,6 +874,7 @@ export class ReleasedParkStore {
 					return true;
 				case "close": {
 					const finish = this.finishOf(entry, pending.error, pending.status);
+					const identity = parkTurnIdentity(entry.descriptor);
 					const outcome = await repo.closeTurn(turnId, finish, this.token);
 					if (outcome === "refused") {
 						// Without the lease the park is not this process's to end.
@@ -833,7 +882,10 @@ export class ReleasedParkStore {
 						return !this.entries.has(turnId);
 					}
 					if (outcome === "closed")
-						logTurnFinished(this.opts.log, turnId, finish, null);
+						logTurnFinished(this.opts.log, turnId, finish, {
+							source: "park_close",
+							identity,
+						});
 					this.unindex(turnId);
 					this.removeParkFile(entry.path);
 					return true;
@@ -928,11 +980,15 @@ export class ReleasedParkStore {
 				errorMessage: error.message,
 				durationMs: now - startedAt,
 			};
+			const identity = parkTurnIdentity(park.descriptor);
 			const outcome = await repo.closeTurn(park.turnId, finish, this.token);
 			if (outcome === "refused")
 				throw new Error("the park lease moved on during recovery");
 			if (outcome === "closed")
-				logTurnFinished(this.opts.log, park.turnId, finish, null);
+				logTurnFinished(this.opts.log, park.turnId, finish, {
+					source: "park_close",
+					identity,
+				});
 			this.removeParkFile(park.sessionPath);
 		};
 		for (const park of await repo.list()) {

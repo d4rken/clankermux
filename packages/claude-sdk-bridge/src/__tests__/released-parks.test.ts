@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import { parkTurnIdentity } from "../released-parks";
 import {
 	assistantMessage,
 	capturingLog,
@@ -479,13 +480,21 @@ describe("resuming a released park", () => {
 		expect(lines).toHaveLength(1);
 		expect(lines[0]?.level).toBe("info");
 		expect(lines[0]?.data).toMatchObject({
+			source: "resumed_park",
+			kind: "turn",
 			status: "completed",
 			httpStatus: 200,
-			resumedFromRelease: true,
+			model: MODEL,
+			accountId: "acct-a",
+			clientHarness: "opencode",
+			// The turn's own decision, from its descriptor.
+			historyMode: "fresh",
+			rebuildReason: null,
 			firstCall: { input: 2, cacheRead: 30_000, cacheCreation: 120 },
 		});
-		expect(lines[0]?.data).not.toHaveProperty("historyMode");
+		// This process saw only the resume's share of the counters.
 		expect(lines[0]?.data).not.toHaveProperty("legs");
+		expect(lines[0]?.data).not.toHaveProperty("toolRounds");
 	});
 
 	it("holds results that arrive during the release until it is stored, then resumes", async () => {
@@ -676,9 +685,14 @@ describe("expiry", () => {
 				status: "expired",
 				httpStatus: 504,
 				errorType: "timeout_error",
-				resumedFromRelease: true,
+				source: "park_close",
+				model: MODEL,
+				accountId: "acct-a",
+				clientHarness: "opencode",
+				historyMode: "fresh",
 			},
 		});
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("legs");
 		expect(log.turns(p.turnId)[0]?.data.durationMs).toBeNumber();
 		expect(h.repo.turns.get(p.turnId)).toMatchObject({
 			status: "expired",
@@ -715,7 +729,9 @@ describe("expiry found at recovery", () => {
 				data: expect.objectContaining({
 					status: "expired",
 					httpStatus: 504,
-					resumedFromRelease: true,
+					source: "park_close",
+					model: MODEL,
+					accountId: "acct-a",
 				}),
 			}),
 		]);
@@ -724,6 +740,97 @@ describe("expiry found at recovery", () => {
 			httpStatus: 504,
 			errorType: "timeout_error",
 		});
+	});
+});
+
+describe("a park's identity on its journal line", () => {
+	it("still logs a close whose descriptor cannot be read, without identity", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		Object.assign(parkRepo.parks.get(p.turnId) ?? {}, {
+			expiresAt: 1,
+			descriptor: "{not json",
+		});
+
+		const log = capturingLog();
+		await releaseHarness({ workRoot, repo, parkRepo, log });
+
+		expect(log.turns(p.turnId).map((l) => l.data)).toEqual([
+			expect.objectContaining({ source: "park_close", status: "expired" }),
+		]);
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("model");
+		expect(log.turns(p.turnId)[0]?.data).not.toHaveProperty("kind");
+	});
+
+	it("the fake park repository closes a missing turn as kept, like the real one", async () => {
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const lease = { dir: "d", pid: 1, startTime: null, token: "T", at: 1 };
+		expect(await parkRepo.acquireLease(lease, () => true)).toBe(true);
+		const finish = { finishedAt: 5, status: "expired" } as const;
+		expect(await parkRepo.closeTurn("missing", finish, "T")).toBe("kept");
+		expect(repo.turns.has("missing")).toBe(false);
+		expect(await parkRepo.closeTurn("missing", finish, "other")).toBe(
+			"refused",
+		);
+	});
+
+	it("reads the turn from a descriptor, and nothing from one of the wrong shape", () => {
+		const plan = makePlan({
+			candidates: [
+				{ accountId: "acct-b", provider: "anthropic", upstreamModel: "m-b" },
+				{ accountId: "acct-a", provider: "anthropic", upstreamModel: "m-a" },
+			],
+			preferredAccountId: "acct-a",
+		});
+		const descriptor = {
+			v: 1,
+			plan,
+			clientHarness: "pi",
+			history: { mode: "rebuild_transcript", reason: "edit" },
+		};
+		const identity = {
+			kind: "turn",
+			model: "m-a",
+			accountId: "acct-a",
+			clientHarness: "pi",
+			historyMode: "rebuild_transcript",
+			rebuildReason: "edit",
+			systemPromptPolicy: null,
+		} as const;
+		expect(parkTurnIdentity(descriptor)).toEqual(identity);
+		expect(parkTurnIdentity(JSON.stringify(descriptor))).toEqual(identity);
+		// Stored before the history decision was kept; an unknown preferred account.
+		expect(
+			parkTurnIdentity({
+				plan: { ...plan, preferredAccountId: "acct-z" },
+				clientHarness: 7,
+			}),
+		).toEqual({
+			...identity,
+			model: "m-b",
+			accountId: "acct-z",
+			clientHarness: null,
+			historyMode: null,
+			rebuildReason: null,
+		});
+		for (const bad of [
+			"{not json",
+			"null",
+			"[]",
+			"{}",
+			null,
+			{},
+			{ plan: null },
+			{ plan: {} },
+			{ plan: { candidates: "m-a" } },
+		])
+			expect(parkTurnIdentity(bad)).toBeNull();
 	});
 });
 

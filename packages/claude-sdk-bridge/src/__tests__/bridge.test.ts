@@ -947,8 +947,11 @@ describe("parked tool calls", () => {
 	});
 
 	describe("the model a continuation names", () => {
-		async function parked(model: string) {
-			const h = harness();
+		async function parked(
+			model: string,
+			log?: ReturnType<typeof capturingLog>,
+		) {
+			const h = harness(log ? { log } : {});
 			const t = await start(
 				h,
 				{ tools, messages: [first] },
@@ -1095,6 +1098,21 @@ describe("parked tool calls", () => {
 			expect(h.repo.turns.get(t.plan.turnId)?.legs[1]).toMatchObject({
 				kind: "continue",
 				httpStatus: 409,
+			});
+		});
+
+		it("counts the refused leg on the line of the turn it frees", async () => {
+			const log = capturingLog();
+			const { h, t } = await parked("sonnet", log);
+			const c = continueTurn(h, t.plan.turnId, results, { model: "opus" });
+			expect((await c.response).status).toBe(409);
+			await settled(h);
+			await waitFor(() => log.turns(t.plan.turnId).length === 1);
+			expect(h.repo.turns.get(t.plan.turnId)?.legs).toHaveLength(2);
+			expect(log.turns(t.plan.turnId)[0]?.data).toMatchObject({
+				source: "live",
+				status: "aborted",
+				legs: 2,
 			});
 		});
 	});
@@ -1827,15 +1845,13 @@ describe("conversations", () => {
 		await settled(h);
 		await waitFor(() => log.turns(t2.plan.turnId).length === 1);
 		expect(log.turns(t2.plan.turnId)[0]?.data).toMatchObject({
+			source: "live",
 			status: "completed",
 			httpStatus: 200,
 			historyMode: "resume",
 			rebuildReason: null,
 			firstCall: { input: 3, cacheRead: 41_000, cacheCreation: 250 },
 		});
-		expect(log.turns(t2.plan.turnId)[0]?.data).not.toHaveProperty(
-			"resumedFromRelease",
-		);
 	});
 
 	it("waits for the previous turn to settle when the next request overtakes its result", async () => {
@@ -3232,6 +3248,51 @@ describe("the turn's journal line", () => {
 			status: "completed",
 			legs: 3,
 			toolRounds: 1,
+		});
+	});
+
+	it("fills the first call in from its message_delta and envelope, never from a later call", async () => {
+		const log = capturingLog();
+		const h = harness({ log });
+		const t = await start(h, {
+			messages: [{ role: "user", content: "hello" }],
+		});
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "one" }], {
+				id: "msg_one",
+				usage: { input_tokens: 5, output_tokens: 1 },
+				deltaUsage: {
+					output_tokens: 3,
+					cache_read_input_tokens: 700,
+					cache_creation_input_tokens: 0,
+				},
+			}),
+		);
+		await reply(t.response);
+		t.query.emit(
+			// The envelope of the same call, after its message_stop.
+			assistantMessage([{ type: "text", text: "one" }], {
+				id: "msg_one",
+				stopReason: "end_turn",
+				usage: {
+					input_tokens: 5,
+					cache_read_input_tokens: null,
+					cache_creation_input_tokens: 40,
+				},
+			}),
+			...streamedMessage([{ type: "text", text: "two" }], {
+				id: "msg_two",
+				usage: { input_tokens: 9, cache_read_input_tokens: 1 },
+			}),
+			resultMessage(),
+		);
+		await settled(h);
+		await waitFor(() => log.turns(t.plan.turnId).length === 1);
+		expect(log.turns(t.plan.turnId)[0]?.data.firstCall).toEqual({
+			input: 5,
+			cacheRead: 700,
+			cacheCreation: 40,
 		});
 	});
 
