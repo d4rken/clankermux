@@ -52,7 +52,10 @@ import {
 	validateProviderPath,
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
-import { createClientAbortResponse } from "./handlers/client-abort-response";
+import {
+	createClientAbortResponse,
+	isClientAbortResponse,
+} from "./handlers/client-abort-response";
 import {
 	completeRateLimitProbe,
 	dropRateLimitProbeLease,
@@ -65,6 +68,7 @@ import {
 } from "./handlers/sdk-bridge-attempt";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
+import { trackPreHeadClientAbort } from "./pre-head-client-abort";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
@@ -92,7 +96,10 @@ import {
 	reportSdkBridgeInnerResponse,
 } from "./sdk-bridge-inner-outcome";
 import { isIngressRecordable } from "./should-record-request";
-import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
+import {
+	createSyntheticTerminalRecorder,
+	recordPreHeadClientAbort,
+} from "./synthetic-terminal-recorder";
 import { resolveZeroAccountsOutcome } from "./zero-accounts-terminal";
 
 export type { ProxyContext } from "./handlers";
@@ -317,6 +324,7 @@ export async function handleProxy(
 		});
 	};
 
+	const releaseAbortTracking = trackPreHeadClientAbort(requestMeta, req.signal);
 	try {
 		const response = await handleIngestedProxy(
 			ingress.context,
@@ -328,7 +336,24 @@ export async function handleProxy(
 			isInternal,
 			burstHoldTimingOverride,
 		);
-		retractIfNeverStarted(response.status);
+		// A disconnect after an upstream send went out is recorded as a request
+		// without an outcome; its summary replaces the retraction.
+		const recordedAbort =
+			isClientAbortResponse(response) &&
+			(await recordPreHeadClientAbort(
+				req,
+				url,
+				ctx,
+				requestMeta,
+				response,
+				ingress.context.finalBodyBuffer,
+				apiKeyId,
+				apiKeyName,
+			).catch((error) => {
+				log.warn("Could not record the client-closed request", error);
+				return false;
+			}));
+		if (!recordedAbort) retractIfNeverStarted(response.status);
 		// A streamed inner reply is reported when its body ends, so Claude Code
 		// must read the response this returns.
 		return reportSdkBridgeInnerResponse(requestMeta, withRequestId(response));
@@ -398,6 +423,8 @@ export async function handleProxy(
 		attachRequestId(error, requestMeta.id);
 		reportSdkBridgeInnerFailure(requestMeta, error);
 		throw error;
+	} finally {
+		releaseAbortTracking();
 	}
 }
 
@@ -1438,10 +1465,11 @@ async function handleIngestedProxy(
 	// because every per-ATTEMPT effect already happened before the terminal was
 	// reached (cooldowns applied, upstream bodies drained, probe leases settled,
 	// per-attempt diagnostics logged); only the aggregate request-level verdict
-	// changes, and there is no client left to receive it.
+	// changes, and there is no client left to receive it. The request is then
+	// recorded, if at all, as one without an outcome by handleProxy.
 	//
 	// Placement is load-bearing: AFTER the staged-body discard above (so a 499
-	// return, which emits no worker end/summary, cannot leak it) and BEFORE the
+	// return, which never reaches forwardToClient, cannot leak it) and BEFORE the
 	// attempted-accounts computation below (so it covers the needsReauth throw too).
 	if (req.signal.aborted) return createClientAbortResponse();
 

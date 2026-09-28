@@ -224,6 +224,7 @@ function makeContext(accounts: Account[], strategy: unknown): ProxyContext {
 			attachUsageSummary: mock(() => {}),
 			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
+			recordClientClosedBeforeHead: mock(() => {}),
 			onWorkerGone: mock(() => {}),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
@@ -237,6 +238,17 @@ function recordSyntheticCalls(ctx: ProxyContext): number {
 			recordSynthetic: { mock: { calls: unknown[] } };
 		}
 	).recordSynthetic.mock.calls.length;
+}
+
+/** The rows written for requests whose client left before any response. */
+function clientClosedRows(ctx: ProxyContext): Array<Record<string, unknown>> {
+	return (
+		ctx.requestRecorder as unknown as {
+			recordClientClosedBeforeHead: { mock: { calls: unknown[][] } };
+		}
+	).recordClientClosedBeforeHead.mock.calls.map(
+		(call) => call[0] as Record<string, unknown>,
+	);
 }
 
 function cooldownCalls(ctx: ProxyContext): number {
@@ -617,6 +629,8 @@ describe("client-abort terminals", () => {
 			"client_closed_request",
 		);
 		expect(recordSyntheticCalls(abortedCtx)).toBe(0);
+		// Nothing was sent upstream, so there is no request to record either.
+		expect(clientClosedRows(abortedCtx)).toHaveLength(0);
 		expect(calls).toBe(0);
 	}, 15_000);
 
@@ -675,6 +689,8 @@ describe("client-abort terminals", () => {
 			"client_closed_request",
 		);
 		expect(recordSyntheticCalls(abortedCtx)).toBe(0);
+		// Nothing was sent upstream, so there is no request to record either.
+		expect(clientClosedRows(abortedCtx)).toHaveLength(0);
 		expect(calls).toBe(0);
 	}, 15_000);
 
@@ -968,16 +984,24 @@ describe("client-abort terminals", () => {
 		).rejects.toThrow(/All accounts failed to proxy the request/);
 		// Both candidates attempted — the AbortError did not terminate the loop.
 		expect(calls).toBe(2);
+		// The client is still there: no client-closed row, no stamped attempt.
+		expect(clientClosedRows(ctx)).toHaveLength(0);
+		const { routingAttempts } = await import("./fixtures/routing-harness");
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(2);
+		for (const attempt of attempts) expect(attempt.status).not.toBe(499);
 	}, 15_000);
 
 	// ===== T5: the forced-account path =====
 
-	it("forced account + client disconnect → 499, and nothing is recorded", async () => {
-		// proxyForcedAccount now threads the client signal into its single upstream
-		// fetch. Without a matching abort check, that change would turn every
-		// client disconnect into a recorded forced-account failure (a local 502 plus
-		// a Request History row) — trading a leak for a new mis-classification.
-		const { proxyForcedAccount } = await import("./fixtures/routing-harness");
+	it("forced account + client disconnect after the send → 499, one row without an outcome, attempt stamped", async () => {
+		// proxyForcedAccount threads the client signal into its single upstream
+		// fetch, so a disconnect surfaces as a thrown AbortError. It must never
+		// become a recorded forced-account failure (a local 502 plus a failure
+		// row); the send was out, so the request is recorded without an outcome.
+		const { setForcedAccount, routingAttempts } = await import(
+			"./fixtures/routing-harness"
+		);
 		const account = makeApiKeyPool(1)[0];
 		const ctx = makeContext([account], makeRoundRobinStrategy());
 
@@ -985,36 +1009,29 @@ describe("client-abort terminals", () => {
 		globalThis.fetch = hangUntilAbortedFetch(state);
 
 		const controller = new AbortController();
-		const requestMeta = {
-			id: "forced-abort-1",
-			method: "POST",
-			path: "/v1/messages",
-			timestamp: Date.now(),
-			requestedModel: "claude-sonnet-4-5",
-			routing: null,
-		} as unknown as RequestMeta;
+		setForcedAccount(account.id);
+		try {
+			const pending = callHandleProxy(
+				makeRequest(controller.signal),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
 
-		const pending = proxyForcedAccount(
-			makeRequest(controller.signal),
-			new URL("https://proxy.local/v1/messages"),
-			account,
-			requestMeta,
-			await makeRequest().arrayBuffer(),
-			ctx,
-		);
+			await waitFor(() => state.calls === 1);
+			controller.abort();
 
-		await waitFor(() => state.calls === 1);
-		controller.abort();
+			const response = await pending;
 
-		const response = await pending;
-
-		expect(state.signal?.aborted).toBe(true);
-		expect(response.status).toBe(499);
-		const body = (await response.json()) as Record<string, unknown>;
-		expect((body.error as Record<string, unknown>).type).toBe(
-			"client_closed_request",
-		);
-		// Nothing recorded: no forced_account_unavailable row, no recorder begin.
+			expect(state.signal?.aborted).toBe(true);
+			expect(response.status).toBe(499);
+			const body = (await response.json()) as Record<string, unknown>;
+			expect((body.error as Record<string, unknown>).type).toBe(
+				"client_closed_request",
+			);
+		} finally {
+			setForcedAccount(null);
+		}
+		// No forced_account_unavailable row, no recorder begin, no failure row.
 		expect(
 			(
 				ctx.requestRecorder as unknown as {
@@ -1026,6 +1043,21 @@ describe("client-abort terminals", () => {
 			(ctx.dbOps as unknown as { saveRequest: { mock: { calls: unknown[] } } })
 				.saveRequest.mock.calls.length,
 		).toBe(0);
+		expect(recordSyntheticCalls(ctx)).toBe(0);
+		const rows = clientClosedRows(ctx);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			accountId: account.id,
+			responseStatus: 499,
+			failoverAttempts: 0,
+		});
+		// The transport failure the abort caused is overwritten by the stamp.
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0]).toMatchObject({
+			status: 499,
+			error: "client_closed_request",
+		});
 	}, 15_000);
 
 	it("forced account + disconnect while the token refresh fails → 499, and nothing is recorded", async () => {
@@ -1034,7 +1066,7 @@ describe("client-abort terminals", () => {
 		// that catch, a disconnect racing a failing refresh becomes a recorded
 		// forced-account failure (local 502 + Request History row) — the same
 		// defect the outer check fixed, one site short.
-		const { proxyForcedAccount } = await import("./fixtures/routing-harness");
+		const { setForcedAccount } = await import("./fixtures/routing-harness");
 		// OAuth account with an already-expired access token, so
 		// getValidAccessToken must go to the network to refresh.
 		const account = makeAccount({
@@ -1067,23 +1099,17 @@ describe("client-abort terminals", () => {
 			return new Response("unavailable", { status: 500 });
 		}) as never;
 
-		const requestMeta = {
-			id: "forced-token-abort-1",
-			method: "POST",
-			path: "/v1/messages",
-			timestamp: Date.now(),
-			requestedModel: "claude-sonnet-4-5",
-			routing: null,
-		} as unknown as RequestMeta;
-
-		const response = await proxyForcedAccount(
-			makeRequest(controller.signal),
-			new URL("https://proxy.local/v1/messages"),
-			account,
-			requestMeta,
-			await makeRequest().arrayBuffer(),
-			ctx,
-		);
+		setForcedAccount(account.id);
+		let response: Response;
+		try {
+			response = await callHandleProxy(
+				makeRequest(controller.signal),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+		} finally {
+			setForcedAccount(null);
+		}
 
 		// Non-vacuity: the refresh really was attempted and really did fail, and
 		// the request never reached upstream.
@@ -1096,7 +1122,7 @@ describe("client-abort terminals", () => {
 			"client_closed_request",
 		);
 		// Nothing recorded: no forced_account_unavailable row, no recorder begin,
-		// no DB write of any kind.
+		// no DB write of any kind, and no client-closed row — nothing was sent.
 		expect(
 			(
 				ctx.requestRecorder as unknown as {
@@ -1109,5 +1135,6 @@ describe("client-abort terminals", () => {
 				.saveRequest.mock.calls.length,
 		).toBe(0);
 		expect(recordSyntheticCalls(ctx)).toBe(0);
+		expect(clientClosedRows(ctx)).toHaveLength(0);
 	}, 15_000);
 });

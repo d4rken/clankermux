@@ -14,6 +14,11 @@ import {
 import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
+import {
+	noteBridgedDispatch,
+	noteUpstreamDispatch,
+	noteUpstreamSettled,
+} from "./pre-head-client-abort";
 import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	enforceOutgoingModel,
@@ -46,6 +51,7 @@ export async function recordLocalRoutingOutcome(
 	reportedModel: string | null = null,
 ): Promise<void> {
 	if (audit.id) {
+		noteUpstreamSettled(meta, audit.id);
 		// Semantic classification wins regardless of whether the body observer finished first.
 		await ctx.dbOps.routing.annotateAttempt(
 			audit.id,
@@ -272,6 +278,7 @@ export async function sendAuthorizedRequest(
 			!account.custom_endpoint
 		)
 			endQuotaUse = usageCache.beginQuotaUse(account.id);
+		if (transport) noteBridgedDispatch(meta);
 		response = transport
 			? await transport(request)
 			: await makeProxyRequest(
@@ -281,9 +288,20 @@ export async function sendAuthorizedRequest(
 					undefined,
 					undefined,
 					signal,
+					() =>
+						noteUpstreamDispatch(meta, {
+							attemptId: attempt.id,
+							account,
+							providerName: (getProvider(account.provider) ?? ctx.provider)
+								.name,
+							resolvedModel: target.upstreamModel,
+						}),
 				);
 		if (prepareResponse) response = await prepareResponse(response);
+		// An error status is the upstream's answer, even with its body unread.
+		if (!response.ok) noteUpstreamSettled(meta, attempt.id);
 	} catch (error) {
+		noteUpstreamSettled(meta, attempt.id);
 		endQuotaUse?.();
 		attempt.finished_at = Date.now();
 		attempt.status =
@@ -354,6 +372,7 @@ export async function sendAuthorizedRequest(
 	return observeRoutingResponse(
 		response,
 		async ({ reportedModel, error, modelRejected }) => {
+			noteUpstreamSettled(meta, attempt.id);
 			endQuotaUse?.();
 			if (modelRejected && attempt.kind === "upstream_send") {
 				await ctx.dbOps.routing.suppressModel(
@@ -392,5 +411,6 @@ import {
 	type DevinRequestProvenance,
 	getDevinReportedModel,
 	getDevinRequestProvenance,
+	getProvider,
 	usageCache,
 } from "@clankermux/providers";

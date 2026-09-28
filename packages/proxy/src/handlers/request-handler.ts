@@ -175,6 +175,9 @@ export async function prepareRequestBody(req: Request): Promise<{
  * @param headers - Request headers
  * @param createBodyStream - Function to create request body stream
  * @param hasBody - Whether the request has a body
+ * @param onDispatch - Called as the network fetch is initiated, and only if
+ *   its signal has not already aborted. A synthetic local response never
+ *   calls it.
  * @returns Promise resolving to the response
  */
 export async function makeProxyRequest(
@@ -184,6 +187,7 @@ export async function makeProxyRequest(
 	createBodyStream?: () => ReadableStream<Uint8Array> | undefined,
 	hasBody?: boolean,
 	signal?: AbortSignal,
+	onDispatch?: () => void,
 ): Promise<Response> {
 	// Synthetic local response: unwrap without fetch, no timeout needed
 	if (target instanceof Request) {
@@ -225,12 +229,12 @@ export async function makeProxyRequest(
 			chatGptCloudflareCookieJar.applyCookieHeader(targetUrl, mutableHeaders);
 			stripInternalControlHeaders(mutableHeaders);
 
-			const response = await fetch(
-				new Request(target, {
-					headers: mutableHeaders,
-					signal: effectiveSignal,
-				}),
-			);
+			const outgoing = new Request(target, {
+				headers: mutableHeaders,
+				signal: effectiveSignal,
+			});
+			if (!effectiveSignal.aborted) onDispatch?.();
+			const response = await fetch(outgoing);
 			chatGptCloudflareCookieJar.captureFromResponse(targetUrl, response);
 			return response;
 		}
@@ -242,6 +246,7 @@ export async function makeProxyRequest(
 		chatGptCloudflareCookieJar.applyCookieHeader(target, mutableHeaders);
 		stripInternalControlHeaders(mutableHeaders);
 
+		if (!effectiveSignal.aborted) onDispatch?.();
 		const response = await fetch(target, {
 			method,
 			headers: mutableHeaders,

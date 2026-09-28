@@ -695,3 +695,128 @@ describe("reasoning effort on alias attempts", () => {
 		expect(sent[0]?.body).toMatchObject({ model: "primary-model", ...effort });
 	});
 });
+describe("a client that leaves before the response starts", () => {
+	function aliasRequest(signal: AbortSignal) {
+		return new Request("https://proxy.test/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "alias:good",
+				max_tokens: 32,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+			signal,
+		});
+	}
+	async function attemptsFor(routing: RoutingRepository) {
+		const db = dbs.at(-1);
+		if (!db) throw new Error("missing database");
+		const row = db
+			.query("SELECT request_id FROM routing_attempts LIMIT 1")
+			.get() as { request_id: string };
+		return routing.listAttempts(row.request_id);
+	}
+
+	it("stamps the send it abandoned over the transport failure the abort caused", async () => {
+		const { ctx, accounts, routing } = await setup();
+		const client = new AbortController();
+		let sent = 0;
+		globalThis.fetch = mockFetch(async (input) => {
+			if (!(input instanceof Request) || !input.url.includes(".test"))
+				return new Response("unavailable", { status: 503 });
+			sent++;
+			const signal = input.signal;
+			return new Promise<Response>((_, reject) =>
+				signal.addEventListener("abort", () =>
+					reject(new DOMException("aborted", "AbortError")),
+				),
+			);
+		});
+		const pending = handleProxy(
+			aliasRequest(client.signal),
+			new URL("https://proxy.test/v1/messages"),
+			ctx,
+		);
+		while (sent === 0) await Bun.sleep(5);
+		client.abort();
+		expect((await pending).status).toBe(499);
+
+		expect(sent).toBe(1);
+		const rows = ctx.recorder.recordClientClosedBeforeHead.mock.calls;
+		expect(rows).toHaveLength(1);
+		expect(rows[0][0]).toMatchObject({
+			accountId: accounts[0].id,
+			model: "primary-model",
+			failoverAttempts: 0,
+		});
+		const [attempt] = await attemptsFor(routing);
+		expect(attempt).toMatchObject({
+			status: 499,
+			error: "client_closed_request",
+		});
+		expect(attempt.finished_at).not.toBeNull();
+	});
+
+	it("records the last stage's send, not the stage being selected, when the client leaves between stages", async () => {
+		const { ctx, accounts, routing } = await setup();
+		const client = new AbortController();
+		const select = ctx.strategy.select.bind(ctx.strategy);
+		let selections = 0;
+		ctx.strategy.select = (offered, meta) => {
+			selections++;
+			// The fallback stage's pool is the third account alone.
+			if (offered.some((a) => a.id === accounts[2].id)) client.abort();
+			const selected = select(offered, meta);
+			meta.routing = {
+				strategy: "session",
+				decision: `selection-${selections}`,
+				selectedAccountId: selected[0]?.id ?? null,
+				candidatesCount: selected.length,
+			};
+			return selected;
+		};
+		const seen = upstream(() =>
+			Response.json({ error: { type: "rate_limit_error" } }, { status: 429 }),
+		);
+		const response = await handleProxy(
+			aliasRequest(client.signal),
+			new URL("https://proxy.test/v1/messages"),
+			ctx,
+		);
+		expect(response.status).toBe(499);
+		expect(seen.map((s) => s.model)).toEqual([
+			"primary-model",
+			"primary-model",
+		]);
+
+		const rows = ctx.recorder.recordClientClosedBeforeHead.mock.calls;
+		expect(rows).toHaveLength(1);
+		const recorded = rows[0][0] as {
+			accountId: string;
+			model: string;
+			failoverAttempts: number;
+			routing: {
+				decision: string;
+				selectedAccountId: string;
+				candidatesCount: number;
+			} | null;
+		};
+		expect(recorded).toMatchObject({
+			accountId: accounts[1].id,
+			model: "primary-model",
+			failoverAttempts: 1,
+		});
+		// The primary stage's routing, although the fallback stage had already
+		// rewritten the request's own by the time the client left.
+		expect(recorded.routing).toMatchObject({
+			selectedAccountId: accounts[1].id,
+			candidatesCount: 2,
+		});
+		expect(recorded.routing?.decision).not.toBe(`selection-${selections}`);
+		// Both sends were answered before the client left: they keep their 429.
+		const attempts = await attemptsFor(routing);
+		expect(attempts.map((a) => a.status)).toEqual([429, 429]);
+		for (const attempt of attempts)
+			expect(attempt.error).not.toBe("client_closed_request");
+	});
+});

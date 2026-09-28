@@ -67,6 +67,7 @@ export type RecorderMock = {
 	begin: ReturnType<typeof mock>;
 	hasRecord: ReturnType<typeof mock>;
 	recordSynthetic: ReturnType<typeof mock>;
+	recordClientClosedBeforeHead: ReturnType<typeof mock>;
 	captureResponseChunk: ReturnType<typeof mock>;
 	finishTransport: ReturnType<typeof mock>;
 	attachUsageSummary: ReturnType<typeof mock>;
@@ -83,6 +84,7 @@ export function makeContext(
 		begin: mock(() => {}),
 		hasRecord: mock(recorderOverrides.hasRecord ?? (() => false)),
 		recordSynthetic: mock(() => {}),
+		recordClientClosedBeforeHead: mock(() => {}),
 		captureResponseChunk: mock(() => {}),
 		finishTransport: mock(() => {}),
 		attachUsageSummary: mock(() => {}),
