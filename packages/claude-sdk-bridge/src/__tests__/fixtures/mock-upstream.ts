@@ -14,6 +14,11 @@
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   last user text contains "THINK"         -> a signed thinking block before the rest
+//
+// A thinking block's signature binds it to the messages before it, as the
+// API's preserved-thinking check does: a later call whose history before
+// that block differs (cache breakpoints and string-or-block content aside)
+// is refused with a 400 "bound to a different conversation".
 //   a user text contains "LOOP<n>"          -> one tool_use per call until the
 //                                              conversation holds n tool_results
 //   last user text asks for a "detailed summary" (Claude Code's compaction
@@ -48,6 +53,8 @@ export interface MockRequest {
 	cache?: { read: number; creation: number };
 	/** Set when the caller dropped the connection while a SLOW answer was pending. */
 	abortedAfterMs?: number;
+	/** Signed thinking blocks in the history that matched their conversation. */
+	thinkingVerified?: number;
 }
 
 /** What a rule changes about a scripted 200 reply. */
@@ -81,6 +88,8 @@ export interface MockRule {
 export interface MockUpstream {
 	url: string;
 	requests: MockRequest[];
+	/** Every thinking signature issued, in order. */
+	signatures: string[];
 	addRule(rule: MockRule): void;
 	/**
 	 * The next `times` /v1/messages calls answer with this status and body;
@@ -100,6 +109,56 @@ export interface MockUpstream {
 }
 
 let toolSeq = 0;
+const issuedSignatures: string[] = [];
+
+/** The messages as the signature check compares them. */
+function conversationDigest(messages: Msg[]): string {
+	const normalized = messages.map((m) => ({
+		role: m.role,
+		content: blocksOf(m).map((block) => {
+			const { cache_control, ...rest } = block;
+			return rest;
+		}),
+	}));
+	return createHash("sha256")
+		.update(JSON.stringify(normalized))
+		.digest("hex")
+		.slice(0, 16);
+}
+
+const SIGNATURE = /^sig_mock_\d+_([0-9a-f]{16})$/;
+
+/** The API's 400 for signed thinking whose history changed, at `at` ("messages.2.content.0"). */
+export function thinkingBindingRefusal(at: string) {
+	return {
+		type: "error",
+		error: {
+			type: "invalid_request_error",
+			message: `${at}: Invalid \`signature\` in \`thinking\` block. The block is bound to a different conversation. Remove the block, or set \`thinking.block_binding.prefix_mismatch_behavior\` to "drop_block".`,
+		},
+	};
+}
+
+/** How many signed thinking blocks match; a refusal names the first that does not. */
+function checkThinking(messages: Msg[]): {
+	verified: number;
+	/** Where the first refused block is. */
+	refusal?: string;
+} {
+	let verified = 0;
+	for (const [i, m] of messages.entries()) {
+		if (m.role !== "assistant") continue;
+		for (const [j, block] of blocksOf(m).entries()) {
+			if (block.type !== "thinking") continue;
+			const bound = SIGNATURE.exec(String(block.signature))?.[1];
+			if (!bound) continue;
+			if (bound !== conversationDigest(messages.slice(0, i)))
+				return { verified, refusal: `messages.${i}.content.${j}` };
+			verified++;
+		}
+	}
+	return { verified };
+}
 
 function lastUser(messages: Msg[]): Msg | undefined {
 	return [...messages].reverse().find((m) => m.role === "user");
@@ -290,12 +349,15 @@ function script(
 		content.push({ type: "text", text: `echo: ${text.slice(-200)}` });
 	}
 
-	if (toolResults.length === 0 && /THINK/.test(text))
+	if (toolResults.length === 0 && /THINK/.test(text)) {
+		const signature = `sig_mock_${toolSeq}_${conversationDigest(body.messages)}`;
+		issuedSignatures.push(signature);
 		content.unshift({
 			type: "thinking",
 			thinking: "mock reasoning",
-			signature: `sig_mock_${toolSeq}`,
+			signature,
 		});
+	}
 
 	const stopReason =
 		shape.stopReason ??
@@ -490,6 +552,14 @@ export function startMockUpstream(): MockUpstream {
 				return Response.json(f.body, { status: f.status, headers: f.headers });
 			}
 			const b = body as ScriptBody;
+			const thinking = checkThinking(b.messages);
+			record.thinkingVerified = thinking.verified;
+			if (thinking.refusal) {
+				record.status = 400;
+				return Response.json(thinkingBindingRefusal(thinking.refusal), {
+					status: 400,
+				});
+			}
 			if (/SLOW/.test(textOf(blocksOf(lastUser(b.messages))))) {
 				const t0 = Date.now();
 				const aborted = await Promise.race([
@@ -543,6 +613,7 @@ export function startMockUpstream(): MockUpstream {
 	return {
 		url: `http://127.0.0.1:${server.port}`,
 		requests,
+		signatures: issuedSignatures,
 		addRule(rule) {
 			rules.push({ ...rule, used: 0 });
 		},

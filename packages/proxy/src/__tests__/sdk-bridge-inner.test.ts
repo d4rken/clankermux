@@ -157,6 +157,86 @@ describe("SDK bridge inner calls", () => {
 		expect(upstreamAccounts(harness)).toEqual([b.id, a.id]);
 	});
 
+	describe("refused thinking", () => {
+		const refusal = (message: string) => () =>
+			Response.json(
+				{ type: "error", error: { type: "invalid_request_error", message } },
+				{ status: 400 },
+			);
+		// The API's wording for signed thinking whose history changed.
+		const BINDING =
+			'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block".';
+		const MUST_START =
+			"messages.3: The final `assistant` message must start with a thinking block";
+		const withThinking = {
+			messages: [
+				{ role: "user", content: "go" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "t", signature: "old" },
+						{ type: "text", text: "ok" },
+					],
+				},
+				{ role: "user", content: "next" },
+			],
+		};
+		/** The first upstream call is refused with `message`, later ones answered. */
+		const refusedOnce = (message: string) => {
+			let calls = 0;
+			return () => (calls++ === 0 ? refusal(message)() : undefined);
+		};
+
+		// Claude Code drops thinking bound to another history itself and asks
+		// again, for good: the real-binary test "recovers a released park
+		// whose thinking was signed before the cut, with one refused call"
+		// pins that.
+		it("bound to a different conversation reaches Claude Code as the API's 400", async () => {
+			harness = await makeBridgeHarness([a, b, c], {
+				upstream: refusal(BINDING),
+			});
+
+			const res = await dispatchProxyRequest(
+				innerRequest(innerContext(), withThinking),
+				new URL("https://proxy.local/v1/messages"),
+				harness.ctx,
+				KEY,
+				"outer",
+			);
+
+			expect(res.status).toBe(400);
+			expect((await res.json()).error.message).toBe(BINDING);
+			expect(harness.upstreamKeys).toEqual([b.api_key ?? ""]);
+		});
+
+		it("for any other reason is retried without thinking, bridged or not", async () => {
+			for (const [message, request] of [
+				[MUST_START, () => innerRequest(innerContext(), withThinking)],
+				[
+					"messages.1.content.0: Invalid `signature` in `thinking` block",
+					() => innerRequest(innerContext(), withThinking),
+				],
+				[BINDING, () => messagesRequest(withThinking)],
+			] as const) {
+				harness?.restore();
+				harness = await makeBridgeHarness([a, b, c], {
+					upstream: refusedOnce(message),
+				});
+
+				const res = await dispatchProxyRequest(
+					request(),
+					new URL("https://proxy.local/v1/messages"),
+					harness.ctx,
+					KEY,
+					"outer",
+				);
+
+				expect(res.status).toBe(200);
+				expect(harness.upstreamKeys).toHaveLength(2);
+			}
+		});
+	});
+
 	it("reject a model the plan does not target, without an upstream call", async () => {
 		harness = await makeBridgeHarness([a, b, c]);
 

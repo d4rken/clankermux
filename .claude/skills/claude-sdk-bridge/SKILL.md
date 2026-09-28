@@ -280,6 +280,100 @@ made private, never deleted: no pid says whether a process still uses them.
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
 
+## Claude Code's environment block
+
+The inner listener removes Claude Code's environment block from every
+`/v1/messages` and `count_tokens` body before dispatch
+(`stripEnvironmentBlocks`, `environment-block.ts`). Nothing else in Claude
+Code's requests is changed.
+
+- **What it is.** The attachment pass Claude Code runs between tool calls
+  adds, once per session, `# Environment` / `You have been invoked in the
+  following environment:` with the child's working directory
+  (`<workRoot>/gen-<id>/cwd`), git state, platform, shell and OS, and
+  `# Environment update` / `Primary working directory: <new> (was <old>)`
+  whenever one changes. A released park resumed after a restart lands on a
+  new generation, so the update names both sandbox paths. The transcript
+  keeps the block, so every later call resends it. pi's model then reported
+  two working directories, pi's `<cwd>` and "the latest environment update"
+  (seen live 2026-09-27). The turn-start pass is skipped for
+  `verbatimPrompts`, so a turn's first call never has it.
+- **Why no option stops it.** Only `CLAUDE_CODE_SIMPLE` (`--bare`) and
+  internal fork flags skip it; bare mode replaces the `claude_code` preset
+  with `CWD: <path> Date: …` and takes API keys only.
+  `CLAUDE_CODE_DISABLE_ATTACHMENTS` and `excludeDynamicSections` leave it.
+  The directory is `realpath(process.cwd())`, so it cannot name the
+  client's path without that path existing on this host.
+- **Where it lands.** Always in a `role: "system"` message: bare for Opus
+  and Fable, wrapped in `<system-reminder>` for Sonnet, sharing its message
+  and often its text block with the model-identity reminder (which stays)
+  and with text the client typed alongside tool results. Never inside a
+  `tool_result` (parallel calls with image results included) and never in
+  the top-level `system`, drop policy included.
+- **Ownership.** Only a block whose working directory (both paths, for an
+  update) is one of this bridge's sandboxes, `<workRoot>/gen-<id>/cwd`
+  under the work root as configured or as resolved, is taken. The same
+  block naming any other directory is the client's (a pasted excerpt, a
+  flattened history) and passes untouched. Only system messages are
+  searched, bare paragraphs and `<system-reminder>` wraps alike; a wrap it
+  shares keeps its other paragraphs. A user message is the client's and is
+  never changed, even when it names this bridge's sandboxes. Trailing
+  whitespace and CRLF line ends are tolerated. Parks recovered from another
+  work root keep their old generation's block.
+- **Never an invalid request.** Only system messages are dropped, and not
+  one whose removal would leave no message or end the request on an
+  assistant turn. An emptied block's `cache_control` moves to the nearest earlier block that
+  can take one: block-form messages only (a string message is never turned
+  into blocks), passing over thinking and empty text, stopping at a block
+  that has its own. With none, the breakpoint goes.
+- **Deterministic.** The same input always gives the same output, so
+  earlier messages stay identical across calls, resumes and released-park
+  resumes: Opus 5.5 and Fable 5.1 refuse signed thinking whose history
+  changed ("bound to a different conversation"), and the mock upstream
+  does the same. A stripped body is parsed and re-serialised once per call;
+  an untouched one is forwarded byte for byte.
+- **Drift.** A text left in place that still names the work root next to
+  `Primary working directory:` or `# Environment` is logged once per turn
+  at debug, as is a user message holding text like it under the work
+  root: a new CLI wording
+  shows up there before anyone reads a transcript.
+- **The cut.** Thinking signed before this change is bound to a history
+  that held the block, so the first call of such a conversation after
+  promotion (in practice a released park, the only session that survives a
+  restart) gets the API's 400 "Invalid `signature` in `thinking` block. The
+  block is bound to a different conversation. …", which the mock upstream
+  returns word for word. Claude
+  Code drops the refused thinking from its session and asks again at once,
+  reading the cached prefix; it never sends that thinking again. The proxy
+  passes that one error ("bound to a different conversation") to a bridged
+  call instead of retrying it without thinking (`thinkingSignatureError`
+  in `proxyWithAccount`): its retry left the thinking in Claude Code's
+  session, and every later call was refused and retried (measured: three
+  refusals in three calls). Every other thinking error, bridged or not,
+  keeps the retry. Cost of the cut: one refused call per such
+  conversation, and the turn's `inner_error_count` counts it.
+- **Decision.** The user chose stripping on 2026-09-28 over leaving it
+  (and over a stable directory under the work root, which the model would
+  still read as a second cwd). Cited for it: Anthropic's LLM gateway guide
+  requires only the `anthropic-beta` and `anthropic-version` headers to be
+  forwarded unchanged, and #48236 and #52988. Its known cost: after a tool
+  round a request carries the model reminder without the environment
+  block, a pairing genuine Claude Code does not send.
+
+## Bumping the Agent SDK or Claude Code
+
+Run the real-binary suites (the two `real-claude*.integration.test.ts`
+files here and the server's `claude-sdk-bridge.integration.test.ts`) in the
+namespace before landing a bump. Where user namespaces are unavailable they
+skip, printing why, and prove nothing: run them on a host that has them.
+"never shows the model Claude Code's own directories, only the client's" in
+`real-claude.integration.test.ts` fails if a new CLI renders the
+environment block in a wording `stripEnvironmentBlocks` no longer matches;
+update the patterns and the unit fixtures in `environment-block.test.ts`
+from what the new binary sends. "recovers a released park whose thinking
+was signed before the cut, with one refused call" fails if Claude Code
+stops recovering refused thinking on its own.
+
 ## System prompt policies
 
 `system-prompt-policy.ts` picks the policy by harness, once per start turn,
@@ -490,6 +584,8 @@ still owns.
   talk to `fixtures/mock-upstream.ts`. Where user namespaces are unavailable
   (Ubuntu 24.04's AppArmor userns restriction) they skip with the reason
   printed. They never run with egress, and never against a real account.
+  The mock binds each signed thinking block to the history before it and
+  refuses a call whose history changed, as the API does.
 - Driving the bridge by script or by hand against a real account is forbidden;
   see "Never curl the Anthropic endpoint" in `.claude/CLAUDE.md`.
 

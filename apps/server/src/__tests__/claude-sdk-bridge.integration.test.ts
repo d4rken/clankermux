@@ -392,5 +392,29 @@ describe.skipIf(reason !== null)(
 				TIMEOUT,
 			);
 		}
+
+		it(
+			"lets Claude Code recover thinking refused after a cut, with one refused call",
+			async () => {
+				const s = await scenario("thinkingCutover");
+				expect(s.signedBeforeCut).toBe(1);
+				expect(s.replies).toEqual([
+					{ status: 200, answer: "done: GW-CUTOVER-RESULT" },
+					{ status: 200, answer: "echo: after the cut" },
+					{ status: 200, answer: "echo: and again" },
+				]);
+				const calls = s.afterCut as Array<{
+					status: number;
+					carriesOld: boolean;
+				}>;
+				// The proxy hands the 400 to Claude Code, which drops the thinking
+				// for good: one refused call, never the old thinking again.
+				expect(calls[0]).toMatchObject({ status: 400, carriesOld: true });
+				expect(calls.length).toBeGreaterThanOrEqual(4);
+				for (const call of calls.slice(1))
+					expect(call).toMatchObject({ status: 200, carriesOld: false });
+			},
+			TIMEOUT,
+		);
 	},
 );

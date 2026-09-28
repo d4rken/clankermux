@@ -4,6 +4,7 @@ import {
 	type SdkBridgeInnerOutcome,
 	sdkBridgeWireModel,
 } from "@clankermux/types";
+import { stripEnvironmentBlocks } from "./environment-block";
 import type { BridgeLog } from "./types";
 
 interface TokenEntry {
@@ -13,6 +14,8 @@ interface TokenEntry {
 	/** Settles once `beforeFirstDispatch` has run; its rejection refuses every call. */
 	gate: Promise<void> | null;
 	beforeFirstDispatch: (() => Promise<void>) | null;
+	/** Whether this turn has logged an environment block it left in place. */
+	environmentNoted: boolean;
 }
 
 export interface InnerRegistration {
@@ -73,6 +76,8 @@ export class InnerListener {
 			log: BridgeLog;
 			/** Largest body an inner call may send, read per call. */
 			maxBodyBytes: () => number;
+			/** The bridge's work root, as configured and as resolved. */
+			workRoots: readonly string[];
 		},
 	) {}
 
@@ -161,6 +166,7 @@ export class InnerListener {
 			revoked: false,
 			gate: null,
 			beforeFirstDispatch: hooks.beforeFirstDispatch ?? null,
+			environmentNoted: false,
 		};
 		this.tokens.set(key, entry);
 		return {
@@ -227,10 +233,12 @@ export class InnerListener {
 		// here and the dispatch, so a call that passes this check is the turn's.
 		if (entry.revoked || this.tokens.get(key) !== entry) return unauthorized();
 		if (!bytes) return this.tooLarge(entry, limit, null);
-		const body = new TextDecoder().decode(bytes);
+		let body = new TextDecoder().decode(bytes);
+		let parsed: unknown;
 		let model: unknown;
 		try {
-			model = (JSON.parse(body) as { model?: unknown }).model;
+			parsed = JSON.parse(body);
+			model = (parsed as { model?: unknown }).model;
 		} catch {
 			this.report(entry, {
 				requestId: "",
@@ -253,6 +261,25 @@ export class InnerListener {
 				accountId: null,
 			});
 			return jsonError(400, "invalid_request_error", message);
+		}
+		// The child's own sandbox is no context for a model driving the
+		// client's tools.
+		const environment = stripEnvironmentBlocks(parsed, {
+			roots: this.opts.workRoots,
+		});
+		if (environment.changed) body = JSON.stringify(parsed);
+		if (
+			(environment.drift || environment.inUserMessages) &&
+			!entry.environmentNoted
+		) {
+			entry.environmentNoted = true;
+			this.opts.log.debug(
+				`SDK bridge turn ${entry.context.turnId}: Claude Code's environment block left in a model call (${
+					environment.drift
+						? "a text under the work root looks like it but did not match"
+						: "a user message holds text like it, which is the client's"
+				})`,
+			);
 		}
 		const headers = new Headers();
 		for (const [name, value] of req.headers) {

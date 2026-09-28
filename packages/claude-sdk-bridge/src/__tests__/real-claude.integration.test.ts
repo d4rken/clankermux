@@ -699,6 +699,140 @@ describe.skipIf(reason !== null)(
 			TIMEOUT,
 		);
 
+		type ChildPathsRun = {
+			resumedReleased: string;
+			restartReleased: string;
+			stops: unknown[];
+			historyModes: unknown[];
+			tamperedHistory: { status: number; message: string };
+			calls: Array<{
+				status: number | null;
+				thinkingVerified: number;
+				excerptArrived: boolean;
+				leaks: string[];
+				clientCwdInSystem: boolean;
+			}>;
+		};
+
+		/** The childPathsInContext run of one model family, checked to have run as intended. */
+		async function childPathsRun(family: string): Promise<ChildPathsRun> {
+			const run = scenario(await results(), "childPathsInContext")[
+				family
+			] as ChildPathsRun;
+			// Two live tool rounds, a park released and resumed in process,
+			// one resumed after a restart and calling again, two more turns,
+			// and parallel calls answered with an image, text and typed text.
+			expect(run.resumedReleased).toBe("released");
+			expect(run.restartReleased).toBe("released");
+			expect(run.stops).toEqual([
+				"tool_use",
+				"end_turn",
+				"tool_use",
+				"end_turn",
+				"tool_use",
+				"tool_use",
+				"end_turn",
+				"end_turn",
+				"end_turn",
+				"tool_use",
+				"end_turn",
+			]);
+			expect(run.historyModes).toEqual([
+				"fresh",
+				"resume",
+				"resume",
+				"resume",
+				"resume",
+				"resume",
+			]);
+			expect(run.calls.length).toBeGreaterThanOrEqual(11);
+			return run;
+		}
+
+		// Also the CLI-bump guard: a new wording of Claude Code's environment
+		// block that the listener no longer recognises shows up here as a leak.
+		it(
+			"never shows the model Claude Code's own directories, only the client's",
+			async () => {
+				for (const family of ["sonnet", "opus", "fable", "drop"]) {
+					const run = await childPathsRun(family);
+					for (const call of run.calls) {
+						expect(call.status).toBe(200);
+						expect(call.leaks).toEqual([]);
+						// pi's prompt names its cwd; the drop policy sends none.
+						expect(call.clientCwdInSystem).toBe(family !== "drop");
+					}
+					// A block the client pasted, naming its own directory, stays.
+					expect(run.calls.at(-1)?.excerptArrived).toBe(true);
+				}
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"keeps signed thinking bound to its conversation across resumes, released parks and a restart",
+			async () => {
+				for (const family of ["opus", "fable"]) {
+					const run = await childPathsRun(family);
+					for (const call of run.calls) expect(call.status).toBe(200);
+					// Every call after the first carried the earlier turns' thinking,
+					// each checked against the history before it.
+					expect(run.calls[0]?.thinkingVerified).toBe(0);
+					for (const call of run.calls.slice(1))
+						expect(call.thinkingVerified).toBeGreaterThan(0);
+					expect(run.calls.at(-1)?.thinkingVerified).toBe(4);
+					// Control: the check refuses a changed history.
+					expect(run.tamperedHistory).toEqual({
+						status: 400,
+						message: expect.stringContaining(
+							"bound to a different conversation",
+						),
+					});
+				}
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"recovers a released park whose thinking was signed before the cut, with one refused call",
+			async () => {
+				const s = scenario(await results(), "thinkingCutover");
+				for (const family of ["opus", "fable"]) {
+					const run = s[family] as {
+						released: string;
+						signedBeforeCut: number;
+						replies: Array<{ status: number; stop: string; text: string }>;
+						turn: { status: string; counters: Record<string, number> };
+						afterCut: Array<{
+							status: number | null;
+							carriesOld: boolean;
+							cacheRead: number | null;
+						}>;
+					};
+					expect(run.released).toBe("released");
+					expect(run.signedBeforeCut).toBe(1);
+					expect(run.replies).toEqual([
+						{ status: 200, stop: "end_turn", text: "done: CUTOVER-RESULT" },
+						{ status: 200, stop: "end_turn", text: "echo: THINK and then" },
+						{ status: 200, stop: "end_turn", text: "echo: last" },
+					]);
+					expect(run.turn.status).toBe("completed");
+					expect(run.turn.counters.innerErrors).toBe(1);
+					// Claude Code drops the refused thinking and asks again at once,
+					// reading the cached prefix; it never sends that thinking again.
+					const [refused, retried, ...later] = run.afterCut;
+					expect(refused).toMatchObject({ status: 400, carriesOld: true });
+					expect(retried?.status).toBe(200);
+					expect(retried?.carriesOld).toBe(false);
+					expect(retried?.cacheRead).toBeGreaterThan(0);
+					expect(later.length).toBeGreaterThanOrEqual(2);
+					for (const call of later)
+						expect(call).toMatchObject({ status: 200, carriesOld: false });
+				}
+			},
+			TIMEOUT,
+		);
+
 		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {

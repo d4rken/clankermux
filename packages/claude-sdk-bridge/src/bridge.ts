@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { lstatSync, readdirSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { Logger } from "@clankermux/logger";
 import {
@@ -148,6 +148,15 @@ export interface ClaudeSdkBridge extends SdkBridgeTransport {
 	 */
 	dispose(): Promise<void>;
 	status(): SdkBridgeStatus;
+}
+
+/** `root` resolved, or as given while it cannot be resolved. */
+function realWorkRoot(root: string): string {
+	try {
+		return realpathSync(root);
+	} catch {
+		return root;
+	}
 }
 
 function isUuid(value: string): boolean {
@@ -475,6 +484,8 @@ export function createClaudeSdkBridge(
 		dispatchInner: deps.dispatchInner,
 		log,
 		maxBodyBytes: () => limits().maxHistoryBytes,
+		// Claude Code reports its working directory as a real path.
+		workRoots: [...new Set([deps.workRoot, realWorkRoot(deps.workRoot)])],
 	});
 	const spawner = new ProcessGroupSpawner((pid, text) =>
 		log.debug(`[claude ${pid}] ${text.trimEnd()}`),

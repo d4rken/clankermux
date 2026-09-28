@@ -46,7 +46,8 @@ import {
 	READ_TOOL,
 	silentLog,
 } from "./fake-sdk";
-import { startMockUpstream } from "./mock-upstream";
+import { startMockUpstream, thinkingBindingRefusal } from "./mock-upstream";
+import { loadPiPromptFixture } from "./pi-prompt-fixtures";
 
 type Block = { type: string; [key: string]: unknown };
 type Msg = { role: "user" | "assistant"; content: string | Block[] };
@@ -1626,6 +1627,463 @@ await scenario("releasedWithUnforwardedCall", async () => {
 		};
 	} finally {
 		await on.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("childPathsInContext", async () => {
+	// A pi conversation whose prompt names the client's own directory: a
+	// fresh turn and a resumed one, each with a tool round, a released park
+	// answered in process and after a restart onto a new generation, and two
+	// more turns after that. Every user turn draws signed thinking, which the
+	// mock refuses once the history before it changes.
+	const clientCwd = "/home/user/projects/widget";
+	const system = loadPiPromptFixture("0.87", "stock").system;
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-child-paths-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const limits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	// A client pasting an environment block of its own: never Claude Code's.
+	const excerpt = [
+		"<system-reminder>",
+		"# Environment",
+		"You have been invoked in the following environment: ",
+		" - Primary working directory: /home/alice/project",
+		" - Platform: darwin",
+		"</system-reminder>",
+	].join("\n");
+	const png =
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	const run = async (model: string, harness = "pi") => {
+		let on = makeBridge(limits, root, parkRepo);
+		await on.ready();
+		const from = mock.requests.length;
+		const header = {
+			clientHarness: harness,
+			piPromptVersion: harness === "pi" ? "0.87" : null,
+			model,
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const req = (messages: Msg[]) =>
+			new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					stream: true,
+					system: harness === "pi" ? system : "You are opencode.",
+					tools: [READ_TOOL],
+					messages,
+					max_tokens: 1024,
+				}),
+			});
+		const start = async (messages: Msg[]) => {
+			const p = {
+				...plan(),
+				candidates: [
+					{
+						accountId: "acct-a",
+						provider: "anthropic" as const,
+						upstreamModel: model,
+					},
+				],
+			};
+			const r = await read(
+				on.startTurn({
+					request: req(messages),
+					plan: p,
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			return { ...r, turnId: p.turnId };
+		};
+		const reply = (turnId: string, messages: Msg[]) =>
+			read(
+				on.continueTurn({
+					turnId,
+					request: req(messages),
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+		const whenReleased = async (turnId: string) => {
+			const until = Date.now() + 20_000;
+			while (
+				repo.turns.get(turnId)?.status !== "released" &&
+				Date.now() < until
+			)
+				await Bun.sleep(50);
+			return repo.turns.get(turnId)?.status;
+		};
+		/** Answers the reply's one call with `result`; returns the next reply. */
+		const answerCall = async (
+			history: Msg[],
+			turnId: string,
+			r: Reply,
+			result: string,
+		) => {
+			const use = (r.content ?? []).find((b) => b.type === "tool_use");
+			history.push(
+				{ role: "assistant", content: r.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(use?.id),
+							content: result,
+						},
+					],
+				},
+			);
+			return reply(turnId, history);
+		};
+		const history: Msg[] = [{ role: "user", content: "THINK TOOL where am I" }];
+		const steps: Record<string, unknown> = {};
+		try {
+			const first = await start(history);
+			const firstDone = await answerCall(
+				history,
+				first.turnId,
+				first,
+				"LIVE-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: firstDone.content as Block[] },
+				{ role: "user", content: "THINK TOOL read resumed.txt" },
+			);
+			const resumed = await start(history);
+			steps.resumedReleased = await whenReleased(resumed.turnId);
+			const resumedDone = await answerCall(
+				history,
+				resumed.turnId,
+				resumed,
+				"RELEASED-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: resumedDone.content as Block[] },
+				{ role: "user", content: "THINK TOOL read restarted.txt" },
+			);
+			const beforeRestart = await start(history);
+			steps.restartReleased = await whenReleased(beforeRestart.turnId);
+			await on.dispose();
+			on = makeBridge(limits, root, parkRepo);
+			await on.ready();
+			// AGAIN makes the model call once more after the resume.
+			const again = await answerCall(
+				history,
+				beforeRestart.turnId,
+				beforeRestart,
+				"AGAIN-RESTARTED-RESULT",
+			);
+			const last = await answerCall(
+				history,
+				beforeRestart.turnId,
+				again,
+				"FINAL-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: last.content as Block[] },
+				{ role: "user", content: "THINK after the restart" },
+			);
+			const after = await start(history);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: after.content as Block[] },
+				{ role: "user", content: `and once more\n\n${excerpt}` },
+			);
+			const once = await start(history);
+			await settled(on);
+			// Parallel calls answered with an image result, a text one and
+			// typed text.
+			history.push(
+				{ role: "assistant", content: once.content as Block[] },
+				{ role: "user", content: "PARALLEL read both" },
+			);
+			const parallel = await start(history);
+			const uses = (parallel.content ?? []).filter(
+				(b) => b.type === "tool_use",
+			);
+			history.push(
+				{ role: "assistant", content: parallel.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(uses[0]?.id),
+							content: [
+								{ type: "text", text: "IMAGE-RESULT" },
+								{
+									type: "image",
+									source: {
+										type: "base64",
+										media_type: "image/png",
+										data: png,
+									},
+								},
+							],
+						},
+						{
+							type: "tool_result",
+							tool_use_id: String(uses[1]?.id),
+							content: "TEXT-RESULT",
+						},
+						{ type: "text", text: "TYPED-WITH-RESULTS" },
+					],
+				},
+			);
+			const parallelDone = await reply(parallel.turnId, history);
+			await settled(on);
+			steps.stops = [
+				first.stop,
+				firstDone.stop,
+				resumed.stop,
+				resumedDone.stop,
+				beforeRestart.stop,
+				again.stop,
+				last.stop,
+				after.stop,
+				once.stop,
+				parallel.stop,
+				parallelDone.stop,
+			];
+			steps.historyModes = [
+				first.turnId,
+				resumed.turnId,
+				beforeRestart.turnId,
+				after.turnId,
+				once.turnId,
+				parallel.turnId,
+			].map((id) => repo.turns.get(id)?.historyMode);
+		} finally {
+			await on.dispose();
+		}
+		const calls = mock.requests
+			.slice(from)
+			.filter((q) => q.path.startsWith("/v1/messages"));
+		// Control: the last call again, with its first message changed.
+		const tampered = structuredClone(calls.at(-1)?.body) as {
+			messages: Msg[];
+		};
+		tampered.messages[0] = { role: "user", content: "THINK elsewhere" };
+		const refused = await mock.handle(
+			new Request(`${mock.url}/v1/messages`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(tampered),
+			}),
+		);
+		// The control is this script's call, not Claude Code's.
+		mock.requests.pop();
+		return {
+			...steps,
+			tamperedHistory: {
+				status: refused.status,
+				message: ((await refused.json()) as { error?: { message?: string } })
+					.error?.message,
+			},
+			calls: calls.map((q) => {
+				const text = JSON.stringify(q.body);
+				const body = q.body as { system?: Array<{ text?: string }> };
+				const systemText = (body.system ?? []).map((b) => b.text).join("");
+				// Each line of the body naming the child's directories.
+				const leaks = [
+					...new Set(
+						text
+							.split(/\\n|"/)
+							.filter((line) => line.includes(root))
+							.map((line) => line.slice(0, 300)),
+					),
+				];
+				return {
+					status: q.status ?? null,
+					thinkingVerified: q.thinkingVerified ?? 0,
+					excerptArrived: text.includes(JSON.stringify(excerpt).slice(1, -1)),
+					leaks,
+					clientCwdInSystem: systemText.includes(`<cwd>\n${clientCwd}\n</cwd>`),
+				};
+			}),
+		};
+	};
+	try {
+		return {
+			root,
+			// Claude Code renders its own context differently per model family.
+			sonnet: await run(MODEL),
+			opus: await run("claude-opus-5-5"),
+			fable: await run("claude-fable-5-1"),
+			// The drop policy: the client's system text never reaches the model.
+			drop: await run("claude-opus-5-5", "opencode"),
+		};
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("thinkingCutover", async () => {
+	// Thinking signed before the environment block was stripped is bound to
+	// a history that held the block, so the API refuses it once the block is
+	// gone: here, every signature the conversation drew before the cut is
+	// refused from then on. The park is released before the cut and resumed
+	// after it, as a promotion would leave it.
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-cutover-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const limits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const run = async (model: string) => {
+		const on = makeBridge(limits, root, parkRepo);
+		await on.ready();
+		const header = {
+			model,
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const req = (messages: Msg[]) =>
+			new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					stream: true,
+					system: "You are opencode.",
+					tools: [READ_TOOL],
+					messages,
+					max_tokens: 1024,
+				}),
+			});
+		const start = async (messages: Msg[]) => {
+			const p = {
+				...plan(),
+				candidates: [
+					{
+						accountId: "acct-a",
+						provider: "anthropic" as const,
+						upstreamModel: model,
+					},
+				],
+			};
+			const r = await read(
+				on.startTurn({
+					request: req(messages),
+					plan: p,
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			return { ...r, turnId: p.turnId };
+		};
+		const from = mock.requests.length;
+		const signedFrom = mock.signatures.length;
+		try {
+			const history: Msg[] = [
+				{ role: "user", content: "THINK TOOL read cutover.txt" },
+			];
+			const parked = await start(history);
+			const until = Date.now() + 20_000;
+			while (
+				repo.turns.get(parked.turnId)?.status !== "released" &&
+				Date.now() < until
+			)
+				await Bun.sleep(50);
+			const released = repo.turns.get(parked.turnId)?.status;
+			const cut = mock.requests.length;
+			const old = mock.signatures.slice(signedFrom);
+			for (const signature of old)
+				mock.addRule({
+					marker: signature,
+					fail: {
+						status: 400,
+						body: thinkingBindingRefusal("messages.2.content.0"),
+					},
+				});
+			const use = (parked.content ?? []).find((b) => b.type === "tool_use");
+			history.push(
+				{ role: "assistant", content: parked.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(use?.id),
+							content: "CUTOVER-RESULT",
+						},
+					],
+				},
+			);
+			const resumed = await read(
+				on.continueTurn({
+					turnId: parked.turnId,
+					request: req(history),
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: resumed.content as Block[] },
+				{ role: "user", content: "THINK and then" },
+			);
+			const next = await start(history);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: next.content as Block[] },
+				{ role: "user", content: "last" },
+			);
+			const last = await start(history);
+			await settled(on);
+			const row = repo.turns.get(parked.turnId);
+			return {
+				released,
+				signedBeforeCut: old.length,
+				replies: [resumed, next, last].map((r) => ({
+					status: r.status,
+					stop: r.stop,
+					text: (r.content ?? [])
+						.filter((b) => b.type === "text")
+						.map((b) => String(b.text))
+						.join(""),
+				})),
+				turn: { status: row?.status, counters: row?.counters },
+				// Each model call from the cut on: its status, and whether it
+				// still carried thinking signed before the cut.
+				afterCut: mock.requests
+					.slice(cut)
+					.filter((q) => q.path.startsWith("/v1/messages"))
+					.map((q) => ({
+						status: q.status ?? null,
+						carriesOld: old.some((sig) => JSON.stringify(q.body).includes(sig)),
+						cacheRead: q.cache?.read ?? null,
+					})),
+				callsBeforeCut: mock.requests
+					.slice(from, cut)
+					.filter((q) => q.path.startsWith("/v1/messages")).length,
+			};
+		} finally {
+			await on.dispose();
+		}
+	};
+	try {
+		return {
+			opus: await run("claude-opus-5-5"),
+			fable: await run("claude-fable-5-1"),
+		};
+	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
 });

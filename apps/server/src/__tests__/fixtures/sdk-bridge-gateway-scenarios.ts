@@ -22,6 +22,7 @@ import { clearProviderOverloadCooldown } from "@clankermux/proxy";
 import {
 	type MockRequest,
 	startMockUpstream,
+	thinkingBindingRefusal,
 } from "../../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/mock-upstream";
 import { type Gateway, startGateway } from "./sdk-bridge-gateway";
 
@@ -833,6 +834,46 @@ for (const [name, status, body, headers] of [
 			),
 		};
 	});
+
+// Thinking signed before a release that changed what Claude Code's history
+// looks like upstream is refused from then on (the mock refuses every
+// signature the conversation drew before the cut).
+await withGateway("thinkingCutover", async (gw, accounts) => {
+	const c = new Conversation("responses", "cutover-responses");
+	c.user("THINK TOOL via gateway before the cut");
+	const signedFrom = mock.signatures.length;
+	const r1 = asReply(await c.send(gw));
+	const old = mock.signatures.slice(signedFrom);
+	for (const signature of old)
+		mock.addRule({
+			marker: signature,
+			fail: {
+				status: 400,
+				body: thinkingBindingRefusal("messages.2.content.0"),
+			},
+		});
+	const cut = mock.requests.length;
+	c.absorb(r1, "GW-CUTOVER-RESULT");
+	const r2 = asReply(await c.send(gw));
+	c.absorb(r2);
+	c.user("after the cut");
+	const r3 = asReply(await c.send(gw));
+	c.absorb(r3);
+	c.user("and again");
+	const r4 = asReply(await c.send(gw));
+	return {
+		signedBeforeCut: old.length,
+		replies: [r2, r3, r4].map((r) => ({ status: r.status, answer: r.answer })),
+		// Each upstream call from the cut on, and whether it still carried
+		// thinking signed before it.
+		afterCut: messagesCalls(cut).map((q) => ({
+			account: accountOf(accounts, q),
+			status: q.status ?? null,
+			carriesOld: old.some((sig) => JSON.stringify(q.body).includes(sig)),
+		})),
+		turns: await finishedTurnRows(gw),
+	};
+});
 
 results.upstreamPaths = [
 	...new Set(mock.requests.map((q) => `${q.method} ${q.path}`)),
