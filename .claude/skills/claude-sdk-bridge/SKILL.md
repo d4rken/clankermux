@@ -314,15 +314,15 @@ Code's requests is changed.
   update) is one of this bridge's sandboxes, `<workRoot>/gen-<id>/cwd`
   under the work root as configured or as resolved, is taken. The same
   block naming any other directory is the client's (a pasted excerpt, a
-  flattened history) and passes untouched. A paragraph is taken bare only
-  in a system message, and inside a `<system-reminder>` wrap in any
-  message; a wrap it shares keeps its other paragraphs. Trailing
+  flattened history) and passes untouched. Only system messages are
+  searched, bare paragraphs and `<system-reminder>` wraps alike; a wrap it
+  shares keeps its other paragraphs. A user message is the client's and is
+  never changed, even when it names this bridge's sandboxes. Trailing
   whitespace and CRLF line ends are tolerated. Parks recovered from another
   work root keep their old generation's block.
 - **Never an invalid request.** Only system messages are dropped, and not
   one whose removal would leave no message or end the request on an
-  assistant turn; a user message the block would empty keeps it. An
-  emptied block's `cache_control` moves to the nearest earlier block that
+  assistant turn. An emptied block's `cache_control` moves to the nearest earlier block that
   can take one: block-form messages only (a string message is never turned
   into blocks), passing over thinking and empty text, stopping at a block
   that has its own. With none, the breakpoint goes.
@@ -334,19 +334,24 @@ Code's requests is changed.
   an untouched one is forwarded byte for byte.
 - **Drift.** A text left in place that still names the work root next to
   `Primary working directory:` or `# Environment` is logged once per turn
-  at debug, as is a user message that kept the block: a new CLI wording
+  at debug, as is a user message holding text like it under the work
+  root: a new CLI wording
   shows up there before anyone reads a transcript.
 - **The cut.** Thinking signed before this change is bound to a history
   that held the block, so the first call of such a conversation after
   promotion (in practice a released park, the only session that survives a
-  restart) gets the 400 "Invalid `signature` in `thinking` block". Claude
+  restart) gets the API's 400 "Invalid `signature` in `thinking` block. The
+  block is bound to a different conversation. …", which the mock upstream
+  returns word for word. Claude
   Code drops the refused thinking from its session and asks again at once,
   reading the cached prefix; it never sends that thinking again. The proxy
-  passes that 400 to a bridged call instead of retrying it without
-  thinking (`proxyWithAccount`): its retry left the thinking in Claude
-  Code's session, and every later call was refused and retried (measured:
-  three refusals in three calls). Cost of the cut: one refused call per
-  such conversation, and the turn's `inner_error_count` counts it.
+  passes that one error ("bound to a different conversation") to a bridged
+  call instead of retrying it without thinking (`thinkingSignatureError`
+  in `proxyWithAccount`): its retry left the thinking in Claude Code's
+  session, and every later call was refused and retried (measured: three
+  refusals in three calls). Every other thinking error, bridged or not,
+  keeps the retry. Cost of the cut: one refused call per such
+  conversation, and the turn's `inner_error_count` counts it.
 - **Decision.** The user chose stripping on 2026-09-28 over leaving it
   (and over a stable directory under the work root, which the model would
   still read as a second cwd). Cited for it: Anthropic's LLM gateway guide
