@@ -157,6 +157,73 @@ describe("SDK bridge inner calls", () => {
 		expect(upstreamAccounts(harness)).toEqual([b.id, a.id]);
 	});
 
+	describe("refused thinking", () => {
+		const refusal = () =>
+			Response.json(
+				{
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message:
+							"messages.1.content.0: Invalid `signature` in `thinking` block",
+					},
+				},
+				{ status: 400 },
+			);
+		const withThinking = {
+			messages: [
+				{ role: "user", content: "go" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "t", signature: "old" },
+						{ type: "text", text: "ok" },
+					],
+				},
+				{ role: "user", content: "next" },
+			],
+		};
+
+		// Claude Code drops the thinking itself and asks again, for good: the
+		// real-binary test "recovers a released park whose thinking was
+		// signed before the cut, with one refused call" pins that.
+		it("reaches Claude Code as the API's 400, with no retry of its own", async () => {
+			harness = await makeBridgeHarness([a, b, c], { upstream: refusal });
+
+			const res = await dispatchProxyRequest(
+				innerRequest(innerContext(), withThinking),
+				new URL("https://proxy.local/v1/messages"),
+				harness.ctx,
+				KEY,
+				"outer",
+			);
+
+			expect(res.status).toBe(400);
+			expect((await res.json()).error.message).toContain(
+				"Invalid `signature` in `thinking` block",
+			);
+			expect(harness.upstreamKeys).toEqual([b.api_key ?? ""]);
+		});
+
+		it("is still retried without thinking for an ordinary request", async () => {
+			let calls = 0;
+			harness = await makeBridgeHarness([a, b, c], {
+				upstream: () => (calls++ === 0 ? refusal() : undefined),
+			});
+
+			const res = await dispatchProxyRequest(
+				messagesRequest(withThinking),
+				new URL("https://proxy.local/v1/messages"),
+				harness.ctx,
+				KEY,
+				"outer",
+			);
+
+			expect(res.status).toBe(200);
+			expect(harness.upstreamKeys).toHaveLength(2);
+		});
+	});
+
 	it("reject a model the plan does not target, without an upstream call", async () => {
 		harness = await makeBridgeHarness([a, b, c]);
 

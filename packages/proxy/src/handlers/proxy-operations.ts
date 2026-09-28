@@ -51,6 +51,7 @@ import {
 	type FullUsageData,
 	getChatContext,
 	getNativeResponsesMetaContext,
+	getSdkBridgeInnerMetaContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 	PROVIDER_NAMES,
@@ -1828,11 +1829,17 @@ export async function proxyWithAccount(
 		let rawResponse = await forwardAttempt(transformedRequest);
 		liveUpstream = rawResponse;
 
-		// Check if this is a Claude provider and we got an invalid thinking signature error
+		// Check if this is a Claude provider and we got an invalid thinking signature error.
+		// A bridged Claude Code call gets the 400 itself: Claude Code drops the
+		// refused thinking from its session and asks again, where a retry here
+		// would leave it to be refused on every later call ("recovers a released
+		// park whose thinking was signed before the cut, with one refused call"
+		// in claude-sdk-bridge's real-claude.integration.test.ts).
 		const isClaudeProvider =
 			provider.name === "anthropic" || account.provider === "claude-oauth";
 		if (
 			isClaudeProvider &&
+			!getSdkBridgeInnerMetaContext(requestMeta) &&
 			(await isInvalidThinkingSignatureError(rawResponse))
 		) {
 			log.info(
