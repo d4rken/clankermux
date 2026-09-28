@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	setSystemTime,
+} from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import {
 	clearGrokSubscriptionUserIdCache,
@@ -191,7 +198,10 @@ describe("fetchGrokSubscriptionUsage", () => {
 		});
 	}
 
+	// The fetcher judges the billing period against the clock, and
+	// `billingBody` builds that period around NOW.
 	beforeEach(() => {
+		setSystemTime(new Date(NOW));
 		originalFetch = globalThis.fetch;
 		dialled = [];
 		clearGrokSubscriptionUserIdCache();
@@ -200,6 +210,7 @@ describe("fetchGrokSubscriptionUsage", () => {
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		clearGrokSubscriptionUserIdCache();
+		setSystemTime();
 	});
 
 	it("dials the billing endpoint with the CLI identity headers and x-userid", async () => {
