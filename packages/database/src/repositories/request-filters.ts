@@ -49,24 +49,36 @@ export const EMPTY_REQUEST_FILTERS: RequestFilters = {
  * The rows that have an outcome: every request except one whose client left
  * before any response started, which is stored with `success` NULL.
  *
- * Analytics and the Overview count requests with an outcome, so every read
- * that rates or totals requests applies this, not only its success-rate
- * column. Volume, latency, active accounts, cost and project-attribution
- * coverage all leave these rows out, since a `COUNT(*)` or `AVG()` over
- * `requests` would otherwise count a request that never got an answer. The
- * rows stay visible in Request History.
+ * Analytics and the Overview count requests with an outcome, so a read that
+ * counts, rates or averages requests must leave these rows out. Apply it per
+ * query, not through a shared WHERE: on an index that lacks `success` it
+ * turns a covering read into a table lookup per row. A read that already
+ * excludes the rows by another predicate (`model IS NOT NULL`, `cost_usd > 0`,
+ * `status_code = 200`, a tool-call join) skips it; the client-closed tests
+ * next to each reader pin that. The rows stay visible in Request History.
+ *
+ * The unary `+` keeps the term from choosing an index: `success IS NOT NULL`
+ * matches nearly every row, and on a read with no timestamp bound the planner
+ * would otherwise drive it off `(success, timestamp)` with a table lookup per
+ * row (analytics-query-plans.test.ts pins the range=all plans).
  */
 export function ratedOutcomeSql(alias: string): string {
-	return `${alias}.success IS NOT NULL`;
+	return `+${alias}.success IS NOT NULL`;
 }
 
 /**
- * {@link ratedOutcomeSql} for a table that references `requests` by
- * `request_id`: drops rows whose request has no outcome, and keeps rows whose
- * request was already pruned, as those reads always have.
+ * {@link ratedOutcomeSql} for a read keyed by request id and bounded below by
+ * time: drops rows whose request has no outcome, and keeps rows whose request
+ * was already pruned or that name none (a NULL id, which `NOT IN` alone would
+ * drop). Takes one bind, the read's own lower bound (0 for none).
+ *
+ * The rows without an outcome in range come from `(success, timestamp)` in a
+ * single pass, instead of a lookup into `requests` per routing row. A request
+ * row is stamped no earlier than its routing row, so bounding it by the same
+ * value misses none; request-client-closed.test.ts pins that.
  */
-export function withoutUnratedParentSql(table: string): string {
-	return `NOT EXISTS (SELECT 1 FROM requests r WHERE r.id = ${table}.request_id AND NOT (${ratedOutcomeSql("r")}))`;
+export function withoutUnratedRequestSinceSql(requestIdColumn: string): string {
+	return `(${requestIdColumn} IS NULL OR ${requestIdColumn} NOT IN (SELECT id FROM requests WHERE success IS NULL AND timestamp >= ? AND id IS NOT NULL))`;
 }
 
 /** Does this selection narrow anything at all? */

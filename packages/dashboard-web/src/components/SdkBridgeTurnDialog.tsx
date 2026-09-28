@@ -1,5 +1,6 @@
 import {
 	isPreHeadClientAbort,
+	type SdkBridgeInnerRequest,
 	type SdkBridgeLegErrorPhase,
 	type SdkBridgeSystemPromptDetail,
 	type SdkBridgeTurnStatus,
@@ -13,6 +14,7 @@ import {
 } from "@clankermux/ui-common";
 import type { ReactNode } from "react";
 import { useSdkBridgeTurn } from "../hooks/queries";
+import { getRequestModelPresentation } from "../lib/request-model";
 import {
 	SDK_BRIDGE_HISTORY_LABEL,
 	SDK_BRIDGE_REBUILD_REASON_LABEL,
@@ -74,6 +76,18 @@ function time(ms: number): string {
 		hour12: false,
 		hourCycle: "h23",
 	});
+}
+
+/** The call's model, labelled the way Request History labels it. */
+function innerModelLabel(
+	call: Pick<SdkBridgeInnerRequest, "model" | "requestedModel">,
+): string {
+	const model = getRequestModelPresentation({
+		model: call.model ?? undefined,
+		requestedModel: call.requestedModel ?? undefined,
+	});
+	if (!model) return "—";
+	return model.requestedOnly ? `${model.value} · requested` : model.value;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -292,7 +306,7 @@ export function SdkBridgeTurnDetails({ view }: { view: SdkBridgeTurnView }) {
 											{time(r.timestamp)}
 										</TableCell>
 										<TableCell>{r.accountName ?? r.accountId ?? "—"}</TableCell>
-										<TableCell>{r.model ?? "—"}</TableCell>
+										<TableCell>{innerModelLabel(r)}</TableCell>
 										<TableCell
 											className={cn(
 												"figure",

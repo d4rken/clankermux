@@ -101,7 +101,6 @@ export async function recordPreHeadClientAbort(
 		isStream: false,
 		providerName: dispatch.providerName,
 		requestedModel: requestMeta.requestedModel ?? null,
-		model: dispatch.resolvedModel,
 		fallbackCreditClaimed: requestMeta.fallbackCreditClaimed ?? null,
 		fallbackFromModel: requestMeta.fallbackFromModel ?? null,
 		synthetic: false,

@@ -10,9 +10,12 @@ import type {
 } from "@clankermux/types";
 import { NO_ACCOUNT_ID } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
-import { ratedOutcomeSql, withoutUnratedParentSql } from "./request-filters";
+import {
+	ratedOutcomeSql,
+	withoutUnratedRequestSinceSql,
+} from "./request-filters";
 
-const WITHOUT_UNRATED_PARENT = withoutUnratedParentSql("request_routing");
+const WITHOUT_UNRATED_REQUEST = withoutUnratedRequestSinceSql("request_id");
 
 /**
  * Distinct active client-session counts split by affinity scope.
@@ -171,8 +174,8 @@ export class StatsRepository {
 				COUNT(DISTINCT affinity_key_hash) as total
 			FROM request_routing
 			WHERE affinity_key_hash IS NOT NULL AND created_at > ?
-				AND ${WITHOUT_UNRATED_PARENT}`,
-			[sinceMs],
+				AND ${WITHOUT_UNRATED_REQUEST}`,
+			[sinceMs, sinceMs],
 		);
 
 		return {
@@ -216,9 +219,9 @@ export class StatsRepository {
 				COUNT(DISTINCT affinity_key_hash) as sessions
 			FROM request_routing
 			WHERE affinity_key_hash IS NOT NULL AND created_at > ?
-				AND ${WITHOUT_UNRATED_PARENT}
+				AND ${WITHOUT_UNRATED_REQUEST}
 			GROUP BY selected_account_id`,
-			[NO_ACCOUNT_ID, sinceMs],
+			[NO_ACCOUNT_ID, sinceMs, sinceMs],
 		);
 
 		return new Map(

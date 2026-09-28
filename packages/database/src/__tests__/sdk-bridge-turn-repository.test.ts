@@ -466,6 +466,7 @@ describe("SdkBridgeTurnRepository", () => {
 				accountUsed: "gone",
 				statusCode: 429,
 				success: false,
+				requestedModel: "claude-opus-5-5",
 			}),
 		);
 		await requests.save(innerRequest("other", { sdkBridgeTurnId: "turn-2" }));
@@ -485,6 +486,9 @@ describe("SdkBridgeTurnRepository", () => {
 		expect(rows[1]).toMatchObject({
 			accountId: "gone",
 			accountName: null,
+			// No usage, so no model; the requested one is carried beside it.
+			model: null,
+			requestedModel: "claude-opus-5-5",
 			statusCode: 429,
 			success: false,
 			errorMessage: null,

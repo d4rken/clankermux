@@ -746,13 +746,16 @@ describe("a client that leaves before the response starts", () => {
 		expect(rows).toHaveLength(1);
 		expect(rows[0][0]).toMatchObject({
 			accountId: accounts[0].id,
-			model: "primary-model",
 			failoverAttempts: 0,
 		});
+		// The row has no usage and so no model; the send's model is on its
+		// attempt.
+		expect(rows[0][0]).not.toHaveProperty("model");
 		const [attempt] = await attemptsFor(routing);
 		expect(attempt).toMatchObject({
 			status: 499,
 			error: "client_closed_request",
+			outgoing_model: "primary-model",
 		});
 		expect(attempt.finished_at).not.toBeNull();
 	});
@@ -793,7 +796,6 @@ describe("a client that leaves before the response starts", () => {
 		expect(rows).toHaveLength(1);
 		const recorded = rows[0][0] as {
 			accountId: string;
-			model: string;
 			failoverAttempts: number;
 			routing: {
 				decision: string;
@@ -803,7 +805,6 @@ describe("a client that leaves before the response starts", () => {
 		};
 		expect(recorded).toMatchObject({
 			accountId: accounts[1].id,
-			model: "primary-model",
 			failoverAttempts: 1,
 		});
 		// The primary stage's routing, although the fallback stage had already

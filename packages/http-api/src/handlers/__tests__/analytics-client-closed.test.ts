@@ -2,8 +2,8 @@
  * Analytics count requests with an outcome. A pre-head client abort (success
  * NULL, 499, `client_closed_request`) has none, so adding one to the fixture
  * must leave every section of the response exactly as it was, however much
- * of the row the section reads (account, model, key, project, routing, tool
- * calls). And a range holding nothing but aborts reads as empty.
+ * of the row the section reads (account, key, project, routing, fallback
+ * credit). And a range holding nothing but aborts reads as empty.
  */
 import { Database } from "bun:sqlite";
 import {
@@ -48,18 +48,25 @@ afterEach(() => {
 	setSystemTime();
 });
 
+/**
+ * An abort row as the recorder writes it: the ingress facts (account, key,
+ * project, requested model, a claimed fallback credit, routing) and none of
+ * the response ones. No usage means no model, tokens or cost, and no context
+ * or tool-call rows are written for it; request-recorder.test.ts and
+ * pre-head-client-abort.test.ts pin that shape. Several analytics reads rely
+ * on it instead of reading `success`.
+ */
 function insertClientClosed(id: string, timestamp: number): void {
 	db.run(
 		`INSERT INTO requests (
 			id, timestamp, method, path, account_used, status_code, success,
 			error_message, response_time_ms, failover_attempts, model,
 			requested_model, api_key_id, api_key_name, project,
-			project_attribution_source, billing_type, context_messages_chars,
-			context_message_count, context_largest_tool_name,
-			context_largest_tool_chars, client_harness
+			project_attribution_source, billing_type, client_harness,
+			fallback_credit_claimed, fallback_from_model, usage_source
 		) VALUES (?, ?, 'POST', '/v1/messages', ?, 499, NULL, ?, 90000, 1,
-			'claude-opus-4-8', 'claude-opus-4-8', ?, 'live-key', ?, 'header',
-			'plan', 5000, 4, 'Read', 700, 'pi')`,
+			NULL, 'claude-opus-4-8', ?, 'live-key', ?, 'header', 'plan', 'pi',
+			1, 'claude-opus-4-8', 'none')`,
 		[
 			id,
 			timestamp,
@@ -76,14 +83,6 @@ function insertClientClosed(id: string, timestamp: number): void {
 			failover_attempts, failover_reason, created_at
 		) VALUES (?, 'session', 'affinity_hit', 'client_session', 'hash-abort', ?, NULL, 2, 1, NULL, ?)`,
 		[id, ACCOUNT_A, timestamp],
-	);
-	db.run(
-		`INSERT INTO request_tool_calls (request_id, tool_name, call_count, error_count) VALUES (?, 'Read', 3, 1)`,
-		[id],
-	);
-	db.run(
-		`INSERT INTO request_tool_errors (request_id, tool_name, error_text) VALUES (?, 'Read', 'boom')`,
-		[id],
 	);
 }
 
@@ -125,6 +124,20 @@ describe("analytics leave out requests without an outcome", () => {
 		expect(body.accountPerformance).toEqual([]);
 		expect(body.apiKeyPerformance).toEqual([]);
 		expect(body.projectBreakdown).toEqual([]);
+		expect(body.accountModelUsage).toEqual([]);
+		expect(body.apiKeyModelUsage).toEqual([]);
+		expect(body.costByModel).toEqual([]);
+		expect(body.modelPerformance).toEqual([]);
+		expect(body.cacheFlow).toEqual([]);
+		expect(body.activeSessions?.totalDistinctSessions).toBe(0);
+		expect(body.activeSessions?.perAccount).toEqual([]);
+		expect(body.refusalFallbacks?.totals).toEqual({
+			refusals: 0,
+			fallbackRetries: 0,
+			eligibleRequests: 0,
+		});
+		expect(body.contextComposition?.growthCurve).toEqual([]);
+		expect(body.clientEfficiency?.rows).toEqual([]);
 	});
 
 	it("does not let an older abort stretch the burn-rate averages", async () => {

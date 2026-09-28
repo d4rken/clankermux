@@ -24,6 +24,7 @@ const log = new Logger("DatabaseBackfills");
 export function runOneShotBackfills(db: Database): void {
 	backfillAutoPauseOverageDefault(db);
 	seedAccountTierHistory(db);
+	clearUnratedRequestModels(db);
 }
 
 const AUTO_PAUSE_OVERAGE_MARKER = "backfill:auto-pause-overage-default";
@@ -145,5 +146,59 @@ function seedAccountTierHistory(db: Database): void {
 
 	log.info(
 		`Backfill ${ACCOUNT_TIER_HISTORY_SEED_MARKER}: seeded tier history for ${seeded} account(s)`,
+	);
+}
+
+const UNRATED_REQUEST_MODEL_MARKER = "backfill:unrated-request-model";
+
+/**
+ * Clear `requests.model` on rows without an outcome (`success` NULL: the
+ * client left before any response started).
+ *
+ * Such rows have no usage, so they now carry no model, and the analytics
+ * reads that filter on `model IS NOT NULL` rely on that to leave them out
+ * without reading `success`. The release that introduced the rows wrote the
+ * dispatched model into them; this pass clears those. The dispatched model
+ * stays on the request's routing attempt.
+ *
+ * `success IS NULL` is a seek on `idx_requests_success_timestamp`, so the pass
+ * touches only those rows.
+ */
+function clearUnratedRequestModels(db: Database): void {
+	let claimed = false;
+	let cleared = 0;
+	const tx = db.transaction(() => {
+		// Marker first, inside the transaction: see the rationale on
+		// backfillAutoPauseOverageDefault.
+		claimed =
+			db
+				.prepare(
+					`INSERT OR IGNORE INTO strategies (name, config, updated_at)
+					 VALUES (?, ?, ?)`,
+				)
+				.run(UNRATED_REQUEST_MODEL_MARKER, "{}", Date.now()).changes > 0;
+		if (!claimed) return;
+
+		cleared = db
+			.prepare(
+				"UPDATE requests SET model = NULL WHERE success IS NULL AND model IS NOT NULL",
+			)
+			.run().changes;
+
+		const now = Date.now();
+		db.prepare(
+			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,
+		).run(
+			JSON.stringify({ requestsCleared: cleared, appliedAt: now }),
+			now,
+			UNRATED_REQUEST_MODEL_MARKER,
+		);
+	});
+	tx();
+
+	if (!claimed) return;
+
+	log.info(
+		`Backfill ${UNRATED_REQUEST_MODEL_MARKER}: cleared the model on ${cleared} request(s) without an outcome`,
 	);
 }

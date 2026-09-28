@@ -28,7 +28,6 @@ export interface UpstreamDispatch {
 	>;
 	/** Name of the provider handler that served the account. */
 	readonly providerName: string;
-	readonly resolvedModel: string;
 	readonly routing: Readonly<RequestRoutingMeta> | null;
 	/** The attempt's failover count, as `forwardToClient` would have recorded it. */
 	readonly failoverAttempts: number;
@@ -97,10 +96,7 @@ export function notePreHeadAttempt(
  */
 export function noteUpstreamDispatch(
 	meta: RequestMeta,
-	send: Pick<
-		UpstreamDispatch,
-		"attemptId" | "account" | "providerName" | "resolvedModel"
-	>,
+	send: Pick<UpstreamDispatch, "attemptId" | "account" | "providerName">,
 ): void {
 	const state = tracked.get(meta);
 	if (!state || state.clientSignal.aborted) return;
@@ -116,7 +112,6 @@ export function noteUpstreamDispatch(
 			auto_pause_on_overage_enabled: account.auto_pause_on_overage_enabled,
 		}),
 		providerName: send.providerName,
-		resolvedModel: send.resolvedModel,
 		routing: meta.routing ? Object.freeze({ ...meta.routing }) : null,
 		failoverAttempts: state.failoverAttempts,
 		startedAt: Date.now(),
