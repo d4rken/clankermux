@@ -323,6 +323,82 @@ describe("InnerListener", () => {
 		});
 	});
 
+	describe("Claude Code's environment block", () => {
+		// As Claude Code 2.1.280 sends it after a tool round; the real-binary
+		// test "never shows the model Claude Code's own directories, only the
+		// client's" pins the shape.
+		const env = [
+			"# Environment",
+			"You have been invoked in the following environment: ",
+			" - Primary working directory: /srv/claude-agent-sdk/gen-abc/cwd",
+			" - Platform: linux",
+		].join("\n");
+		const model = "You are powered by the model claude-sonnet-5.";
+		const withEnvironment = {
+			model: MODEL,
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "system",
+					content: [
+						{
+							type: "text",
+							text: `${env}\n\n${model}`,
+							cache_control: { type: "ephemeral" },
+						},
+					],
+				},
+			],
+		};
+		const send = (token: string, path: string, body: string) =>
+			listener?.handle(
+				new Request(`http://127.0.0.1:1${path}`, {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						authorization: `Bearer ${token}`,
+					},
+					body,
+				}),
+			);
+
+		for (const path of [
+			"/v1/messages?beta=true",
+			"/v1/messages/count_tokens?beta=true",
+		])
+			it(`is removed before dispatch (${path.split("?")[0]})`, async () => {
+				const { inner, listener } = setup();
+				const { token } = listener.register(context());
+				const res = await send(token, path, JSON.stringify(withEnvironment));
+				expect(res?.status).toBe(200);
+				expect(inner.calls[0]?.body).toEqual({
+					model: MODEL,
+					messages: [
+						{ role: "user", content: "hi" },
+						{
+							role: "system",
+							content: [
+								{
+									type: "text",
+									text: model,
+									cache_control: { type: "ephemeral" },
+								},
+							],
+						},
+					],
+				});
+			});
+
+		it("leaves a body without one byte for byte, client text naming a directory included", async () => {
+			const { inner, listener } = setup();
+			const { token } = listener.register(context());
+			const raw = `{"model":"${MODEL}","messages":[{"role":"user","content":"Primary working directory: /home/me/project\\n\\n# Environment"}],  "max_tokens":1.0}`;
+			const res = await send(token, "/v1/messages?beta=true", raw);
+			expect(res?.status).toBe(200);
+			expect(await inner.calls[0]?.req.text()).toBe(raw);
+		});
+	});
+
 	it("listens on loopback only", () => {
 		const { listener } = setup();
 		expect(listener.ensureStarted()).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);

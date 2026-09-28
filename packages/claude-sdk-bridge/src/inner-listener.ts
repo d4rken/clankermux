@@ -4,6 +4,7 @@ import {
 	type SdkBridgeInnerOutcome,
 	sdkBridgeWireModel,
 } from "@clankermux/types";
+import { stripEnvironmentBlocks } from "./environment-block";
 import type { BridgeLog } from "./types";
 
 interface TokenEntry {
@@ -227,10 +228,12 @@ export class InnerListener {
 		// here and the dispatch, so a call that passes this check is the turn's.
 		if (entry.revoked || this.tokens.get(key) !== entry) return unauthorized();
 		if (!bytes) return this.tooLarge(entry, limit, null);
-		const body = new TextDecoder().decode(bytes);
+		let body = new TextDecoder().decode(bytes);
+		let parsed: unknown;
 		let model: unknown;
 		try {
-			model = (JSON.parse(body) as { model?: unknown }).model;
+			parsed = JSON.parse(body);
+			model = (parsed as { model?: unknown }).model;
 		} catch {
 			this.report(entry, {
 				requestId: "",
@@ -254,6 +257,9 @@ export class InnerListener {
 			});
 			return jsonError(400, "invalid_request_error", message);
 		}
+		// The child's own sandbox is no context for a model driving the
+		// client's tools.
+		if (stripEnvironmentBlocks(parsed)) body = JSON.stringify(parsed);
 		const headers = new Headers();
 		for (const [name, value] of req.headers) {
 			const lower = name.toLowerCase();

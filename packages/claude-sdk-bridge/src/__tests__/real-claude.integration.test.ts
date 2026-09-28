@@ -699,6 +699,92 @@ describe.skipIf(reason !== null)(
 			TIMEOUT,
 		);
 
+		type ChildPathsRun = {
+			resumedReleased: string;
+			restartReleased: string;
+			stops: unknown[];
+			historyModes: unknown[];
+			tamperedHistory: { status: number; message: string };
+			calls: Array<{
+				status: number | null;
+				thinkingVerified: number;
+				leaks: string[];
+				clientCwdInSystem: boolean;
+			}>;
+		};
+
+		/** The childPathsInContext run of one model family, checked to have run as intended. */
+		async function childPathsRun(family: string): Promise<ChildPathsRun> {
+			const run = scenario(await results(), "childPathsInContext")[
+				family
+			] as ChildPathsRun;
+			// Two live tool rounds, a park released and resumed in process,
+			// one resumed after a restart and calling again, two more turns.
+			expect(run.resumedReleased).toBe("released");
+			expect(run.restartReleased).toBe("released");
+			expect(run.stops).toEqual([
+				"tool_use",
+				"end_turn",
+				"tool_use",
+				"end_turn",
+				"tool_use",
+				"tool_use",
+				"end_turn",
+				"end_turn",
+				"end_turn",
+			]);
+			expect(run.historyModes).toEqual([
+				"fresh",
+				"resume",
+				"resume",
+				"resume",
+				"resume",
+			]);
+			expect(run.calls.length).toBeGreaterThanOrEqual(9);
+			return run;
+		}
+
+		// Also the CLI-bump guard: a new wording of Claude Code's environment
+		// block that the listener no longer recognises shows up here as a leak.
+		it(
+			"never shows the model Claude Code's own directories, only the client's",
+			async () => {
+				for (const family of ["sonnet", "opus", "fable"]) {
+					const run = await childPathsRun(family);
+					for (const call of run.calls) {
+						expect(call.status).toBe(200);
+						expect(call.leaks).toEqual([]);
+						expect(call.clientCwdInSystem).toBe(true);
+					}
+				}
+			},
+			TIMEOUT,
+		);
+
+		it(
+			"keeps signed thinking bound to its conversation across resumes, released parks and a restart",
+			async () => {
+				for (const family of ["opus", "fable"]) {
+					const run = await childPathsRun(family);
+					for (const call of run.calls) expect(call.status).toBe(200);
+					// Every call after the first carried the earlier turns' thinking,
+					// each checked against the history before it.
+					expect(run.calls[0]?.thinkingVerified).toBe(0);
+					for (const call of run.calls.slice(1))
+						expect(call.thinkingVerified).toBeGreaterThan(0);
+					expect(run.calls.at(-1)?.thinkingVerified).toBe(4);
+					// Control: the check refuses a changed history.
+					expect(run.tamperedHistory).toEqual({
+						status: 400,
+						message: expect.stringContaining(
+							"bound to a different conversation",
+						),
+					});
+				}
+			},
+			TIMEOUT,
+		);
+
 		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {

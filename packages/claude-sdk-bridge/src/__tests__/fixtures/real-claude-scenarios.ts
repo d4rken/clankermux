@@ -47,6 +47,7 @@ import {
 	silentLog,
 } from "./fake-sdk";
 import { startMockUpstream } from "./mock-upstream";
+import { loadPiPromptFixture } from "./pi-prompt-fixtures";
 
 type Block = { type: string; [key: string]: unknown };
 type Msg = { role: "user" | "assistant"; content: string | Block[] };
@@ -1626,6 +1627,248 @@ await scenario("releasedWithUnforwardedCall", async () => {
 		};
 	} finally {
 		await on.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("childPathsInContext", async () => {
+	// A pi conversation whose prompt names the client's own directory: a
+	// fresh turn and a resumed one, each with a tool round, a released park
+	// answered in process and after a restart onto a new generation, and two
+	// more turns after that. Every user turn draws signed thinking, which the
+	// mock refuses once the history before it changes.
+	const clientCwd = "/home/user/projects/widget";
+	const system = loadPiPromptFixture("0.87", "stock").system;
+	const root = mkdtempSync(join(tmpdir(), "sdk-bridge-child-paths-"));
+	const parkRepo = memoryParkRepo(repo.turns);
+	const limits: Partial<SdkBridgeLimits> = {
+		maxProcesses: 2,
+		parkReleaseMs: 500,
+		parkedTimeoutMs: 60_000,
+		turnDeadlineMs: 120_000,
+		releasedParkTtlMs: 600_000,
+	};
+	const run = async (model: string) => {
+		let on = makeBridge(limits, root, parkRepo);
+		await on.ready();
+		const from = mock.requests.length;
+		const header = {
+			clientHarness: "pi",
+			piPromptVersion: "0.87",
+			model,
+			affinityScope: "client_session" as const,
+			affinityKey: `conv-${crypto.randomUUID()}`,
+		};
+		const req = (messages: Msg[]) =>
+			new Request("http://bridge.test/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model,
+					stream: true,
+					system,
+					tools: [READ_TOOL],
+					messages,
+					max_tokens: 1024,
+				}),
+			});
+		const start = async (messages: Msg[]) => {
+			const p = {
+				...plan(),
+				candidates: [
+					{
+						accountId: "acct-a",
+						provider: "anthropic" as const,
+						upstreamModel: model,
+					},
+				],
+			};
+			const r = await read(
+				on.startTurn({
+					request: req(messages),
+					plan: p,
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+			return { ...r, turnId: p.turnId };
+		};
+		const reply = (turnId: string, messages: Msg[]) =>
+			read(
+				on.continueTurn({
+					turnId,
+					request: req(messages),
+					meta: meta(header),
+					signal: new AbortController().signal,
+				}),
+			);
+		const whenReleased = async (turnId: string) => {
+			const until = Date.now() + 20_000;
+			while (
+				repo.turns.get(turnId)?.status !== "released" &&
+				Date.now() < until
+			)
+				await Bun.sleep(50);
+			return repo.turns.get(turnId)?.status;
+		};
+		/** Answers the reply's one call with `result`; returns the next reply. */
+		const answerCall = async (
+			history: Msg[],
+			turnId: string,
+			r: Reply,
+			result: string,
+		) => {
+			const use = (r.content ?? []).find((b) => b.type === "tool_use");
+			history.push(
+				{ role: "assistant", content: r.content as Block[] },
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: String(use?.id),
+							content: result,
+						},
+					],
+				},
+			);
+			return reply(turnId, history);
+		};
+		const history: Msg[] = [{ role: "user", content: "THINK TOOL where am I" }];
+		const steps: Record<string, unknown> = {};
+		try {
+			const first = await start(history);
+			const firstDone = await answerCall(
+				history,
+				first.turnId,
+				first,
+				"LIVE-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: firstDone.content as Block[] },
+				{ role: "user", content: "THINK TOOL read resumed.txt" },
+			);
+			const resumed = await start(history);
+			steps.resumedReleased = await whenReleased(resumed.turnId);
+			const resumedDone = await answerCall(
+				history,
+				resumed.turnId,
+				resumed,
+				"RELEASED-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: resumedDone.content as Block[] },
+				{ role: "user", content: "THINK TOOL read restarted.txt" },
+			);
+			const beforeRestart = await start(history);
+			steps.restartReleased = await whenReleased(beforeRestart.turnId);
+			await on.dispose();
+			on = makeBridge(limits, root, parkRepo);
+			await on.ready();
+			// AGAIN makes the model call once more after the resume.
+			const again = await answerCall(
+				history,
+				beforeRestart.turnId,
+				beforeRestart,
+				"AGAIN-RESTARTED-RESULT",
+			);
+			const last = await answerCall(
+				history,
+				beforeRestart.turnId,
+				again,
+				"FINAL-RESULT",
+			);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: last.content as Block[] },
+				{ role: "user", content: "THINK after the restart" },
+			);
+			const after = await start(history);
+			await settled(on);
+			history.push(
+				{ role: "assistant", content: after.content as Block[] },
+				{ role: "user", content: "and once more" },
+			);
+			const once = await start(history);
+			await settled(on);
+			steps.stops = [
+				first.stop,
+				firstDone.stop,
+				resumed.stop,
+				resumedDone.stop,
+				beforeRestart.stop,
+				again.stop,
+				last.stop,
+				after.stop,
+				once.stop,
+			];
+			steps.historyModes = [
+				first.turnId,
+				resumed.turnId,
+				beforeRestart.turnId,
+				after.turnId,
+				once.turnId,
+			].map((id) => repo.turns.get(id)?.historyMode);
+		} finally {
+			await on.dispose();
+		}
+		const calls = mock.requests
+			.slice(from)
+			.filter((q) => q.path.startsWith("/v1/messages"));
+		// Control: the last call again, with its first message changed.
+		const tampered = structuredClone(calls.at(-1)?.body) as {
+			messages: Msg[];
+		};
+		tampered.messages[0] = { role: "user", content: "THINK elsewhere" };
+		const refused = await mock.handle(
+			new Request(`${mock.url}/v1/messages`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(tampered),
+			}),
+		);
+		// The control is this script's call, not Claude Code's.
+		mock.requests.pop();
+		return {
+			...steps,
+			tamperedHistory: {
+				status: refused.status,
+				message: ((await refused.json()) as { error?: { message?: string } })
+					.error?.message,
+			},
+			calls: calls.map((q) => {
+				const text = JSON.stringify(q.body);
+				const body = q.body as { system?: Array<{ text?: string }> };
+				const systemText = (body.system ?? []).map((b) => b.text).join("");
+				// Each line of the body naming the child's directories.
+				const leaks = [
+					...new Set(
+						text
+							.split(/\\n|"/)
+							.filter((line) => line.includes(root))
+							.map((line) => line.slice(0, 300)),
+					),
+				];
+				return {
+					status: q.status ?? null,
+					thinkingVerified: q.thinkingVerified ?? 0,
+					leaks,
+					clientCwdInSystem: systemText.includes(`<cwd>\n${clientCwd}\n</cwd>`),
+				};
+			}),
+		};
+	};
+	try {
+		return {
+			root,
+			// Claude Code renders its own context differently per model family.
+			sonnet: await run(MODEL),
+			opus: await run("claude-opus-5-5"),
+			fable: await run("claude-fable-5-1"),
+		};
+	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
