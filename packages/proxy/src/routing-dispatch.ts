@@ -36,6 +36,12 @@ import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 /** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
 export interface RoutingAttemptAudit {
 	id: string | null;
+	/**
+	 * The attempt whose row already holds what the upstream answered, so a
+	 * later generic `network_error` from a throw must not replace it. Compared
+	 * against `id`, so it never carries over to a later send.
+	 */
+	judged?: string | null;
 }
 export async function recordLocalRoutingOutcome(
 	audit: RoutingAttemptAudit,
@@ -137,6 +143,8 @@ export async function sendAuthorizedRequest(
 		reasoning_effort_reason: reasoning?.reason ?? null,
 	};
 	let response: Response;
+	// The upstream's own status line, once a head has arrived.
+	let head: Response | null = null;
 	let recorded = false;
 	// Held from the send until the body is over, so the usage cache never takes
 	// a poll that landed mid-request as proof the account has been idle.
@@ -279,7 +287,7 @@ export async function sendAuthorizedRequest(
 		)
 			endQuotaUse = usageCache.beginQuotaUse(account.id);
 		if (transport) noteBridgedDispatch(meta);
-		response = transport
+		head = transport
 			? await transport(request)
 			: await makeProxyRequest(
 					request,
@@ -297,23 +305,30 @@ export async function sendAuthorizedRequest(
 							resolvedModel: target.upstreamModel,
 						}),
 				);
-		if (prepareResponse) response = await prepareResponse(response);
-		// An error status is the upstream's answer, even with its body unread.
+		// An error status is the upstream's answer, even with its body unread,
+		// and even if preparing the response then fails.
+		if (!head.ok) noteUpstreamSettled(meta, attempt.id);
+		response = prepareResponse ? await prepareResponse(head) : head;
 		if (!response.ok) noteUpstreamSettled(meta, attempt.id);
 	} catch (error) {
 		noteUpstreamSettled(meta, attempt.id);
 		endQuotaUse?.();
 		attempt.finished_at = Date.now();
-		attempt.status =
-			error instanceof RoutingPolicyError
+		// Preparation failed after the upstream had already answered with an
+		// error: that answer is the attempt's verdict, not a transport failure.
+		const answered = head && !head.ok ? head : null;
+		attempt.status = answered
+			? answered.status
+			: error instanceof RoutingPolicyError
 				? 403
 				: error instanceof SdkBridgeCapacityError
 					? error.status
 					: error instanceof SdkBridgeUnavailableError
 						? 503
 						: 502;
-		attempt.error =
-			error instanceof RoutingPolicyError
+		attempt.error = answered
+			? `Upstream HTTP ${answered.status}`
+			: error instanceof RoutingPolicyError
 				? error.message
 				: error instanceof SdkBridgeCapacityError
 					? `SDK bridge at capacity: ${error.message}`
@@ -330,7 +345,10 @@ export async function sendAuthorizedRequest(
 					attempt.error,
 					null,
 				);
-			if (audit) audit.id = attempt.id;
+			if (audit) {
+				audit.id = attempt.id;
+				if (answered) audit.judged = attempt.id;
+			}
 		} catch {
 			/* Preserve the original dispatch failure if audit storage also failed. */
 		}

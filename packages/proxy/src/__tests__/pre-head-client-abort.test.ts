@@ -594,3 +594,64 @@ describe("Codex prefix peek abandoned by the client", () => {
 			expect(attempt.error).not.toBe(CLIENT_CLOSED_REQUEST);
 	});
 });
+
+describe("a non-OK head whose preparation fails", () => {
+	let originalFetch: typeof globalThis.fetch;
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it.each([
+		429, 400, 503,
+	])("keeps the %i the upstream answered when the client leaves during preparation", async (status) => {
+		const account = canonicalAccount({
+			id: crypto.randomUUID(),
+			name: "plain",
+			provider: "test-provider",
+			api_key: "k",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			refresh_token_issued_at: null,
+		});
+		const ctx = makeContext([account]);
+		const client = new AbortController();
+		Object.assign(ctx.provider, {
+			normalizeUpstreamResponse: async () => {
+				client.abort();
+				throw new Error("normalization failed");
+			},
+		});
+		let calls = 0;
+		globalThis.fetch = mock(async () => {
+			calls++;
+			return Response.json({ error: { type: "x" } }, { status });
+		}) as never;
+
+		const response = await callHandleProxy(
+			new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hi" }],
+					max_tokens: 8,
+				}),
+				signal: client.signal,
+			}),
+			ctx,
+		);
+
+		expect(response.status).toBe(499);
+		expect(calls).toBe(1);
+		const [attempt] = await attemptsOf(ctx);
+		expect(attempt).toMatchObject({
+			status,
+			error: `Upstream HTTP ${status}`,
+		});
+		expect(closedRows(ctx)).toHaveLength(1);
+	});
+});

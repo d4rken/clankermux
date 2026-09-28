@@ -175,7 +175,11 @@ import {
 	classify429Transient,
 } from "./transparent-retry";
 
-import { isZaiOverloadResponse, recoverZaiOverload } from "./zai-overload";
+import {
+	isZaiOverloadResponse,
+	recoverZaiOverload,
+	ZAI_OVERLOAD_VERDICT,
+} from "./zai-overload";
 
 const log = new Logger("ProxyOperations");
 
@@ -1340,7 +1344,13 @@ export async function proxyWithAccount(
 			// The client abandoned the send in flight: the stamp is its verdict.
 			if (reason === CLIENT_CLOSED_REQUEST && attemptAudit.id)
 				await stampClientClosedAttempt(ctx, attemptAudit.id);
-			else
+			// A throw after the upstream already answered adds nothing to that
+			// answer, which the attempt's row already holds.
+			else if (
+				outcome.kind !== "network_error" ||
+				attemptAudit.id === null ||
+				attemptAudit.judged !== attemptAudit.id
+			)
 				await recordLocalRoutingOutcome(
 					attemptAudit,
 					requestMeta,
@@ -1404,6 +1414,23 @@ export async function proxyWithAccount(
 	// success; if forwardToClient itself throws, discard's locked-guard no-ops).
 	let liveUpstream: Response | null = null;
 	let activeUpstreamModel: string | null = null;
+	// The client left after the response head arrived but before any byte was
+	// forwarded: the same pre-head terminal as an abort that throws, with the
+	// cleanup a forward would otherwise have owned. The stamp goes first, as in
+	// `fail()`, so the observer draining the body cannot finish the row ahead
+	// of it. Called only once `req.signal.aborted` is already true, so the
+	// ordinary forward path gains no await.
+	const abandonBeforeForward = async (
+		response: Response,
+	): Promise<Response> => {
+		if (attemptAudit.id && wasInFlightAtAbort(requestMeta, attemptAudit.id))
+			await stampClientClosedAttempt(ctx, attemptAudit.id);
+		discardUpstreamBody(response);
+		liveUpstream = null;
+		cacheBodyStore.discardStaged(requestMeta.id);
+		settleOverloadProbe("abandoned", "client_aborted");
+		return createClientAbortResponse();
+	};
 	// Trust-gated probe predicate for every exemption below. `requestMeta.internal`
 	// is handleProxy's own `isInternal` parameter (default false, sourced only from
 	// dispatchProxyRequest) and is therefore unspoofable; the marker headers alone
@@ -1790,8 +1817,32 @@ export async function proxyWithAccount(
 			};
 			const response = await send();
 			if (account.provider !== "zai") return response;
+			// Recorded against the send the peek just read, before the backoff,
+			// so a throw during the wait cannot replace it with network_error.
+			const judgeZaiOverload = async (): Promise<void> => {
+				const id = attemptAudit.id;
+				if (!id) return;
+				try {
+					await recordLocalRoutingOutcome(
+						attemptAudit,
+						requestMeta,
+						account,
+						ctx,
+						ZAI_OVERLOAD_VERDICT,
+						200,
+					);
+					attemptAudit.judged = id;
+				} catch (error) {
+					log.warn("Could not persist the Z.ai overload verdict", error);
+				}
+			};
 			try {
-				return await recoverZaiOverload(response, send, attemptSignal());
+				return await recoverZaiOverload(
+					response,
+					send,
+					attemptSignal(),
+					judgeZaiOverload,
+				);
 			} catch (error) {
 				// A failed/aborted peek may own a retry response already. Release
 				// it even when the cache-control retry's local catch keeps its 400.
@@ -1806,6 +1857,7 @@ export async function proxyWithAccount(
 		): Promise<Response | null> => {
 			log.warn(`Z.ai overload retries exhausted on account ${account.name}`);
 			if (isTerminalAttempt()) {
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				settleOverloadProbe("abandoned", "sse_overloaded_error");
 				options?.onOutcome?.({ kind: "other" });
 				return forwardToClient(
@@ -3062,6 +3114,7 @@ export async function proxyWithAccount(
 				log.warn(
 					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				return forwardToClient(
 					{
 						...recordFieldsFromMeta(requestMeta),
@@ -3253,6 +3306,7 @@ export async function proxyWithAccount(
 				// A non-official-provider 529 terminal (the official-Anthropic 529
 				// was intercepted above): no family trip fires here, and streaming a
 				// known-error body yields no health verdict — release the lease.
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				settleOverloadProbe("abandoned");
 				return forwardToClient(
 					{
@@ -3362,6 +3416,7 @@ export async function proxyWithAccount(
 				);
 			}
 		}
+		if (req.signal.aborted) return await abandonBeforeForward(response);
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
 		return forwardToClient(
@@ -3841,6 +3896,16 @@ export async function proxyForcedAccount(
 					requestMeta.timestamp,
 				);
 			}
+		}
+
+		// The client left after the head arrived: the pre-head terminal, as in
+		// the catch below, stamping the send it abandoned before its body goes.
+		if (req.signal.aborted) {
+			if (attemptAudit.id && wasInFlightAtAbort(requestMeta, attemptAudit.id))
+				await stampClientClosedAttempt(ctx, attemptAudit.id);
+			discardUpstreamBody(response);
+			liveForcedUpstream = null;
+			return createClientAbortResponse();
 		}
 
 		// Forward to client for recording + streaming. disableCooldown:true keeps

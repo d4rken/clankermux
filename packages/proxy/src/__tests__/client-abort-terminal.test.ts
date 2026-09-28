@@ -37,7 +37,11 @@ import {
 	resetHoldSlots,
 } from "../handlers/burst-cooldown";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
-import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
+import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+	inspectProviderOverload,
+} from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
@@ -334,6 +338,26 @@ async function waitFor(cond: () => boolean, timeoutMs = 5_000): Promise<void> {
 	}
 }
 
+/** Streams still open when the test ends, closed by `afterEach`. */
+const openStreams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+
+/** A streaming 200 whose head has arrived and whose body is still open. */
+function openStream(): Response {
+	return new Response(
+		new ReadableStream<Uint8Array>({
+			start(c) {
+				openStreams.push(c);
+				c.enqueue(
+					new TextEncoder().encode(
+						'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-sonnet-4-5"}}\n\n',
+					),
+				);
+			},
+		}),
+		{ status: 200, headers: { "content-type": "text/event-stream" } },
+	);
+}
+
 /**
  * An upstream that accepts the connection and never answers until the signal it
  * was HANDED aborts — the real production shape of a client disconnect on an
@@ -380,6 +404,11 @@ describe("client-abort terminals", () => {
 	});
 
 	afterEach(() => {
+		for (const stream of openStreams.splice(0)) {
+			try {
+				stream.close();
+			} catch {}
+		}
 		globalThis.fetch = originalFetch;
 		clearAnthropicBurstThrottle();
 		resetHoldSlots();
@@ -992,6 +1021,71 @@ describe("client-abort terminals", () => {
 		for (const attempt of attempts) expect(attempt.status).not.toBe(499);
 	}, 15_000);
 
+	// ===== The window between the response head and forwarding =====
+
+	it("client leaves after the head arrives but before forwarding → neutral row, attempt stamped, staged body and probe released", async () => {
+		cacheBodyStore.setEnabled(true);
+		const baseline = cacheBodyStore.getStagingSize();
+		// A half-open overload bucket, so this attempt holds the probe lease.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 20,
+			"claude-sonnet-4-5",
+		);
+		await sleep(40);
+
+		const account = makeApiKeyPool(1)[0];
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+		const controller = new AbortController();
+		let calls = 0;
+		let stagedDuringAttempt = -1;
+		let probeHeldDuringAttempt = false;
+		globalThis.fetch = upstreamOnlyFetch(() => {
+			calls++;
+			stagedDuringAttempt = cacheBodyStore.getStagingSize();
+			probeHeldDuringAttempt = inspectProviderOverload(
+				"anthropic",
+				"claude-sonnet-4-5",
+			).probeActive;
+			// The head is on its way back when the client hangs up.
+			controller.abort();
+			return openStream();
+		});
+
+		const response = await callHandleProxy(
+			makeCacheableRequest(controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(response.status).toBe(499);
+		expect(calls).toBe(1);
+		// Nothing was forwarded, so the ordinary recorder never began.
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					begin: { mock: { calls: unknown[] } };
+				}
+			).begin.mock.calls.length,
+		).toBe(0);
+		const rows = clientClosedRows(ctx);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ accountId: account.id });
+		const { routingAttempts } = await import("./fixtures/routing-harness");
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0]).toMatchObject({
+			status: 499,
+			error: "client_closed_request",
+		});
+		expect(stagedDuringAttempt).toBeGreaterThan(baseline);
+		expect(cacheBodyStore.getStagingSize()).toBe(baseline);
+		expect(probeHeldDuringAttempt).toBe(true);
+		expect(
+			inspectProviderOverload("anthropic", "claude-sonnet-4-5").probeActive,
+		).toBe(false);
+	}, 15_000);
+
 	// ===== T5: the forced-account path =====
 
 	it("forced account + client disconnect after the send → 499, one row without an outcome, attempt stamped", async () => {
@@ -1055,6 +1149,43 @@ describe("client-abort terminals", () => {
 		const attempts = routingAttempts(ctx);
 		expect(attempts).toHaveLength(1);
 		expect(attempts[0]).toMatchObject({
+			status: 499,
+			error: "client_closed_request",
+		});
+	}, 15_000);
+
+	it("forced account + client leaves after the head arrives → neutral row, no forward, attempt stamped", async () => {
+		const { setForcedAccount, routingAttempts } = await import(
+			"./fixtures/routing-harness"
+		);
+		const account = makeApiKeyPool(1)[0];
+		const ctx = makeContext([account], makeRoundRobinStrategy());
+		const controller = new AbortController();
+		globalThis.fetch = upstreamOnlyFetch(() => {
+			controller.abort();
+			return openStream();
+		});
+		setForcedAccount(account.id);
+		let response: Response;
+		try {
+			response = await callHandleProxy(
+				makeRequest(controller.signal),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+		} finally {
+			setForcedAccount(null);
+		}
+		expect(response.status).toBe(499);
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					begin: { mock: { calls: unknown[] } };
+				}
+			).begin.mock.calls.length,
+		).toBe(0);
+		expect(clientClosedRows(ctx)).toHaveLength(1);
+		expect(routingAttempts(ctx)[0]).toMatchObject({
 			status: 499,
 			error: "client_closed_request",
 		});

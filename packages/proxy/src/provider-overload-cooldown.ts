@@ -166,7 +166,8 @@ export type OverloadProbeEvidence =
 	| "model_not_found"
 	| "model_switch"
 	| "stale_token_retry"
-	| "codex_transient_hold";
+	| "codex_transient_hold"
+	| "client_aborted";
 
 export type ProbeAdmission =
 	| { admitted: true; token: OverloadProbeToken | null }
