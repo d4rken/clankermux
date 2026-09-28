@@ -434,6 +434,14 @@ describe("getModelColor", () => {
 		);
 	});
 
+	it("keeps Sonnet 5.5 off Sonnet 5's color", () => {
+		// `claude-sonnet-5.5` contains `claude-sonnet-5`, so without its explicit
+		// entry the substring fallback would draw both as one emerald line.
+		expect(getModelColor(CLAUDE_MODEL_IDS.SONNET_5_5)).not.toBe(
+			getModelColor(CLAUDE_MODEL_IDS.SONNET_5),
+		);
+	});
+
 	it("keeps Sonnet 4.5 off the legacy claude-3.5-sonnet color", () => {
 		expect(getModelColor(CLAUDE_MODEL_IDS.SONNET_4_5)).not.toBe(
 			getModelColor("claude-3.5-sonnet"),

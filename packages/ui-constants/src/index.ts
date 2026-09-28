@@ -2,7 +2,7 @@
  * The two status hues that are NOT theme tokens, and must not become them.
  *
  * Live Activity draws amber "rate limited" and red "failed" marks in the same
- * plot as model-coloured request marks. `model-colors.test.ts` measures all 31
+ * plot as model-coloured request marks. `model-colors.test.ts` measures all 32
  * model hues — in both colour modes, at normal vision and under simulated
  * protanopia and deuteranopia — against exactly these two values, and
  * `scripts/extend-model-palette.ts` searches for new hues against them too. Of
@@ -89,10 +89,10 @@ export const CHART_TOKENS = {
  * collision that is both shape-distinguished and vanishingly rare.
  *
  * Ten entries are the surviving originals, verbatim from Okabe-Ito and Paul
- * Tol's schemes. `gold` is Tol high-contrast yellow. The remaining twenty
+ * Tol's schemes. `gold` is Tol high-contrast yellow. The remaining twenty-one
  * come from a Lab sweep, not a published set: those sets cluster tightly
- * enough that they are exhausted well before 31 mutually separable hues, and
- * 31 is what 30 models plus a fallback pool needs.
+ * enough that they are exhausted well before 32 mutually separable hues, and
+ * 32 is what 31 models plus a fallback pool needs.
  * `bun packages/ui-constants/scripts/extend-model-palette.ts` is that search.
  */
 export const MODEL_PALETTE = {
@@ -109,7 +109,7 @@ export const MODEL_PALETTE = {
 	grey: "#DDDDDD", // Tol pale grey
 	// Added by the search. `gold` is Tol high-contrast yellow verbatim; the rest
 	// come from the Lab sweep, because the published qualitative sets are
-	// clustered enough that they run out well before 31 mutually separable hues.
+	// clustered enough that they run out well before 32 mutually separable hues.
 	gold: "#DDAA33", // Tol high-contrast yellow
 	periwinkle: "#8582FD",
 	indigo: "#8846E5",
@@ -131,6 +131,7 @@ export const MODEL_PALETTE = {
 	taupe: "#A38D78",
 	steel: "#457196",
 	blush: "#F1A6C4",
+	heliotrope: "#CF59E2",
 } as const;
 
 /**
@@ -190,6 +191,7 @@ export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
 	taupe: "#8D7864", // L* 52 · 4.2:1
 	steel: "#507BA1", // L* 50 · 4.5:1
 	blush: "#C77F9D", // L* 61 · 3.0:1
+	heliotrope: "#89009E", // L* 34 · 8.2:1
 } as const;
 
 /**

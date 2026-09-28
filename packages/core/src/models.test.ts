@@ -9,13 +9,31 @@ import {
 	LATEST_SONNET_MODEL,
 } from "./models";
 
-describe("Claude Sonnet 5 registration", () => {
-	it("exposes the claude-sonnet-5 model id", () => {
-		expect(CLAUDE_MODEL_IDS.SONNET_5).toBe("claude-sonnet-5");
+describe("Claude Sonnet 5.5 registration", () => {
+	it("exposes the claude-sonnet-5-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.SONNET_5_5).toBe("claude-sonnet-5-5");
 	});
 
 	it("is the latest sonnet model", () => {
-		expect(LATEST_SONNET_MODEL).toBe("claude-sonnet-5");
+		expect(LATEST_SONNET_MODEL).toBe("claude-sonnet-5-5");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-sonnet-5-5")).toBe("Claude Sonnet 5.5");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		expect(getModelShortName("claude-sonnet-5-5")).toBe("claude-sonnet-5.5");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-sonnet-5-5")).toBe(true);
+	});
+});
+
+describe("Claude Sonnet 5 registration", () => {
+	it("exposes the claude-sonnet-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.SONNET_5).toBe("claude-sonnet-5");
 	});
 
 	it("has a human-readable display name", () => {
