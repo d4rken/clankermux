@@ -280,6 +280,60 @@ made private, never deleted: no pid says whether a process still uses them.
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
 
+## Claude Code's environment block
+
+The inner listener removes Claude Code's environment block from every
+`/v1/messages` and `count_tokens` body before dispatch
+(`stripEnvironmentBlocks`, `environment-block.ts`). Nothing else in Claude
+Code's requests is changed.
+
+- **What it is.** The attachment pass Claude Code runs between tool calls
+  adds, once per session, `# Environment` / `You have been invoked in the
+  following environment:` with the child's working directory
+  (`<workRoot>/gen-<id>/cwd`), git state, platform, shell and OS, and
+  `# Environment update` / `Primary working directory: <new> (was <old>)`
+  whenever one changes. A released park resumed after a restart lands on a
+  new generation, so the update names both sandbox paths. The transcript
+  keeps the block, so every later call resends it. pi's model then reported
+  two working directories, pi's `<cwd>` and "the latest environment update"
+  (seen live 2026-09-27). The turn-start pass is skipped for
+  `verbatimPrompts`, so a turn's first call never has it.
+- **Why no option stops it.** Only `CLAUDE_CODE_SIMPLE` (`--bare`) and
+  internal fork flags skip it; bare mode replaces the `claude_code` preset
+  with `CWD: <path> Date: …` and takes API keys only.
+  `CLAUDE_CODE_DISABLE_ATTACHMENTS` and `excludeDynamicSections` leave it.
+  The directory is `realpath(process.cwd())`, so it cannot name the
+  client's path without that path existing on this host.
+- **Shapes removed.** Opus and Fable get it bare in a `role: "system"`
+  message, Sonnet wrapped in `<system-reminder>`; a user message's
+  wrapped copy goes too. It shares its message, often its text block, with
+  the model-identity reminder, which stays. Only a whole blank-line
+  paragraph of exactly that shape goes (bare only in a system message), so
+  client text naming a directory is never touched. An emptied block or
+  message goes, and its `cache_control` moves to the block before it
+  unless that one has its own or cannot take one (thinking). The same input
+  always gives the same output, so earlier messages stay identical across
+  calls, resumes and released-park resumes: Opus 5.5 and Fable 5.1 refuse
+  signed thinking whose history changed ("bound to a different
+  conversation"), and the mock upstream does the same.
+- **Decision.** The user chose stripping on 2026-09-28 over leaving it
+  (and over a stable directory under the work root, which the model would
+  still read as a second cwd). Cited for it: Anthropic's LLM gateway guide
+  requires only the `anthropic-beta` and `anthropic-version` headers to be
+  forwarded unchanged, and #48236 and #52988. Its known cost: after a tool
+  round a request carries the model reminder without the environment
+  block, a pairing genuine Claude Code does not send.
+
+## Bumping the Agent SDK or Claude Code
+
+Run the real-binary suites (the two `real-claude*.integration.test.ts`
+files here and the server's `claude-sdk-bridge.integration.test.ts`) in the
+namespace, not skipped, before landing a bump. "never shows the model Claude Code's own directories, only the
+client's" in `real-claude.integration.test.ts` fails if a new CLI renders
+the environment block in a wording `stripEnvironmentBlocks` no longer
+matches; update the patterns and the unit fixtures in
+`environment-block.test.ts` from what the new binary sends.
+
 ## System prompt policies
 
 `system-prompt-policy.ts` picks the policy by harness, once per start turn,
@@ -490,6 +544,8 @@ still owns.
   talk to `fixtures/mock-upstream.ts`. Where user namespaces are unavailable
   (Ubuntu 24.04's AppArmor userns restriction) they skip with the reason
   printed. They never run with egress, and never against a real account.
+  The mock binds each signed thinking block to the history before it and
+  refuses a call whose history changed, as the API does.
 - Driving the bridge by script or by hand against a real account is forbidden;
   see "Never curl the Anthropic endpoint" in `.claude/CLAUDE.md`.
 
