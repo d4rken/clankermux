@@ -9,7 +9,11 @@ import type {
 	RoutingAttempt,
 	RoutingRule,
 } from "@clankermux/types";
-import { getNativeResponsesRequestContext } from "@clankermux/types";
+import {
+	ATTEMPT_TRANSPORT_ENDINGS,
+	CLIENT_CLOSED_REQUEST,
+	getNativeResponsesRequestContext,
+} from "@clankermux/types";
 import { modelPermissionScope } from "../../account-model-permissions";
 import { selectAccountsForRequest as runSelection } from "../../handlers/account-selector";
 import {
@@ -77,6 +81,10 @@ export async function provisionRouting(
 	fixturePermissions.set(ctx, rows);
 	if (!ctx.requestRecorder?.hasRecord && ctx.requestRecorder)
 		Object.assign(ctx.requestRecorder, { hasRecord: () => false });
+	if (!ctx.requestRecorder?.recordClientClosedBeforeHead && ctx.requestRecorder)
+		Object.assign(ctx.requestRecorder, {
+			recordClientClosedBeforeHead: mock(() => {}),
+		});
 	for (const account of await ctx.dbOps.getAllAccounts()) {
 		rows.set(account.id, {
 			account_id: account.id,
@@ -97,12 +105,28 @@ export async function provisionRouting(
 		annotateAttempt: mock(
 			async (id: string, error: string, status: number | null) => {
 				const row = audit.find((a) => a.id === id);
-				if (row) {
+				if (row && row.error !== CLIENT_CLOSED_REQUEST) {
 					row.error = error;
 					row.status ??= status;
 				}
 			},
 		),
+		// The repository's conditional stamp, in memory; its SQL is pinned by
+		// routing-attempt-client-closed.test.ts.
+		finishAttemptClientClosed: mock(async (id: string, finished_at: number) => {
+			const row = audit.find((a) => a.id === id);
+			if (
+				!row ||
+				row.kind !== "upstream_send" ||
+				(row.status !== null &&
+					!ATTEMPT_TRANSPORT_ENDINGS.includes(row.error ?? ""))
+			)
+				return false;
+			row.status = 499;
+			row.error = CLIENT_CLOSED_REQUEST;
+			row.finished_at ??= finished_at;
+			return true;
+		}),
 		getPermissions: mock(async (id: string) => rows.get(id) ?? null),
 		isModelSuppressed: mock(async () => false),
 		suppressModel: mock(async () => {}),
@@ -117,7 +141,9 @@ export async function provisionRouting(
 				error: string | null,
 				reported_model: string | null,
 			) => {
-				Object.assign(audit.find((a) => a.id === id) ?? {}, {
+				const row = audit.find((a) => a.id === id);
+				if (row?.error === CLIENT_CLOSED_REQUEST) return;
+				Object.assign(row ?? {}, {
 					finished_at,
 					status,
 					error: audit.find((a) => a.id === id)?.error ?? error,

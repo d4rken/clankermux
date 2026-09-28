@@ -487,8 +487,10 @@ describe("SdkBridgeTurnRepository", () => {
 			accountName: null,
 			statusCode: 429,
 			success: false,
+			errorMessage: null,
 			inputTokens: null,
 		});
+		expect(rows[0].errorMessage).toBeNull();
 		expect(await repo.listInnerRequests("turn-1", 1)).toHaveLength(1);
 		db.run("DELETE FROM requests");
 		expect(await repo.listInnerRequests("turn-1", 10)).toEqual([]);

@@ -151,6 +151,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			attachUsageSummary: mock(() => {}),
 			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
+			recordClientClosedBeforeHead: mock(() => {}),
 			// Read by the all-accounts-failed terminal's collision guard. Absent
 			// here until a test actually reached that terminal.
 			hasRecord: mock(() => false),
@@ -706,6 +707,14 @@ describe("transparent overload hold", () => {
 		// client-abort marker (the client is still connected).
 		expect(res.status).toBe(529);
 		expect(fetchCalls).toBe(1);
+		// Nor a row for a client that left: this one never did.
+		expect(
+			(
+				ctx.requestRecorder as unknown as {
+					recordClientClosedBeforeHead: { mock: { calls: unknown[] } };
+				}
+			).recordClientClosedBeforeHead.mock.calls,
+		).toHaveLength(0);
 		// Ended around the ~2s budget, nowhere near the 30-min upstream timeout.
 		expect(Date.now() - started).toBeLessThan(10_000);
 		// Every hold slot was released on the way out.

@@ -337,6 +337,22 @@ describe("LiveActivityLanesView", () => {
 		expect(shapeFor("ok")).toContain("<circle");
 	});
 
+	it("draws a request whose client left before the response as a neutral hollow ring", () => {
+		const markup = render({
+			lanes: buildLanes(
+				[event({ status: "client_closed" })],
+				"project",
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		const plot = plotOf(markup);
+		expect(plot).toContain('fill="none"');
+		expect(plot).toContain('stroke="var(--muted-foreground)"');
+		expect(plot).toContain("client left before the response");
+	});
+
 	it("marks a pending request differently from a streaming one", () => {
 		// Waiting on the upstream and actively receiving bytes are different
 		// situations — one may be a stall, the other never is.

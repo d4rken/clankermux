@@ -53,6 +53,20 @@ export interface ResolvedRoutingTarget {
 	upstreamModel: string;
 	targetSource: "literal" | "requested" | "provider_default" | "identity";
 }
+/**
+ * `routing_attempts.error` values that record only how a send's transport
+ * ended: the fetch failed, the body stream failed, or its consumer cancelled
+ * it. None of them says what the upstream answered.
+ */
+export const ATTEMPT_TRANSPORT_FAILED = "Upstream transport failed";
+export const ATTEMPT_STREAM_FAILED = "Upstream response stream failed";
+export const ATTEMPT_CONSUMPTION_CANCELED = "Response consumption canceled";
+export const ATTEMPT_TRANSPORT_ENDINGS: readonly string[] = [
+	ATTEMPT_TRANSPORT_FAILED,
+	ATTEMPT_STREAM_FAILED,
+	ATTEMPT_CONSUMPTION_CANCELED,
+];
+
 export interface RoutingAttempt {
 	id: string;
 	request_id: string;

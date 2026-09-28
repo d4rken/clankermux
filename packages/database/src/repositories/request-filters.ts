@@ -45,6 +45,30 @@ export const EMPTY_REQUEST_FILTERS: RequestFilters = {
 	status: "all",
 };
 
+/**
+ * The rows that have an outcome: every request except one whose client left
+ * before any response started, which is stored with `success` NULL.
+ *
+ * Analytics and the Overview count requests with an outcome, so every read
+ * that rates or totals requests applies this, not only its success-rate
+ * column. Volume, latency, active accounts, cost and project-attribution
+ * coverage all leave these rows out, since a `COUNT(*)` or `AVG()` over
+ * `requests` would otherwise count a request that never got an answer. The
+ * rows stay visible in Request History.
+ */
+export function ratedOutcomeSql(alias: string): string {
+	return `${alias}.success IS NOT NULL`;
+}
+
+/**
+ * {@link ratedOutcomeSql} for a table that references `requests` by
+ * `request_id`: drops rows whose request has no outcome, and keeps rows whose
+ * request was already pruned, as those reads always have.
+ */
+export function withoutUnratedParentSql(table: string): string {
+	return `NOT EXISTS (SELECT 1 FROM requests r WHERE r.id = ${table}.request_id AND NOT (${ratedOutcomeSql("r")}))`;
+}
+
 /** Does this selection narrow anything at all? */
 export function hasRequestFilters(
 	filters: RequestFilters | undefined,

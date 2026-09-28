@@ -300,7 +300,13 @@ export interface SdkBridgeInnerRequest {
 	accountName: string | null;
 	model: string | null;
 	statusCode: number | null;
+	/** False for a request without an outcome too; see `errorMessage`. */
 	success: boolean;
+	/**
+	 * The row's recorded error, which is how a request whose client left
+	 * before any response started is told apart from a failure.
+	 */
+	errorMessage: string | null;
 	inputTokens: number | null;
 	outputTokens: number | null;
 	cacheReadInputTokens: number | null;

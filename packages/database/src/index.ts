@@ -96,6 +96,7 @@ export {
 	hasRequestFilters,
 	type RequestFilterStatus,
 	type RequestFilters,
+	ratedOutcomeSql,
 } from "./repositories/request-filters";
 export {
 	isClientInputError,

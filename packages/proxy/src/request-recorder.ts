@@ -6,6 +6,7 @@ import {
 } from "@clankermux/providers";
 import {
 	type CachePrefixCapture,
+	CLIENT_CLOSED_REQUEST,
 	type ContextComposition,
 	type CostSource,
 	type GatewayHintMetadata,
@@ -85,6 +86,11 @@ export interface RecordMeta {
 	providerName: string;
 	/** Model named by the request, independent of any provider-reported model. */
 	requestedModel?: string | null;
+	/**
+	 * The row's model when no usage summary names one: for a request that got
+	 * no response, the model its last attempt was sent.
+	 */
+	model?: string | null;
 	/**
 	 * True when the request body carried a fallback credit token (see
 	 * `RequestMeta.fallbackCreditClaimed`). Optional: synthetic/audit rows may
@@ -295,10 +301,12 @@ interface SaveRequestData extends GatewayHintMetadata {
 	path: string;
 	accountUsed: string | null;
 	statusCode: number | null;
-	success: boolean;
+	success: boolean | null;
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
+	/** Row model when no usage names one — mirrors `RequestData.model`. */
+	model?: string | null;
 	usage?: unknown;
 	apiKeyId?: string;
 	apiKeyName?: string;
@@ -883,14 +891,47 @@ export class RequestRecorder {
 		errorMessage?: string,
 		details: SyntheticRecordDetails = {},
 	): void {
-		const billingType = this.deriveBillingType(meta);
 		const success = outcome === "success";
-		const responseTime = Math.max(0, this.now() - meta.timestamp);
 		// Carry the specific reason (e.g. "provider_overloaded"/"pool_exhausted")
 		// into the row instead of a generic "synthetic" string.
 		const error = success
 			? null
 			: (errorMessage ?? this.outcomeToErrorString(outcome) ?? "synthetic");
+		this.recordCompleted(meta, success, outcome, error, details);
+	}
+
+	/**
+	 * Record a request whose client left after an upstream attempt was sent
+	 * but before any response reached it. The row has no outcome (`success`
+	 * NULL), so outcome-rated reads leave it out; the payload envelope and the
+	 * live event keep their boolean `success: false`.
+	 */
+	recordClientClosedBeforeHead(
+		meta: RecordMeta,
+		details: SyntheticRecordDetails = {},
+	): void {
+		this.recordCompleted(
+			meta,
+			null,
+			"disconnect",
+			CLIENT_CLOSED_REQUEST,
+			details,
+		);
+	}
+
+	/**
+	 * Persist a record whose transport and payload are already complete, and
+	 * emit its summary. `success` null writes a row without an outcome.
+	 */
+	private recordCompleted(
+		meta: RecordMeta,
+		success: boolean | null,
+		outcome: TransportOutcome,
+		error: string | null,
+		details: SyntheticRecordDetails,
+	): void {
+		const billingType = this.deriveBillingType(meta);
+		const responseTime = Math.max(0, this.now() - meta.timestamp);
 
 		const storePayloads = this.getStorePayloads();
 		let reqBytes: Uint8Array | null = null;
@@ -943,7 +984,7 @@ export class RequestRecorder {
 		this.persistOrdered(record, success, responseTime, error, undefined);
 
 		this.emitSummaryEvent(
-			this.buildEventResponse(record, success, responseTime, null, {
+			this.buildEventResponse(record, success === true, responseTime, null, {
 				outcome,
 				errorMessage: error,
 			}),
@@ -1131,7 +1172,7 @@ export class RequestRecorder {
 	 */
 	private persistOrdered(
 		record: InternalRecord,
-		success: boolean,
+		success: boolean | null,
 		responseTime: number,
 		errorMessage: string | null,
 		usage: unknown,
@@ -1172,7 +1213,7 @@ export class RequestRecorder {
 		let json: string | null = null;
 		if (reservation) {
 			try {
-				json = this.buildEnvelope(record, success);
+				json = this.buildEnvelope(record, success === true);
 			} catch (error) {
 				log.error(
 					`Failed to build payload envelope for ${meta.requestId}:`,
@@ -1207,6 +1248,7 @@ export class RequestRecorder {
 			errorMessage,
 			responseTime,
 			failoverAttempts: meta.failoverAttempts,
+			model: meta.model ?? null,
 			usage,
 			apiKeyId: meta.apiKeyId ?? undefined,
 			apiKeyName: meta.apiKeyName ?? undefined,
@@ -1637,7 +1679,7 @@ export class RequestRecorder {
 					this.outcomeToErrorString(errorSource?.outcome)),
 			responseTimeMs: responseTime,
 			failoverAttempts: meta.failoverAttempts,
-			model: usage?.model,
+			model: usage?.model ?? meta.model ?? undefined,
 			requestedModel: meta.requestedModel ?? undefined,
 			promptTokens: usage?.inputTokens,
 			completionTokens: usage?.outputTokens,

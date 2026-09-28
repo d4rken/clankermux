@@ -48,6 +48,7 @@ import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-co
 import {
 	type Account,
 	type AnthropicUsageData,
+	CLIENT_CLOSED_REQUEST,
 	type FullUsageData,
 	getChatContext,
 	getNativeResponsesMetaContext,
@@ -75,6 +76,12 @@ import {
 	recordFamilyWeeklyExhausted,
 } from "../family-weekly-memo";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
+import {
+	notePreHeadAttempt,
+	noteUpstreamSettled,
+	stampClientClosedAttempt,
+	wasInFlightAtAbort,
+} from "../pre-head-client-abort";
 import { recordProtectedFamilyDemand } from "../protected-family-demand";
 import {
 	applyProviderOverloadCooldown,
@@ -168,7 +175,11 @@ import {
 	classify429Transient,
 } from "./transparent-retry";
 
-import { isZaiOverloadResponse, recoverZaiOverload } from "./zai-overload";
+import {
+	isZaiOverloadResponse,
+	recoverZaiOverload,
+	ZAI_OVERLOAD_VERDICT,
+} from "./zai-overload";
 
 const log = new Logger("ProxyOperations");
 
@@ -1219,6 +1230,7 @@ export async function proxyWithAccount(
 	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
 	noteAttemptStarted(requestMeta);
+	notePreHeadAttempt(requestMeta, failoverAttempts);
 	// Before anything is sent, so a response that outlives a poller restart
 	// cannot feed the restarted poller's header store.
 	const usageHeaderEpoch = usageCache.usageHeaderEpoch(account.id);
@@ -1329,20 +1341,30 @@ export async function proxyWithAccount(
 				? (account.rate_limited_reason ?? "rate_limited")
 				: outcome.kind);
 		try {
-			await recordLocalRoutingOutcome(
-				attemptAudit,
-				requestMeta,
-				account,
-				ctx,
-				reason,
-				response?.status ?? null,
-				// Taken from the outcome rather than a parameter, so the one path
-				// that discards its body before the observer can read the served
-				// model cannot forget to supply it. Without this the attempt the
-				// proxy ACTED on is the one row with no `reported_model`, and the
-				// dashboard surfaces would show nothing for it.
-				outcome.kind === "model_substituted" ? outcome.served : null,
-			);
+			// The client abandoned the send in flight: the stamp is its verdict.
+			if (reason === CLIENT_CLOSED_REQUEST && attemptAudit.id)
+				await stampClientClosedAttempt(ctx, attemptAudit.id);
+			// A throw after the upstream already answered adds nothing to that
+			// answer, which the attempt's row already holds.
+			else if (
+				outcome.kind !== "network_error" ||
+				attemptAudit.id === null ||
+				attemptAudit.judged !== attemptAudit.id
+			)
+				await recordLocalRoutingOutcome(
+					attemptAudit,
+					requestMeta,
+					account,
+					ctx,
+					reason,
+					response?.status ?? null,
+					// Taken from the outcome rather than a parameter, so the one path
+					// that discards its body before the observer can read the served
+					// model cannot forget to supply it. Without this the attempt the
+					// proxy ACTED on is the one row with no `reported_model`, and the
+					// dashboard surfaces would show nothing for it.
+					outcome.kind === "model_substituted" ? outcome.served : null,
+				);
 		} catch (error) {
 			log.warn("Could not persist routing attempt outcome", error);
 		}
@@ -1392,6 +1414,23 @@ export async function proxyWithAccount(
 	// success; if forwardToClient itself throws, discard's locked-guard no-ops).
 	let liveUpstream: Response | null = null;
 	let activeUpstreamModel: string | null = null;
+	// The client left after the response head arrived but before any byte was
+	// forwarded: the same pre-head terminal as an abort that throws, with the
+	// cleanup a forward would otherwise have owned. The stamp goes first, as in
+	// `fail()`, so the observer draining the body cannot finish the row ahead
+	// of it. Called only once `req.signal.aborted` is already true, so the
+	// ordinary forward path gains no await.
+	const abandonBeforeForward = async (
+		response: Response,
+	): Promise<Response> => {
+		if (attemptAudit.id && wasInFlightAtAbort(requestMeta, attemptAudit.id))
+			await stampClientClosedAttempt(ctx, attemptAudit.id);
+		discardUpstreamBody(response);
+		liveUpstream = null;
+		cacheBodyStore.discardStaged(requestMeta.id);
+		settleOverloadProbe("abandoned", "client_aborted");
+		return createClientAbortResponse();
+	};
 	// Trust-gated probe predicate for every exemption below. `requestMeta.internal`
 	// is handleProxy's own `isInternal` parameter (default false, sourced only from
 	// dispatchProxyRequest) and is therefore unspoofable; the marker headers alone
@@ -1778,8 +1817,32 @@ export async function proxyWithAccount(
 			};
 			const response = await send();
 			if (account.provider !== "zai") return response;
+			// Recorded against the send the peek just read, before the backoff,
+			// so a throw during the wait cannot replace it with network_error.
+			const judgeZaiOverload = async (): Promise<void> => {
+				const id = attemptAudit.id;
+				if (!id) return;
+				try {
+					await recordLocalRoutingOutcome(
+						attemptAudit,
+						requestMeta,
+						account,
+						ctx,
+						ZAI_OVERLOAD_VERDICT,
+						200,
+					);
+					attemptAudit.judged = id;
+				} catch (error) {
+					log.warn("Could not persist the Z.ai overload verdict", error);
+				}
+			};
 			try {
-				return await recoverZaiOverload(response, send, attemptSignal());
+				return await recoverZaiOverload(
+					response,
+					send,
+					attemptSignal(),
+					judgeZaiOverload,
+				);
 			} catch (error) {
 				// A failed/aborted peek may own a retry response already. Release
 				// it even when the cache-control retry's local catch keeps its 400.
@@ -1794,6 +1857,7 @@ export async function proxyWithAccount(
 		): Promise<Response | null> => {
 			log.warn(`Z.ai overload retries exhausted on account ${account.name}`);
 			if (isTerminalAttempt()) {
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				settleOverloadProbe("abandoned", "sse_overloaded_error");
 				options?.onOutcome?.({ kind: "other" });
 				return forwardToClient(
@@ -3050,6 +3114,7 @@ export async function proxyWithAccount(
 				log.warn(
 					`Provider ${account.provider} returned final 529 overload response — forwarding upstream response instead of pool_exhausted`,
 				);
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				return forwardToClient(
 					{
 						...recordFieldsFromMeta(requestMeta),
@@ -3114,6 +3179,9 @@ export async function proxyWithAccount(
 			// the probe; only the reading moved.
 			const prefixFailure = codexPrefixFailure;
 			if (prefixFailure) {
+				// The upstream has answered: an in-band failure, not a send still
+				// in flight when a client leaves during the hold below.
+				if (attemptAudit.id) noteUpstreamSettled(requestMeta, attemptAudit.id);
 				// A backend that fails in-band is usually serving again within
 				// seconds, and the sibling this would otherwise move to has a cold
 				// prompt cache. Wait once and re-attempt the SAME account; only a
@@ -3238,6 +3306,7 @@ export async function proxyWithAccount(
 				// A non-official-provider 529 terminal (the official-Anthropic 529
 				// was intercepted above): no family trip fires here, and streaming a
 				// known-error body yields no health verdict — release the lease.
+				if (req.signal.aborted) return await abandonBeforeForward(response);
 				settleOverloadProbe("abandoned");
 				return forwardToClient(
 					{
@@ -3347,6 +3416,7 @@ export async function proxyWithAccount(
 				);
 			}
 		}
+		if (req.signal.aborted) return await abandonBeforeForward(response);
 		const transferredProbeToken = overloadProbeToken;
 		overloadProbeToken = null;
 		return forwardToClient(
@@ -3372,6 +3442,9 @@ export async function proxyWithAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
+		// Read before any await below: whether the client had already left when
+		// this attempt failed, not whether it leaves while the failure is handled.
+		const abortedAtThrow = req.signal.aborted;
 		if (err instanceof RoutingPolicyError) {
 			// A policy rejection is not a failover: it propagates to dispatch and
 			// ends the request, carrying its own audit row (routing-dispatch sets
@@ -3408,14 +3481,25 @@ export async function proxyWithAccount(
 							kind: "network_error",
 							...(!attemptAudit.id ? { beforeDispatch: true } : {}),
 						};
-		const failed = await fail(outcome, liveUpstream);
+		const abandonedInFlight =
+			abortedAtThrow &&
+			attemptAudit.id !== null &&
+			wasInFlightAtAbort(requestMeta, attemptAudit.id);
+		const failed = await fail(
+			outcome,
+			liveUpstream,
+			undefined,
+			abandonedInFlight ? CLIENT_CLOSED_REQUEST : undefined,
+		);
 
 		// Client disconnect: the throw is the upstream fetch reacting to the
 		// client's own signal, so return the terminal 499 rather than signalling
 		// failover into a fan-out nobody is waiting for. Keyed on
 		// `req.signal.aborted`, NEVER `isAbortError` — the burst / overload /
 		// context-window holds compose their own AbortControllers, and a budget
-		// deadline must still fail over.
+		// deadline must still fail over. The request's row is handleProxy's to
+		// write; `fail()` above stamped the attempt when the client abandoned it
+		// in flight.
 		//
 		// The staged-body discard is this function's own responsibility here:
 		// proxyWithAccount stages cacheable bodies before fetching, and once this
@@ -3506,6 +3590,8 @@ export async function proxyForcedAccount(
 ): Promise<Response> {
 	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
+	// Force forbids failover, so there is never one to count.
+	notePreHeadAttempt(requestMeta, 0);
 	// Before anything is sent; see proxyWithAccount.
 	const usageHeaderEpoch = usageCache.usageHeaderEpoch(account.id);
 	// Hoisted to function scope so the outer catch (which may fire before
@@ -3646,11 +3732,12 @@ export async function proxyForcedAccount(
 			try {
 				accessToken = await getValidAccessToken(account, ctx);
 			} catch (tokenErr) {
-				// Client disconnect during the refresh: return the terminal 499
-				// WITHOUT recording, exactly as the outer catch does. This catch has
-				// its own `return`, so it never reaches that check — without this
-				// line a disconnect that races a token refresh would still produce a
-				// logged forced-account failure, a history row and a 502.
+				// Client disconnect during the refresh: nothing was sent yet, so
+				// return the terminal 499 without recording a failure, as the outer
+				// catch does. This catch has its own `return`, so it never reaches
+				// that check — without this line a disconnect that races a token
+				// refresh would still produce a logged forced-account failure, a
+				// history row and a 502.
 				//
 				// Keyed on `req.signal.aborted`, NEVER `isAbortError`: a genuine
 				// token-refresh failure (invalid_grant, upstream 5xx, refresh
@@ -3811,6 +3898,16 @@ export async function proxyForcedAccount(
 			}
 		}
 
+		// The client left after the head arrived: the pre-head terminal, as in
+		// the catch below, stamping the send it abandoned before its body goes.
+		if (req.signal.aborted) {
+			if (attemptAudit.id && wasInFlightAtAbort(requestMeta, attemptAudit.id))
+				await stampClientClosedAttempt(ctx, attemptAudit.id);
+			discardUpstreamBody(response);
+			liveForcedUpstream = null;
+			return createClientAbortResponse();
+		}
+
 		// Forward to client for recording + streaming. disableCooldown:true keeps
 		// the mid-stream rate-limit sniffer from mutating cooldown state on a
 		// forced 429/529. Ownership of the body transfers to forwardToClient at
@@ -3845,10 +3942,10 @@ export async function proxyForcedAccount(
 
 		// Client disconnect: threading `req.signal` into the fetch above means a
 		// disconnect now surfaces here as an AbortError. Return the terminal 499
-		// WITHOUT logging an error or calling recordLocalError — otherwise
-		// threading the signal would have converted every client disconnect into a
-		// recorded forced-account failure plus a history row, i.e. traded a leak
-		// for a new mis-classification.
+		// WITHOUT logging an error or calling recordLocalError: a disconnect is
+		// not a forced-account failure. If the send was already out, handleProxy
+		// records the request as one without an outcome, and the attempt the
+		// client abandoned is stamped here.
 		//
 		// Keyed on `req.signal.aborted`, NEVER `isAbortError`: makeProxyRequest
 		// composes the client signal with its own internal timeout controller, so
@@ -3856,8 +3953,10 @@ export async function proxyForcedAccount(
 		// recorded as a forced-account failure.
 		if (req.signal.aborted) {
 			log.debug(
-				`Forced account ${account.name}: client disconnected — returning 499 without recording`,
+				`Forced account ${account.name}: client disconnected — returning 499`,
 			);
+			if (attemptAudit.id && wasInFlightAtAbort(requestMeta, attemptAudit.id))
+				await stampClientClosedAttempt(ctx, attemptAudit.id);
 			return createClientAbortResponse();
 		}
 

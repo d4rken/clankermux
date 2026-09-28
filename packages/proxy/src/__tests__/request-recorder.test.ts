@@ -35,10 +35,11 @@ interface SaveRequestCall {
 	accountUsed: string | null;
 	accountId?: string | null;
 	statusCode: number | null;
-	success: boolean;
+	success: boolean | null;
 	errorMessage: string | null;
 	responseTime: number;
 	failoverAttempts: number;
+	model: string | null | undefined;
 	usage: unknown;
 	apiKeyId: string | undefined;
 	apiKeyName: string | undefined;
@@ -102,10 +103,11 @@ class FakeDbOps {
 		accountUsed: string | null;
 		accountId?: string | null;
 		statusCode: number | null;
-		success: boolean;
+		success: boolean | null;
 		errorMessage: string | null;
 		responseTime: number;
 		failoverAttempts: number;
+		model?: string | null;
 		usage?: unknown;
 		apiKeyId?: string;
 		apiKeyName?: string;
@@ -139,6 +141,7 @@ class FakeDbOps {
 			errorMessage: data.errorMessage,
 			responseTime: data.responseTime,
 			failoverAttempts: data.failoverAttempts,
+			model: data.model,
 			usage: data.usage,
 			apiKeyId: data.apiKeyId,
 			apiKeyName: data.apiKeyName,
@@ -1581,6 +1584,76 @@ describe("RequestRecorder — recordSynthetic", () => {
 			"headers",
 			"payload",
 		]);
+	});
+});
+
+describe("RequestRecorder — recordClientClosedBeforeHead", () => {
+	const clientClosedMeta = () =>
+		makeMeta({
+			requestId: "closed-1",
+			accountId: "acct-codex",
+			accountName: "Codex One",
+			responseStatus: 499,
+			providerName: "codex",
+			requestedModel: "gpt-6-astra",
+			model: "gpt-6-astra-resolved",
+			failureSource: "client_closed_request",
+			// The fake clock reads 1_000_000: a minute after arrival.
+			timestamp: 940_000,
+			failoverAttempts: 1,
+		});
+
+	it("writes a row with no outcome, the dispatched model and no usage", async () => {
+		const h = makeHarness();
+		h.recorder.recordClientClosedBeforeHead(clientClosedMeta(), {
+			responseBody: makeArrayBuffer('{"error":"closed"}'),
+		});
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		const row = h.dbOps.saveRequestCalls[0];
+		expect(row).toMatchObject({
+			id: "closed-1",
+			accountUsed: "acct-codex",
+			statusCode: 499,
+			success: null,
+			errorMessage: "client_closed_request",
+			failoverAttempts: 1,
+			model: "gpt-6-astra-resolved",
+			requestedModel: "gpt-6-astra",
+			usageSource: "none",
+		});
+		expect(row.usage).toBeUndefined();
+		// Arrival to departure: the wait the client gave up on.
+		expect(row.responseTime).toBe(60_000);
+		// The row is a real upstream attempt, not a local rejection.
+		const envelope = JSON.parse(h.dbOps.savePayloadCalls[0].json) as {
+			meta: Record<string, unknown>;
+		};
+		expect(envelope.meta.success).toBe(false);
+		expect(envelope.meta.synthetic).toBeUndefined();
+		expect(envelope.meta.failureSource).toBe("client_closed_request");
+	});
+
+	it("keeps the live event's success a boolean", async () => {
+		const h = makeHarness();
+		h.recorder.recordClientClosedBeforeHead(clientClosedMeta());
+		await h.flush();
+		expect(h.emitted).toHaveLength(1);
+		expect(h.emitted[0]).toMatchObject({
+			id: "closed-1",
+			success: false,
+			statusCode: 499,
+			errorMessage: "client_closed_request",
+			model: "gpt-6-astra-resolved",
+		});
+	});
+
+	it("fires no account side effects", async () => {
+		const h = makeHarness();
+		h.recorder.recordClientClosedBeforeHead(clientClosedMeta());
+		await h.flush();
+		expect(h.dbOps.updateAccountUsageCalls).toEqual([]);
+		expect(h.dbOps.pauseCalls).toEqual([]);
 	});
 });
 

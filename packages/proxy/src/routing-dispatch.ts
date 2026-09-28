@@ -5,6 +5,7 @@ import {
 } from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
+	ATTEMPT_TRANSPORT_FAILED,
 	getChatContext,
 	readReasoningEffortAdaptation,
 	SdkBridgeCapacityError,
@@ -13,6 +14,11 @@ import {
 import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
+import {
+	noteBridgedDispatch,
+	noteUpstreamDispatch,
+	noteUpstreamSettled,
+} from "./pre-head-client-abort";
 import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	enforceOutgoingModel,
@@ -30,6 +36,12 @@ import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 /** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
 export interface RoutingAttemptAudit {
 	id: string | null;
+	/**
+	 * The attempt whose row already holds what the upstream answered, so a
+	 * later generic `network_error` from a throw must not replace it. Compared
+	 * against `id`, so it never carries over to a later send.
+	 */
+	judged?: string | null;
 }
 export async function recordLocalRoutingOutcome(
 	audit: RoutingAttemptAudit,
@@ -45,6 +57,7 @@ export async function recordLocalRoutingOutcome(
 	reportedModel: string | null = null,
 ): Promise<void> {
 	if (audit.id) {
+		noteUpstreamSettled(meta, audit.id);
 		// Semantic classification wins regardless of whether the body observer finished first.
 		await ctx.dbOps.routing.annotateAttempt(
 			audit.id,
@@ -130,6 +143,8 @@ export async function sendAuthorizedRequest(
 		reasoning_effort_reason: reasoning?.reason ?? null,
 	};
 	let response: Response;
+	// The upstream's own status line, once a head has arrived.
+	let head: Response | null = null;
 	let recorded = false;
 	// Held from the send until the body is over, so the usage cache never takes
 	// a poll that landed mid-request as proof the account has been idle.
@@ -271,7 +286,8 @@ export async function sendAuthorizedRequest(
 			!account.custom_endpoint
 		)
 			endQuotaUse = usageCache.beginQuotaUse(account.id);
-		response = transport
+		if (transport) noteBridgedDispatch(meta);
+		head = transport
 			? await transport(request)
 			: await makeProxyRequest(
 					request,
@@ -280,27 +296,45 @@ export async function sendAuthorizedRequest(
 					undefined,
 					undefined,
 					signal,
+					() =>
+						noteUpstreamDispatch(meta, {
+							attemptId: attempt.id,
+							account,
+							providerName: (getProvider(account.provider) ?? ctx.provider)
+								.name,
+							resolvedModel: target.upstreamModel,
+						}),
 				);
-		if (prepareResponse) response = await prepareResponse(response);
+		// An error status is the upstream's answer, even with its body unread,
+		// and even if preparing the response then fails.
+		if (!head.ok) noteUpstreamSettled(meta, attempt.id);
+		response = prepareResponse ? await prepareResponse(head) : head;
+		if (!response.ok) noteUpstreamSettled(meta, attempt.id);
 	} catch (error) {
+		noteUpstreamSettled(meta, attempt.id);
 		endQuotaUse?.();
 		attempt.finished_at = Date.now();
-		attempt.status =
-			error instanceof RoutingPolicyError
+		// Preparation failed after the upstream had already answered with an
+		// error: that answer is the attempt's verdict, not a transport failure.
+		const answered = head && !head.ok ? head : null;
+		attempt.status = answered
+			? answered.status
+			: error instanceof RoutingPolicyError
 				? 403
 				: error instanceof SdkBridgeCapacityError
 					? error.status
 					: error instanceof SdkBridgeUnavailableError
 						? 503
 						: 502;
-		attempt.error =
-			error instanceof RoutingPolicyError
+		attempt.error = answered
+			? `Upstream HTTP ${answered.status}`
+			: error instanceof RoutingPolicyError
 				? error.message
 				: error instanceof SdkBridgeCapacityError
 					? `SDK bridge at capacity: ${error.message}`
 					: error instanceof SdkBridgeUnavailableError
 						? `SDK bridge unavailable: ${error.message}`
-						: "Upstream transport failed";
+						: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else
@@ -311,7 +345,10 @@ export async function sendAuthorizedRequest(
 					attempt.error,
 					null,
 				);
-			if (audit) audit.id = attempt.id;
+			if (audit) {
+				audit.id = attempt.id;
+				if (answered) audit.judged = attempt.id;
+			}
 		} catch {
 			/* Preserve the original dispatch failure if audit storage also failed. */
 		}
@@ -353,6 +390,7 @@ export async function sendAuthorizedRequest(
 	return observeRoutingResponse(
 		response,
 		async ({ reportedModel, error, modelRejected }) => {
+			noteUpstreamSettled(meta, attempt.id);
 			endQuotaUse?.();
 			if (modelRejected && attempt.kind === "upstream_send") {
 				await ctx.dbOps.routing.suppressModel(
@@ -391,5 +429,6 @@ import {
 	type DevinRequestProvenance,
 	getDevinReportedModel,
 	getDevinRequestProvenance,
+	getProvider,
 	usageCache,
 } from "@clankermux/providers";

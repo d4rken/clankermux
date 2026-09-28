@@ -289,6 +289,23 @@ describe("normalization", () => {
 		expect(s.get("r1")?.status).toBe("rate_limited");
 	});
 
+	it("classifies a client that left before the response as its own terminal, not an error", () => {
+		const s = store();
+		applyStreamEvent(s, {
+			type: "summary",
+			payload: summaryPayload({
+				statusCode: 499,
+				success: false,
+				errorMessage: "client_closed_request",
+			}),
+		});
+
+		expect(s.get("r1")?.status).toBe("client_closed");
+		const { lanes } = buildLanes([...s.values()], "project", T0, WINDOW, 6);
+		expect(lanes[0].requests).toBe(1);
+		expect(lanes[0].errors).toBe(0);
+	});
+
 	it("classifies a non-429 failure as an error", () => {
 		const s = store();
 		applyStreamEvent(s, {

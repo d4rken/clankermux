@@ -88,18 +88,32 @@ export async function peekZaiOverload(
 	}
 }
 
-/** One short retry per model, then let the existing model/account loop recover. */
+/** The routing-attempt verdict for a send that answered with an in-band 1305. */
+export const ZAI_OVERLOAD_VERDICT = "zai_overloaded";
+
+/**
+ * One short retry per model, then let the existing model/account loop recover.
+ *
+ * `onOverload` runs for each send the peek recognizes, before its body is
+ * discarded and before the backoff, so the caller can record the verdict
+ * against that send while it is still the current one.
+ */
 export async function recoverZaiOverload(
 	response: Response,
 	retry: () => Promise<Response>,
 	signal?: AbortSignal,
+	onOverload?: () => Promise<void>,
 ): Promise<Response> {
 	if (!(await peekZaiOverload(response, signal))) return response;
+	const judged = onOverload?.();
 	discardUpstreamBody(response);
+	await judged;
 	await delay(100 + Math.random() * 100, undefined, { signal });
 	const retried = await retry();
 	if (!(await peekZaiOverload(retried, signal))) return retried;
+	const judgedRetry = onOverload?.();
 	discardUpstreamBody(retried);
+	await judgedRetry;
 	const headers = new Headers({
 		"content-type": "application/json",
 		"retry-after": "1",

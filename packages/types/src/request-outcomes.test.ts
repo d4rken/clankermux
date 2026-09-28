@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
+	CLIENT_CLOSED_REQUEST,
 	classifyRequestOutcomeCause,
 	classifyStopCause,
 	isLegacyAttemptAudit,
+	isPreHeadClientAbort,
 	outcomeForCause,
 	STOP_CAUSES,
 } from "./stops-history";
@@ -10,6 +12,7 @@ import {
 describe("recorded request outcomes", () => {
 	it.each([
 		["client disconnected", 200, "client_disconnected", "disconnected"],
+		["client_closed_request", 499, "client_disconnected", "disconnected"],
 		["request timed out", 200, "request_timed_out", "failed"],
 		["stream error", 200, "stream_failed", "failed"],
 		["upstream_stream_error", 200, "stream_failed", "failed"],
@@ -77,5 +80,12 @@ describe("recorded request outcomes", () => {
 		null,
 	])("keeps unproven and client terminal labels %s", (message) => {
 		expect(isLegacyAttemptAudit(message, 429)).toBe(false);
+	});
+	it("recognizes a pre-head client abort only by its exact marker pair", () => {
+		expect(isPreHeadClientAbort(499, CLIENT_CLOSED_REQUEST)).toBe(true);
+		expect(isPreHeadClientAbort(499, "client disconnected")).toBe(false);
+		expect(isPreHeadClientAbort(200, CLIENT_CLOSED_REQUEST)).toBe(false);
+		expect(isPreHeadClientAbort(499, null)).toBe(false);
+		expect(isPreHeadClientAbort(undefined, undefined)).toBe(false);
 	});
 });

@@ -88,6 +88,7 @@ function view(over: Partial<SdkBridgeTurnView> = {}): SdkBridgeTurnView {
 				model: "claude-opus-5-5",
 				statusCode: 529,
 				success: false,
+				errorMessage: "provider_overloaded",
 				inputTokens: null,
 				outputTokens: null,
 				cacheReadInputTokens: null,
@@ -318,5 +319,45 @@ describe("SdkBridgeTurnDetails", () => {
 			/>,
 		);
 		expect(html).toContain("None");
+	});
+
+	it("draws a model call whose client left before the response as neutral", () => {
+		const base = view();
+		const call = base.innerRequests[0];
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					innerRequests: [
+						{
+							...call,
+							id: "pre-head",
+							statusCode: 499,
+							errorMessage: "client_closed_request",
+						},
+						{
+							...call,
+							id: "post-head",
+							statusCode: 200,
+							errorMessage: "client disconnected",
+						},
+						{
+							...call,
+							id: "upstream-499",
+							statusCode: 499,
+							errorMessage: "499 upstream text",
+						},
+					],
+				}}
+			/>,
+		);
+		const cellOf = (id: string) => {
+			const row = html.slice(html.indexOf(`title="${id}"`));
+			return row.slice(0, row.indexOf("</tr>"));
+		};
+		expect(cellOf("pre-head")).toContain("text-muted-foreground");
+		expect(cellOf("pre-head")).not.toContain("text-destructive-strong");
+		expect(cellOf("post-head")).toContain("text-destructive-strong");
+		expect(cellOf("upstream-499")).toContain("text-destructive-strong");
 	});
 });

@@ -31,6 +31,7 @@ import {
 	routingAttempts,
 } from "../../__tests__/fixtures/routing-harness";
 import { cacheBodyStore } from "../../cache-body-store";
+import { trackPreHeadClientAbort } from "../../pre-head-client-abort";
 import {
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
@@ -40,6 +41,7 @@ import {
 	isOrdinaryAttemptFailure,
 } from "../../recovery-holds";
 import type { ProxyContext } from "../proxy-types";
+import { ZAI_OVERLOAD_VERDICT } from "../zai-overload";
 
 describe("Zai 1305 recovery through the account/model loop", () => {
 	const originalFetch = globalThis.fetch;
@@ -87,6 +89,60 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 			provider: "zai",
 			custom_endpoint: null,
 		});
+	it("keeps the 1305 verdict when the client leaves during the retry backoff of a hold re-probe", async () => {
+		let calls = 0;
+		const client = new AbortController();
+		globalThis.fetch = mockFetch(async () => {
+			calls++;
+			// Leave while the backoff before the retry is running.
+			setTimeout(() => client.abort(), 20);
+			return overloaded();
+		});
+		const ctx = makeProxyContext();
+		const meta = makeRequestMeta();
+		const req = makeRequest(makeRequestBody());
+		const clientReq = new Request(req, { signal: client.signal });
+		const release = trackPreHeadClientAbort(meta, client.signal);
+		// A hold re-probe composes the client's signal with its own budget.
+		const budget = new AbortController();
+		const response = await proxyWithAccount(
+			clientReq,
+			new URL("https://proxy.local/v1/messages"),
+			account(),
+			meta,
+			makeRequestBody(),
+			() => undefined,
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{
+				signal: AbortSignal.any([client.signal, budget.signal]),
+				fromHold: true,
+			},
+		);
+		release();
+
+		expect(response?.status).toBe(499);
+		expect(calls).toBe(1);
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0].error).toBe(ZAI_OVERLOAD_VERDICT);
+		expect(attempts[0].status).toBe(200);
+	});
+
+	it("records the 1305 verdict against each send it recognized", async () => {
+		globalThis.fetch = mockFetch(async () => overloaded());
+		const ctx = makeProxyContext();
+		expect(await run(account(), ctx)).toBeNull();
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(2);
+		expect(attempts[0].error).toBe(ZAI_OVERLOAD_VERDICT);
+	});
+
 	it("fails over after one retry without mutating quota cooldowns", async () => {
 		const fetcher = mock(async () => overloaded());
 		globalThis.fetch = fetcher as unknown as typeof fetch;

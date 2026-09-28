@@ -1,6 +1,7 @@
 import {
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveWindowTotals,
+	ratedOutcomeSql,
 	UsageSnapshotRepository,
 } from "@clankermux/database";
 import {
@@ -150,7 +151,7 @@ export function createCacheEffectivenessHandler(context: APIContext) {
 				        COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
 				        COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_tokens
 				 FROM requests
-				 WHERE timestamp >= ?`,
+				 WHERE timestamp >= ? AND ${ratedOutcomeSql("requests")}`,
 				[sinceMs],
 			);
 			return {

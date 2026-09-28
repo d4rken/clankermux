@@ -1,3 +1,5 @@
+const clientAbortResponses = new WeakSet<Response>();
+
 /**
  * The generic client-departed terminal: returned wherever the proxy observes
  * that the CLIENT disconnected — a burst-retry / overload / context-window hold
@@ -10,6 +12,10 @@
  * error for a request nobody is waiting on. Uses 499 (Client Closed Request) so
  * history/logs reflect the disconnect rather than a server-side failure.
  *
+ * Every response it returns is branded (see {@link isClientAbortResponse}), so
+ * the one place that records a disconnect after an upstream attempt went out
+ * can tell this terminal from an upstream 499 passed through.
+ *
  * The `x-clankermux-burst-retry: client-aborted` header predates the generic use
  * and is deliberately KEPT as-is: it is an existing diagnostic other code and
  * tests key on, and renaming it is a separate concern.
@@ -20,7 +26,7 @@
  * through that barrel).
  */
 export function createClientAbortResponse(): Response {
-	return new Response(
+	const response = new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
@@ -36,4 +42,11 @@ export function createClientAbortResponse(): Response {
 			},
 		},
 	);
+	clientAbortResponses.add(response);
+	return response;
+}
+
+/** Whether `response` is this module's client-departed terminal. */
+export function isClientAbortResponse(response: Response): boolean {
+	return clientAbortResponses.has(response);
 }

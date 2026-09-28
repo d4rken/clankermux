@@ -139,7 +139,7 @@ describe("analytics totals aggregate", () => {
 
 	it("reports filtered API cost coverage without counting plan value or losing free requests", async () => {
 		const insert = db.prepare(
-			`INSERT INTO requests (id, timestamp, model, billing_type, cost_usd, cost_source, method, path) VALUES (?, ?, ?, ?, ?, ?, 'POST', '/v1/messages')`,
+			`INSERT INTO requests (id, timestamp, model, billing_type, cost_usd, cost_source, method, path, success) VALUES (?, ?, ?, ?, ?, ?, 'POST', '/v1/messages', 1)`,
 		);
 		for (const [id, model, billing, cost, source] of [
 			["cost-reported", "cost-coverage-test", "api", 2, "reported"],

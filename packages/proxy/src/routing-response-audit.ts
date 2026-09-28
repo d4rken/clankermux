@@ -1,4 +1,8 @@
 import { Logger } from "@clankermux/logger";
+import {
+	ATTEMPT_CONSUMPTION_CANCELED,
+	ATTEMPT_STREAM_FAILED,
+} from "@clankermux/types";
 
 const log = new Logger("routing-audit");
 export interface RoutingResponseResult {
@@ -155,14 +159,14 @@ export function observeRoutingResponse(
 					}
 				} catch (error) {
 					controller.error(error);
-					void done("Upstream response stream failed");
+					void done(ATTEMPT_STREAM_FAILED);
 				}
 			},
 			async cancel(reason) {
 				try {
 					await reader.cancel(reason);
 				} finally {
-					await done("Response consumption canceled");
+					await done(ATTEMPT_CONSUMPTION_CANCELED);
 				}
 			},
 		}),

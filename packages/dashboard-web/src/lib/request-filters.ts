@@ -71,11 +71,13 @@ export interface RequestQueryParams {
 /**
  * Common HTTP status codes always offered in the specific-code picker, so error
  * codes are selectable even when the currently-loaded rows are all 200s (the
- * exact gap that made "filter to non-200" impossible before).
+ * exact gap that made "filter to non-200" impossible before). 499 is how to
+ * find requests whose client left before the response started: they have no
+ * outcome, so neither the success nor the error filter lists them.
  */
 export const COMMON_STATUS_CODES = [
-	200, 201, 204, 400, 401, 403, 404, 408, 409, 422, 429, 500, 502, 503, 504,
-	529,
+	200, 201, 204, 400, 401, 403, 404, 408, 409, 422, 429, 499, 500, 502, 503,
+	504, 529,
 ];
 
 /** Union the curated common codes with any codes observed in loaded data. */

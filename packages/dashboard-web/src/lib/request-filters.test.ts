@@ -262,6 +262,10 @@ describe("mergeStatusCodes", () => {
 		expect(merged).toEqual([...COMMON_STATUS_CODES].sort((a, b) => a - b));
 	});
 
+	it("offers 499, the code that finds requests whose client left before the response", () => {
+		expect(mergeStatusCodes([])).toContain(499);
+	});
+
 	it("adds observed codes not in the common set, sorted and deduped", () => {
 		const merged = mergeStatusCodes([200, 418, 429]);
 		expect(merged).toContain(418);

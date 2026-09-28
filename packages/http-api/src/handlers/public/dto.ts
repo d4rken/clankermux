@@ -4,6 +4,7 @@
  */
 import type { RequestResponse, StopsHistoryResponse } from "@clankermux/types";
 import {
+	CLIENT_CLOSED_REQUEST,
 	classifyStopCause,
 	outcomeForCause,
 	resolveCostSource,
@@ -927,7 +928,7 @@ export type PublicTokenBasisDto = "provider" | "estimated";
  */
 export type PublicErrorCategoryDto =
 	| PublicStopCauseDto
-	/** The client went away mid-response. */
+	/** The client went away, mid-response or before the response started. */
 	| "client_disconnected"
 	/** The proxy's own deadline elapsed. */
 	| "request_timed_out"
@@ -947,6 +948,7 @@ export type PublicErrorCategoryDto =
 const TRANSPORT_TERMINALS: ReadonlyMap<string, PublicErrorCategoryDto> =
 	new Map<string, PublicErrorCategoryDto>([
 		["client disconnected", "client_disconnected"],
+		[CLIENT_CLOSED_REQUEST, "client_disconnected"],
 		["request timed out", "request_timed_out"],
 		["stream error", "stream_error"],
 	]);
