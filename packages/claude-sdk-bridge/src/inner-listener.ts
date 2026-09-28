@@ -14,6 +14,8 @@ interface TokenEntry {
 	/** Settles once `beforeFirstDispatch` has run; its rejection refuses every call. */
 	gate: Promise<void> | null;
 	beforeFirstDispatch: (() => Promise<void>) | null;
+	/** Whether this turn has logged an environment block it left in place. */
+	environmentNoted: boolean;
 }
 
 export interface InnerRegistration {
@@ -74,6 +76,8 @@ export class InnerListener {
 			log: BridgeLog;
 			/** Largest body an inner call may send, read per call. */
 			maxBodyBytes: () => number;
+			/** The bridge's work root, as configured and as resolved. */
+			workRoots: readonly string[];
 		},
 	) {}
 
@@ -162,6 +166,7 @@ export class InnerListener {
 			revoked: false,
 			gate: null,
 			beforeFirstDispatch: hooks.beforeFirstDispatch ?? null,
+			environmentNoted: false,
 		};
 		this.tokens.set(key, entry);
 		return {
@@ -259,7 +264,23 @@ export class InnerListener {
 		}
 		// The child's own sandbox is no context for a model driving the
 		// client's tools.
-		if (stripEnvironmentBlocks(parsed)) body = JSON.stringify(parsed);
+		const environment = stripEnvironmentBlocks(parsed, {
+			roots: this.opts.workRoots,
+		});
+		if (environment.changed) body = JSON.stringify(parsed);
+		if (
+			(environment.drift || environment.keptInUserMessages > 0) &&
+			!entry.environmentNoted
+		) {
+			entry.environmentNoted = true;
+			this.opts.log.debug(
+				`SDK bridge turn ${entry.context.turnId}: Claude Code's environment block left in a model call (${
+					environment.drift
+						? "a text under the work root looks like it but did not match"
+						: "it was all a user message held"
+				})`,
+			);
+		}
 		const headers = new Headers();
 		for (const [name, value] of req.headers) {
 			const lower = name.toLowerCase();

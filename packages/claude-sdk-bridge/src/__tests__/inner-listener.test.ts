@@ -6,6 +6,8 @@ import type {
 import { InnerListener } from "../inner-listener";
 import { fakeInner, MODEL, makePlan, silentLog } from "./fixtures/fake-sdk";
 
+const WORK_ROOT = "/srv/claude-agent-sdk";
+
 function context(
 	outcomes: SdkBridgeInnerOutcome[] = [],
 ): SdkBridgeInnerContext {
@@ -53,12 +55,13 @@ describe("InnerListener", () => {
 	let listener: InnerListener | null = null;
 	afterEach(() => listener?.stop());
 
-	function setup(maxBodyBytes = 1024 * 1024) {
+	function setup(maxBodyBytes = 1024 * 1024, log = silentLog) {
 		const inner = fakeInner();
 		listener = new InnerListener({
 			dispatchInner: inner.dispatch,
-			log: silentLog,
+			log,
 			maxBodyBytes: () => maxBodyBytes,
+			workRoots: [WORK_ROOT],
 		});
 		return { inner, listener };
 	}
@@ -118,6 +121,7 @@ describe("InnerListener", () => {
 			dispatchInner: inner.dispatch,
 			log: silentLog,
 			maxBodyBytes: () => 1024,
+			workRoots: [WORK_ROOT],
 		});
 		const foreign = other.register(context()).token;
 		other.stop();
@@ -330,7 +334,7 @@ describe("InnerListener", () => {
 		const env = [
 			"# Environment",
 			"You have been invoked in the following environment: ",
-			" - Primary working directory: /srv/claude-agent-sdk/gen-abc/cwd",
+			` - Primary working directory: ${WORK_ROOT}/gen-abc/cwd`,
 			" - Platform: linux",
 		].join("\n");
 		const model = "You are powered by the model claude-sonnet-5.";
@@ -388,6 +392,47 @@ describe("InnerListener", () => {
 					],
 				});
 			});
+
+		it("leaves the same block naming another directory byte for byte", async () => {
+			const { inner, listener } = setup();
+			const { token } = listener.register(context());
+			const pasted = env.replace(
+				`${WORK_ROOT}/gen-abc/cwd`,
+				"/home/alice/project",
+			);
+			const raw = JSON.stringify({
+				model: MODEL,
+				messages: [
+					{
+						role: "user",
+						content: `<system-reminder>\n${pasted}\n</system-reminder>`,
+					},
+				],
+			});
+			await send(token, "/v1/messages?beta=true", raw);
+			expect(await inner.calls[0]?.req.text()).toBe(raw);
+		});
+
+		it("logs once per turn, at debug, a block under its root it could not take", async () => {
+			const debug: string[] = [];
+			const { listener } = setup(1024 * 1024, {
+				...silentLog,
+				debug: (message: string) => debug.push(message),
+			});
+			const { token } = listener.register(context());
+			const drifted = JSON.stringify({
+				model: MODEL,
+				messages: [
+					{ role: "user", content: "hi" },
+					{ role: "system", content: env.replace("You have been", "You were") },
+				],
+			});
+			await send(token, "/v1/messages?beta=true", drifted);
+			await send(token, "/v1/messages?beta=true", drifted);
+			expect(debug.filter((m) => m.includes("environment block"))).toHaveLength(
+				1,
+			);
+		});
 
 		it("leaves a body without one byte for byte, client text naming a directory included", async () => {
 			const { inner, listener } = setup();
