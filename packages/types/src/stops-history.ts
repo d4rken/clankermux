@@ -207,8 +207,25 @@ export function outcomeForCause(cause: StopCause): RequestOutcome {
 	return OUTCOME_BY_CAUSE[cause];
 }
 
+/**
+ * `requests.error_message` of a request whose client left after an upstream
+ * attempt was dispatched but before any response reached it. Such a row is
+ * stored with `status_code` 499 and `success` NULL, so it counts neither as a
+ * success nor as a failure.
+ */
+export const CLIENT_CLOSED_REQUEST = "client_closed_request";
+
+/** Whether a recorded request is a pre-head client abort (see {@link CLIENT_CLOSED_REQUEST}). */
+export function isPreHeadClientAbort(
+	statusCode: number | null | undefined,
+	errorMessage: string | null | undefined,
+): boolean {
+	return statusCode === 499 && errorMessage === CLIENT_CLOSED_REQUEST;
+}
+
 const HISTORY_LABELS: Readonly<Record<string, StopCause>> = {
 	"client disconnected": "client_disconnected",
+	[CLIENT_CLOSED_REQUEST]: "client_disconnected",
 	"request timed out": "request_timed_out",
 	"stream error": "stream_failed",
 	upstream_stream_error: "stream_failed",

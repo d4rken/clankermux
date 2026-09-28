@@ -86,6 +86,11 @@ describe("public Stops outcome contract", () => {
 		expect(toPublicErrorCategory("client disconnected", 200)).toBe(
 			"client_disconnected",
 		);
+		// A pre-head abort carries HTTP 499, which would otherwise read as a
+		// forwarded upstream failure.
+		expect(toPublicErrorCategory("client_closed_request", 499)).toBe(
+			"client_disconnected",
+		);
 		expect(toPublicErrorCategory("request timed out", 200)).toBe(
 			"request_timed_out",
 		);
