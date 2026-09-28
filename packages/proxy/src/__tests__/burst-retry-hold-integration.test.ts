@@ -432,6 +432,70 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(calls).toHaveLength(2);
 	});
 
+	it("client leaves during the hold wait after a transient 429 ⇒ one row without an outcome, the 429 attempt keeps its 429", async () => {
+		const held = makeAccount({ id: "held", name: "Cache" });
+		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
+		seedFreshHeadroom("held");
+
+		let calls = 0;
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				return rl429({ "x-should-retry": "true" });
+			}),
+		);
+
+		const controller = new AbortController();
+		const ctx = makeContext([held, sibling], "held");
+		const { handleProxy, routingAttempts } = await import(
+			"./fixtures/routing-harness"
+		);
+		// A clock just short of the 60s no-reset cooldown, so the hold really
+		// waits (about half a second) before its re-probe.
+		const pending = handleProxy(
+			new Request("https://proxy.local/v1/messages", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 10,
+				}),
+				signal: controller.signal,
+			}),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+			undefined,
+			undefined,
+			false,
+			{ now: () => Date.now() + 59_500, jitterMs: 0, maxHoldMs: 5_000 },
+		);
+		const deadline = Date.now() + 5_000;
+		while (getActiveHoldCount() === 0) {
+			if (Date.now() > deadline) throw new Error("the hold never started");
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		controller.abort();
+		const res = await pending;
+
+		expect(res.status).toBe(499);
+		// The wait was cut short: no re-probe, no sibling.
+		expect(calls).toBe(1);
+		expect(getActiveHoldCount()).toBe(0);
+		const rows = (
+			ctx.requestRecorder as unknown as {
+				recordClientClosedBeforeHead: { mock: { calls: unknown[][] } };
+			}
+		).recordClientClosedBeforeHead.mock.calls;
+		expect(rows).toHaveLength(1);
+		expect(rows[0][0]).toMatchObject({ accountId: "held" });
+		const attempts = routingAttempts(ctx);
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0].status).toBe(429);
+		expect(attempts[0].error).not.toBe("client_closed_request");
+	});
+
 	it("concurrent request with burst marker already active holds the held account (no sibling diversion)", async () => {
 		const held = makeAccount({
 			id: "held",
