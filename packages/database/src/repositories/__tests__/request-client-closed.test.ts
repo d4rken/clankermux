@@ -219,6 +219,30 @@ describe("pre-head client abort rows", () => {
 		}
 	});
 
+	it("keeps a routing row without a request id, abort or not", async () => {
+		// request_routing.request_id is a TEXT PRIMARY KEY, which SQLite lets
+		// hold NULL. Such a row names no request, so no abort can rule it out.
+		db.run(
+			`INSERT INTO request_routing (request_id, strategy, decision, affinity_scope, affinity_key_hash, selected_account_id, candidates_count, created_at)
+			 VALUES (NULL, 'session', 'affinity_hit', 'claude_session', 'h-orphan', 'acct-a', 4, ?)`,
+			[Date.now()],
+		);
+		const read = async () => ({
+			sessions: await stats.getActiveSessionCounts(0),
+			byAccount: Object.fromEntries(
+				await stats.getActiveSessionCountsByAccount(0),
+			),
+			candidates: await requests.getCandidateCountDistribution({ sinceMs: 0 }),
+		});
+		const before = await read();
+		expect(before.sessions.total).toBe(1);
+		expect(before.byAccount).toEqual({ "acct-a": 1 });
+		expect(before.candidates).toEqual([{ candidatesCount: 4, requests: 1 }]);
+		await requests.save(clientClosed("abort"));
+		await route("abort", "acct-b", "codex_thread", "h-abort", 3);
+		expect(await read()).toEqual(before);
+	});
+
 	it("an abort-only range has no active sessions", async () => {
 		await requests.save(clientClosed("abort"));
 		await route("abort", "acct-b", "codex_thread", "h-abort", 3);

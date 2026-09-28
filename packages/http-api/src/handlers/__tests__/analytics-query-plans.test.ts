@@ -552,26 +552,39 @@ function loadProductionStats(): void {
 	db.exec("ANALYZE sqlite_schema");
 }
 
-const RATED = [ratedOutcomeSql("r"), ratedOutcomeSql("requests")];
-const UNRATED_REQUESTS = (() => {
-	const clause = withoutUnratedRequestSinceSql("request_id");
-	return clause.slice(clause.indexOf("(") + 1, -1);
-})();
+/** A regex that matches `sql` with any run of whitespace where it has one. */
+function whitespaceTolerant(sql: string): string {
+	return sql
+		.trim()
+		.split(/\s+/)
+		.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+		.join("\\s+");
+}
+
+// Built from the helpers' own output, so a change to either is followed here.
+const RATED = new RegExp(
+	[ratedOutcomeSql("r"), ratedOutcomeSql("requests")]
+		.map(whitespaceTolerant)
+		.join("|"),
+	"g",
+);
+const UNRATED_ROUTING = new RegExp(
+	["request_id", "rr.request_id"]
+		.map((column) => whitespaceTolerant(withoutUnratedRequestSinceSql(column)))
+		.join("|"),
+	"g",
+);
+/** Any trace of an outcome exclusion, however it came to be written. */
+const OUTCOME_TERM = /success\s+IS\s+(NOT\s+)?NULL/i;
 
 /**
  * The statement as it would read without excluding requests that have no
- * outcome. The routing exclusion keeps its bind but selects nothing.
+ * outcome. Each exclusion becomes a constant-true term, which the planner
+ * drops, so every WHERE shape (sole predicate, first, last) stays valid; the
+ * routing exclusion keeps its bind.
  */
 function withoutOutcomeExclusion(sql: string): string {
-	let out = sql;
-	for (const predicate of RATED) {
-		out = out
-			.split(`WHERE ${predicate} AND `)
-			.join("WHERE ")
-			.split(` AND ${predicate}`)
-			.join("");
-	}
-	return out.split(UNRATED_REQUESTS).join("SELECT NULL WHERE ? IS NULL AND 0");
+	return sql.replace(RATED, "1").replace(UNRATED_ROUTING, "(? IS NULL OR 1)");
 }
 
 /** The plan lines that read `requests`, in plan order. */
@@ -595,9 +608,14 @@ const unratedLookup = (read: string) =>
  */
 function expectExclusionFree(): void {
 	expect(statements.length).toBeGreaterThan(0);
+	let compared = 0;
 	for (const { sql, binds } of statements) {
 		const bare = withoutOutcomeExclusion(sql);
+		// Every exclusion must be recognised and taken out, or the statement
+		// would pass without being compared at all.
+		expect(bare, sql).not.toMatch(OUTCOME_TERM);
 		if (bare === sql) continue;
+		compared++;
 		const before = requestReads(bare, binds);
 		const after = requestReads(sql, binds).filter(
 			(read) => !unratedLookup(read),
@@ -611,6 +629,7 @@ function expectExclusionFree(): void {
 				expect(indexOf(now), context).toBe(indexOf(read));
 		});
 	}
+	expect(compared).toBeGreaterThan(0);
 }
 
 describe("excluding requests without an outcome keeps production plans", () => {

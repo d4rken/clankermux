@@ -86,6 +86,7 @@ function view(over: Partial<SdkBridgeTurnView> = {}): SdkBridgeTurnView {
 				accountId: "acct-b",
 				accountName: "Claude B",
 				model: "claude-opus-5-5",
+				requestedModel: "claude-opus-5-5",
 				statusCode: 529,
 				success: false,
 				errorMessage: "provider_overloaded",
@@ -359,5 +360,43 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(cellOf("pre-head")).not.toContain("text-destructive-strong");
 		expect(cellOf("post-head")).toContain("text-destructive-strong");
 		expect(cellOf("upstream-499")).toContain("text-destructive-strong");
+	});
+
+	it("labels the requested model for a call that reported none", () => {
+		const base = view();
+		const call = base.innerRequests[0];
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					innerRequests: [
+						{
+							...call,
+							id: "served",
+							model: "claude-opus-5-5",
+							requestedModel: "claude-opus-5-5[1m]",
+						},
+						{
+							...call,
+							id: "pre-head",
+							statusCode: 499,
+							errorMessage: "client_closed_request",
+							model: null,
+							requestedModel: "claude-fable-5-1",
+						},
+						{ ...call, id: "neither", model: null, requestedModel: null },
+					],
+				}}
+			/>,
+		);
+		// Time, account, model: the model is the third cell of the row.
+		const modelCellOf = (id: string) => {
+			const row = html.slice(html.indexOf(`title="${id}"`));
+			const cells = row.slice(0, row.indexOf("</tr>")).split("</td>");
+			return cells[2]?.slice(cells[2].lastIndexOf(">") + 1);
+		};
+		expect(modelCellOf("served")).toBe("claude-opus-5-5");
+		expect(modelCellOf("pre-head")).toBe("claude-fable-5-1 · requested");
+		expect(modelCellOf("neither")).toBe("—");
 	});
 });

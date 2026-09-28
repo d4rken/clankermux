@@ -298,7 +298,10 @@ export interface SdkBridgeInnerRequest {
 	accountId: string | null;
 	/** Null when the account was deleted since. */
 	accountName: string | null;
+	/** The model the provider reported; null for a call with no usage. */
 	model: string | null;
+	/** The model the call asked for, shown when `model` is null. */
+	requestedModel: string | null;
 	statusCode: number | null;
 	/** False for a request without an outcome too; see `errorMessage`. */
 	success: boolean;

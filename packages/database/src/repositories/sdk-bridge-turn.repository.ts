@@ -77,6 +77,7 @@ interface InnerRequestRow {
 	account_used: string | null;
 	account_name: string | null;
 	model: string | null;
+	requested_model: string | null;
 	status_code: number | null;
 	success: number | null;
 	error_message: string | null;
@@ -471,7 +472,8 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	): Promise<SdkBridgeInnerRequest[]> {
 		const rows = await this.query<InnerRequestRow>(
 			`SELECT r.id, r.timestamp, r.account_used, a.name AS account_name,
-				r.model, r.status_code, r.success, r.error_message, r.input_tokens,
+				r.model, r.requested_model, r.status_code, r.success, r.error_message,
+				r.input_tokens,
 				r.output_tokens,
 				r.cache_read_input_tokens, r.cache_creation_input_tokens, r.cost_usd
 			FROM requests r
@@ -487,6 +489,7 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 			accountId: row.account_used,
 			accountName: row.account_name,
 			model: row.model,
+			requestedModel: row.requested_model,
 			statusCode: row.status_code,
 			success: !!row.success,
 			errorMessage: row.error_message,

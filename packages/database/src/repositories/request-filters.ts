@@ -69,7 +69,8 @@ export function ratedOutcomeSql(alias: string): string {
 /**
  * {@link ratedOutcomeSql} for a read keyed by request id and bounded below by
  * time: drops rows whose request has no outcome, and keeps rows whose request
- * was already pruned. Takes one bind, the read's own lower bound (0 for none).
+ * was already pruned or that name none (a NULL id, which `NOT IN` alone would
+ * drop). Takes one bind, the read's own lower bound (0 for none).
  *
  * The rows without an outcome in range come from `(success, timestamp)` in a
  * single pass, instead of a lookup into `requests` per routing row. A request
@@ -77,7 +78,7 @@ export function ratedOutcomeSql(alias: string): string {
  * value misses none; request-client-closed.test.ts pins that.
  */
 export function withoutUnratedRequestSinceSql(requestIdColumn: string): string {
-	return `${requestIdColumn} NOT IN (SELECT id FROM requests WHERE success IS NULL AND timestamp >= ? AND id IS NOT NULL)`;
+	return `(${requestIdColumn} IS NULL OR ${requestIdColumn} NOT IN (SELECT id FROM requests WHERE success IS NULL AND timestamp >= ? AND id IS NOT NULL))`;
 }
 
 /** Does this selection narrow anything at all? */

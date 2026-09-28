@@ -401,6 +401,7 @@ describe("RequestsTab — SDK bridge turns", () => {
 				accountId: "acct-a",
 				accountName: "Claude A",
 				model: "claude-opus-5-5",
+				requestedModel: "claude-opus-5-5",
 				statusCode: 200,
 				success: true,
 				errorMessage: null,
