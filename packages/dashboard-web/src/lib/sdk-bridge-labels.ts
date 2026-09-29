@@ -19,6 +19,7 @@ export const SDK_BRIDGE_STATUS_LABEL: Record<SdkBridgeTurnStatus, string> = {
 export const SDK_BRIDGE_HISTORY_LABEL: Record<SdkBridgeHistoryMode, string> = {
 	fresh: "Fresh session",
 	resume: "Resumed session",
+	resume_extended: "Resumed, client turns appended",
 	rebuild_transcript: "Rebuilt from history",
 	rebuild_flattened: "Rebuilt from history, flattened",
 };

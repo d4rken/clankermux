@@ -55,16 +55,23 @@ export const SDK_BRIDGE_TURN_KINDS = Object.keys({
 	side_request: true,
 } satisfies Record<SdkBridgeTurnKind, true>) as SdkBridgeTurnKind[];
 
-/** How the turn's conversation history reached Claude Code. */
+/**
+ * How the turn's conversation history reached Claude Code.
+ * `resume_extended`: the stored session resumed with the messages the
+ * client added after it (another model's turns) appended as transcript
+ * entries; its first call writes those to the cache.
+ */
 export type SdkBridgeHistoryMode =
 	| "fresh"
 	| "resume"
+	| "resume_extended"
 	| "rebuild_transcript"
 	| "rebuild_flattened";
 
 export const SDK_BRIDGE_HISTORY_MODES = Object.keys({
 	fresh: true,
 	resume: true,
+	resume_extended: true,
 	rebuild_transcript: true,
 	rebuild_flattened: true,
 } satisfies Record<SdkBridgeHistoryMode, true>) as SdkBridgeHistoryMode[];
@@ -73,6 +80,10 @@ export const SDK_BRIDGE_HISTORY_MODES = Object.keys({
  * Why a turn rebuilt its conversation's Claude Code session from the
  * client's history. `account_change` is the exception: it is recorded on a
  * resumed session whose previous turn ran on another account.
+ * `continuation` is also the reason of every `resume_extended` turn.
+ * `compaction`: the history is shorter than the stored one, or the first
+ * message changed under the same client session and the history got
+ * shorter than a conversation stored under it.
  * `dead_continuation`: the request answered tool calls of a query that no
  * longer exists, so the history up to those calls was rebuilt and the tool
  * results became the new query's prompt.

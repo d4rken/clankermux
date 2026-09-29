@@ -221,6 +221,108 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"appends another model's turns to the stored session, replaying Claude Code's own prefix",
+			async () => {
+				const s = scenario(await results(), "extendAfterOtherModel");
+				type Cache = { read: number; creation: number };
+				type Turn = {
+					messages: unknown[];
+					cache: Cache;
+					thinkingVerified: number;
+					tailCounts: number[];
+				};
+				const one = s.turnOne as {
+					calls: number;
+					systemTexts: string[];
+					cache: Cache;
+					lastMessages: unknown[];
+				};
+				const two = s.two as Turn;
+				const three = s.three as Turn;
+				const four = s.four as { cache: Cache; thinkingVerified: number };
+				console.log(
+					`[claude-sdk-bridge] extended resume first-call cache reads: turn 1 last call wrote up to ${one.cache.read + one.cache.creation}; first extension read ${two.cache.read}, wrote ${two.cache.creation}; second read ${three.cache.read}, wrote ${three.cache.creation}; plain resume after read ${four.cache.read}`,
+				);
+				expect(s.rows).toEqual([
+					{ historyMode: "fresh", rebuildReason: null },
+					{ historyMode: "resume_extended", rebuildReason: "continuation" },
+					{ historyMode: "resume_extended", rebuildReason: "continuation" },
+					{ historyMode: "resume", rebuildReason: null },
+				]);
+				for (const r of s.replies as Array<{ status: number; stop: unknown }>)
+					expect(r).toMatchObject({ status: 200, stop: "end_turn" });
+
+				// Turn 1's last model call, Claude Code's date and model system
+				// messages included, opens the extended turn's first call as sent.
+				expect(one.calls).toBe(3);
+				expect(one.systemTexts).toEqual([
+					expect.stringContaining("Today's date is"),
+					expect.stringContaining("You are powered by the model"),
+				]);
+				const prefix = one.lastMessages;
+				expect(two.messages.slice(0, prefix.length)).toEqual(prefix);
+				const text = (t: string) => [{ type: "text", text: t }];
+				expect(two.messages.slice(prefix.length)).toEqual([
+					// Turn 1's final reply, unchanged.
+					{ role: "assistant", content: text("done: CONTENT-X") },
+					// The other model's turn, once.
+					{ role: "user", content: text("GPT-Q1 question") },
+					{
+						role: "assistant",
+						content: [
+							{ type: "text", text: "GPT reading 1." },
+							{
+								type: "tool_use",
+								id: "call_x1|fc_x1",
+								name: "mcp__c__read",
+								input: { path: "g1.txt" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_x1|fc_x1",
+								content: "GPT-RESULT-1",
+							},
+						],
+					},
+					{ role: "assistant", content: text("GPT answer 1") },
+					// The new prompt.
+					{ role: "user", content: text("EXTEND-ONE back to claude") },
+				]);
+				// The call id appears in the call and its result, nowhere else.
+				expect(two.tailCounts).toEqual([1, 1, 1, 1, 2]);
+				expect(two.cache.read).toBe(one.cache.read + one.cache.creation);
+
+				// Extended again: the first extension stays as it was sent, its
+				// assistant messages unmerged, and the new turn follows once.
+				expect(three.messages.slice(0, two.messages.length)).toEqual(
+					two.messages,
+				);
+				expect(three.messages.slice(two.messages.length)).toEqual([
+					{
+						role: "assistant",
+						content: text("echo: EXTEND-ONE back to claude"),
+					},
+					{ role: "user", content: text("GPT-Q2 question") },
+					{ role: "assistant", content: text("GPT answer 2") },
+					{ role: "user", content: text("EXTEND-TWO again") },
+				]);
+				expect(three.tailCounts).toEqual([1, 1, 1]);
+				expect(three.cache.read).toBe(two.cache.read + two.cache.creation);
+
+				// Turn 1's signed thinking stayed bound to its history throughout.
+				expect(s.refusals).toEqual([]);
+				for (const t of [two, three, four])
+					expect(t.thinkingVerified).toBeGreaterThan(0);
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"answers a side request on a copy of the session, which the next turn never sees",
 			async () => {
 				const s = scenario(await results(), "sideRequestFork");
@@ -430,7 +532,12 @@ describe.skipIf(reason !== null)(
 				expect(resumed.reply).toEqual([
 					{ type: "text", text: "done: RELEASED-A" },
 				]);
-				expect(resumed.cache.read).toBe(s.firstCallCacheCreation as number);
+				// The mock's prompt cache is shared by every scenario, so the
+				// first call may already have read part of its prefix.
+				expect(resumed.cache.read).toBe(
+					(s.firstCallCacheRead as number) +
+						(s.firstCallCacheCreation as number),
+				);
 				const [assistant, user] = resumed.messages.slice(-2) as [Msg, Msg];
 				expect(assistant.role).toBe("assistant");
 				expect(assistant.content.map((c) => c.type)).toEqual([

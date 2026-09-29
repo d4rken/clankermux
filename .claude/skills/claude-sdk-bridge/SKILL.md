@@ -583,12 +583,26 @@ Without either, lines go only to `$CLANKERMUX_LOG_DIR/app.log`, by default
   supersession or recovery).
 - `historyMode` / `rebuildReason`: `resume` continues the conversation's
   stored session; `rebuild_*` rebuilt it from the client's history, and the
-  reason says why.
+  reason says why. `resume_extended` (always `continuation`, or
+  `account_change`) is a history that is the stored conversation plus
+  messages the client got elsewhere, typically another model's turns in
+  pi: the stored session is forked and those messages are appended after
+  its last assistant entry (`FileSessionStore.forkExtended`), so Claude
+  Code replays its own bytes, date and model system messages included. A
+  tail it cannot append (an open or foreign tool call, thinking, a
+  transcript without a clean leaf) takes the full rebuild with the same
+  reason. A post-compaction pi turn is `rebuild_transcript; reason=compaction`
+  under a new `conversation_key_hash`: pi puts its summary first, which
+  changes the key, and `compaction` then means a longer conversation is
+  stored under the same client session. Without one it stays `unknown`.
 - `firstCall`: `input`, `cacheRead` and `cacheCreation` of the query's first
   top-level model call, by message id, filled in from its `message_delta`
   and its assistant envelope. On a `resume` turn it should read almost the
   whole conversation from cache. `cacheRead: 0` with a large
-  `cacheCreation` means the resumed prompt missed the cached prefix.
+  `cacheCreation` means the resumed prompt missed the cached prefix. On a
+  `resume_extended` turn it should read the stored conversation's prefix
+  (about what its last call read and wrote) and write the appended tail,
+  so its read share is lower by design.
 - `tokens`: Claude Code's own totals for the query, a cross-check. Billing
   truth is the inner `requests` rows.
 - `legs`, `toolRounds`, `innerCalls`, `innerErrors`: the row's counters as
@@ -625,7 +639,8 @@ sqlite3 -header -column "$DB" "SELECT id, datetime(started_at/1000,'unixepoch','
 # History mode and rebuild reason per day
 sqlite3 -header -column "$DB" "SELECT date(started_at/1000,'unixepoch','localtime') AS day, kind, history_mode, coalesce(rebuild_reason,'-') AS reason, count(*) AS turns FROM sdk_bridge_turns WHERE started_at >= strftime('%s','now','-7 days')*1000 GROUP BY 1,2,3,4 ORDER BY 1 DESC, 5 DESC;"
 
-# Each resumed turn's first inner call: MISS read nothing, LOW read under 80% of a >10k prompt
+# Each resumed turn's first inner call: MISS read nothing, LOW read under 80% of a >10k prompt.
+# Plain resumes only: a resume_extended first call writes its appended tail by design.
 sqlite3 -header -column "$DB" "WITH first AS (SELECT r.sdk_bridge_turn_id AS turn_id, r.status_code, r.input_tokens AS input, r.cache_read_input_tokens AS cache_read, r.cache_creation_input_tokens AS cache_creation, row_number() OVER (PARTITION BY r.sdk_bridge_turn_id ORDER BY r.timestamp, r.id) AS n FROM requests r JOIN sdk_bridge_turns t ON t.id = r.sdk_bridge_turn_id WHERE t.history_mode = 'resume' AND t.started_at >= strftime('%s','now','-7 days')*1000) SELECT f.turn_id, datetime(t.started_at/1000,'unixepoch','localtime') AS started, t.kind, t.status, f.status_code, f.input, f.cache_read, f.cache_creation, round(100.0*f.cache_read/nullif(f.input+f.cache_read+f.cache_creation,0),1) AS read_pct, CASE WHEN f.cache_read = 0 THEN 'MISS' WHEN f.input+f.cache_read+f.cache_creation > 10000 AND f.cache_read < 0.8*(f.input+f.cache_read+f.cache_creation) THEN 'LOW' ELSE '' END AS flag FROM first f JOIN sdk_bridge_turns t ON t.id = f.turn_id WHERE f.n = 1 ORDER BY t.started_at DESC;"
 
 # Thinking-binding refusals (the upstream text is kept in requests.error_message, capped at 300 characters)

@@ -3,6 +3,7 @@ import {
 	answersFinalToolCalls,
 	buildSyntheticTranscript,
 	classifyRebuild,
+	extensionTail,
 	FLATTENED_HISTORY_NOTE,
 	firstUserDigest,
 	flattenHistory,
@@ -284,6 +285,7 @@ describe("buildSyntheticTranscript (golden)", () => {
 			version: "2.1.280",
 			randomId: () => `uuid-${++n}`,
 			now: () => Date.UTC(2026, 8, 23),
+			turnId: "turn-1",
 		});
 		const common = {
 			isSidechain: false,
@@ -310,7 +312,7 @@ describe("buildSyntheticTranscript (golden)", () => {
 				parentUuid: "uuid-1",
 				uuid: "uuid-2",
 				message: {
-					id: "msg_sdk_bridge_rebuild_1",
+					id: "msg_sdk_bridge_turn-1_1",
 					type: "message",
 					role: "assistant",
 					model: "claude-sonnet-5",
@@ -354,7 +356,7 @@ describe("buildSyntheticTranscript (golden)", () => {
 				parentUuid: "uuid-3",
 				uuid: "uuid-4",
 				message: {
-					id: "msg_sdk_bridge_rebuild_3",
+					id: "msg_sdk_bridge_turn-1_3",
 					type: "message",
 					role: "assistant",
 					model: "claude-sonnet-5",
@@ -365,6 +367,138 @@ describe("buildSyntheticTranscript (golden)", () => {
 				},
 			},
 		]);
+	});
+});
+
+describe("buildSyntheticTranscript after an existing transcript", () => {
+	const ctx = (turnId: string, parentUuid: string) => {
+		let n = 0;
+		return {
+			sessionId: "11111111-1111-4111-8111-111111111111",
+			cwd: "/work/cwd",
+			model: "claude-sonnet-5",
+			upstreamToolName: (name: string) => `mcp__c__${name}`,
+			version: "2.1.280",
+			randomId: () => `${turnId}-uuid-${++n}`,
+			now: () => Date.UTC(2026, 8, 29),
+			turnId,
+			parentUuid,
+		};
+	};
+	const tail = normalizeHistory([
+		{ role: "user", content: "q" },
+		{ role: "assistant", content: "a" },
+	]);
+
+	it("chains its first entry to the given parent", () => {
+		const entries = buildSyntheticTranscript(tail, ctx("turn-2", "leaf-1"));
+		expect(entries.map((e) => [e.parentUuid, e.uuid])).toEqual([
+			["leaf-1", "turn-2-uuid-1"],
+			["turn-2-uuid-1", "turn-2-uuid-2"],
+		]);
+	});
+
+	it("gives each turn's assistant messages ids of their own", () => {
+		// Claude Code merges transcript entries that share a message id.
+		const first = buildSyntheticTranscript(tail, ctx("turn-2", "leaf-1"));
+		const second = buildSyntheticTranscript(
+			tail,
+			ctx("turn-3", String(first.at(-1)?.uuid)),
+		);
+		const ids = [...first, ...second].flatMap((e) =>
+			e.type === "assistant" ? [(e.message as { id: string }).id] : [],
+		);
+		expect(ids).toEqual(["msg_sdk_bridge_turn-2_1", "msg_sdk_bridge_turn-3_1"]);
+	});
+});
+
+describe("extensionTail", () => {
+	const stored = messageDigests(conversation);
+	const tools = new Set(["read"]);
+	const gptRound: ClientMessage[] = [
+		{ role: "user", content: "and c.txt?" },
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "tool_use",
+					id: "call_c1|fc_c1",
+					name: "read",
+					input: { path: "c.txt" },
+				},
+			],
+		},
+		{
+			role: "user",
+			content: [
+				{ type: "tool_result", tool_use_id: "call_c1|fc_c1", content: "C" },
+			],
+		},
+		{ role: "assistant", content: "C." },
+	];
+
+	it("gives the client's messages after the stored conversation", () => {
+		expect(
+			extensionTail([...conversation, ...gptRound], stored, tools),
+		).toEqual(normalizeHistory(gptRound));
+	});
+
+	it("is null when nothing follows, or the history is not the stored one plus more", () => {
+		expect(extensionTail(conversation, stored, tools)).toBeNull();
+		const edited = structuredClone(conversation);
+		edited[4] = { role: "assistant", content: "something else" };
+		expect(extensionTail([...edited, ...gptRound], stored, tools)).toBeNull();
+	});
+
+	it("is null for a tail that starts with an assistant message", () => {
+		const history: ClientMessage[] = [
+			{ role: "user", content: "q" },
+			{ role: "assistant", content: "a" },
+		];
+		// The stored conversation ended on the user's message.
+		const digests = messageDigests(history.slice(0, 1));
+		expect(extensionTail(history, digests, tools)).toBeNull();
+	});
+
+	it("is null for a tail that ends in open calls", () => {
+		expect(
+			extensionTail([...conversation, ...gptRound.slice(0, 2)], stored, tools),
+		).toBeNull();
+	});
+
+	it("is null for a call to a tool this turn does not have", () => {
+		expect(
+			extensionTail([...conversation, ...gptRound], stored, new Set(["write"])),
+		).toBeNull();
+	});
+
+	it("is null for a tail carrying signed thinking", () => {
+		const thinking: ClientMessage[] = [
+			gptRound[0] as ClientMessage,
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "t", signature: "sig-other" },
+					{ type: "text", text: "C." },
+				],
+			},
+		];
+		const redacted: ClientMessage[] = [
+			gptRound[0] as ClientMessage,
+			{
+				role: "assistant",
+				content: [
+					{ type: "redacted_thinking", data: "opaque" },
+					{ type: "text", text: "C." },
+				],
+			},
+		];
+		expect(
+			extensionTail([...conversation, ...thinking], stored, tools),
+		).toBeNull();
+		expect(
+			extensionTail([...conversation, ...redacted], stored, tools),
+		).toBeNull();
 	});
 });
 

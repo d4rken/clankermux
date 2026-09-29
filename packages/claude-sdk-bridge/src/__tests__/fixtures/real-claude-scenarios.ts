@@ -574,6 +574,167 @@ await scenario("resumeWithHeader", async () => {
 	};
 });
 
+await scenario("extendAfterOtherModel", async () => {
+	const header = {
+		affinityScope: "client_session" as const,
+		affinityKey: `conv-${crypto.randomUUID()}`,
+	};
+	const calls = () =>
+		mock.requests.filter(
+			(q) =>
+				q.path.startsWith("/v1/messages") && !q.path.includes("count_tokens"),
+		);
+	/** Messages as the cache check compares them: breakpoints aside. */
+	const plainMessages = (q: { body: unknown } | undefined): unknown[] =>
+		JSON.parse(JSON.stringify(messagesOf(q)), (key, value) =>
+			key === "cache_control" ? undefined : value,
+		);
+	const rowOf = (turnId: string) => {
+		const row = repo.turns.get(turnId);
+		return { historyMode: row?.historyMode, rebuildReason: row?.rebuildReason };
+	};
+	/** One user turn, answering every tool call with `results` until it ends. */
+	async function run(
+		messages: Msg[],
+		results: (round: number, ids: string[]) => string[] = (_, ids) =>
+			ids.map(() => "unused"),
+	) {
+		const from = calls().length;
+		const first = await turn(messages, header);
+		let r: Reply = first;
+		let round = 0;
+		while (r.stop === "tool_use") {
+			const ids = (r.content ?? [])
+				.filter((b) => b.type === "tool_use")
+				.map((b) => String(b.id));
+			const texts = results(round++, ids);
+			messages.push(
+				{ role: "assistant", content: r.content as Block[] },
+				{
+					role: "user",
+					content: ids.map((id, i) => ({
+						type: "tool_result",
+						tool_use_id: id,
+						content: texts[i] ?? "",
+					})),
+				},
+			);
+			r = await answer(first.turnId, messages);
+		}
+		messages.push({ role: "assistant", content: r.content as Block[] });
+		await settled();
+		return { turnId: first.turnId, reply: r, sent: calls().slice(from) };
+	}
+	/** A turn another model answered, as pi replays it: its own call ids. */
+	const otherModel = (n: number, withCall: boolean): Msg[] => [
+		{ role: "user", content: `GPT-Q${n} question` },
+		...(withCall
+			? ([
+					{
+						role: "assistant",
+						content: [
+							{ type: "text", text: `GPT reading ${n}.` },
+							{
+								type: "tool_use",
+								id: `call_x${n}|fc_x${n}`,
+								name: "read",
+								input: { path: `g${n}.txt` },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: `call_x${n}|fc_x${n}`,
+								content: `GPT-RESULT-${n}`,
+							},
+						],
+					},
+				] as Msg[])
+			: []),
+		{ role: "assistant", content: [{ type: "text", text: `GPT answer ${n}` }] },
+	];
+	const count = (q: { body: unknown } | undefined, text: string) =>
+		JSON.stringify(messagesOf(q)).split(text).length - 1;
+
+	// Turn 1: signed thinking, parallel calls, then one more call.
+	const messages: Msg[] = [
+		{ role: "user", content: "THINK PARALLEL read both, then extend" },
+	];
+	const one = await run(messages, (round, ids) =>
+		round === 0 ? ids.map((_, i) => (i ? "P1" : "AGAIN-0")) : ["CONTENT-X"],
+	);
+	const lastOfOne = one.sent.at(-1);
+
+	// Turn 2: the stored conversation, one turn of another model with a call, a new prompt.
+	messages.push(...otherModel(1, true), {
+		role: "user",
+		content: "EXTEND-ONE back to claude",
+	});
+	const two = await run(messages);
+	const firstOfTwo = two.sent[0];
+
+	// Turn 3: extended again, with another model's plain answer.
+	messages.push(...otherModel(2, false), {
+		role: "user",
+		content: "EXTEND-TWO again",
+	});
+	const three = await run(messages);
+	const firstOfThree = three.sent[0];
+
+	// Turn 4: an ordinary resume of the extended session.
+	messages.push({ role: "user", content: "PLAIN-RESUME last" });
+	const four = await run(messages);
+
+	const prefix = plainMessages(lastOfOne);
+	const all = [one, two, three, four].flatMap((t) => t.sent);
+	return {
+		rows: [one, two, three, four].map((t) => rowOf(t.turnId)),
+		replies: [one, two, three, four].map((t) => ({
+			status: t.reply.status,
+			stop: t.reply.stop,
+			text: JSON.stringify(t.reply.content ?? t.reply.body),
+		})),
+		turnOne: {
+			calls: one.sent.length,
+			systemTexts: (messagesOf(lastOfOne) as Msg[])
+				.filter((m) => (m.role as string) === "system")
+				.map((m) => JSON.stringify(m.content)),
+			cache: lastOfOne?.cache,
+			lastMessages: prefix,
+		},
+		two: {
+			messages: plainMessages(firstOfTwo),
+			cache: firstOfTwo?.cache,
+			thinkingVerified: firstOfTwo?.thinkingVerified ?? 0,
+			tailCounts: [
+				"GPT-Q1 question",
+				"GPT reading 1.",
+				"GPT-RESULT-1",
+				"GPT answer 1",
+				"call_x1|fc_x1",
+			].map((t) => count(firstOfTwo, t)),
+		},
+		three: {
+			messages: plainMessages(firstOfThree),
+			cache: firstOfThree?.cache,
+			thinkingVerified: firstOfThree?.thinkingVerified ?? 0,
+			tailCounts: ["GPT-Q2 question", "GPT answer 2", "GPT answer 1"].map((t) =>
+				count(firstOfThree, t),
+			),
+		},
+		four: {
+			cache: four.sent[0]?.cache,
+			thinkingVerified: four.sent[0]?.thinkingVerified ?? 0,
+		},
+		refusals: all
+			.filter((q) => q.status !== 200)
+			.map((q) => ({ status: q.status, path: q.path })),
+	};
+});
+
 await scenario("sideRequestFork", async () => {
 	const calls = () =>
 		mock.requests.filter((q) => q.path.startsWith("/v1/messages"));
@@ -1067,6 +1228,7 @@ await scenario("releasedParkResume", async () => {
 			addedByRelease: entries(released)
 				.slice(before)
 				.map((e) => e.type),
+			firstCallCacheRead: firstCall?.cache?.read ?? null,
 			firstCallCacheCreation: firstCall?.cache?.creation ?? null,
 			plain,
 			resumed,

@@ -31,6 +31,7 @@ import {
 	type ConversationClaim,
 	ConversationStore,
 	conversationKey,
+	conversationScopeKey,
 } from "./conversation-store";
 import {
 	type BridgeError,
@@ -43,6 +44,7 @@ import {
 	answersFinalToolCalls,
 	buildSyntheticTranscript,
 	classifyRebuild,
+	extensionTail,
 	firstUserDigest,
 	flattenBlocks,
 	flattenHistory,
@@ -636,6 +638,8 @@ export function createClaudeSdkBridge(
 	interface HistoryDecision {
 		mode: SdkBridgeHistoryMode;
 		reason: RebuildReason | null;
+		/** `resume_extended`: the messages to append to the stored session. */
+		tail?: ApiMessage[];
 	}
 
 	function rebuildMode(
@@ -653,19 +657,43 @@ export function createClaudeSdkBridge(
 		turn: TurnRequest,
 		claim: ConversationClaim | null,
 		accountId: string,
+		conversation: { key: string; scopeKey: string | null } | null,
 	): HistoryDecision {
 		const normalized = normalizeHistory(turn.history);
 		if (!normalized.length) return { mode: "fresh", reason: null };
 		const digests = messageDigests(turn.history);
 		const current = claim?.current ?? null;
-		const reason = classifyRebuild(current, digests, accountId);
-		// Matching history resumes even on another account; the change is still recorded.
-		if (current && sameDigests(current.digests, digests))
+		if (!current) {
+			// A new first message under a session that stored a longer
+			// conversation: pi's compaction puts its summary first.
+			const compacted =
+				conversation?.scopeKey &&
+				conversations.longestInScope(conversation.scopeKey, conversation.key) >
+					digests.length;
 			return {
-				mode: "resume",
-				reason: reason === "account_change" ? reason : null,
+				mode: rebuildMode(turn),
+				reason: compacted ? "compaction" : "unknown",
 			};
-		return { mode: rebuildMode(turn), reason };
+		}
+		const moved = current.accountId !== null && current.accountId !== accountId;
+		// Matching history resumes even on another account; the change is still recorded.
+		if (sameDigests(current.digests, digests))
+			return { mode: "resume", reason: moved ? "account_change" : null };
+		const tail = extensionTail(
+			turn.history,
+			current.digests,
+			new Set(turn.tools.map((t) => t.name)),
+		);
+		if (tail)
+			return {
+				mode: "resume_extended",
+				reason: moved ? "account_change" : "continuation",
+				tail,
+			};
+		return {
+			mode: rebuildMode(turn),
+			reason: classifyRebuild(current, digests, accountId),
+		};
 	}
 
 	function rebuildsInFlight(): number {
@@ -1038,6 +1066,7 @@ export function createClaudeSdkBridge(
 				maxTurns: sideRequest ? 1 : null,
 				resume:
 					input.historyMode === "resume" ||
+					input.historyMode === "resume_extended" ||
 					input.historyMode === "rebuild_transcript",
 				resumeSessionAt: resumed?.park.resumeAt ?? null,
 				sessionStore: sessionStore(),
@@ -1159,6 +1188,7 @@ export function createClaudeSdkBridge(
 		systemPrompt: SystemPromptDecision,
 		startedAt: number,
 		history: SdkBridgeTurnHistory,
+		scopeKey: string | null,
 	): ResumeDescriptor {
 		return {
 			v: 1,
@@ -1173,6 +1203,7 @@ export function createClaudeSdkBridge(
 			projectAttributionSource: start.meta.projectAttributionSource,
 			turnStartedAt: startedAt,
 			history,
+			scopeKey,
 		};
 	}
 
@@ -1264,6 +1295,7 @@ export function createClaudeSdkBridge(
 					toolNames: ToolNames;
 					systemPrompt: SystemPromptDecision;
 					convKey: string | null;
+					scopeKey: string | null;
 			  } => {
 			const target =
 				plan.candidates.find((c) => c.accountId === plan.preferredAccountId) ??
@@ -1286,6 +1318,11 @@ export function createClaudeSdkBridge(
 			promptRecord.detail = decided.detail;
 			if (!decided.ok) return refuse(decided.error, decided.reason);
 			let convKey: string | null = null;
+			const scopeKey = conversationScopeKey({
+				apiKeyId: meta.apiKeyId,
+				affinityScope: meta.affinityScope,
+				affinityKey: meta.affinityKey,
+			});
 			try {
 				convKey = conversationKey({
 					apiKeyId: meta.apiKeyId,
@@ -1304,6 +1341,7 @@ export function createClaudeSdkBridge(
 				toolNames,
 				systemPrompt: decided.decision,
 				convKey,
+				scopeKey,
 			};
 		};
 
@@ -1361,7 +1399,7 @@ export function createClaudeSdkBridge(
 		}
 		const prepared = prepare(turn);
 		if (prepared instanceof Response) return prepared;
-		const { target, toolNames, systemPrompt, convKey } = prepared;
+		const { target, toolNames, systemPrompt, convKey, scopeKey } = prepared;
 		// A new turn replaces one of its conversation still waiting on tool
 		// results; the old one could only ever be answered out of order now.
 		// Synchronous, so a continuation for it arriving meanwhile finds it closed.
@@ -1386,7 +1424,7 @@ export function createClaudeSdkBridge(
 			}
 		}
 		const claim = convKey
-			? await conversations.claim(convKey, timing.settleWaitMs)
+			? await conversations.claim(convKey, timing.settleWaitMs, scopeKey)
 			: null;
 
 		// From the claim until the query is live, every exit gives back what it
@@ -1413,7 +1451,12 @@ export function createClaudeSdkBridge(
 				// Always flattened (see answersFinalToolCalls).
 				history = deadContinuation
 					? { mode: "rebuild_flattened", reason: "dead_continuation" }
-					: decideHistory(turn, claim, plan.preferredAccountId);
+					: decideHistory(
+							turn,
+							claim,
+							plan.preferredAccountId,
+							convKey ? { key: convKey, scopeKey } : null,
+						);
 			} catch (error) {
 				log.warn(
 					`SDK bridge turn ${plan.turnId}: history not comparable (${errorSummary(error)}); flattening it`,
@@ -1445,33 +1488,63 @@ export function createClaudeSdkBridge(
 				throw new Error("randomId must produce UUIDs for session ids");
 			sessionId = newSessionId;
 			const normalized = normalizeHistory(turn.history);
-			if (history.mode === "resume" && claim?.current) {
-				if (!store.fork(claim.current.sessionId, newSessionId)) {
-					history = {
-						mode: rebuildMode(turn),
-						reason: history.reason ?? "unknown",
-					};
-					const rebuildRejection = admission();
-					if (rebuildRejection) {
-						releaseClaim();
-						return refuseAdmission(rebuildRejection, refuse);
-					}
+			const transcriptContext = {
+				sessionId: newSessionId,
+				cwd: dirs.cwd,
+				model: target.upstreamModel,
+				// transcriptEligible admitted only this turn's own tools.
+				upstreamToolName: (name: string) =>
+					toolNames.upstreamName(name) ?? name,
+				version: CLAUDE_CODE_VERSION,
+				randomId: () => crypto.randomUUID(),
+				now,
+				turnId: plan.turnId,
+			};
+			let copied = false;
+			if (history.mode === "resume" && claim?.current)
+				copied = store.fork(claim.current.sessionId, newSessionId);
+			if (history.mode === "resume_extended" && claim?.current) {
+				const tail = history.tail ?? [];
+				try {
+					copied = store.forkExtended(
+						claim.current.sessionId,
+						newSessionId,
+						(leafUuid) =>
+							buildSyntheticTranscript(tail, {
+								...transcriptContext,
+								parentUuid: leafUuid,
+							}),
+					);
+					if (!copied)
+						log.debug(
+							`SDK bridge turn ${plan.turnId}: the stored session has no leaf to append to; rebuilding`,
+						);
+				} catch (error) {
+					log.warn(
+						`SDK bridge turn ${plan.turnId}: could not extend the stored session (${errorSummary(error)}); rebuilding`,
+					);
+				}
+				if (!copied) discardSession(newSessionId);
+			}
+			if (
+				(history.mode === "resume" || history.mode === "resume_extended") &&
+				!copied
+			) {
+				history = {
+					mode: rebuildMode(turn),
+					reason: history.reason ?? "unknown",
+				};
+				const rebuildRejection = admission();
+				if (rebuildRejection) {
+					releaseClaim();
+					return refuseAdmission(rebuildRejection, refuse);
 				}
 			}
 			if (history.mode === "rebuild_transcript")
 				try {
 					store.write(
 						newSessionId,
-						buildSyntheticTranscript(normalized, {
-							sessionId: newSessionId,
-							cwd: dirs.cwd,
-							model: target.upstreamModel,
-							// transcriptEligible admitted only this turn's own tools.
-							upstreamToolName: (name) => toolNames.upstreamName(name) ?? name,
-							version: CLAUDE_CODE_VERSION,
-							randomId: () => crypto.randomUUID(),
-							now,
-						}),
+						buildSyntheticTranscript(normalized, transcriptContext),
 					);
 				} catch (error) {
 					// Content nested past what serializes becomes text instead.
@@ -1515,10 +1588,14 @@ export function createClaudeSdkBridge(
 				sideRequest: false,
 				recorder,
 				startedAt,
-				descriptor: describe(input, turn, systemPrompt, startedAt, {
-					mode: history.mode,
-					reason: history.reason,
-				}),
+				descriptor: describe(
+					input,
+					turn,
+					systemPrompt,
+					startedAt,
+					{ mode: history.mode, reason: history.reason },
+					scopeKey,
+				),
 			});
 			// The query owns the claim from here.
 			claimReleased = true;
@@ -1535,7 +1612,8 @@ export function createClaudeSdkBridge(
 		}
 
 		counters.turnsStarted++;
-		if (history.mode === "resume") counters.resumes++;
+		if (history.mode === "resume" || history.mode === "resume_extended")
+			counters.resumes++;
 		if (history.mode.startsWith("rebuild")) counters.rebuilds++;
 		return openStartLeg(
 			live,
@@ -1665,6 +1743,7 @@ export function createClaudeSdkBridge(
 					input.systemPrompt,
 					input.startedAt,
 					{ mode: "resume", reason: null },
+					null,
 				),
 			});
 		} catch (error) {
@@ -2006,8 +2085,13 @@ export function createClaudeSdkBridge(
 				return refuse(bridgeErrors.parkStoreUnavailable());
 			}
 			if (!dbClaimed) return refuse(bridgeErrors.staleToolResults());
+			// The park's own scope, like its key: the results' headers name neither.
 			claim = convKey
-				? await conversations.claim(convKey, timing.settleWaitMs)
+				? await conversations.claim(
+						convKey,
+						timing.settleWaitMs,
+						descriptor.scopeKey ?? null,
+					)
 				: null;
 			const { query: run, mcp } = await loadSdks();
 			// No await from here to the launch.

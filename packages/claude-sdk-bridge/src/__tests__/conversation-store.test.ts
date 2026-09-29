@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { ConversationStore, conversationKey } from "../conversation-store";
+import {
+	ConversationStore,
+	conversationKey,
+	conversationScopeKey,
+} from "../conversation-store";
 
 const session = (id: string) => ({
 	sessionId: id,
@@ -31,6 +35,39 @@ describe("conversationKey", () => {
 			conversationKey({ ...base, firstUserDigest: "title-helper" }),
 		).not.toBe(key);
 		expect(conversationKey({ ...base })).toBe(key);
+	});
+
+	it("keeps its value, so stored conversations keep resuming", () => {
+		expect(conversationKey(base)).toBe(
+			"5ea12061e7edeb3d978568f225fd3e84e094a661016b654c56a86a9a665f6bd2",
+		);
+	});
+});
+
+describe("conversationScopeKey", () => {
+	const base = {
+		apiKeyId: "key-1",
+		affinityScope: "client_session",
+		affinityKey: "sess-1",
+	};
+
+	it("is shared by every first message of one client session, and by nothing else", () => {
+		const scope = conversationScopeKey(base);
+		expect(scope).toMatch(/^[0-9a-f]{64}$/);
+		expect(conversationScopeKey({ ...base })).toBe(scope);
+		expect(conversationScopeKey({ ...base, affinityKey: "sess-2" })).not.toBe(
+			scope,
+		);
+		expect(conversationScopeKey({ ...base, apiKeyId: "key-2" })).not.toBe(
+			scope,
+		);
+		expect(
+			conversationScopeKey({ ...base, affinityScope: "project" }),
+		).toBeNull();
+		expect(conversationScopeKey({ ...base, affinityKey: null })).toBeNull();
+		expect(conversationScopeKey(base)).not.toBe(
+			conversationKey({ ...base, firstUserDigest: "" }),
+		);
 	});
 });
 
@@ -234,6 +271,53 @@ describe("ConversationStore", () => {
 			expect(store.size).toBe(1);
 			expect((await store.claim("k", 100)).current?.sessionId).toBe("s1");
 			expect(discarded).toEqual([]);
+		});
+	});
+
+	describe("longestInScope", () => {
+		const withDigests = (id: string, n: number) => ({
+			sessionId: id,
+			digests: Array.from({ length: n }, (_, i) => `${id}-${i}`),
+			accountId: "acct-a",
+		});
+
+		async function settle(
+			store: ConversationStore,
+			key: string,
+			scope: string | null,
+			session: ReturnType<typeof withDigests>,
+		) {
+			const claim = await store.claim(key, 100, scope);
+			claim.register(session, Promise.resolve(true));
+			await Bun.sleep(0);
+		}
+
+		it("gives the largest settled digest count of the scope's other conversations", async () => {
+			const store = new ConversationStore({
+				now: Date.now,
+				onDiscard: () => {},
+			});
+			await settle(store, "main", "scope-1", withDigests("main", 12));
+			await settle(store, "helper", "scope-1", withDigests("helper", 2));
+			await settle(store, "compacted", "scope-1", withDigests("c", 3));
+			await settle(store, "other", "scope-2", withDigests("other", 40));
+			await settle(store, "unscoped", null, withDigests("unscoped", 50));
+			expect(store.longestInScope("scope-1", "compacted")).toBe(12);
+			expect(store.longestInScope("scope-1", "main")).toBe(3);
+			expect(store.longestInScope("scope-2", "other")).toBe(0);
+			expect(store.longestInScope("scope-3", "x")).toBe(0);
+		});
+
+		it("ignores a session still settling, and waits for nothing", async () => {
+			const store = new ConversationStore({
+				now: Date.now,
+				onDiscard: () => {},
+			});
+			const claim = await store.claim("main", 100, "scope-1");
+			claim.register(withDigests("main", 12), new Promise(() => {}));
+			const held = await store.claim("held", 100, "scope-1");
+			expect(store.longestInScope("scope-1", "compacted")).toBe(0);
+			held.release();
 		});
 	});
 });

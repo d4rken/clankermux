@@ -56,6 +56,100 @@ export function forkTranscriptFile(
 	return true;
 }
 
+/**
+ * The entry the next message of a transcript (JSONL bytes) follows: its last
+ * non-sidechain entry with a uuid, when that is an assistant message with no
+ * tool call, nothing names it as a parent, and its parentUuid chain reaches
+ * an entry whose parentUuid is null through entries in the file. Null
+ * otherwise, and for an unparsable line or a uuid written twice. Entries off
+ * the chain, a parallel call's results among them, are left alone.
+ */
+export function transcriptLeaf(bytes: Buffer): string | null {
+	const parents = new Map<string, string | null>();
+	const hasChild = new Set<string>();
+	let leaf: { uuid: string; type: unknown; calls: boolean } | null = null;
+	let start = 0;
+	while (start < bytes.length) {
+		let end = bytes.indexOf(0x0a, start);
+		if (end === -1) end = bytes.length;
+		if (end > start) {
+			let entry: Record<string, unknown>;
+			try {
+				entry = JSON.parse(bytes.toString("utf8", start, end));
+			} catch {
+				return null;
+			}
+			if (typeof entry?.uuid === "string") {
+				if (parents.has(entry.uuid)) return null;
+				const parent =
+					typeof entry.parentUuid === "string" ? entry.parentUuid : null;
+				parents.set(entry.uuid, parent);
+				if (entry.isSidechain !== true) {
+					if (parent) hasChild.add(parent);
+					const content = (entry.message as { content?: unknown } | undefined)
+						?.content;
+					leaf = {
+						uuid: entry.uuid,
+						type: entry.type,
+						calls:
+							Array.isArray(content) &&
+							content.some(
+								(b) => (b as { type?: unknown })?.type === "tool_use",
+							),
+					};
+				}
+			}
+		}
+		start = end + 1;
+	}
+	if (!leaf || leaf.type !== "assistant" || leaf.calls) return null;
+	if (hasChild.has(leaf.uuid)) return null;
+	const seen = new Set<string>();
+	let at: string | null = leaf.uuid;
+	while (at !== null) {
+		if (seen.has(at)) return null;
+		seen.add(at);
+		const parent = parents.get(at);
+		if (parent === undefined) return null;
+		at = parent;
+	}
+	return leaf.uuid;
+}
+
+/**
+ * Copy the transcript at `from` to `to` under a new session id, with the
+ * entries `extend` builds for its {@link transcriptLeaf} appended; false,
+ * writing nothing, when it is unreadable or has no such leaf.
+ */
+export function forkExtendedTranscriptFile(
+	from: string,
+	to: string,
+	fromId: string,
+	toId: string,
+	extend: (leafUuid: string) => SessionStoreEntry[],
+): boolean {
+	let bytes: Buffer;
+	try {
+		if (!lstatSync(from).isFile()) return false;
+		bytes = readFileSync(from);
+	} catch {
+		return false;
+	}
+	const leaf = transcriptLeaf(bytes);
+	if (!leaf) return false;
+	const tail = extend(leaf)
+		.map((e) => `${JSON.stringify(e)}\n`)
+		.join("");
+	const copy = rewriteSessionId(bytes, fromId, toId);
+	const separator =
+		copy.length && copy[copy.length - 1] !== 0x0a ? Buffer.from("\n") : null;
+	writePrivateBytes(
+		to,
+		Buffer.concat([copy, ...(separator ? [separator] : []), Buffer.from(tail)]),
+	);
+	return true;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SUBPATH = /^[A-Za-z0-9_./-]{1,200}$/;
 
@@ -146,6 +240,25 @@ export class FileSessionStore implements SessionStore {
 			this.path({ sessionId: toId }),
 			fromId,
 			toId,
+		);
+	}
+
+	/**
+	 * {@link fork}, with the entries `extend` builds appended after the
+	 * copy's leaf ({@link transcriptLeaf}). False, writing nothing, when there
+	 * is no session to copy or no leaf to append to.
+	 */
+	forkExtended(
+		fromId: string,
+		toId: string,
+		extend: (leafUuid: string) => SessionStoreEntry[],
+	): boolean {
+		return forkExtendedTranscriptFile(
+			this.path({ sessionId: fromId }),
+			this.path({ sessionId: toId }),
+			fromId,
+			toId,
+			extend,
 		);
 	}
 

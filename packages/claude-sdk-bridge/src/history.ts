@@ -325,6 +325,31 @@ export function transcriptEligible(
 	return history.at(-1)?.role === "assistant";
 }
 
+/**
+ * The messages to append to a stored conversation's transcript so it holds
+ * `history`: what follows the stored messages, when it is
+ * {@link transcriptEligible} and carries no thinking. Signed thinking made
+ * elsewhere is bound to a history other than the stored transcript. Null
+ * when the history is not the stored conversation plus such messages.
+ *
+ *   stored [u1, a1], history [u1, a1, u2, a2(call), u3(result), a3] → [u2, a2, u3, a3]
+ *   stored [u1, a1], history [u1, a1, u2, a2(call)]                 → null
+ */
+export function extensionTail(
+	history: readonly ClientMessage[],
+	stored: readonly string[],
+	toolNames: ReadonlySet<string>,
+): ApiMessage[] | null {
+	const tail = messagesAfter(history, stored);
+	if (!tail?.length) return null;
+	const thinking = tail.some((m) =>
+		m.content.some(
+			(b) => b.type === "thinking" || b.type === "redacted_thinking",
+		),
+	);
+	return !thinking && transcriptEligible(tail, toolNames) ? tail : null;
+}
+
 export interface TranscriptContext {
 	sessionId: string;
 	cwd: string;
@@ -334,18 +359,27 @@ export interface TranscriptContext {
 	version: string;
 	randomId: () => string;
 	now: () => number;
+	/**
+	 * The turn writing the entries. Assistant messages are
+	 * `msg_sdk_bridge_<turnId>_<index>`: Claude Code merges entries sharing a
+	 * message id, so a session extended twice must never repeat one.
+	 */
+	turnId: string;
+	/** The entry the first message follows; absent, it starts the transcript. */
+	parentUuid?: string;
 }
 
 /**
  * The history as Claude Code's own session transcript, for `sessionStore`
- * to hand back on resume. Only the fields a resume reads are written.
+ * to hand back on resume, or as entries to append after an existing one.
+ * Only the fields a resume reads are written.
  */
 export function buildSyntheticTranscript(
 	history: readonly ApiMessage[],
 	ctx: TranscriptContext,
 ): SessionStoreEntry[] {
 	const entries: SessionStoreEntry[] = [];
-	let parentUuid: string | null = null;
+	let parentUuid: string | null = ctx.parentUuid ?? null;
 	const timestamp = new Date(ctx.now()).toISOString();
 	for (const [i, message] of history.entries()) {
 		const uuid = ctx.randomId();
@@ -375,7 +409,7 @@ export function buildSyntheticTranscript(
 				...common,
 				type: "assistant",
 				message: {
-					id: `msg_sdk_bridge_rebuild_${i}`,
+					id: `msg_sdk_bridge_${ctx.turnId}_${i}`,
 					type: "message",
 					role: "assistant",
 					model: ctx.model,

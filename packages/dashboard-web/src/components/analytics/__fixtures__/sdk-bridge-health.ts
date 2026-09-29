@@ -70,12 +70,13 @@ export function healthFixture(
 		toolRounds: { samples: 7, p50: 2, p95: 6, total: 21 },
 		byHistoryMode: {
 			fresh: 5,
-			resume: 6,
+			resume: 4,
+			resume_extended: 2,
 			rebuild_transcript: 0,
 			rebuild_flattened: 3,
 		},
 		byRebuildReason: {
-			continuation: 0,
+			continuation: 2,
 			compaction: 0,
 			edit: 1,
 			unknown: 0,

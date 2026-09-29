@@ -234,11 +234,14 @@ reached Claude Code, and names the rebuild reason when there is one:
 | `fresh` | The request carried no earlier turns. |
 | `resume` | Claude Code resumed its own session of this conversation. |
 | `resume; reason=account_change` | The same, on another account than the previous turn. |
+| `resume_extended; reason=continuation` | Claude Code resumed its own session, with the messages the request added after it (turns another model answered) appended. `reason=account_change` when the previous turn ran on another account. |
 | `rebuild_transcript; reason=<reason>` | The session was rebuilt from the request's history, message for message. |
 | `rebuild_flattened; reason=<reason>` | The history was rebuilt as one framed text prompt. |
 
 Reasons are `edit` (an earlier message differs), `compaction` (the history
-is shorter than the stored one), `continuation`, `account_change` (on a
+is shorter than the stored one, or its first message changed and it is
+shorter than a conversation stored under the same client session),
+`continuation`, `account_change` (on a
 resume, or on a rebuild when the stored session could not be copied),
 `dead_continuation` (tool results for a Claude Code query that no longer
 exists) and `unknown` (no stored session, for example without a session

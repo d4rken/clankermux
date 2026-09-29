@@ -54,10 +54,10 @@ describe("SdkBridgeHealthCard", () => {
 			renderToStaticMarkup(<SdkBridgeHealthCard data={healthFixture()} />),
 		);
 		expect(out).toContain(
-			"Fresh session 5 · Resumed session 6 · Rebuilt from history 0 · Rebuilt from history, flattened 3",
+			"Fresh session 5 · Resumed session 4 · Resumed, client turns appended 2 · Rebuilt from history 0 · Rebuilt from history, flattened 3",
 		);
 		expect(out).toContain(
-			"Rebuild reasons: edit 1 · tool results after their query ended 2",
+			"Rebuild reasons: continuation 2 · edit 1 · tool results after their query ended 2",
 		);
 		expect(out).not.toContain("compaction");
 		expect(out).toContain(
