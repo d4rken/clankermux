@@ -141,6 +141,23 @@ describe("SdkBridgeTurnDetails", () => {
 		expect(html).toContain("Rebuilt from history, flattened (account change)");
 	});
 
+	it("names a resume that appended the client's own turns", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						historyMode: "resume_extended",
+						rebuildReason: "continuation",
+					},
+				}}
+			/>,
+		);
+		expect(html).toContain("Resumed, client turns appended (continuation)");
+	});
+
 	it("names the rebuild of tool results whose query had ended", () => {
 		const base = view();
 		const html = renderToStaticMarkup(

@@ -10,6 +10,8 @@ export interface StoredSession {
 }
 
 interface ConversationRecord {
+	/** {@link conversationScopeKey} of the client session it belongs to. */
+	scopeKey: string | null;
 	current: StoredSession | null;
 	/** Registration order of `current`, so a late settle never replaces a newer session. */
 	currentSeq: number;
@@ -55,6 +57,32 @@ export function conversationKey(input: {
 		.digest("hex");
 }
 
+/**
+ * The client session a conversation belongs to: {@link conversationKey}
+ * without the first message. A client that rewrites the first message (pi's
+ * compaction puts its summary there) starts a new conversation under the
+ * same scope.
+ */
+export function conversationScopeKey(input: {
+	apiKeyId: string | null;
+	affinityScope: string | null;
+	affinityKey: string | null;
+}): string | null {
+	if (!input.affinityScope || !SESSION_SCOPES.has(input.affinityScope))
+		return null;
+	if (!input.affinityKey) return null;
+	return createHash("sha256")
+		.update(
+			JSON.stringify([
+				"scope",
+				input.apiKeyId,
+				input.affinityScope,
+				input.affinityKey,
+			]),
+		)
+		.digest("hex");
+}
+
 export interface ConversationClaim {
 	/** The settled session to resume from, if any. */
 	current: StoredSession | null;
@@ -85,6 +113,7 @@ export class ConversationStore {
 		let record = this.records.get(key);
 		if (!record) {
 			record = {
+				scopeKey: null,
 				current: null,
 				currentSeq: 0,
 				nextSeq: 1,
@@ -105,7 +134,11 @@ export class ConversationStore {
 	 * during that wait queues behind this one instead of claiming alongside it,
 	 * and every await is followed by a fresh look at the record.
 	 */
-	async claim(key: string, waitMs: number): Promise<ConversationClaim> {
+	async claim(
+		key: string,
+		waitMs: number,
+		scopeKey: string | null = null,
+	): Promise<ConversationClaim> {
 		this.prune();
 		// Waits run on the real clock; `now` only dates records.
 		const deadline = Date.now() + waitMs;
@@ -154,6 +187,7 @@ export class ConversationStore {
 		}
 		const record = owned as ConversationRecord;
 		record.lastUsed = this.opts.now();
+		if (scopeKey) record.scopeKey = scopeKey;
 		// A turn still unsettled after the wait is ignored, not resumed.
 		const current = record.current;
 		return {
@@ -182,6 +216,19 @@ export class ConversationStore {
 			await Promise.resolve();
 		}
 		return this.records.get(key)?.current ?? null;
+	}
+
+	/**
+	 * The most messages a settled session of another conversation under
+	 * `scopeKey` holds; 0 when there is none. Read for labelling only: it
+	 * takes nothing and waits for nothing.
+	 */
+	longestInScope(scopeKey: string, exceptKey: string): number {
+		let longest = 0;
+		for (const [key, record] of this.records)
+			if (key !== exceptKey && record.scopeKey === scopeKey && record.current)
+				longest = Math.max(longest, record.current.digests.length);
+		return longest;
 	}
 
 	/**

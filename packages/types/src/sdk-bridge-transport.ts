@@ -169,7 +169,7 @@ export interface SdkBridgeTurnMeta {
  * On every response of a bridged turn once its history is decided: how the
  * conversation reached Claude Code (`SdkBridgeHistoryMode`), with the rebuild
  * reason when there is one. `resume`, `resume; reason=account_change`,
- * `rebuild_transcript; reason=edit`.
+ * `resume_extended; reason=continuation`, `rebuild_transcript; reason=edit`.
  */
 export const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
 

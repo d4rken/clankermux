@@ -145,6 +145,7 @@ describe("SDK bridge health", () => {
 		expect(data.byHistoryMode).toEqual({
 			fresh: 0,
 			resume: 0,
+			resume_extended: 0,
 			rebuild_transcript: 0,
 			rebuild_flattened: 0,
 		});
@@ -338,17 +339,22 @@ describe("SDK bridge health", () => {
 			historyMode: "rebuild_flattened",
 			rebuildReason: "dead_continuation",
 		});
+		await turn("d", HOUR, "completed", {
+			historyMode: "resume_extended",
+			rebuildReason: "continuation",
+		});
 
 		const data = await health();
 
 		expect(data.byHistoryMode).toEqual({
 			fresh: 0,
 			resume: 2,
+			resume_extended: 1,
 			rebuild_transcript: 0,
 			rebuild_flattened: 1,
 		});
 		expect(data.byRebuildReason).toEqual({
-			continuation: 0,
+			continuation: 1,
 			compaction: 0,
 			edit: 0,
 			unknown: 0,
