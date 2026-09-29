@@ -257,6 +257,78 @@ describe("translateAnthropicResponseToResponses", () => {
 		expect(result.created_at).toBeGreaterThan(0);
 	});
 
+	describe("terminal status", () => {
+		const toolReply: AnthropicResponse["content"] = [
+			{ type: "text", text: "Reading it." },
+			{ type: "tool_use", id: "toolu_1", name: "read", input: {} },
+		];
+
+		test("max_tokens under the client's own cap is incomplete for max_output_tokens", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({ content: toolReply, stop_reason: "max_tokens" }),
+				"resp_t",
+				"m",
+				undefined,
+				{ clientCappedOutput: true },
+			);
+			expect(result.status).toBe("incomplete");
+			expect(result.incomplete_details).toEqual({
+				reason: "max_output_tokens",
+			});
+			expect(result.output.map((item) => item.type)).toEqual([
+				"message",
+				"function_call",
+			]);
+			expect(result.usage).toMatchObject({ output_tokens: 20 });
+		});
+
+		test("max_tokens under the supplied cap stays completed", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({ content: toolReply, stop_reason: "max_tokens" }),
+				"resp_t",
+				"m",
+			);
+			expect(result.status).toBe("completed");
+			expect(result).not.toHaveProperty("incomplete_details");
+		});
+
+		test("model_context_window_exceeded fails for context_length_exceeded", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({
+					content: toolReply,
+					stop_reason: "model_context_window_exceeded",
+				}),
+				"resp_t",
+				"m",
+				undefined,
+				{ clientCappedOutput: true },
+			);
+			expect(result.status).toBe("failed");
+			expect(result.error).toMatchObject({ code: "context_length_exceeded" });
+			expect(result).not.toHaveProperty("incomplete_details");
+		});
+
+		for (const stopReason of [
+			"tool_use",
+			"end_turn",
+			"stop_sequence",
+			"pause_turn",
+			"refusal",
+			null,
+		])
+			test(`${stopReason} stays completed`, () => {
+				const result = translateAnthropicResponseToResponses(
+					makeBaseResponse({ content: toolReply, stop_reason: stopReason }),
+					"resp_t",
+					"m",
+					undefined,
+					{ clientCappedOutput: true },
+				);
+				expect(result.status).toBe("completed");
+				expect(result).not.toHaveProperty("incomplete_details");
+			});
+	});
+
 	test("multiple text blocks → one OutputMessageItem per block", () => {
 		const resp = makeBaseResponse({
 			content: [

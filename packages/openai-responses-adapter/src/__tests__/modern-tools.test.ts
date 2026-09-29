@@ -214,6 +214,16 @@ describe("modern Responses tools", () => {
 			input_tokens_details: { cached_tokens: 90, cache_write_tokens: 8 },
 		});
 		if (type === "custom") {
+			// Announced whole once its input parsed, not at its block's start.
+			const added = out.findIndex(
+				(x) => x.type === "response.output_item.added",
+			);
+			expect(out.slice(added, added + 4).map((x) => x.type)).toEqual([
+				"response.output_item.added",
+				"response.custom_tool_call_input.delta",
+				"response.custom_tool_call_input.done",
+				"response.output_item.done",
+			]);
 			expect(
 				out.some((x) => x.type.startsWith("response.function_call_arguments")),
 			).toBe(false);
@@ -299,6 +309,222 @@ describe("tool translation identity and invalid output", () => {
 		expect(out).toContain("event: response.failed");
 		expect(out).not.toContain("event: response.completed");
 		expect(out).not.toContain("event: response.custom_tool_call_input.delta");
+		expect(out).not.toContain("event: response.output_item.added");
+	});
+
+	test("a malformed custom tool call stops the calls after it", async () => {
+		const req = request(),
+			ctx = createToolTranslation(req),
+			[custom, fn] = [ctx.tools[1].name, ctx.tools[2].name];
+		const events = [
+			{ type: "message_start", message: { usage: { input_tokens: 1 } } },
+			{
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "tool_use", id: "c1", name: custom, input: {} },
+			},
+			{
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "input_json_delta", partial_json: '{"input":42}' },
+			},
+			{ type: "content_block_stop", index: 0 },
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: { type: "tool_use", id: "c2", name: fn, input: {} },
+			},
+			{
+				type: "content_block_delta",
+				index: 1,
+				delta: { type: "input_json_delta", partial_json: '{"cell_id":"1"}' },
+			},
+			{ type: "content_block_stop", index: 1 },
+			{
+				type: "message_delta",
+				delta: { stop_reason: "tool_use" },
+				usage: { output_tokens: 7 },
+			},
+			{ type: "message_stop" },
+		];
+		const out = (
+			await translateAnthropicStreamToResponses(
+				new Response(
+					events
+						.map((x) => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`)
+						.join(""),
+				),
+				"resp",
+				"alias",
+				ctx,
+				{ clientCappedOutput: true },
+			).text()
+		)
+			.split("\n")
+			.filter((x) => x.startsWith("data: "))
+			.map((x) => JSON.parse(x.slice(6)));
+		expect(out.map((x) => x.type)).toEqual([
+			"response.created",
+			"response.in_progress",
+			"response.failed",
+		]);
+		expect(out[2].response).toMatchObject({
+			error: {
+				code: "invalid_tool_arguments",
+				message: expect.stringContaining("expected an input string"),
+			},
+			output: [],
+		});
+	});
+
+	describe("custom tool input the reply did not finish", () => {
+		async function translate(
+			args: string,
+			stopReason: string,
+			clientCappedOutput: boolean,
+		) {
+			const ctx = createToolTranslation(request()),
+				name = ctx.tools[1].name;
+			const events = [
+				{ type: "message_start", message: { usage: { input_tokens: 1 } } },
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "tool_use", id: "c", name, input: {} },
+				},
+				{
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "input_json_delta", partial_json: args },
+				},
+				{ type: "content_block_stop", index: 0 },
+				{
+					type: "message_delta",
+					delta: { stop_reason: stopReason },
+					usage: { output_tokens: 7 },
+				},
+				{ type: "message_stop" },
+			];
+			const out = (
+				await translateAnthropicStreamToResponses(
+					new Response(
+						events
+							.map((x) => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`)
+							.join(""),
+					),
+					"resp",
+					"alias",
+					ctx,
+					{ clientCappedOutput },
+				).text()
+			)
+				.split("\n")
+				.filter((x) => x.startsWith("data: "))
+				.map((x) => JSON.parse(x.slice(6)));
+			// A withheld call sends nothing at all.
+			expect(
+				out.filter(
+					(x) =>
+						x.type.startsWith("response.output_item") ||
+						x.type.startsWith("response.custom_tool_call_input"),
+				),
+			).toEqual([]);
+			const terminal = out.at(-1);
+			expect(terminal.response.output).toEqual([]);
+			expect(terminal.response.usage).toMatchObject({
+				input_tokens: 1,
+				output_tokens: 7,
+			});
+			return terminal;
+		}
+
+		test("cut off under the client's cap: incomplete", async () => {
+			const terminal = await translate('{"input":"pri', "max_tokens", true);
+			expect(terminal).toMatchObject({
+				type: "response.incomplete",
+				response: { incomplete_details: { reason: "max_output_tokens" } },
+			});
+		});
+
+		test("cut off under the supplied cap: failed", async () => {
+			const terminal = await translate('{"input":"pri', "max_tokens", false);
+			expect(terminal).toMatchObject({
+				type: "response.failed",
+				response: {
+					error: {
+						code: "invalid_tool_arguments",
+						message: expect.stringContaining("output token limit"),
+					},
+				},
+			});
+		});
+
+		test("malformed in a finished reply: failed with the final usage", async () => {
+			const terminal = await translate('{"input":42}', "tool_use", true);
+			expect(terminal).toMatchObject({
+				type: "response.failed",
+				response: {
+					error: {
+						code: "invalid_tool_arguments",
+						message: expect.stringContaining("expected an input string"),
+					},
+				},
+			});
+		});
+	});
+
+	describe("non-streamed custom tool input the reply did not finish", () => {
+		function translate(stopReason: string, clientCappedOutput: boolean) {
+			const ctx = createToolTranslation(request());
+			return translateAnthropicResponseToResponses(
+				{
+					id: "msg",
+					type: "message",
+					role: "assistant",
+					model: "m",
+					content: [
+						{ type: "text", text: "Running it." },
+						// What Anthropic reports for input it cut off mid-string.
+						{ type: "tool_use", id: "c", name: ctx.tools[1].name, input: {} },
+					],
+					stop_reason: stopReason,
+					stop_sequence: null,
+					usage: { input_tokens: 1, output_tokens: 7 },
+				},
+				"resp",
+				"alias",
+				ctx,
+				{ clientCappedOutput },
+			);
+		}
+
+		test("cut off under the client's cap: incomplete without the call", () => {
+			const result = translate("max_tokens", true);
+			expect(result).toMatchObject({
+				status: "incomplete",
+				incomplete_details: { reason: "max_output_tokens" },
+				usage: { output_tokens: 7 },
+			});
+			expect(result.output.map((item) => item.type)).toEqual(["message"]);
+		});
+
+		test("cut off under the supplied cap: failed without the call", () => {
+			const result = translate("max_tokens", false);
+			expect(result).toMatchObject({
+				status: "failed",
+				error: {
+					code: "invalid_tool_arguments",
+					message: expect.stringContaining("output token limit"),
+				},
+			});
+			expect(result.output.map((item) => item.type)).toEqual(["message"]);
+		});
+
+		test("malformed in a finished reply: throws", () => {
+			expect(() => translate("tool_use", true)).toThrow(
+				"expected an input string",
+			);
+		});
 	});
 });
 

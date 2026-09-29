@@ -39,6 +39,16 @@ function sseEvent(type: string, data: unknown): string {
 	return `event: ${type}\ndata: ${JSON.stringify(data)}`;
 }
 
+const TERMINAL_EVENTS = new Set([
+	"response.completed",
+	"response.incomplete",
+	"response.failed",
+]);
+
+function isTerminal(event: string): boolean {
+	return TERMINAL_EVENTS.has(event);
+}
+
 describe("translateAnthropicStreamToResponses", () => {
 	test("does not invent cache misses when only writes are reported", async () => {
 		for (const reads of [undefined, null, 0, -1]) {
@@ -380,7 +390,7 @@ describe("translateAnthropicStreamToResponses", () => {
 				],
 			] as const;
 			// No message_stop or final blank line: output_tokens must come from
-			// processing the buffered message_delta, not emitDone's defaults.
+			// processing the buffered message_delta, not the initial zero.
 			const body = frames
 				.map(
 					([event, data]) =>
@@ -398,11 +408,11 @@ describe("translateAnthropicStreamToResponses", () => {
 				events.find((event) => event.event === "response.output_text.delta")
 					?.data,
 			).toMatchObject({ delta: "hi" });
-			expect(
-				events.filter((event) => event.event === "response.completed"),
-			).toHaveLength(1);
+			expect(events.filter((event) => isTerminal(event.event))).toHaveLength(1);
+			expect(events.at(-1)?.event).toBe("response.failed");
 			expect(events.at(-1)?.data).toMatchObject({
 				response: {
+					status: "failed",
 					usage: { input_tokens: 5, output_tokens: 7, total_tokens: 12 },
 				},
 			});
@@ -938,4 +948,242 @@ describe("translateAnthropicStreamToResponses", () => {
 			raw.indexOf("event: response.completed"),
 		);
 	});
+});
+
+describe("terminal status", () => {
+	/**
+	 * A text block, then a tool_use block whose arguments were cut off at
+	 * `{"path":"/tm`, then `tail`.
+	 */
+	function replyWithTool(tail: string[], closeTool = true): Response {
+		return makeAnthropicStream([
+			sseEvent("message_start", {
+				message: { id: "msg_t", usage: { input_tokens: 9, output_tokens: 0 } },
+			}),
+			sseEvent("content_block_start", {
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("content_block_delta", {
+				index: 0,
+				delta: { type: "text_delta", text: "Reading it." },
+			}),
+			sseEvent("content_block_stop", { index: 0 }),
+			sseEvent("content_block_start", {
+				index: 1,
+				content_block: {
+					type: "tool_use",
+					id: "toolu_1",
+					name: "read",
+					input: {},
+				},
+			}),
+			sseEvent("content_block_delta", {
+				index: 1,
+				delta: { type: "input_json_delta", partial_json: '{"path":"/tm' },
+			}),
+			...(closeTool ? [sseEvent("content_block_stop", { index: 1 })] : []),
+			...tail,
+		]);
+	}
+
+	function ending(stopReason: string | null, outputTokens = 4): string[] {
+		return [
+			sseEvent("message_delta", {
+				delta: { stop_reason: stopReason, stop_sequence: null },
+				usage: { output_tokens: outputTokens },
+			}),
+			sseEvent("message_stop", {}),
+		];
+	}
+
+	async function terminalOf(
+		upstream: Response,
+		options: { clientCappedOutput?: boolean } = {},
+	) {
+		const events = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				upstream,
+				"resp_t",
+				"test-model",
+				undefined,
+				options,
+			),
+		);
+		const terminals = events.filter((event) => isTerminal(event.event));
+		expect(terminals).toHaveLength(1);
+		expect(events.at(-1)).toBe(terminals[0]);
+		const terminal = terminals[0] as {
+			event: string;
+			data: { type: string; response: Record<string, unknown> };
+		};
+		expect(terminal.data.type).toBe(terminal.event);
+		return terminal;
+	}
+
+	test("max_tokens under the client's own cap is incomplete for max_output_tokens", async () => {
+		const terminal = await terminalOf(replyWithTool(ending("max_tokens")), {
+			clientCappedOutput: true,
+		});
+		expect(terminal.event).toBe("response.incomplete");
+		expect(terminal.data.response).toMatchObject({
+			status: "incomplete",
+			incomplete_details: { reason: "max_output_tokens" },
+			usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
+		});
+		expect(terminal.data.response.error).toBeUndefined();
+	});
+
+	test("max_tokens under the supplied cap stays completed", async () => {
+		const terminal = await terminalOf(replyWithTool(ending("max_tokens")));
+		expect(terminal.event).toBe("response.completed");
+		expect(terminal.data.response).toMatchObject({
+			status: "completed",
+			usage: { output_tokens: 4 },
+		});
+		expect(terminal.data.response.incomplete_details).toBeUndefined();
+	});
+
+	for (const clientCappedOutput of [false, true])
+		test(`model_context_window_exceeded fails for context_length_exceeded (client cap: ${clientCappedOutput})`, async () => {
+			const terminal = await terminalOf(
+				replyWithTool(ending("model_context_window_exceeded")),
+				{ clientCappedOutput },
+			);
+			expect(terminal.event).toBe("response.failed");
+			expect(terminal.data.response).toMatchObject({
+				status: "failed",
+				error: {
+					code: "context_length_exceeded",
+					// The wording clients match to recognize an overflow.
+					message:
+						"Your input exceeds the context window of this model. Please adjust your input and try again.",
+				},
+				usage: { input_tokens: 9, output_tokens: 4 },
+			});
+		});
+
+	test("EOF with a search in flight fails the search before the response", async () => {
+		const events = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream([
+					sseEvent("message_start", {
+						message: { usage: { input_tokens: 2, output_tokens: 0 } },
+					}),
+					sseEvent("content_block_start", {
+						index: 0,
+						content_block: {
+							type: "server_tool_use",
+							id: "srvtoolu_1",
+							name: "web_search",
+							input: { query: "bun" },
+						},
+					}),
+					sseEvent("content_block_stop", { index: 0 }),
+				]),
+				"resp_s",
+				"test-model",
+			),
+		);
+		const done = events.findIndex(
+			(event) => event.event === "response.output_item.done",
+		);
+		const failed = events.findIndex(
+			(event) => event.event === "response.failed",
+		);
+		expect(done).toBeGreaterThan(-1);
+		expect(failed).toBe(events.length - 1);
+		expect(done).toBeLessThan(failed);
+		expect(events[done]?.data).toMatchObject({
+			item: { type: "web_search_call", status: "failed" },
+		});
+		expect(events[failed]?.data).toMatchObject({
+			response: {
+				error: { code: "stream_truncated" },
+				output: [{ type: "web_search_call", status: "failed" }],
+			},
+		});
+	});
+
+	test("EOF mid tool_use fails with only the finished items", async () => {
+		const terminal = await terminalOf(replyWithTool([], false));
+		expect(terminal.event).toBe("response.failed");
+		expect(terminal.data.response).toMatchObject({
+			status: "failed",
+			error: {
+				code: "stream_truncated",
+				message: expect.stringContaining("message_stop"),
+			},
+			usage: { input_tokens: 9, output_tokens: 0 },
+		});
+		expect(terminal.data.response.incomplete_details).toBeUndefined();
+		expect(terminal.data.response.output).toEqual([
+			expect.objectContaining({ type: "message", status: "completed" }),
+		]);
+	});
+
+	test("EOF after a max_tokens message_delta still fails", async () => {
+		const terminal = await terminalOf(
+			replyWithTool([
+				sseEvent("message_delta", {
+					delta: { stop_reason: "max_tokens" },
+					usage: { output_tokens: 4 },
+				}),
+			]),
+		);
+		expect(terminal.event).toBe("response.failed");
+		expect(terminal.data.response).toMatchObject({
+			status: "failed",
+			usage: { output_tokens: 4 },
+		});
+	});
+
+	test("an empty upstream body fails", async () => {
+		const terminal = await terminalOf(new Response(""));
+		expect(terminal.event).toBe("response.failed");
+		expect(terminal.data.response.output).toEqual([]);
+	});
+
+	test("a successful response without a body fails as truncated", async () => {
+		const translated = translateAnthropicStreamToResponses(
+			new Response(null, { status: 200 }),
+			"resp_t",
+			"test-model",
+		);
+		expect(translated.status).toBe(200);
+		expect(translated.headers.get("content-type")).toBe("text/event-stream");
+		const events = await collectSseEvents(translated);
+		expect(events.map((event) => event.event)).toEqual(["response.failed"]);
+		expect(events[0]?.data).toMatchObject({
+			response: { status: "failed", error: { code: "stream_truncated" } },
+		});
+	});
+
+	for (const stopReason of [
+		"tool_use",
+		"end_turn",
+		"stop_sequence",
+		"pause_turn",
+		"refusal",
+		null,
+	])
+		test(`${stopReason} stays completed`, async () => {
+			const terminal = await terminalOf(replyWithTool(ending(stopReason)), {
+				clientCappedOutput: true,
+			});
+			expect(terminal.event).toBe("response.completed");
+			expect(terminal.data.response).toMatchObject({
+				status: "completed",
+				usage: { input_tokens: 9, output_tokens: 4 },
+			});
+			expect(terminal.data.response.incomplete_details).toBeUndefined();
+			expect(terminal.data.response.output).toEqual([
+				expect.objectContaining({ type: "message" }),
+				expect.objectContaining({
+					type: "function_call",
+					call_id: "toolu_1",
+					status: "completed",
+				}),
+			]);
+		});
 });

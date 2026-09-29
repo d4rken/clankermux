@@ -1574,3 +1574,170 @@ describe("the client-facing request id survives the Responses adapter", () => {
 		expect(resp.headers.get("x-clankermux-request-id")).toBe(REQUEST_ID);
 	});
 });
+
+describe("terminal status follows who capped the output", () => {
+	const reply = (stopReason: string) => ({
+		id: "msg_1",
+		type: "message",
+		role: "assistant",
+		model: "claude-haiku-4-5",
+		content: [{ type: "text", text: "Partial" }],
+		stop_reason: stopReason,
+		stop_sequence: null,
+		usage: { input_tokens: 10, output_tokens: 5 },
+	});
+
+	const streamOf = (stopReason: string) =>
+		[
+			["message_start", { message: { usage: { input_tokens: 10 } } }],
+			["message_delta", { delta: { stop_reason: stopReason } }],
+			["message_stop", {}],
+		]
+			.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`)
+			.join("");
+
+	async function send(
+		stopReason: string,
+		extra: Record<string, unknown>,
+	): Promise<{ resp: Response; gaps: unknown }> {
+		const seen: { gaps: unknown } = { gaps: undefined };
+		const handleProxy: HandleProxyFn = async (req) => {
+			seen.gaps = getNativeResponsesRequestContext(req)?.translationGaps;
+			return extra.stream
+				? new Response(streamOf(stopReason), {
+						headers: { "Content-Type": "text/event-stream" },
+					})
+				: Response.json(reply(stopReason));
+		};
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: "Hi",
+				...extra,
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			handleProxy,
+			{},
+		);
+		return { resp, gaps: seen.gaps };
+	}
+
+	for (const [label, extra, status] of [
+		["client cap", { max_output_tokens: 100 }, "incomplete"],
+		["no cap", {}, "completed"],
+		["null cap", { max_output_tokens: null }, "completed"],
+	] as const)
+		for (const stream of [false, true])
+			test(`max_tokens with ${label} is ${status} (stream: ${stream})`, async () => {
+				const { resp, gaps } = await send("max_tokens", { ...extra, stream });
+				expect(gaps).toMatchObject({
+					maxTokensDefaulted: status === "completed",
+				});
+				expect(resp.status).toBe(200);
+				if (stream) {
+					expect(await resp.text()).toContain(`event: response.${status}\n`);
+				} else {
+					expect((await resp.json()).status).toBe(status);
+				}
+			});
+
+	test("a non-streamed context overflow answers 400 context_length_exceeded", async () => {
+		const { resp } = await send("model_context_window_exceeded", {
+			stream: false,
+		});
+		expect(resp.status).toBe(400);
+		expect((await resp.json()).error).toMatchObject({
+			type: "invalid_request_error",
+			code: "context_length_exceeded",
+		});
+	});
+
+	describe("a non-streamed custom tool call without valid input", () => {
+		async function sendCustom(
+			stopReason: string,
+			extra: Record<string, unknown>,
+		): Promise<Response> {
+			const handleProxy: HandleProxyFn = async (req) => {
+				const sent = (await req.json()) as { tools: Array<{ name: string }> };
+				return Response.json({
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					model: "claude-haiku-4-5",
+					content: [
+						{ type: "text", text: "Running it." },
+						{
+							type: "tool_use",
+							id: "c",
+							name: sent.tools[0]?.name,
+							input: {},
+						},
+					],
+					stop_reason: stopReason,
+					stop_sequence: null,
+					usage: { input_tokens: 10, output_tokens: 5 },
+				});
+			};
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: "Hi",
+					tools: [{ type: "custom", name: "exec" }],
+					stream: false,
+					...extra,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+			return handleResponsesRequest(req, new URL(req.url), handleProxy, {});
+		}
+
+		test("cut off under the client's cap: 200 incomplete without the call", async () => {
+			const resp = await sendCustom("max_tokens", { max_output_tokens: 100 });
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body).toMatchObject({
+				status: "incomplete",
+				incomplete_details: { reason: "max_output_tokens" },
+			});
+			expect(body.output.map((item: { type: string }) => item.type)).toEqual([
+				"message",
+			]);
+		});
+
+		test("cut off under the supplied cap: 502 invalid_tool_arguments", async () => {
+			const resp = await sendCustom("max_tokens", {});
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error).toMatchObject({
+				type: "api_error",
+				code: "invalid_tool_arguments",
+				message: expect.stringContaining("output token limit"),
+			});
+		});
+
+		test("cut off by the context window: 400 context_length_exceeded", async () => {
+			const resp = await sendCustom("model_context_window_exceeded", {});
+			expect(resp.status).toBe(400);
+			expect((await resp.json()).error).toEqual({
+				message:
+					"Your input exceeds the context window of this model. Please adjust your input and try again.",
+				type: "invalid_request_error",
+				code: "context_length_exceeded",
+			});
+		});
+
+		test("in a finished reply: 502 invalid_upstream_response", async () => {
+			const resp = await sendCustom("tool_use", { max_output_tokens: 100 });
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error).toMatchObject({
+				type: "api_error",
+				code: "invalid_upstream_response",
+			});
+		});
+	});
+});

@@ -246,6 +246,72 @@ describe("transformStreamingResponse — text responses", () => {
 		expect(parsed.delta.stop_reason).toBe("end_turn");
 	});
 
+	it("ends a finished reply with no content with message_delta and message_stop", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [
+					{ index: 0, delta: { role: "assistant" }, finish_reason: null },
+				],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			}),
+			"[DONE]",
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		expect(events.map((e) => e.event)).toEqual([
+			"message_start",
+			"ping",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(parseData(events[2] ?? {}).delta.stop_reason).toBe("end_turn");
+	});
+
+	for (const [label, delta] of [
+		["text", { content: "Hel" }],
+		[
+			"a tool call",
+			{
+				tool_calls: [
+					{
+						index: 0,
+						id: "call_1",
+						type: "function",
+						function: { name: "read", arguments: '{"pa' },
+					},
+				],
+			},
+		],
+	] as const)
+		it(`ends ${label} that stopped for length with stop_reason max_tokens`, async () => {
+			const upstream = makeOpenAIStream([
+				JSON.stringify({
+					id: "c1",
+					model: "gpt-4",
+					choices: [{ index: 0, delta, finish_reason: null }],
+				}),
+				JSON.stringify({
+					id: "c1",
+					model: "gpt-4",
+					choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+				}),
+				"[DONE]",
+			]);
+			const events = parseSSEEvents(
+				await readStream(transformStreamingResponse(upstream).body),
+			);
+			const msgDelta = events.find((e) => e.event === "message_delta");
+			expect(parseData(msgDelta ?? {}).delta.stop_reason).toBe("max_tokens");
+			expect(events.at(-1)?.event).toBe("message_stop");
+		});
+
 	it("emits message_stop after message_delta", async () => {
 		const upstream = makeOpenAIStream([
 			JSON.stringify({

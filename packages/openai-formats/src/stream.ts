@@ -2,7 +2,7 @@ import { markUpstreamReportedNoUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
 import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
-import { repairTruncatedToolJson } from "./utils";
+import { mapOpenAIFinishReason, repairTruncatedToolJson } from "./utils";
 
 const log = new Logger("openai-formats");
 
@@ -75,7 +75,10 @@ function emitToolCallJson(
  * @param toolCallBlockIndices - Maps OpenAI tool_call delta index → Anthropic block index.
  *   Pass null when stopReason is "end_turn" (text-only response).
  * @param endTurnBlockIndex - Anthropic block index to close when stopReason is "end_turn".
- *   May be a text block or a thinking block depending on the stream pattern.
+ *   May be a text block or a thinking block depending on the stream pattern,
+ *   or null for a reply that opened no block.
+ * @param reportedStopReason - The message_delta's stop_reason, when it is not
+ *   `stopReason` itself.
  */
 function emitStreamEnd(
 	controller: TransformStreamDefaultController,
@@ -83,7 +86,8 @@ function emitStreamEnd(
 	stopReason: "tool_use" | "end_turn",
 	context: TransformStreamContext,
 	toolCallBlockIndices: Record<number, number> | null,
-	endTurnBlockIndex = 0,
+	endTurnBlockIndex: number | null = 0,
+	reportedStopReason: string = stopReason,
 ) {
 	const {
 		promptTokens,
@@ -117,7 +121,7 @@ function emitStreamEnd(
 `),
 			);
 		}
-	} else if (stopReason === "end_turn") {
+	} else if (stopReason === "end_turn" && endTurnBlockIndex !== null) {
 		// Text or thinking block — use the assigned Anthropic block index
 		const contentBlockStop = {
 			type: "content_block_stop",
@@ -146,7 +150,7 @@ function emitStreamEnd(
 	const messageDelta = {
 		type: "message_delta",
 		delta: {
-			stop_reason: stopReason,
+			stop_reason: reportedStopReason,
 			stop_sequence: null,
 		},
 		// Each cache field is emitted only when upstream reported ITS counter.
@@ -252,6 +256,12 @@ export function transformStreamingResponse(response: Response): Response {
 
 						// Handle [DONE] marker
 						if (dataStr === "[DONE]") {
+							// A reply the output limit cut off says so, whatever block
+							// it was cut off in.
+							const lengthStop =
+								context.finishReason === "length"
+									? mapOpenAIFinishReason(context.finishReason)
+									: undefined;
 							if (context.encounteredToolCall) {
 								// Emit buffered JSON for all tool calls, then stop events.
 								// Use Anthropic block indices (from toolCallBlockIndices), not OpenAI tool_call indices.
@@ -274,6 +284,8 @@ export function transformStreamingResponse(response: Response): Response {
 									"tool_use",
 									context,
 									context.toolCallBlockIndices,
+									undefined,
+									lengthStop,
 								);
 							} else if (context.hasSentContentBlockStart) {
 								// If text block was closed mid-stream (content→thinking transition),
@@ -288,6 +300,7 @@ export function transformStreamingResponse(response: Response): Response {
 									context,
 									null,
 									lastBlockIndex,
+									lengthStop,
 								);
 							} else if (context.hasSentThinkingBlockStart) {
 								// Reasoning-only stream: emitStreamEnd closes block via end_turn branch
@@ -298,6 +311,18 @@ export function transformStreamingResponse(response: Response): Response {
 									context,
 									null,
 									context.thinkingBlockIndex,
+									lengthStop,
+								);
+							} else if (context.hasSentStart) {
+								// A finished reply with no content still ends.
+								emitStreamEnd(
+									controller,
+									encoder,
+									"end_turn",
+									context,
+									null,
+									null,
+									lengthStop,
 								);
 							}
 
@@ -315,6 +340,10 @@ export function transformStreamingResponse(response: Response): Response {
 								context.extractedModel = data.model;
 								context.hasStarted = true;
 							}
+
+							const finishReason = data.choices?.[0]?.finish_reason;
+							if (typeof finishReason === "string")
+								context.finishReason = finishReason;
 
 							// Extract usage data if present (typically in last chunk before [DONE])
 							if (data.usage) {

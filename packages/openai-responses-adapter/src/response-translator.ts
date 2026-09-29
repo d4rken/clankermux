@@ -4,6 +4,11 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
+import {
+	responsesTerminalStatus,
+	stoppedMidOutput,
+	withheldToolCallTerminalStatus,
+} from "./terminal-status";
 import { customToolInput, type ToolTranslation } from "./tool-translation";
 import type {
 	AnthropicResponse,
@@ -19,12 +24,13 @@ export function translateAnthropicResponseToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
-	options: { includeSources?: boolean } = {},
+	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
 ): ResponsesResponse {
 	const output: ResponsesResponse["output"] = [];
 	/** Hosted searches by tool_use id, until their result fills their slot. */
 	const searches = new Map<string, { index: number; query: string | null }>();
 
+	let withheldCustomToolCall = false;
 	let outputIdx = 0;
 	for (const block of resp.content) {
 		if (block.type === "text") {
@@ -80,13 +86,23 @@ export function translateAnthropicResponseToResponses(
 				name: block.name,
 			};
 			if (identity.type === "custom") {
+				let input: string;
+				try {
+					input = customToolInput(block.input);
+				} catch (error) {
+					// Only input the reply was cut off in is withheld; any other is
+					// an upstream fault.
+					if (!stoppedMidOutput(resp.stop_reason)) throw error;
+					withheldCustomToolCall = true;
+					continue;
+				}
 				output.push({
 					type: "custom_tool_call",
 					id: `${responseId}_fc_${outputIdx}`,
 					call_id: block.id,
 					name: identity.name,
 					...(identity.namespace ? { namespace: identity.namespace } : {}),
-					input: customToolInput(block.input),
+					input,
 					status: "completed",
 				});
 				outputIdx++;
@@ -111,7 +127,12 @@ export function translateAnthropicResponseToResponses(
 		object: "response",
 		created_at: Math.floor(Date.now() / 1000),
 		model: resp.model || model,
-		status: "completed",
+		...(withheldCustomToolCall
+			? withheldToolCallTerminalStatus
+			: responsesTerminalStatus)(
+			resp.stop_reason,
+			options.clientCappedOutput ?? false,
+		),
 		output,
 		usage: translateAnthropicUsage(resp.usage),
 	};

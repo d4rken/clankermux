@@ -6,11 +6,16 @@ import {
 	webSearchResultOf,
 } from "./hosted-web-search";
 import {
+	type ResponsesTerminalStatus,
+	responsesTerminalStatus,
+	withheldToolCallTerminalStatus,
+} from "./terminal-status";
+import {
 	customToolInput,
 	type ToolIdentity,
 	type ToolTranslation,
 } from "./tool-translation";
-import type { AnthropicUsage } from "./types";
+import type { AnthropicUsage, ResponsesError } from "./types";
 import { mergeAnthropicUsage, translateAnthropicUsage } from "./usage";
 
 const log = new Logger("openai-responses-adapter");
@@ -31,10 +36,13 @@ interface State {
 		{ callId: string; identity: ToolIdentity; argsBuf: string }
 	>;
 	usage: AnthropicUsage;
+	stopReason: string | null;
+	clientCappedOutput: boolean;
+	/** A custom tool call whose input did not parse; its item never finished. */
+	withheldCustomToolCall: boolean;
 	doneSent: boolean;
 	/** Finished items by output index; a reserved slot stays empty until then. */
 	outputItems: Array<Record<string, unknown>>;
-	streamError: { type: string; message: string } | null;
 	includeSources: boolean;
 	/** Hosted searches by tool_use id, from their invocation to their result. */
 	searches: Map<
@@ -113,33 +121,76 @@ function finishSearch(
 	);
 }
 
-function emitDone(
+function emitToolCallAdded(
 	controller: TransformStreamDefaultController,
 	state: State,
+	outputIdx: number,
+	callId: string,
+	identity: ToolIdentity,
+): void {
+	emitSse(
+		controller,
+		"response.output_item.added",
+		{
+			type: "response.output_item.added",
+			output_index: outputIdx,
+			item: {
+				type: identity.type === "custom" ? "custom_tool_call" : "function_call",
+				id: `${state.responseId}_fc_${outputIdx}`,
+				call_id: callId,
+				name: identity.name,
+				...(identity.namespace ? { namespace: identity.namespace } : {}),
+				...(identity.type === "custom" ? { input: "" } : { arguments: "" }),
+				status: "in_progress",
+			},
+		},
+		state,
+	);
+}
+
+const STREAM_TRUNCATED: ResponsesError = {
+	code: "stream_truncated",
+	message: "Upstream stream ended before message_stop",
+};
+
+/** Fail every search still unanswered, then close the response. */
+function emitTerminal(
+	controller: TransformStreamDefaultController,
+	state: State,
+	terminal: ResponsesTerminalStatus,
 ): void {
 	if (state.doneSent) return;
-	// A search the stream never answered did not complete.
 	for (const search of state.searches.values())
 		if (!search.done) finishSearch(controller, state, search, { ok: false });
 	state.doneSent = true;
 
+	const eventType = `response.${terminal.status}`;
 	emitSse(
 		controller,
-		"response.completed",
+		eventType,
 		{
-			type: "response.completed",
+			type: eventType,
 			response: {
 				id: state.responseId,
 				object: "response",
 				created_at: Math.floor(Date.now() / 1000),
 				model: state.model,
-				status: "completed",
+				...terminal,
 				output: finishedItems(state),
 				usage: translateAnthropicUsage(state.usage),
 			},
 		},
 		state,
 	);
+}
+
+/** The terminal for a reply that reached `message_stop`. */
+function replyTerminal(state: State): ResponsesTerminalStatus {
+	return (
+		state.withheldCustomToolCall
+			? withheldToolCallTerminalStatus
+			: responsesTerminalStatus
+	)(state.stopReason, state.clientCappedOutput);
 }
 
 const MAX_ERROR_LABEL = 128;
@@ -195,6 +246,16 @@ function processEvent(
 	}
 
 	if (eventType === "content_block_start") {
+		// A reply is cut off only in its last block, so a withheld call with a
+		// block after it was malformed. Nothing after it may reach the client.
+		if (state.withheldCustomToolCall) {
+			emitTerminal(
+				controller,
+				state,
+				withheldToolCallTerminalStatus(null, state.clientCappedOutput),
+			);
+			return;
+		}
 		const blockIndex = data.index as number;
 		const contentBlock = data.content_block as Record<string, unknown>;
 
@@ -308,25 +369,16 @@ function processEvent(
 						? JSON.stringify(contentBlock.input)
 						: "",
 			});
-			emitSse(
-				controller,
-				"response.output_item.added",
-				{
-					type: "response.output_item.added",
-					output_index: outputIdx,
-					item: {
-						type:
-							identity.type === "custom" ? "custom_tool_call" : "function_call",
-						id: `${state.responseId}_fc_${outputIdx}`,
-						call_id: contentBlock.id as string,
-						name: identity.name,
-						...(identity.namespace ? { namespace: identity.namespace } : {}),
-						...(identity.type === "custom" ? { input: "" } : { arguments: "" }),
-						status: "in_progress",
-					},
-				},
-				state,
-			);
+			// A custom call's input streams no deltas, so it is announced whole
+			// at its content_block_stop, and only if that input parses.
+			if (identity.type !== "custom")
+				emitToolCallAdded(
+					controller,
+					state,
+					outputIdx,
+					contentBlock.id as string,
+					identity,
+				);
 		}
 		return;
 	}
@@ -489,20 +541,11 @@ function processEvent(
 				try {
 					input = customToolInput(JSON.parse(tool.argsBuf));
 				} catch {
-					processEvent(
-						"error",
-						{
-							error: {
-								type: "invalid_tool_arguments",
-								message:
-									"Upstream returned invalid custom tool arguments; expected an input string",
-							},
-						},
-						controller,
-						state,
-					);
+					// Only the stop reason, still to come, says whether it was cut off.
+					state.withheldCustomToolCall = true;
 					return;
 				}
+				emitToolCallAdded(controller, state, outputIdx, tool.callId, identity);
 				emitSse(
 					controller,
 					"response.custom_tool_call_input.delta",
@@ -566,11 +609,14 @@ function processEvent(
 			state.usage,
 			data.usage as Record<string, unknown> | undefined,
 		);
+		const stopReason = (data.delta as Record<string, unknown> | undefined)
+			?.stop_reason;
+		if (typeof stopReason === "string") state.stopReason = stopReason;
 		return;
 	}
 
 	if (eventType === "message_stop") {
-		emitDone(controller, state);
+		emitTerminal(controller, state, replyTerminal(state));
 		return;
 	}
 
@@ -581,27 +627,10 @@ function processEvent(
 			typeof err?.message === "string" && err.message.trim()
 				? err.message
 				: "An error occurred during streaming";
-		const errCode = errorLabel(err?.code) ?? errType;
-		state.streamError = { type: errType, message: errMsg };
-		state.doneSent = true;
-		emitSse(
-			controller,
-			"response.failed",
-			{
-				type: "response.failed",
-				response: {
-					id: state.responseId,
-					object: "response",
-					created_at: Math.floor(Date.now() / 1000),
-					model: state.model,
-					status: "failed",
-					error: { code: errCode, message: errMsg },
-					output: finishedItems(state),
-					usage: translateAnthropicUsage(state.usage),
-				},
-			},
-			state,
-		);
+		emitTerminal(controller, state, {
+			status: "failed",
+			error: { code: errorLabel(err?.code) ?? errType, message: errMsg },
+		});
 		return;
 	}
 
@@ -623,9 +652,9 @@ function processEvent(
 	// a junk event in a stream whose numbering the client reads as contiguous.
 	//
 	// Suppressed once a terminal event has been emitted. A trailing comment is
-	// legal SSE but useless (the client already has `response.completed` /
-	// `response.failed` and can act on it) and actively unhelpful, since holding
-	// a finished connection open is how a hung request stays hung.
+	// legal SSE but useless (the client already has the terminal event and can
+	// act on it) and actively unhelpful, since holding a finished connection
+	// open is how a hung request stays hung.
 	if (eventType === "ping") {
 		if (!state.doneSent) {
 			controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -677,11 +706,15 @@ export function translateAnthropicStreamToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
-	options: { includeSources?: boolean } = {},
+	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
 ): Response {
-	if (!anthropicResponse.body) {
+	if (!anthropicResponse.body && !anthropicResponse.ok) {
 		return new Response(null, { status: anthropicResponse.status });
 	}
+	// A successful reply without a body is one that ended before it began.
+	const upstreamBody =
+		anthropicResponse.body ??
+		new ReadableStream<Uint8Array>({ start: (c) => c.close() });
 
 	// Per-request decoder: TextDecoder is stateful (buffers incomplete UTF-8
 	// sequences across chunks), so a shared singleton would corrupt concurrent streams.
@@ -700,16 +733,18 @@ export function translateAnthropicStreamToResponses(
 		textByBlock: new Map(),
 		toolByBlock: new Map(),
 		usage: { input_tokens: 0, output_tokens: 0 },
+		stopReason: null,
+		clientCappedOutput: options.clientCappedOutput ?? false,
+		withheldCustomToolCall: false,
 		doneSent: false,
 		outputItems: [],
-		streamError: null,
 		includeSources: options.includeSources ?? false,
 		searches: new Map(),
 		searchByBlock: new Map(),
 		citationsByBlock: new Map(),
 	};
 
-	const transformedBody = anthropicResponse.body.pipeThrough(
+	const transformedBody = upstreamBody.pipeThrough(
 		new TransformStream<Uint8Array, Uint8Array>({
 			transform(chunk, controller) {
 				try {
@@ -740,8 +775,12 @@ export function translateAnthropicStreamToResponses(
 						parseAndProcessEvent(state.lineBuffer, controller, state);
 						state.lineBuffer = "";
 					}
-					// Ensure done event is always emitted
-					emitDone(controller, state);
+					// Only message_stop completes a reply; a body that ends before it
+					// was cut off, even after a message_delta.
+					emitTerminal(controller, state, {
+						status: "failed",
+						error: STREAM_TRUNCATED,
+					});
 				} catch (err) {
 					log.warn(`Stream flush error: ${String(err)}`);
 				}
