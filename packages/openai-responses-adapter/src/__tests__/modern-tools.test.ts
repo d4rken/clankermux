@@ -300,6 +300,102 @@ describe("tool translation identity and invalid output", () => {
 		expect(out).not.toContain("event: response.completed");
 		expect(out).not.toContain("event: response.custom_tool_call_input.delta");
 	});
+
+	describe("custom tool input the reply did not finish", () => {
+		async function translate(
+			args: string,
+			stopReason: string,
+			clientCappedOutput: boolean,
+		) {
+			const ctx = createToolTranslation(request()),
+				name = ctx.tools[1].name;
+			const events = [
+				{ type: "message_start", message: { usage: { input_tokens: 1 } } },
+				{
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "tool_use", id: "c", name, input: {} },
+				},
+				{
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "input_json_delta", partial_json: args },
+				},
+				{ type: "content_block_stop", index: 0 },
+				{
+					type: "message_delta",
+					delta: { stop_reason: stopReason },
+					usage: { output_tokens: 7 },
+				},
+				{ type: "message_stop" },
+			];
+			const out = (
+				await translateAnthropicStreamToResponses(
+					new Response(
+						events
+							.map((x) => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`)
+							.join(""),
+					),
+					"resp",
+					"alias",
+					ctx,
+					{ clientCappedOutput },
+				).text()
+			)
+				.split("\n")
+				.filter((x) => x.startsWith("data: "))
+				.map((x) => JSON.parse(x.slice(6)));
+			// Never a finished item carrying input the model did not finish.
+			expect(
+				out.filter(
+					(x) =>
+						x.type === "response.output_item.done" ||
+						x.type.startsWith("response.custom_tool_call_input"),
+				),
+			).toEqual([]);
+			const terminal = out.at(-1);
+			expect(terminal.response.output).toEqual([]);
+			expect(terminal.response.usage).toMatchObject({
+				input_tokens: 1,
+				output_tokens: 7,
+			});
+			return terminal;
+		}
+
+		test("cut off under the client's cap: incomplete", async () => {
+			const terminal = await translate('{"input":"pri', "max_tokens", true);
+			expect(terminal).toMatchObject({
+				type: "response.incomplete",
+				response: { incomplete_details: { reason: "max_output_tokens" } },
+			});
+		});
+
+		test("cut off under the supplied cap: failed", async () => {
+			const terminal = await translate('{"input":"pri', "max_tokens", false);
+			expect(terminal).toMatchObject({
+				type: "response.failed",
+				response: {
+					error: {
+						code: "invalid_tool_arguments",
+						message: expect.stringContaining("output token limit"),
+					},
+				},
+			});
+		});
+
+		test("malformed in a finished reply: failed with the final usage", async () => {
+			const terminal = await translate('{"input":42}', "tool_use", true);
+			expect(terminal).toMatchObject({
+				type: "response.failed",
+				response: {
+					error: {
+						code: "invalid_tool_arguments",
+						message: expect.stringContaining("expected an input string"),
+					},
+				},
+			});
+		});
+	});
 });
 
 test("nested namespaces fail explicitly instead of losing their parent", () => {

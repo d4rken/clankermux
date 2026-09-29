@@ -32,6 +32,7 @@ import type {
 	HandleProxyFn,
 	ResponseItem,
 	ResponsesRequest,
+	ResponsesResponse,
 } from "./types";
 
 const log = new Logger("openai-responses-adapter");
@@ -393,6 +394,7 @@ async function respondToResponsesRequest(
 				`Skipping unsupported/built-in tool type: ${webSearch.toolType}`,
 			);
 	const includeSources = includesWebSearchSources(body);
+	const clientCappedOutput = body.max_output_tokens != null;
 
 	// 5. Build synthetic request targeting /v1/messages
 	const messagesUrl = new URL(url.toString());
@@ -441,7 +443,7 @@ async function respondToResponsesRequest(
 		// API-key pin, which can narrow routing further on top.
 		denyDirectOfficialAnthropic: true,
 		translationGaps: {
-			maxTokensDefaulted: body.max_output_tokens === undefined,
+			maxTokensDefaulted: !clientCappedOutput,
 			droppedFields: [
 				...(["temperature", "top_p"] as const).filter(
 					(field) =>
@@ -642,7 +644,7 @@ async function respondToResponsesRequest(
 			responseId,
 			body.model,
 			tools,
-			{ includeSources },
+			{ includeSources, clientCappedOutput },
 		);
 	}
 
@@ -662,15 +664,15 @@ async function respondToResponsesRequest(
 			{ status: 502, headers: { "Content-Type": "application/json" } },
 		);
 	}
+	let translated: ResponsesResponse;
 	try {
-		const translated = translateAnthropicResponseToResponses(
+		translated = translateAnthropicResponseToResponses(
 			respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
 			responseId,
 			body.model,
 			tools,
-			{ includeSources },
+			{ includeSources, clientCappedOutput },
 		);
-		return Response.json(translated);
 	} catch {
 		return Response.json(
 			{
@@ -684,4 +686,17 @@ async function respondToResponsesRequest(
 			{ status: 502 },
 		);
 	}
+	// A context overflow is answered the way an upstream 400 for one is.
+	if (translated.status === "failed" && translated.error)
+		return Response.json(
+			{
+				error: {
+					message: translated.error.message,
+					type: "invalid_request_error",
+					code: translated.error.code,
+				},
+			},
+			{ status: 400 },
+		);
+	return Response.json(translated);
 }

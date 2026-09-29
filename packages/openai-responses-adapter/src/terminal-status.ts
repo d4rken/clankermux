@@ -1,33 +1,35 @@
-import type { ResponsesIncompleteDetails } from "./types";
+import type { ResponsesError, ResponsesIncompleteDetails } from "./types";
 
 export type ResponsesTerminalStatus =
 	| { status: "completed" }
-	| { status: "incomplete"; incomplete_details: ResponsesIncompleteDetails };
+	| { status: "incomplete"; incomplete_details: ResponsesIncompleteDetails }
+	| { status: "failed"; error: ResponsesError };
 
-const INCOMPLETE_REASONS: ReadonlyMap<
-	string,
-	ResponsesIncompleteDetails["reason"]
-> = new Map([
-	["max_tokens", "max_output_tokens"],
-	["model_context_window_exceeded", "max_output_tokens"],
-	["refusal", "content_filter"],
-]);
+export const CONTEXT_WINDOW_EXCEEDED: ResponsesError = {
+	code: "context_length_exceeded",
+	message: "The model's context window filled up before the reply finished",
+};
 
 /**
  * The Responses status of a reply that ended with Anthropic's `stop_reason`.
+ * `clientCappedOutput` says whether the client set `max_output_tokens`, as
+ * opposed to running into the cap the translation supplied for it.
  *
- *   "max_tokens" -> { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
- *   "refusal"    -> { status: "incomplete", incomplete_details: { reason: "content_filter" } }
- *   "tool_use"   -> { status: "completed" }
+ *   "max_tokens", client cap          -> { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
+ *   "max_tokens", supplied cap        -> { status: "completed" }
+ *   "model_context_window_exceeded"   -> { status: "failed", error: { code: "context_length_exceeded", ... } }
+ *   (anything else, e.g. "tool_use")  -> { status: "completed" }
  */
 export function responsesTerminalStatus(
 	stopReason: string | null | undefined,
+	clientCappedOutput: boolean,
 ): ResponsesTerminalStatus {
-	const reason =
-		typeof stopReason === "string"
-			? INCOMPLETE_REASONS.get(stopReason)
-			: undefined;
-	return reason
-		? { status: "incomplete", incomplete_details: { reason } }
-		: { status: "completed" };
+	if (stopReason === "max_tokens" && clientCappedOutput)
+		return {
+			status: "incomplete",
+			incomplete_details: { reason: "max_output_tokens" },
+		};
+	if (stopReason === "model_context_window_exceeded")
+		return { status: "failed", error: CONTEXT_WINDOW_EXCEEDED };
+	return { status: "completed" };
 }

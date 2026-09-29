@@ -390,7 +390,7 @@ describe("translateAnthropicStreamToResponses", () => {
 				],
 			] as const;
 			// No message_stop or final blank line: output_tokens must come from
-			// processing the buffered message_delta, not emitDone's defaults.
+			// processing the buffered message_delta, not the initial zero.
 			const body = frames
 				.map(
 					([event, data]) =>
@@ -408,8 +408,6 @@ describe("translateAnthropicStreamToResponses", () => {
 				events.find((event) => event.event === "response.output_text.delta")
 					?.data,
 			).toMatchObject({ delta: "hi" });
-			// No message_stop means the stream was cut off, whatever its last
-			// message_delta said.
 			expect(events.filter((event) => isTerminal(event.event))).toHaveLength(1);
 			expect(events.at(-1)?.event).toBe("response.failed");
 			expect(events.at(-1)?.data).toMatchObject({
@@ -999,9 +997,18 @@ describe("terminal status", () => {
 		];
 	}
 
-	async function terminalOf(upstream: Response) {
+	async function terminalOf(
+		upstream: Response,
+		options: { clientCappedOutput?: boolean } = {},
+	) {
 		const events = await collectSseEvents(
-			translateAnthropicStreamToResponses(upstream, "resp_t", "test-model"),
+			translateAnthropicStreamToResponses(
+				upstream,
+				"resp_t",
+				"test-model",
+				undefined,
+				options,
+			),
 		);
 		const terminals = events.filter((event) => isTerminal(event.event));
 		expect(terminals).toHaveLength(1);
@@ -1014,32 +1021,85 @@ describe("terminal status", () => {
 		return terminal;
 	}
 
-	for (const stopReason of ["max_tokens", "model_context_window_exceeded"])
-		test(`${stopReason} mid tool_use is incomplete for max_output_tokens`, async () => {
-			const terminal = await terminalOf(replyWithTool(ending(stopReason)));
-			expect(terminal.event).toBe("response.incomplete");
-			expect(terminal.data.response).toMatchObject({
-				status: "incomplete",
-				incomplete_details: { reason: "max_output_tokens" },
-				usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
-			});
-			expect(terminal.data.response.error).toBeUndefined();
+	test("max_tokens under the client's own cap is incomplete for max_output_tokens", async () => {
+		const terminal = await terminalOf(replyWithTool(ending("max_tokens")), {
+			clientCappedOutput: true,
 		});
-
-	test("refusal is incomplete for content_filter", async () => {
-		const terminal = await terminalOf(
-			makeAnthropicStream([
-				sseEvent("message_start", {
-					message: { usage: { input_tokens: 3, output_tokens: 0 } },
-				}),
-				...ending("refusal", 1),
-			]),
-		);
 		expect(terminal.event).toBe("response.incomplete");
 		expect(terminal.data.response).toMatchObject({
 			status: "incomplete",
-			incomplete_details: { reason: "content_filter" },
-			usage: { input_tokens: 3, output_tokens: 1 },
+			incomplete_details: { reason: "max_output_tokens" },
+			usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
+		});
+		expect(terminal.data.response.error).toBeUndefined();
+	});
+
+	test("max_tokens under the supplied cap stays completed", async () => {
+		const terminal = await terminalOf(replyWithTool(ending("max_tokens")));
+		expect(terminal.event).toBe("response.completed");
+		expect(terminal.data.response).toMatchObject({
+			status: "completed",
+			usage: { output_tokens: 4 },
+		});
+		expect(terminal.data.response.incomplete_details).toBeUndefined();
+	});
+
+	for (const clientCappedOutput of [false, true])
+		test(`model_context_window_exceeded fails for context_length_exceeded (client cap: ${clientCappedOutput})`, async () => {
+			const terminal = await terminalOf(
+				replyWithTool(ending("model_context_window_exceeded")),
+				{ clientCappedOutput },
+			);
+			expect(terminal.event).toBe("response.failed");
+			expect(terminal.data.response).toMatchObject({
+				status: "failed",
+				error: {
+					code: "context_length_exceeded",
+					message: expect.stringContaining("context window"),
+				},
+				usage: { input_tokens: 9, output_tokens: 4 },
+			});
+		});
+
+	test("EOF with a search in flight fails the search before the response", async () => {
+		const events = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream([
+					sseEvent("message_start", {
+						message: { usage: { input_tokens: 2, output_tokens: 0 } },
+					}),
+					sseEvent("content_block_start", {
+						index: 0,
+						content_block: {
+							type: "server_tool_use",
+							id: "srvtoolu_1",
+							name: "web_search",
+							input: { query: "bun" },
+						},
+					}),
+					sseEvent("content_block_stop", { index: 0 }),
+				]),
+				"resp_s",
+				"test-model",
+			),
+		);
+		const done = events.findIndex(
+			(event) => event.event === "response.output_item.done",
+		);
+		const failed = events.findIndex(
+			(event) => event.event === "response.failed",
+		);
+		expect(done).toBeGreaterThan(-1);
+		expect(failed).toBe(events.length - 1);
+		expect(done).toBeLessThan(failed);
+		expect(events[done]?.data).toMatchObject({
+			item: { type: "web_search_call", status: "failed" },
+		});
+		expect(events[failed]?.data).toMatchObject({
+			response: {
+				error: { code: "stream_truncated" },
+				output: [{ type: "web_search_call", status: "failed" }],
+			},
 		});
 	});
 
@@ -1087,10 +1147,13 @@ describe("terminal status", () => {
 		"end_turn",
 		"stop_sequence",
 		"pause_turn",
+		"refusal",
 		null,
 	])
 		test(`${stopReason} stays completed`, async () => {
-			const terminal = await terminalOf(replyWithTool(ending(stopReason)));
+			const terminal = await terminalOf(replyWithTool(ending(stopReason)), {
+				clientCappedOutput: true,
+			});
 			expect(terminal.event).toBe("response.completed");
 			expect(terminal.data.response).toMatchObject({
 				status: "completed",

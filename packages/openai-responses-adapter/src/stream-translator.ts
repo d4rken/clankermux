@@ -5,13 +5,16 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
-import { responsesTerminalStatus } from "./terminal-status";
+import {
+	type ResponsesTerminalStatus,
+	responsesTerminalStatus,
+} from "./terminal-status";
 import {
 	customToolInput,
 	type ToolIdentity,
 	type ToolTranslation,
 } from "./tool-translation";
-import type { AnthropicUsage } from "./types";
+import type { AnthropicUsage, ResponsesError } from "./types";
 import { mergeAnthropicUsage, translateAnthropicUsage } from "./usage";
 
 const log = new Logger("openai-responses-adapter");
@@ -33,6 +36,9 @@ interface State {
 	>;
 	usage: AnthropicUsage;
 	stopReason: string | null;
+	clientCappedOutput: boolean;
+	/** A custom tool call whose input did not parse; its item never finished. */
+	withheldCustomToolCall: boolean;
 	doneSent: boolean;
 	/** Finished items by output index; a reserved slot stays empty until then. */
 	outputItems: Array<Record<string, unknown>>;
@@ -114,21 +120,23 @@ function finishSearch(
 	);
 }
 
-function emitDone(
+const STREAM_TRUNCATED: ResponsesError = {
+	code: "stream_truncated",
+	message: "Upstream stream ended before message_stop",
+};
+
+/** Fail every search still unanswered, then close the response. */
+function emitTerminal(
 	controller: TransformStreamDefaultController,
 	state: State,
+	terminal: ResponsesTerminalStatus,
 ): void {
 	if (state.doneSent) return;
-	// A search the stream never answered did not complete.
 	for (const search of state.searches.values())
 		if (!search.done) finishSearch(controller, state, search, { ok: false });
 	state.doneSent = true;
 
-	const terminal = responsesTerminalStatus(state.stopReason);
-	const eventType =
-		terminal.status === "incomplete"
-			? "response.incomplete"
-			: "response.completed";
+	const eventType = `response.${terminal.status}`;
 	emitSse(
 		controller,
 		eventType,
@@ -148,31 +156,28 @@ function emitDone(
 	);
 }
 
-function emitFailed(
-	controller: TransformStreamDefaultController,
-	state: State,
-	error: { code: string; message: string },
-): void {
-	if (state.doneSent) return;
-	state.doneSent = true;
-	emitSse(
-		controller,
-		"response.failed",
-		{
-			type: "response.failed",
-			response: {
-				id: state.responseId,
-				object: "response",
-				created_at: Math.floor(Date.now() / 1000),
-				model: state.model,
-				status: "failed",
-				error,
-				output: finishedItems(state),
-				usage: translateAnthropicUsage(state.usage),
-			},
-		},
-		state,
+/**
+ * The terminal for a reply that reached `message_stop`. A withheld custom
+ * tool call fails a reply that would otherwise complete, so no client runs
+ * input the model never finished.
+ */
+function replyTerminal(state: State): ResponsesTerminalStatus {
+	const terminal = responsesTerminalStatus(
+		state.stopReason,
+		state.clientCappedOutput,
 	);
+	if (!state.withheldCustomToolCall || terminal.status !== "completed")
+		return terminal;
+	return {
+		status: "failed",
+		error: {
+			code: "invalid_tool_arguments",
+			message:
+				state.stopReason === "max_tokens"
+					? "Upstream reached the output token limit inside a custom tool call's input"
+					: "Upstream returned invalid custom tool arguments; expected an input string",
+		},
+	};
 }
 
 const MAX_ERROR_LABEL = 128;
@@ -522,18 +527,8 @@ function processEvent(
 				try {
 					input = customToolInput(JSON.parse(tool.argsBuf));
 				} catch {
-					processEvent(
-						"error",
-						{
-							error: {
-								type: "invalid_tool_arguments",
-								message:
-									"Upstream returned invalid custom tool arguments; expected an input string",
-							},
-						},
-						controller,
-						state,
-					);
+					// Only the stop reason, still to come, says whether it was cut off.
+					state.withheldCustomToolCall = true;
 					return;
 				}
 				emitSse(
@@ -606,7 +601,7 @@ function processEvent(
 	}
 
 	if (eventType === "message_stop") {
-		emitDone(controller, state);
+		emitTerminal(controller, state, replyTerminal(state));
 		return;
 	}
 
@@ -617,9 +612,9 @@ function processEvent(
 			typeof err?.message === "string" && err.message.trim()
 				? err.message
 				: "An error occurred during streaming";
-		emitFailed(controller, state, {
-			code: errorLabel(err?.code) ?? errType,
-			message: errMsg,
+		emitTerminal(controller, state, {
+			status: "failed",
+			error: { code: errorLabel(err?.code) ?? errType, message: errMsg },
 		});
 		return;
 	}
@@ -642,9 +637,9 @@ function processEvent(
 	// a junk event in a stream whose numbering the client reads as contiguous.
 	//
 	// Suppressed once a terminal event has been emitted. A trailing comment is
-	// legal SSE but useless (the client already has `response.completed` /
-	// `response.failed` and can act on it) and actively unhelpful, since holding
-	// a finished connection open is how a hung request stays hung.
+	// legal SSE but useless (the client already has the terminal event and can
+	// act on it) and actively unhelpful, since holding a finished connection
+	// open is how a hung request stays hung.
 	if (eventType === "ping") {
 		if (!state.doneSent) {
 			controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -696,7 +691,7 @@ export function translateAnthropicStreamToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
-	options: { includeSources?: boolean } = {},
+	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
 ): Response {
 	if (!anthropicResponse.body) {
 		return new Response(null, { status: anthropicResponse.status });
@@ -720,6 +715,8 @@ export function translateAnthropicStreamToResponses(
 		toolByBlock: new Map(),
 		usage: { input_tokens: 0, output_tokens: 0 },
 		stopReason: null,
+		clientCappedOutput: options.clientCappedOutput ?? false,
+		withheldCustomToolCall: false,
 		doneSent: false,
 		outputItems: [],
 		includeSources: options.includeSources ?? false,
@@ -761,9 +758,9 @@ export function translateAnthropicStreamToResponses(
 					}
 					// Only message_stop completes a reply; a body that ends before it
 					// was cut off, even after a message_delta.
-					emitFailed(controller, state, {
-						code: "stream_truncated",
-						message: "Upstream stream ended before message_stop",
+					emitTerminal(controller, state, {
+						status: "failed",
+						error: STREAM_TRUNCATED,
 					});
 				} catch (err) {
 					log.warn(`Stream flush error: ${String(err)}`);

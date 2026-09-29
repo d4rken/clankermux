@@ -263,35 +263,49 @@ describe("translateAnthropicResponseToResponses", () => {
 			{ type: "tool_use", id: "toolu_1", name: "read", input: {} },
 		];
 
-		for (const stopReason of ["max_tokens", "model_context_window_exceeded"])
-			test(`${stopReason} mid tool_use is incomplete for max_output_tokens`, () => {
-				const result = translateAnthropicResponseToResponses(
-					makeBaseResponse({ content: toolReply, stop_reason: stopReason }),
-					"resp_t",
-					"m",
-				);
-				expect(result.status).toBe("incomplete");
-				expect(result.incomplete_details).toEqual({
-					reason: "max_output_tokens",
-				});
-				expect(result.output.map((item) => item.type)).toEqual([
-					"message",
-					"function_call",
-				]);
-				expect(result.usage).toMatchObject({ output_tokens: 20 });
-			});
-
-		test("refusal is incomplete for content_filter", () => {
+		test("max_tokens under the client's own cap is incomplete for max_output_tokens", () => {
 			const result = translateAnthropicResponseToResponses(
-				makeBaseResponse({
-					content: [{ type: "text", text: "I can't help with that." }],
-					stop_reason: "refusal",
-				}),
+				makeBaseResponse({ content: toolReply, stop_reason: "max_tokens" }),
+				"resp_t",
+				"m",
+				undefined,
+				{ clientCappedOutput: true },
+			);
+			expect(result.status).toBe("incomplete");
+			expect(result.incomplete_details).toEqual({
+				reason: "max_output_tokens",
+			});
+			expect(result.output.map((item) => item.type)).toEqual([
+				"message",
+				"function_call",
+			]);
+			expect(result.usage).toMatchObject({ output_tokens: 20 });
+		});
+
+		test("max_tokens under the supplied cap stays completed", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({ content: toolReply, stop_reason: "max_tokens" }),
 				"resp_t",
 				"m",
 			);
-			expect(result.status).toBe("incomplete");
-			expect(result.incomplete_details).toEqual({ reason: "content_filter" });
+			expect(result.status).toBe("completed");
+			expect(result).not.toHaveProperty("incomplete_details");
+		});
+
+		test("model_context_window_exceeded fails for context_length_exceeded", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({
+					content: toolReply,
+					stop_reason: "model_context_window_exceeded",
+				}),
+				"resp_t",
+				"m",
+				undefined,
+				{ clientCappedOutput: true },
+			);
+			expect(result.status).toBe("failed");
+			expect(result.error).toMatchObject({ code: "context_length_exceeded" });
+			expect(result).not.toHaveProperty("incomplete_details");
 		});
 
 		for (const stopReason of [
@@ -299,6 +313,7 @@ describe("translateAnthropicResponseToResponses", () => {
 			"end_turn",
 			"stop_sequence",
 			"pause_turn",
+			"refusal",
 			null,
 		])
 			test(`${stopReason} stays completed`, () => {
@@ -306,6 +321,8 @@ describe("translateAnthropicResponseToResponses", () => {
 					makeBaseResponse({ content: toolReply, stop_reason: stopReason }),
 					"resp_t",
 					"m",
+					undefined,
+					{ clientCappedOutput: true },
 				);
 				expect(result.status).toBe("completed");
 				expect(result).not.toHaveProperty("incomplete_details");

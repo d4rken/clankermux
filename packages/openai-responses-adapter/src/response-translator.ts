@@ -20,7 +20,7 @@ export function translateAnthropicResponseToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
-	options: { includeSources?: boolean } = {},
+	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
 ): ResponsesResponse {
 	const output: ResponsesResponse["output"] = [];
 	/** Hosted searches by tool_use id, until their result fills their slot. */
@@ -112,7 +112,10 @@ export function translateAnthropicResponseToResponses(
 		object: "response",
 		created_at: Math.floor(Date.now() / 1000),
 		model: resp.model || model,
-		...responsesTerminalStatus(resp.stop_reason),
+		...responsesTerminalStatus(
+			resp.stop_reason,
+			options.clientCappedOutput ?? false,
+		),
 		output,
 		usage: translateAnthropicUsage(resp.usage),
 	};

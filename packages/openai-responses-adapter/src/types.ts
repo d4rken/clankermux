@@ -173,7 +173,7 @@ export interface ResponsesResponse {
 }
 
 export interface ResponsesIncompleteDetails {
-	reason: "max_output_tokens" | "content_filter";
+	reason: "max_output_tokens";
 }
 
 export type OutputItem =

@@ -246,6 +246,34 @@ describe("transformStreamingResponse — text responses", () => {
 		expect(parsed.delta.stop_reason).toBe("end_turn");
 	});
 
+	it("ends a finished reply with no content with message_delta and message_stop", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [
+					{ index: 0, delta: { role: "assistant" }, finish_reason: null },
+				],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			}),
+			"[DONE]",
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		expect(events.map((e) => e.event)).toEqual([
+			"message_start",
+			"ping",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(parseData(events[2] ?? {}).delta.stop_reason).toBe("end_turn");
+	});
+
 	it("emits message_stop after message_delta", async () => {
 		const upstream = makeOpenAIStream([
 			JSON.stringify({
