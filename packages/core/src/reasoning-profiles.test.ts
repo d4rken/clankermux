@@ -18,7 +18,7 @@ it("requires matching adapter and model families", () => {
 		"xhigh",
 		"max",
 	]);
-	for (const model of ["gpt-6-sol", "gpt-6-luna"])
+	for (const model of ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"])
 		expect(getAliasReasoningEfforts(model, "codex")).toEqual([
 			"low",
 			"medium",

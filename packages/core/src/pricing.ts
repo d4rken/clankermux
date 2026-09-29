@@ -444,6 +444,18 @@ BUNDLED_PRICING.openai = {
 				cache_write: 12.5,
 			},
 		},
+		// Seeded from OpenAI's pricing page on 2026-09-29, before models.dev
+		// listed the model. Same rates as GPT-6 Sol except the cache read.
+		"gpt-6.1-sol": {
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			cost: {
+				input: 2,
+				output: 10,
+				cache_read: 0.1,
+				cache_write: 2.5,
+			},
+		},
 		// Seeded from OpenAI's model pages on 2026-09-22, launch day, before
 		// models.dev listed either model.
 		"gpt-6-sol": {

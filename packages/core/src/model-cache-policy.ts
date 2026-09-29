@@ -41,7 +41,7 @@ const CLAUDE_MODELS = new Set(
 	]),
 );
 const MODERN_OPENAI =
-	/^gpt-(?:5\.6(?:-(?:sol|terra|luna))?|6-(?:astra|sol|luna))$/;
+	/^gpt-(?:5\.6(?:-(?:sol|terra|luna))?|6-(?:astra|sol|luna)|6\.1-sol)$/;
 const EARLIER_OPENAI =
 	/^(?:gpt-(?:4o(?:-mini)?|4\.1(?:-mini|-nano)?|5(?:\.[1-5])?(?:-(?:pro|mini|nano|codex(?:-max|-mini)?|chat-latest))?)|o[134](?:-mini|-pro|-preview)?)$/;
 

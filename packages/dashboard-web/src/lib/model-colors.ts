@@ -65,6 +65,7 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	"gpt-6-astra": "leaf",
 	"gpt-6-sol": "steel",
 	"gpt-6-luna": "blush",
+	"gpt-6.1-sol": "pewter",
 };
 
 /**

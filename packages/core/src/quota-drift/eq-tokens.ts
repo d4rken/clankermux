@@ -95,6 +95,8 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	"gpt-6-astra": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"gpt-6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"gpt-6-luna": { ...OPENAI_EQ_WEIGHTS, output: 5 },
+	// GPT-6.1 Sol keeps GPT-6 Sol's $2 / $10 but reads cache at $0.10: 0.05x.
+	"gpt-6.1-sol": { ...OPENAI_EQ_WEIGHTS, output: 5, cacheRead: 0.05 },
 	"gpt-5.6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },

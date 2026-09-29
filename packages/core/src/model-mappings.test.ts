@@ -108,6 +108,7 @@ describe("MODEL_CONTEXT_WINDOWS", () => {
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex-spark"]).toBe(128_000);
 		// The client default stays at 272K even when routing allows more.
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6-astra"]).toBe(272_000);
+		expect(MODEL_CONTEXT_WINDOWS["gpt-6.1-sol"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6-sol"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6-luna"]).toBe(272_000);
 	});
@@ -164,6 +165,7 @@ describe("resolveModelMaxContextWindow", () => {
 		expect(resolveModelMaxContextWindow("gpt-5.6-sol-2026-05-13")).toBe(
 			272_000,
 		);
+		expect(resolveModelMaxContextWindow("gpt-6.1-sol")).toBe(272_000);
 		expect(resolveModelMaxContextWindow("gpt-6-sol")).toBe(272_000);
 		expect(resolveModelMaxContextWindow("gpt-6-luna")).toBe(272_000);
 		expect(resolveModelMaxContextWindow("gpt-5.3-codex-spark")).toBe(128_000);
