@@ -9,6 +9,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { clampEffortToModel, claudeModelTakesEffort } from "@clankermux/core";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./tool-server";
+import { WEB_SEARCH_TOOL, webSearchDomainHook } from "./web-search";
 
 export interface WorkPaths {
 	root: string;
@@ -87,6 +88,8 @@ export interface QueryOptionsInput {
 	/** The client tools' names inside Claude Code (`ToolNames.exposed`). */
 	toolNames: readonly string[];
 	toolServer: McpSdkServerConfigWithInstance | null;
+	/** Claude Code's WebSearch, for a client's hosted web search; null leaves it off. */
+	webSearch: { allowedDomains: readonly string[] | null } | null;
 	systemPrompt: { append: string | null; excludeDynamicSections: boolean };
 	/** The client's effort; dropped or lowered to what `model` accepts. */
 	effort: EffortLevel | null;
@@ -110,8 +113,23 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 	return {
 		cwd: input.paths.cwd,
 		model: input.model,
-		tools: [],
-		allowedTools: input.toolNames.map((name) => `${MCP_TOOL_PREFIX}${name}`),
+		tools: input.webSearch ? [WEB_SEARCH_TOOL] : [],
+		allowedTools: [
+			...input.toolNames.map((name) => `${MCP_TOOL_PREFIX}${name}`),
+			...(input.webSearch ? [WEB_SEARCH_TOOL] : []),
+		],
+		...(input.webSearch?.allowedDomains
+			? {
+					hooks: {
+						PreToolUse: [
+							{
+								matcher: WEB_SEARCH_TOOL,
+								hooks: [webSearchDomainHook(input.webSearch.allowedDomains)],
+							},
+						],
+					},
+				}
+			: {}),
 		permissionMode: "dontAsk",
 		mcpServers: input.toolServer ? { [MCP_SERVER_NAME]: input.toolServer } : {},
 		strictMcpConfig: true,

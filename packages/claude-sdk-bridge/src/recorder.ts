@@ -11,6 +11,7 @@ import {
 	type ModelCallUsage,
 	type TurnLogCounts,
 	type TurnLogIdentity,
+	type TurnLogWebSearch,
 } from "./turn-log";
 import type { BridgeLog, SdkBridgeTurnRepo } from "./types";
 import { processStartTime } from "./work-dirs";
@@ -41,6 +42,8 @@ export class TurnRecorder {
 		innerCalls: 0,
 		innerErrors: 0,
 	};
+	/** WebSearch calls Claude Code made, and the searches their results report. */
+	private readonly webSearch: TurnLogWebSearch = { calls: 0, requests: 0 };
 	/** The query's first top-level model call, by its message id. */
 	private firstCall: {
 		messageId: string | null;
@@ -140,6 +143,7 @@ export class TurnRecorder {
 		const source = this.inserted ? "live" : "resumed_park";
 		const identity = this.identity;
 		const firstCall = this.firstCall && { ...this.firstCall.usage };
+		const webSearch = this.webSearch.calls ? { ...this.webSearch } : null;
 		this.chain = this.chain.then(async () => {
 			let applied: boolean;
 			try {
@@ -164,6 +168,7 @@ export class TurnRecorder {
 				identity,
 				counts: source === "live" ? { ...this.counts } : null,
 				firstCall,
+				webSearch,
 			});
 		});
 		return this.chain;
@@ -192,6 +197,16 @@ export class TurnRecorder {
 		call.cacheRead = tokenCount(u.cache_read_input_tokens) ?? call.cacheRead;
 		call.cacheCreation =
 			tokenCount(u.cache_creation_input_tokens) ?? call.cacheCreation;
+	}
+
+	/** Claude Code started a WebSearch call for the client's hosted search. */
+	noteWebSearchCall(): void {
+		this.webSearch.calls++;
+	}
+
+	/** A WebSearch call's result, reporting `searchCount` searches. */
+	noteWebSearchResult(searchCount: number): void {
+		this.webSearch.requests += searchCount;
 	}
 
 	bump(delta: SdkBridgeTurnCounterDelta): Promise<void> {

@@ -35,7 +35,7 @@ import {
 	ParkedCalls,
 	ToolNames,
 } from "../../tool-server";
-import type { SdkBridgeLimits, SdkBridgeParkRepo } from "../../types";
+import type { QueryFn, SdkBridgeLimits, SdkBridgeParkRepo } from "../../types";
 import { ensurePrivateDir } from "../../work-dirs";
 import {
 	foldReply,
@@ -137,9 +137,11 @@ function makeBridge(
 	limits: Partial<SdkBridgeLimits>,
 	root: string = workRoot,
 	parkRepo?: SdkBridgeParkRepo,
+	queryFn?: QueryFn,
 ): ClaudeSdkBridge {
 	return createClaudeSdkBridge({
 		...(parkRepo ? { parkRepo } : {}),
+		...(queryFn ? { queryFn } : {}),
 		dispatchInner: async (req, ctx) => {
 			const requestId = crypto.randomUUID();
 			// As the proxy does: the row begins, then the call ends.
@@ -199,6 +201,7 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		translationGaps: null,
 		piPromptVersion: null,
 		sideRequest: null,
+		hostedWebSearch: null,
 		...extra,
 	};
 }
@@ -1100,6 +1103,7 @@ await scenario("releasedParkResume", async () => {
 					token: crypto.randomUUID(),
 					model: MODEL,
 					toolNames: names.exposed,
+					webSearch: null,
 					toolServer: createToolServer(mcp, [READ_TOOL], names, (id) =>
 						parked.wait(id),
 					),
@@ -2247,6 +2251,123 @@ await scenario("thinkingCutover", async () => {
 		};
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+await scenario("webSearch", async () => {
+	// Claude Code's own messages, as the SDK reports them to the bridge.
+	const reported: Array<Record<string, unknown>> = [];
+	const { query } = await import("@anthropic-ai/claude-agent-sdk");
+	const teeing: QueryFn = (params) => {
+		const q = query(params);
+		return {
+			interrupt: () => q.interrupt(),
+			close: () => q.close(),
+			async *[Symbol.asyncIterator]() {
+				for await (const m of q) {
+					if (m.type !== "stream_event")
+						reported.push(m as unknown as Record<string, unknown>);
+					yield m;
+				}
+			},
+		};
+	};
+	const searching = makeBridge(
+		{ maxProcesses: 2, parkedTimeoutMs: 60_000, turnDeadlineMs: 120_000 },
+		workRoot,
+		undefined,
+		teeing,
+	);
+	const isSub = (q: { body: unknown }) =>
+		((q.body as { tools?: Array<{ type?: string }> })?.tools ?? []).some((t) =>
+			String(t.type ?? "").startsWith("web_search_"),
+		);
+	const searchTurn = async (
+		text: string,
+		allowedDomains: string[] | null = null,
+		stream = true,
+	) => {
+		const from = mock.requests.length;
+		const p = plan();
+		const r = await read(
+			searching.startTurn({
+				request: request([{ role: "user", content: text }], [], {
+					max_tokens: 1024,
+					stream,
+				}),
+				plan: p,
+				meta: meta({
+					hostedWebSearch: { required: true, allowedDomains },
+				}),
+				signal: new AbortController().signal,
+			}),
+		);
+		await settled(searching);
+		// A torn-down turn's finish is written after its query closes.
+		const until = Date.now() + 5_000;
+		while (repo.turns.get(p.turnId)?.status === "running" && Date.now() < until)
+			await Bun.sleep(20);
+		const calls = mock.requests
+			.slice(from)
+			.filter((q) => q.path.startsWith("/v1/messages"));
+		const body = (q: { body: unknown }) => q.body as Record<string, unknown>;
+		return {
+			reply: r,
+			turnStatus: repo.turns.get(p.turnId)?.status,
+			subRequests: calls.filter(isSub).map((q) => ({
+				model: body(q).model,
+				stream: body(q).stream,
+				tools: body(q).tools,
+				toolChoice: body(q).tool_choice ?? null,
+				thinking: body(q).thinking ?? null,
+				maxTokens: body(q).max_tokens,
+				beta: q.headers["anthropic-beta"] ?? null,
+				messages: body(q).messages,
+				status: q.status,
+			})),
+			mainTools: calls
+				.filter((q) => !isSub(q))
+				.map((q) =>
+					((body(q).tools as Array<{ name: string }> | undefined) ?? []).map(
+						(t) => t.name,
+					),
+				),
+		};
+	};
+	try {
+		const searched = await searchTurn("SEARCH bun release notes");
+		const envelopes = {
+			toolUse: reported
+				.filter((m) => m.type === "assistant")
+				.flatMap(
+					(m) =>
+						(m.message as { content: Block[] }).content.filter(
+							(b) => b.type === "tool_use",
+						) as Block[],
+				),
+			toolResults: reported
+				.filter((m) => m.type === "user" && "tool_use_result" in m)
+				.map((m) => ({
+					content: (m.message as { content: unknown }).content,
+					toolUseResult: m.tool_use_result,
+				})),
+		};
+		const nonStreamed = await searchTurn("SEARCH bun json", null, false);
+		const filtered = await searchTurn("SEARCH bun docs", ["docs.example"]);
+		const widened = await searchTurn("SEARCHWIDE bun docs", ["docs.example"]);
+		const failed = await searchTurn("SEARCH SEARCHFAIL bun");
+		const unsearched = await searchTurn("answer from memory");
+		return {
+			searched,
+			envelopes,
+			nonStreamed,
+			filtered,
+			widened,
+			failed,
+			unsearched,
+		};
+	} finally {
+		await searching.dispose();
 	}
 });
 

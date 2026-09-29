@@ -150,7 +150,8 @@ const IGNORED_FIELDS = ["temperature", "top_p"] as const;
 /**
  * What a bridged turn does with the request fields Claude Code sets itself:
  * - `max_tokens` is honoured, as Claude Code's own output limit;
- * - `temperature` and `top_p` are accepted and not applied;
+ * - `temperature`, `top_p` and a hosted web search's hints are accepted and
+ *   not applied;
  * - the fields `sdkBridgeRefusedField` names are refused.
  * `gaps` names what the body cannot show: an adapter's default `max_tokens`
  * is no limit of the client's, and a dropped field was still asked for.
@@ -172,9 +173,13 @@ function applyFieldPolicy(
 		maxOutputTokens = limit;
 	}
 	const dropped = new Set(gaps?.droppedFields ?? []);
-	const ignoredFields = IGNORED_FIELDS.filter(
-		(field) => body[field] != null || dropped.has(field),
-	);
+	const ignoredFields = [
+		...IGNORED_FIELDS.filter(
+			(field) => body[field] != null || dropped.has(field),
+		),
+		// Hints of a hosted web search, which Claude Code's WebSearch cannot take.
+		...[...dropped].filter((field) => field.startsWith("web_search.")),
+	];
 	return { maxOutputTokens, ignoredFields };
 }
 

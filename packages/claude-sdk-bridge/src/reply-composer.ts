@@ -1,5 +1,6 @@
 import type { ToolNames } from "./tool-server";
 import type { Block } from "./turn-request";
+import { WEB_SEARCH_TOOL, type WebSearchOutcome } from "./web-search";
 
 export type StreamEvent = { type: string; [key: string]: unknown };
 
@@ -48,6 +49,14 @@ interface Accumulated {
 	json?: string;
 }
 
+/** One of Claude Code's WebSearch calls, shown to the client as Anthropic's server tool. */
+interface Search {
+	id: string;
+	json: string;
+	/** Its result is queued or sent. */
+	answered: boolean;
+}
+
 /**
  * Turns Claude Code's model messages into one Anthropic reply per leg. Every
  * model call Claude Code makes arrives as its own message; the client must see
@@ -72,6 +81,19 @@ export class ReplyComposer {
 	/** tool_use ids handed to the client in the current leg. */
 	legToolUseIds: string[] = [];
 	lastStopReason: string | null = null;
+	/** The leg's WebSearch calls the client was shown, by tool_use id. */
+	private searches = new Map<string, Search>();
+	/**
+	 * Upstream block index to a WebSearch call whose input is still
+	 * streaming; the client sees nothing of it until its block completes.
+	 */
+	private searchBlocks = new Map<number, Search>();
+	/** Results waiting for the output blocks open now to close. */
+	private queuedResults: Block[] = [];
+	/** Forwarded output blocks started and not yet stopped. */
+	private openOutputs = new Set<number>();
+	/** Searches of this leg whose result was a completed search. */
+	completedSearches = 0;
 
 	constructor(
 		private readonly opts: {
@@ -81,6 +103,10 @@ export class ReplyComposer {
 			newMessageId: () => string;
 			/** False for a side request, whose tool calls no client runs. */
 			forwardToolUse?: boolean;
+			/** Claude Code's WebSearch serves the client's hosted web search. */
+			webSearch?: boolean;
+			/** A WebSearch call started. */
+			onWebSearch?: (id: string) => void;
 		},
 	) {}
 
@@ -115,13 +141,22 @@ export class ReplyComposer {
 		this.accumulated = new Map();
 		this.legToolUseIds = [];
 		this.lastStopReason = null;
+		this.searches = new Map();
+		this.searchBlocks = new Map();
+		this.queuedResults = [];
+		this.openOutputs = new Set();
+		this.completedSearches = 0;
 	}
 
 	detach(): void {
 		this.sink = null;
 	}
 
-	/** The leg's reply as content blocks, the way the client will store it. */
+	/**
+	 * The leg's reply as content blocks, the way the client will store it.
+	 * The search blocks are not: a Responses client's history carries them
+	 * as `web_search_call` items, which its translation drops.
+	 */
 	legContent(): Block[] {
 		return [...this.accumulated.entries()]
 			.sort(([a], [b]) => a - b)
@@ -161,6 +196,100 @@ export class ReplyComposer {
 		});
 	}
 
+	private isWebSearch(block: Block): boolean {
+		return (
+			this.opts.webSearch === true &&
+			block.type === "tool_use" &&
+			block.name === WEB_SEARCH_TOOL
+		);
+	}
+
+	/** Whether `id` is a WebSearch call of this leg still waiting on its result. */
+	awaitsWebSearch(id: string): boolean {
+		const search = this.searches.get(id);
+		return !!search && !search.answered;
+	}
+
+	private newSearch(block: Block): Search {
+		return { id: String(block.id), json: "", answered: false };
+	}
+
+	/**
+	 * A complete WebSearch call goes out as a `server_tool_use` block, and
+	 * only then is it the leg's. Only the query goes out: Claude Code's input
+	 * may also carry the domain lists the bridge set.
+	 */
+	private closeSearch(search: Search): void {
+		this.searches.set(search.id, search);
+		this.opts.onWebSearch?.(search.id);
+		let input: unknown = null;
+		try {
+			input = search.json ? JSON.parse(search.json) : null;
+		} catch {}
+		const query = (input as { query?: unknown } | null)?.query;
+		const index = this.nextIndex++;
+		this.emit({
+			type: "content_block_start",
+			index,
+			content_block: {
+				type: "server_tool_use",
+				id: search.id,
+				name: "web_search",
+				input: {},
+			},
+		});
+		this.emit({
+			type: "content_block_delta",
+			index,
+			delta: {
+				type: "input_json_delta",
+				partial_json: JSON.stringify(
+					typeof query === "string" ? { query } : {},
+				),
+			},
+		});
+		this.emit({ type: "content_block_stop", index });
+		this.flushResults();
+	}
+
+	/**
+	 * A WebSearch call's result, as a `web_search_tool_result` block. It goes
+	 * out once no other block is open; a call not of this leg, or answered
+	 * already (a replayed envelope), is ignored.
+	 */
+	onWebSearchResult(id: string, outcome: WebSearchOutcome): boolean {
+		const search = this.searches.get(id);
+		if (!search || search.answered) return false;
+		search.answered = true;
+		if (outcome.status === "completed") this.completedSearches++;
+		this.queuedResults.push({
+			type: "web_search_tool_result",
+			tool_use_id: id,
+			content:
+				outcome.status === "completed"
+					? outcome.sources.map((s) => ({
+							type: "web_search_result",
+							url: s.url,
+							title: s.title,
+						}))
+					: {
+							type: "web_search_tool_result_error",
+							error_code: outcome.errorCode,
+						},
+		});
+		this.flushResults();
+		return true;
+	}
+
+	private flushResults(): void {
+		if (this.openOutputs.size > 0 || !this.sink) return;
+		for (const block of this.queuedResults.splice(0)) {
+			const index = this.nextIndex++;
+			this.emit({ type: "content_block_start", index, content_block: block });
+			this.emit({ type: "content_block_stop", index });
+		}
+	}
+
 	/** Open an output block for an upstream block; null when it is not forwarded. */
 	private openBlock(block: Block): number | null {
 		let out: Block;
@@ -176,13 +305,33 @@ export class ReplyComposer {
 			const index = this.nextIndex++;
 			this.accumulated.set(index, { type: "tool_use", id, name, json: "" });
 			this.emit({ type: "content_block_start", index, content_block: out });
+			this.openOutputs.add(index);
 			return index;
 		}
 		if (!FORWARDED_BLOCKS.has(block.type)) return null;
 		const index = this.nextIndex++;
 		this.accumulated.set(index, { type: block.type, text: "" });
 		this.emit({ type: "content_block_start", index, content_block: block });
+		this.openOutputs.add(index);
 		return index;
+	}
+
+	private closeBlock(index: number): void {
+		if (!this.openOutputs.delete(index)) return;
+		this.emit({ type: "content_block_stop", index });
+		this.flushResults();
+	}
+
+	/**
+	 * A new upstream message, or the reply's end, while the last one was cut
+	 * off mid-block (a stream that failed, which Claude Code fetches again).
+	 * A forwarded block it left open is closed with what it carried; a
+	 * WebSearch call cut off in its input was never shown, and goes.
+	 */
+	private endCutOffBlocks(): void {
+		this.searchBlocks.clear();
+		for (const index of [...this.openOutputs].sort((a, b) => a - b))
+			this.closeBlock(index);
 	}
 
 	private applyDelta(index: number, delta: Record<string, unknown>): void {
@@ -213,6 +362,7 @@ export class ReplyComposer {
 			case "message_start": {
 				const message = (event.message ?? {}) as Record<string, unknown>;
 				if (typeof message.id === "string") this.streamedIds.add(message.id);
+				this.endCutOffBlocks();
 				this.streaming = true;
 				this.indexMap = new Map();
 				this.heldDelta = null;
@@ -223,20 +373,34 @@ export class ReplyComposer {
 			}
 			case "content_block_start": {
 				this.startMessage({});
-				const out = this.openBlock(event.content_block as Block);
+				const block = event.content_block as Block;
+				if (this.isWebSearch(block)) {
+					this.searchBlocks.set(event.index as number, this.newSearch(block));
+					this.indexMap.set(event.index as number, null);
+					return null;
+				}
+				const out = this.openBlock(block);
 				this.indexMap.set(event.index as number, out);
 				return null;
 			}
 			case "content_block_delta": {
+				const search = this.searchBlocks.get(event.index as number);
+				const delta = event.delta as Record<string, unknown>;
+				if (search && delta.type === "input_json_delta")
+					search.json += String(delta.partial_json ?? "");
 				const out = this.indexMap.get(event.index as number);
-				if (out !== undefined && out !== null)
-					this.applyDelta(out, event.delta as Record<string, unknown>);
+				if (out !== undefined && out !== null) this.applyDelta(out, delta);
 				return null;
 			}
 			case "content_block_stop": {
+				const search = this.searchBlocks.get(event.index as number);
+				if (search) {
+					this.searchBlocks.delete(event.index as number);
+					this.closeSearch(search);
+					return null;
+				}
 				const out = this.indexMap.get(event.index as number);
-				if (out !== undefined && out !== null)
-					this.emit({ type: "content_block_stop", index: out });
+				if (out !== undefined && out !== null) this.closeBlock(out);
 				return null;
 			}
 			case "message_delta": {
@@ -269,6 +433,8 @@ export class ReplyComposer {
 	): UpstreamMessageEnd | null {
 		const id = typeof message.id === "string" ? message.id : null;
 		if (id && this.streamedIds.has(id)) return null;
+		this.endCutOffBlocks();
+		this.streaming = false;
 		this.startMessage(message);
 		const content = Array.isArray(message.content)
 			? (message.content as Block[])
@@ -276,6 +442,12 @@ export class ReplyComposer {
 		for (const block of content) {
 			let start: Block = block;
 			let delta: Record<string, unknown> | null = null;
+			if (this.isWebSearch(block)) {
+				const search = this.newSearch(block);
+				search.json = JSON.stringify(block.input ?? {});
+				this.closeSearch(search);
+				continue;
+			}
 			if (block.type === "text") {
 				start = { type: "text", text: "" };
 				delta = { type: "text_delta", text: block.text ?? "" };
@@ -317,7 +489,7 @@ export class ReplyComposer {
 		const out = this.openBlock(start);
 		if (out === null) return;
 		for (const delta of deltas) this.applyDelta(out, delta);
-		this.emit({ type: "content_block_stop", index: out });
+		this.closeBlock(out);
 	}
 
 	/**
@@ -332,6 +504,16 @@ export class ReplyComposer {
 	finish(stopReason: string | null): void {
 		if (!this.sink) return;
 		this.startMessage({});
+		// A search still unanswered never completed.
+		for (const search of this.searches.values())
+			if (!search.answered)
+				this.onWebSearchResult(search.id, {
+					status: "failed",
+					errorCode: "unavailable",
+					searchCount: 0,
+				});
+		this.endCutOffBlocks();
+		this.flushResults();
 		const held = (this.heldDelta ?? {}) as {
 			delta?: Record<string, unknown>;
 			usage?: Record<string, unknown>;

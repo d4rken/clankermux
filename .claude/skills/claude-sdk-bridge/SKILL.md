@@ -274,11 +274,88 @@ made private, never deleted: no pid says whether a process still uses them.
   `MAX_MCP_OUTPUT_TOKENS=100000000`.
 - A client `document` block in a tool result reaches Claude Code as the
   text `[document omitted]` (`toMcpResult`): MCP results carry no documents.
-- Options: `tools: []`, `settingSources: []`, `skills: []`, `plugins: []`,
+- Options: `tools: []` (`["WebSearch"]` for a hosted web search, below), `settingSources: []`, `skills: []`, `plugins: []`,
   `strictMcpConfig`, `verbatimPrompts`, `systemPrompt.snapshot: false` (a
   resume renders the current policy's prompt), and
   `pathToClaudeCodeExecutable` always set (skips a libc probe that blocks the
   event loop).
+
+## Hosted web search
+
+A Responses request whose only tool is a hosted `web_search` gets a real
+search: Claude Code's own WebSearch. The docs' "Hosted web search on Claude
+models" is the client contract.
+
+- **Request.** The Responses adapter never puts the tool in the translated
+  body (every other destination drops it, as before). `planHostedWebSearch`
+  records it in the native context as `hostedWebSearch: {required,
+  allowedDomains}` only when it is the only tool (not mixed with function,
+  custom or `additional_tools`) and `tool_choice` is not `none`;
+  `required` is `tool_choice: "required"` or a named web search. The
+  bridged attempt copies it to `SdkBridgeTurnMeta.hostedWebSearch` and,
+  once `startTurn` has returned a response, marks it served ("handled by
+  the bridge", not "a search completed"; a start that throws fails over
+  unmarked); the adapter logs the old "Skipping unsupported/built-in
+  tool type" warning only for requests no bridge served, and an info line
+  for a mixed request. The body carries no `tool_choice` for it, so the
+  field policy never sees one. A malformed `tools` or `additional_tools`
+  answers the adapter's usual 400. `external_web_access: false`
+  (cached results only) is carried as `externalWebAccess: false`, and the
+  bridge refuses that turn with 400 `web_search_cache_only_unsupported`
+  before any claim, so it displaces no parked turn and starts no query.
+- **Options.** With the flag, `tools: ["WebSearch"]` and `allowedTools`
+  adds `WebSearch`; nothing else of Claude Code's own. With
+  `allowedDomains`, a PreToolUse hook (`webSearchDomainHook`) sets
+  `allowed_domains` on every call, keeps a narrower list the model chose,
+  drops `blocked_domains` (the API takes one list or the other) and denies
+  a call naming a domain outside the list. Side requests never get it.
+- **Sub-request.** Measured on CLI 2.1.280 (`real-claude.integration.test.ts`
+  prints it): WebSearch makes its own streamed `/v1/messages` call on the
+  turn's own model (the bare id for `[1m]`, with the 1M beta), with
+  `tools: [{type: "web_search_20250305", name: "web_search", max_uses: 8}]`,
+  system "You are an assistant for performing a web search tool use" and
+  user text "Perform a web search for the query: …". Sonnet 5 and Haiku
+  force the tool (`tool_choice: {type: "tool"}`, thinking disabled); Opus
+  5.5 and Fable 5.1 send `tool_choice: auto` and may answer without
+  searching. The model is always in the frozen plan, so neither the inner
+  listener nor `sdkBridgeCandidatesForModel` has a rule for it; it is an
+  ordinary inner `requests` row. The provider's
+  `usage.server_tool_use.web_search_requests` is not persisted on that row:
+  no part of the gateway reads it today, so usage and cost reporting carry
+  no per-search fees.
+- **Reply.** The WebSearch `tool_use` becomes a `server_tool_use` block
+  (`name: "web_search"`, input `{query}` only) and the SDK's
+  `SDKUserMessage.tool_use_result` (a `WebSearchOutput`) a
+  `web_search_tool_result` (`ReplyComposer.onWebSearchResult`), queued
+  until no other block is open, taken once per call. `webSearchOutcome`:
+  result groups are a completed search (URLs deduplicated, none is fine);
+  "Web search error: <code>" in `results` is a failed one with that code;
+  commentary with `searchCount: 0`, `is_error` (a hook denial included), or
+  a missing or invalid output fails with `unavailable`. A call still
+  unanswered at the reply's end fails the same way. A call becomes the
+  leg's only once its block completes: a streamed message cut off inside a
+  WebSearch input (Claude Code then fetches the call again, or not) drops
+  that partial call, which never gets a result and never counts. At a new
+  upstream message a forwarded block the cut left open is closed on the
+  wire with what it carried. The Responses adapter
+  turns the pair into one `web_search_call`, its slot reserved at the
+  invocation.
+- **Required.** `endLeg` checks for a completed search before
+  `composer.finish()`: without one the turn is torn down with 502
+  `web_search_not_performed`, JSON before the head, an SSE `error` (so
+  `response.failed`) after it. The first message_start commits a streamed
+  head, so a streamed turn practically always gets the SSE form. A refusal
+  without a search fails the same way.
+- **History.** The search blocks are not in `legContent()`, so the
+  registered digests are the text answer's, which is what a Responses
+  client sends back (its `web_search_call` items do not translate). The
+  next turn resumes; Claude Code's transcript keeps its real WebSearch
+  call. A search-only turn has no client tools, so it never parks and no
+  resume descriptor carries the flag.
+- **Journal.** The turn line carries `webSearchCount` (WebSearch calls) and
+  `webSearchRequests`, the sum of Claude Code's `WebSearchOutput.searchCount`
+  over their results. It is not the provider's
+  `usage.server_tool_use.web_search_requests`, which nothing persists.
 
 ## Claude Code's environment block
 

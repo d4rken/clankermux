@@ -64,6 +64,7 @@ describe("query options", () => {
 		model: "claude-sonnet-5",
 		toolNames: ["read"],
 		toolServer: server,
+		webSearch: null,
 		systemPrompt: { append: null, excludeDynamicSections: false },
 		effort: null,
 		maxOutputTokens: null,
@@ -173,5 +174,22 @@ describe("query options", () => {
 		});
 		expect(options.mcpServers).toEqual({});
 		expect(options.allowedTools).toEqual([]);
+	});
+
+	it("adds Claude Code's WebSearch, and nothing else of its own, for a hosted web search", () => {
+		const options = buildQueryOptions({
+			...base,
+			webSearch: { allowedDomains: null },
+		});
+		expect(options.tools).toEqual(["WebSearch"]);
+		expect(options.allowedTools).toEqual(["mcp__c__read", "WebSearch"]);
+		expect(options.hooks).toBeUndefined();
+		const filtered = buildQueryOptions({
+			...base,
+			webSearch: { allowedDomains: ["bun.sh"] },
+		});
+		expect(
+			filtered.hooks?.PreToolUse?.map((m) => [m.matcher, m.hooks.length]),
+		).toEqual([["WebSearch", 1]]);
 	});
 });

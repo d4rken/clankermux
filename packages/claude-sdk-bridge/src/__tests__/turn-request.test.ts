@@ -207,6 +207,18 @@ describe("field policy", () => {
 			turnOf(parse({}, { maxTokensDefaulted: false, droppedFields: ["top_p"] }))
 				.ignoredFields,
 		).toEqual(["top_p"]);
+		// And so do a hosted web search's hints.
+		expect(
+			turnOf(
+				parse(
+					{},
+					{
+						maxTokensDefaulted: false,
+						droppedFields: ["web_search.user_location", "top_p"],
+					},
+				),
+			).ignoredFields,
+		).toEqual(["top_p", "web_search.user_location"]);
 	});
 
 	it("refuses stop sequences with a 400 naming the field", () => {

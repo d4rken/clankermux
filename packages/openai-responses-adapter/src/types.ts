@@ -174,7 +174,8 @@ export interface ResponsesResponse {
 export type OutputItem =
 	| OutputMessageItem
 	| OutputFunctionCallItem
-	| OutputCustomToolCallItem;
+	| OutputCustomToolCallItem
+	| OutputWebSearchCallItem;
 
 export interface OutputMessageItem {
 	type: "message";
@@ -189,6 +190,7 @@ export type OutputContent = OutputTextOutputContent | OutputRefusalContent;
 export interface OutputTextOutputContent {
 	type: "output_text";
 	text: string;
+	annotations?: Array<Record<string, unknown>>;
 }
 
 export interface OutputRefusalContent {
@@ -214,6 +216,17 @@ export interface OutputCustomToolCallItem {
 	namespace?: string;
 	input: string;
 	status: "completed";
+}
+
+export interface OutputWebSearchCallItem {
+	type: "web_search_call";
+	id: string;
+	status: "completed" | "failed";
+	action: {
+		type: "search";
+		query?: string;
+		sources?: Array<{ type: "url"; url: string; title?: string }>;
+	};
 }
 
 export interface ResponsesUsage {
@@ -323,11 +336,29 @@ export interface AnthropicResponse {
 
 export type AnthropicResponseContent =
 	| AnthropicTextResponseContent
-	| AnthropicToolUseResponseContent;
+	| AnthropicToolUseResponseContent
+	| AnthropicServerToolUseResponseContent
+	| AnthropicWebSearchToolResultContent;
 
 export interface AnthropicTextResponseContent {
 	type: "text";
 	text: string;
+	citations?: unknown;
+}
+
+/** A server tool's invocation; the adapter maps `web_search` only. */
+export interface AnthropicServerToolUseResponseContent {
+	type: "server_tool_use";
+	id: string;
+	name: string;
+	input: unknown;
+}
+
+export interface AnthropicWebSearchToolResultContent {
+	type: "web_search_tool_result";
+	tool_use_id: string;
+	/** The results, or `{type: "web_search_tool_result_error", error_code}`. */
+	content: unknown;
 }
 
 export interface AnthropicToolUseResponseContent {

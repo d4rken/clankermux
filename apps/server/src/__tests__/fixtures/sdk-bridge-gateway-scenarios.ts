@@ -875,6 +875,76 @@ await withGateway("thinkingCutover", async (gw, accounts) => {
 	};
 });
 
+// pi-web-search's own request (its api.ts, for a model it drives over
+// openai-responses), and what it reads back from the stream.
+await withGateway("piWebSearch", async (gw, accounts) => {
+	const send = async (input: string) => {
+		const from = mock.requests.length;
+		const response = await fetch(`${gw.url}/wire/openai/v1/responses`, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${gw.apiKey}`,
+				"content-type": "application/json",
+				accept: "text/event-stream",
+				"user-agent": "pi/0.86.0",
+				"x-clankermux-pi-prompt": "0.87",
+			},
+			body: JSON.stringify({
+				model: MODEL,
+				input,
+				tools: [{ type: "web_search" }],
+				tool_choice: "required",
+				include: ["web_search_call.action.sources", "web_search_call.results"],
+				stream: true,
+				store: false,
+			}),
+		});
+		const text = await response.text();
+		const events = text
+			.split("\n\n")
+			.map((f) =>
+				f
+					.split("\n")
+					.find((l) => l.startsWith("data: "))
+					?.slice(6),
+			)
+			.filter((d): d is string => !!d)
+			.map((d) => JSON.parse(d) as Record<string, unknown>);
+		const calls = messagesCalls(from);
+		const isSub = (q: MockRequest) =>
+			((q.body as { tools?: Array<{ type?: string }> }).tools ?? []).some((t) =>
+				String(t.type ?? "").startsWith("web_search_"),
+			);
+		const completed = events.find((e) => e.type === "response.completed")
+			?.response as { status: string; output: unknown[] } | undefined;
+		return {
+			status: response.status,
+			eventTypes: events.map((e) => String(e.type)),
+			searchEvents: events.filter((e) =>
+				String(e.type).startsWith("response.web_search_call."),
+			),
+			failed: events.find((e) => e.type === "response.failed") ?? null,
+			completed: completed ?? null,
+			subRequests: calls.filter(isSub).map((q) => ({
+				model: (q.body as { model?: unknown }).model,
+				tools: (q.body as { tools?: unknown }).tools,
+				account: accountOf(accounts, q),
+				status: q.status ?? null,
+			})),
+			mainCalls: calls.filter((q) => !isSub(q)).length,
+		};
+	};
+	const searched = await send("SEARCH bun release notes");
+	const inner = await innerRows(gw, 3);
+	const unsearched = await send("answer from memory");
+	return {
+		searched,
+		unsearched,
+		innerRows: inner,
+		turns: await finishedTurnRows(gw),
+	};
+});
+
 results.upstreamPaths = [
 	...new Set(mock.requests.map((q) => `${q.method} ${q.path}`)),
 ];

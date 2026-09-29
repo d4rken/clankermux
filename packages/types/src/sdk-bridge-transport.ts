@@ -143,6 +143,20 @@ export interface SdkBridgeTranslationGaps {
 	readonly droppedFields: readonly string[];
 }
 
+/**
+ * A Responses request's hosted `web_search` tool, when it is the request's
+ * only tool and `tool_choice` is not `none`. A bridged turn serves it with
+ * Claude Code's own WebSearch; the translated body carries no tool for it.
+ */
+export interface SdkBridgeHostedWebSearch {
+	/** `tool_choice` required or naming web search: the reply must follow a completed search. */
+	readonly required: boolean;
+	/** Plain lowercase hostnames every search is limited to; null for no filter. */
+	readonly allowedDomains: readonly string[] | null;
+	/** The client's `external_web_access: false`: cached results only. */
+	readonly externalWebAccess?: false;
+}
+
 /** Facts about the outer request that the bridge records and forwards. */
 export interface SdkBridgeTurnMeta {
 	/** The outer request id, which the client sees as `x-clankermux-request-id`. */
@@ -163,6 +177,8 @@ export interface SdkBridgeTurnMeta {
 	readonly piPromptVersion: string | null;
 	/** {@link sdkBridgeSideRequestMode}: null when absent, "" when blank. */
 	readonly sideRequest: string | null;
+	/** Null unless the client's hosted web search is to be served. */
+	readonly hostedWebSearch: SdkBridgeHostedWebSearch | null;
 }
 
 /**

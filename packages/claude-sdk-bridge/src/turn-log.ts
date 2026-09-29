@@ -32,6 +32,12 @@ export interface TurnLogCounts {
 	innerErrors: number;
 }
 
+/** Claude Code's WebSearch calls in the turn, and the searches they ran. */
+export interface TurnLogWebSearch {
+	calls: number;
+	requests: number;
+}
+
 /** Token counts of one model call; null where Claude Code reported none. */
 export interface ModelCallUsage {
 	input: number | null;
@@ -62,6 +68,7 @@ export function logTurnFinished(
 		identity: TurnLogIdentity | null;
 		counts?: TurnLogCounts | null;
 		firstCall?: ModelCallUsage | null;
+		webSearch?: TurnLogWebSearch | null;
 	},
 ): void {
 	const tokens = [
@@ -104,6 +111,8 @@ export function logTurnFinished(
 		sdkNumTurns: finish.sdkNumTurns,
 		tokens,
 		firstCall: line.firstCall ?? undefined,
+		webSearchCount: line.webSearch?.calls,
+		webSearchRequests: line.webSearch?.requests,
 	};
 	for (const key of Object.keys(data))
 		if (data[key] === undefined) delete data[key];

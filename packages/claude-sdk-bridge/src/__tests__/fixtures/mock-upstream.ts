@@ -11,6 +11,16 @@
 //   last user text contains "SAYTOOL"       -> "echo: <last user text>", then that tool_use
 //   last user text contains "TOOL"          -> one tool_use for the *read tool
 //   anything else                           -> text "echo: <last user text>"
+//   tools offer WebSearch and the last user text contains "SEARCH"
+//                                           -> one WebSearch tool_use whose query is the
+//                                              text after "SEARCH "; "SEARCHWIDE" adds
+//                                              allowed_domains ["evil.test"] to its input
+//   a tools[] entry of type web_search_*    -> Claude Code's search sub-request, answered
+//                                              as the API's server tool: server_tool_use,
+//                                              a web_search_tool_result with two results
+//                                              (on the first allowed domain, else
+//                                              results.example), then a text; a query with
+//                                              "SEARCHFAIL" gets a web_search_tool_result_error
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   last user text contains "THINK"         -> a signed thinking block before the rest
@@ -186,8 +196,39 @@ interface ScriptBody {
 	model: string;
 	messages: Msg[];
 	system?: string | Block[];
-	tools?: Array<{ name: string }>;
+	tools?: Array<{ name: string; type?: string; allowed_domains?: string[] }>;
 	stream?: boolean;
+}
+
+/** The API's answer to a request offering its web_search server tool. */
+function webSearchReply(
+	body: ScriptBody,
+	tool: { allowed_domains?: string[] },
+): Block[] {
+	const asked = textOf(blocksOf(lastUser(body.messages)));
+	const query =
+		/Perform a web search for the query: (.*)/.exec(asked)?.[1]?.trim() ??
+		asked;
+	const id = `srvtoolu_mock_${++toolSeq}`;
+	const host = tool.allowed_domains?.[0] ?? "results.example";
+	const slug = encodeURIComponent(query.toLowerCase().replace(/\s+/g, "-"));
+	return [
+		{ type: "server_tool_use", id, name: "web_search", input: { query } },
+		{
+			type: "web_search_tool_result",
+			tool_use_id: id,
+			content: /SEARCHFAIL/.test(query)
+				? { type: "web_search_tool_result_error", error_code: "unavailable" }
+				: [1, 2].map((n) => ({
+						type: "web_search_result",
+						url: `https://${host}/${slug}/${n}`,
+						title: `Result ${n} for ${query}`,
+						encrypted_content: `enc_${n}`,
+						page_age: null,
+					})),
+		},
+		{ type: "text", text: `Found results for ${query}.` },
+	];
 }
 
 const LOOKBACK_BLOCKS = 20;
@@ -268,12 +309,32 @@ function script(
 	)?.name;
 
 	const content: Block[] = [];
+	const searchTool = body.tools?.find((t) =>
+		String(t.type ?? "").startsWith("web_search_"),
+	);
+	const offersWebSearch = body.tools?.some((t) => t.name === "WebSearch");
 	const flattenedResult = /\[tool result id=[^\]]*\]\n([^\n]*)/.exec(text);
 	const loop = /LOOP(\d+)/.exec(userTexts(body.messages));
 	const resultsSoFar = body.messages
 		.flatMap((m) => blocksOf(m))
 		.filter((b) => b.type === "tool_result").length;
-	if (/create a detailed summary/.test(JSON.stringify(user))) {
+	if (searchTool) {
+		content.push(...webSearchReply(body, searchTool));
+	} else if (
+		offersWebSearch &&
+		toolResults.length === 0 &&
+		/SEARCH/.test(text)
+	) {
+		const query = /SEARCH\w*\s+(.*)/.exec(text)?.[1]?.trim() || "nothing";
+		content.push({
+			type: "tool_use",
+			id: `toolu_mock_${++toolSeq}`,
+			name: "WebSearch",
+			input: /SEARCHWIDE/.test(text)
+				? { query, allowed_domains: ["evil.test"] }
+				: { query },
+		});
+	} else if (/create a detailed summary/.test(JSON.stringify(user))) {
 		content.push({ type: "text", text: "<summary>MOCK-SUMMARY</summary>" });
 	} else if (readTool && loop && resultsSoFar < Number(loop[1])) {
 		content.push({
@@ -371,6 +432,7 @@ function script(
 		output_tokens: 20,
 		cache_read_input_tokens: cache.read,
 		cache_creation_input_tokens: cache.creation,
+		...(searchTool ? { server_tool_use: { web_search_requests: 1 } } : {}),
 		...shape.usage,
 	};
 	let out = sse("message_start", {
@@ -414,12 +476,18 @@ function script(
 				index,
 				delta: { type: "text_delta", text: block.text },
 			});
+		} else if (block.type === "web_search_tool_result") {
+			out += sse("content_block_start", {
+				type: "content_block_start",
+				index,
+				content_block: block,
+			});
 		} else {
 			out += sse("content_block_start", {
 				type: "content_block_start",
 				index,
 				content_block: {
-					type: "tool_use",
+					type: block.type,
 					id: block.id,
 					name: block.name,
 					input: {},
@@ -445,7 +513,10 @@ function script(
 				? { stop_details: shape.stopDetails }
 				: {}),
 		},
-		usage: { output_tokens: usage.output_tokens },
+		usage: {
+			output_tokens: usage.output_tokens,
+			...(searchTool ? { server_tool_use: usage.server_tool_use } : {}),
+		},
 	});
 	out += sse("message_stop", { type: "message_stop" });
 	return out;
