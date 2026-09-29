@@ -8,6 +8,7 @@ import {
 	wasHostedWebSearchServed,
 } from "@clankermux/types";
 import {
+	type HostedWebSearchPlan,
 	includesWebSearchSources,
 	planHostedWebSearch,
 } from "./hosted-web-search";
@@ -346,33 +347,13 @@ async function respondToResponsesRequest(
 	// 3. Generate response ID
 	const responseId = `resp_${crypto.randomBytes(12).toString("hex")}`;
 
-	// A hosted web search runs only on a bridged Claude turn; the translated
-	// body never carries it.
-	const webSearch = planHostedWebSearch(body);
-	if (webSearch.kind === "invalid")
-		return Response.json(
-			{
-				error: {
-					type: "invalid_request_error",
-					code: "invalid_request_error",
-					message: webSearch.message,
-				},
-			},
-			{ status: 400 },
-		);
-	if (webSearch.kind === "dropped")
-		if (webSearch.reason === "mixed")
-			log.info(`${webSearch.toolType} dropped: mixed with client tools`);
-		else
-			log.warn(
-				`Skipping unsupported/built-in tool type: ${webSearch.toolType}`,
-			);
-	const includeSources = includesWebSearchSources(body);
-
-	// 4. Translate to Anthropic format
+	// 4. Translate to Anthropic format. A hosted web search runs only on a
+	// bridged Claude turn; the translated body never carries it.
+	let webSearch: HostedWebSearchPlan;
 	let tools: ToolTranslation;
 	let anthropicBody: AnthropicRequest;
 	try {
+		webSearch = planHostedWebSearch(body);
 		tools = createToolTranslation(body);
 		anthropicBody = translateRequestToAnthropic(
 			body as typeof body & { input: ResponseItem[] },
@@ -393,6 +374,25 @@ async function respondToResponsesRequest(
 			{ status: 400 },
 		);
 	}
+	if (webSearch.kind === "invalid")
+		return Response.json(
+			{
+				error: {
+					type: "invalid_request_error",
+					code: "invalid_request_error",
+					message: webSearch.message,
+				},
+			},
+			{ status: 400 },
+		);
+	if (webSearch.kind === "dropped")
+		if (webSearch.reason === "mixed")
+			log.info(`${webSearch.toolType} dropped: mixed with client tools`);
+		else
+			log.warn(
+				`Skipping unsupported/built-in tool type: ${webSearch.toolType}`,
+			);
+	const includeSources = includesWebSearchSources(body);
 
 	// 5. Build synthetic request targeting /v1/messages
 	const messagesUrl = new URL(url.toString());

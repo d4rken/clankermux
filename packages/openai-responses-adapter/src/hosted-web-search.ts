@@ -1,5 +1,5 @@
 import type { SdkBridgeHostedWebSearch } from "@clankermux/types";
-import type { ResponsesRequest, ResponsesTool } from "./types";
+import type { ResponsesRequest } from "./types";
 
 /** `web_search`, `web_search_preview` and their dated snapshots. */
 const WEB_SEARCH_TYPE = /^web_search(_preview)?(_\d{4}_\d{2}_\d{2})?$/;
@@ -8,8 +8,12 @@ const HOSTNAME =
 const MAX_ALLOWED_DOMAINS = 100;
 const SOURCES_INCLUDE = "web_search_call.action.sources";
 
-export function isHostedWebSearchTool(tool: { type?: unknown }): boolean {
-	return typeof tool.type === "string" && WEB_SEARCH_TYPE.test(tool.type);
+export function isHostedWebSearchTool(
+	tool: unknown,
+): tool is Record<string, unknown> & { type: string } {
+	if (!tool || typeof tool !== "object" || Array.isArray(tool)) return false;
+	const { type } = tool as { type?: unknown };
+	return typeof type === "string" && WEB_SEARCH_TYPE.test(type);
 }
 
 /**
@@ -29,22 +33,23 @@ export type HostedWebSearchPlan =
 			droppedFields: string[];
 	  };
 
-function allToolsOf(body: ResponsesRequest): ResponsesTool[] {
-	const tools = [...(body.tools ?? [])];
+/** Every tool the request declares; entries are unchecked, as the client sent them. */
+function allToolsOf(body: ResponsesRequest): unknown[] {
+	const tools: unknown[] = [];
+	if (Array.isArray(body.tools))
+		for (const tool of body.tools) tools.push(tool);
 	if (Array.isArray(body.input))
-		for (const item of body.input)
-			if (item?.type === "additional_tools" && Array.isArray(item.tools))
-				tools.push(...item.tools);
+		for (const item of body.input as unknown[]) {
+			const extra = item as { type?: unknown; tools?: unknown } | null;
+			if (extra?.type === "additional_tools" && Array.isArray(extra.tools))
+				for (const tool of extra.tools) tools.push(tool);
+		}
 	return tools;
 }
 
 function requiredBy(choice: ResponsesRequest["tool_choice"]): boolean {
 	if (choice === "required") return true;
-	return (
-		!!choice &&
-		typeof choice === "object" &&
-		isHostedWebSearchTool(choice as { type?: unknown })
-	);
+	return isHostedWebSearchTool(choice);
 }
 
 /**
@@ -92,7 +97,7 @@ export function planHostedWebSearch(
 	const searches = tools.filter(isHostedWebSearchTool);
 	const first = searches[0];
 	if (!first) return { kind: "absent" };
-	const toolType = String(first.type);
+	const toolType = first.type;
 	if (tools.length > searches.length)
 		return { kind: "dropped", toolType, reason: "mixed" };
 	if (body.tool_choice === "none")
@@ -102,7 +107,7 @@ export function planHostedWebSearch(
 			kind: "invalid",
 			message: "Only one web_search tool is supported per request",
 		};
-	const tool = first as Record<string, unknown>;
+	const tool = first;
 	const domains = allowedDomainsOf(tool.filters);
 	if (!domains.ok) return { kind: "invalid", message: domains.message };
 	return {
@@ -111,6 +116,10 @@ export function planHostedWebSearch(
 		search: {
 			required: requiredBy(body.tool_choice),
 			allowedDomains: domains.domains,
+			// Cache-only, which Claude Code's WebSearch cannot do; the bridge refuses it.
+			...(tool.external_web_access === false
+				? { externalWebAccess: false as const }
+				: {}),
 		},
 		droppedFields: (["user_location", "search_context_size"] as const)
 			.filter((field) => tool[field] != null)

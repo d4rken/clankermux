@@ -207,16 +207,19 @@ export async function proxyViaSdkBridge(input: {
 			input.audit,
 			null,
 			undefined,
-			(request) => {
-				const native = getNativeResponsesMetaContext(requestMeta);
-				if (native && meta.hostedWebSearch) markHostedWebSearchServed(native);
-				return bridge.startTurn({
+			async (request) => {
+				const response = await bridge.startTurn({
 					request,
 					plan,
 					meta,
 					signal: req.signal,
 					bumpIdleTimeout: input.bumpIdleTimeout,
 				});
+				// Handled by the bridge, whatever became of it: not "a search
+				// completed". A start that threw fails over, where the drop stands.
+				const native = getNativeResponsesMetaContext(requestMeta);
+				if (native && meta.hostedWebSearch) markHostedWebSearchServed(native);
+				return response;
 			},
 		);
 		return { kind: "response", response };

@@ -5,6 +5,7 @@
  * direct fetch; without one the account is excluded exactly as before.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import {
 	type Account,
 	type ChatRequirements,
@@ -544,6 +545,69 @@ describe("Chat Completions through the SDK bridge", () => {
 		expect(response.status).toBe(200);
 		expect(bridge.starts[0].meta.hostedWebSearch).toEqual(search);
 		expect(wasHostedWebSearchServed(context)).toBe(true);
+	});
+
+	describe("the Responses adapter's warning about a dropped web search", () => {
+		async function searchVia(bridge: FakeBridge) {
+			harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+			const { handleResponsesRequest } = await import(
+				"@clankermux/openai-responses-adapter"
+			);
+			const warn = spyOn(Logger.prototype, "warn");
+			spies.push(warn);
+			const req = new Request("https://proxy.local/v1/responses", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: MODEL,
+					input: "latest bun release",
+					tools: [{ type: "web_search" }],
+					tool_choice: "required",
+					stream: false,
+				}),
+			});
+			await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				handleProxy as never,
+				harness.ctx,
+				KEY,
+				"pi-key",
+			);
+			return warn.mock.calls
+				.map(([message]) => String(message))
+				.filter((m) => m.includes("web_search"));
+		}
+
+		it("stays quiet when the bridge takes the turn", async () => {
+			const bridge = makeFakeBridge();
+			expect(await searchVia(bridge)).toEqual([]);
+			expect(bridge.starts).toHaveLength(1);
+		});
+
+		for (const error of [
+			new SdkBridgeUnavailableError("process cap reached"),
+			new SdkBridgeCapacityError({
+				reason: "process_cap",
+				status: 529,
+				type: "overloaded_error",
+				message: "every Claude Code slot is taken",
+				retryAfter: "10",
+			}),
+		])
+			it(`fires when an available bridge refuses the turn (${error.constructor.name}) and another account answers`, async () => {
+				const bridge = makeFakeBridge(() => {
+					throw error;
+				});
+				const warnings = await searchVia(bridge);
+				expect(bridge.starts).toHaveLength(1);
+				expect(
+					sends(harness as BridgeHarness).map((r) => r.account_id),
+				).toEqual(["claude-a", "other"]);
+				expect(warnings).toEqual([
+					"Skipping unsupported/built-in tool type: web_search",
+				]);
+			});
 	});
 
 	it("leaves a hosted web search unserved when the route is not bridged", async () => {

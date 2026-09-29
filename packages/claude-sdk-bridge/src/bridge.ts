@@ -1291,6 +1291,12 @@ export function createClaudeSdkBridge(
 			);
 		const body = await readBody(input.request);
 		if ("error" in body) return refuse(body.error, body.error.reason);
+		// Before any claim: a refused search displaces no parked turn.
+		if (kind === "turn" && meta.hostedWebSearch?.externalWebAccess === false)
+			return refuse(
+				bridgeErrors.webSearchCacheOnly(),
+				"web_search_cache_only_unsupported",
+			);
 		/** What every start needs once its body is read: target, tools, prompt, conversation. */
 		const prepare = (
 			turn: TurnBody,

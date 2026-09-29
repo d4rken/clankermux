@@ -53,9 +53,10 @@ export class ToolTranslation {
 				continue;
 			}
 			if (tool.type !== "function" && tool.type !== "custom") {
+				const type = tool.type;
 				// The handler says what becomes of a hosted web search.
 				if (!isHostedWebSearchTool(tool))
-					log.warn(`Skipping unsupported/built-in tool type: ${tool.type}`);
+					log.warn(`Skipping unsupported/built-in tool type: ${type}`);
 				continue;
 			}
 			const identity: ToolIdentity = {

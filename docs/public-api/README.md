@@ -279,6 +279,14 @@ search, `…completed` for each item.
 subdomains. Entries must be plain hostnames without a scheme or path, at
 most 100; anything else answers `400 invalid_request_error`.
 `user_location` and `search_context_size` are accepted and not applied.
+`external_web_access: false` (cached results only) answers
+`400 invalid_request_error`, code `web_search_cache_only_unsupported`:
+Claude Code's WebSearch cannot restrict a search to cached results.
+
+Usage and cost reporting do not include per-search fees. The provider's
+count of web search requests is not kept on request records; the SDK
+bridge's journal line counts searches from Claude Code's own report
+(`webSearchRequests`).
 
 Web search is ignored, as every other hosted tool (`file_search`,
 `code_interpreter`, `image_generation`, …) is, when the request also carries

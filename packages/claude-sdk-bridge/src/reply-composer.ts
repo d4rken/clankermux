@@ -81,13 +81,17 @@ export class ReplyComposer {
 	/** tool_use ids handed to the client in the current leg. */
 	legToolUseIds: string[] = [];
 	lastStopReason: string | null = null;
-	/** The leg's WebSearch calls, by tool_use id. */
+	/** The leg's WebSearch calls the client was shown, by tool_use id. */
 	private searches = new Map<string, Search>();
-	/** Upstream block index to the search whose input it streams. */
+	/**
+	 * Upstream block index to a WebSearch call whose input is still
+	 * streaming; the client sees nothing of it until its block completes.
+	 */
 	private searchBlocks = new Map<number, Search>();
-	/** Results waiting for the output block open now to close. */
+	/** Results waiting for the output blocks open now to close. */
 	private queuedResults: Block[] = [];
-	private openOutputBlocks = 0;
+	/** Forwarded output blocks started and not yet stopped. */
+	private openOutputs = new Set<number>();
 	/** Searches of this leg whose result was a completed search. */
 	completedSearches = 0;
 
@@ -140,7 +144,7 @@ export class ReplyComposer {
 		this.searches = new Map();
 		this.searchBlocks = new Map();
 		this.queuedResults = [];
-		this.openOutputBlocks = 0;
+		this.openOutputs = new Set();
 		this.completedSearches = 0;
 	}
 
@@ -206,20 +210,18 @@ export class ReplyComposer {
 		return !!search && !search.answered;
 	}
 
-	/** A WebSearch call opens as a `server_tool_use` block; its input follows at its end. */
-	private openSearch(block: Block): Search {
-		this.startMessage({});
-		const search: Search = { id: String(block.id), json: "", answered: false };
-		this.searches.set(search.id, search);
-		this.opts.onWebSearch?.(search.id);
-		return search;
+	private newSearch(block: Block): Search {
+		return { id: String(block.id), json: "", answered: false };
 	}
 
 	/**
-	 * Only the query goes out: Claude Code's input may also carry the domain
-	 * lists the bridge set.
+	 * A complete WebSearch call goes out as a `server_tool_use` block, and
+	 * only then is it the leg's. Only the query goes out: Claude Code's input
+	 * may also carry the domain lists the bridge set.
 	 */
 	private closeSearch(search: Search): void {
+		this.searches.set(search.id, search);
+		this.opts.onWebSearch?.(search.id);
 		let input: unknown = null;
 		try {
 			input = search.json ? JSON.parse(search.json) : null;
@@ -280,7 +282,7 @@ export class ReplyComposer {
 	}
 
 	private flushResults(): void {
-		if (this.openOutputBlocks > 0 || !this.sink) return;
+		if (this.openOutputs.size > 0 || !this.sink) return;
 		for (const block of this.queuedResults.splice(0)) {
 			const index = this.nextIndex++;
 			this.emit({ type: "content_block_start", index, content_block: block });
@@ -303,21 +305,33 @@ export class ReplyComposer {
 			const index = this.nextIndex++;
 			this.accumulated.set(index, { type: "tool_use", id, name, json: "" });
 			this.emit({ type: "content_block_start", index, content_block: out });
-			this.openOutputBlocks++;
+			this.openOutputs.add(index);
 			return index;
 		}
 		if (!FORWARDED_BLOCKS.has(block.type)) return null;
 		const index = this.nextIndex++;
 		this.accumulated.set(index, { type: block.type, text: "" });
 		this.emit({ type: "content_block_start", index, content_block: block });
-		this.openOutputBlocks++;
+		this.openOutputs.add(index);
 		return index;
 	}
 
 	private closeBlock(index: number): void {
+		if (!this.openOutputs.delete(index)) return;
 		this.emit({ type: "content_block_stop", index });
-		this.openOutputBlocks = Math.max(0, this.openOutputBlocks - 1);
 		this.flushResults();
+	}
+
+	/**
+	 * A new upstream message, or the reply's end, while the last one was cut
+	 * off mid-block (a stream that failed, which Claude Code fetches again).
+	 * A forwarded block it left open is closed with what it carried; a
+	 * WebSearch call cut off in its input was never shown, and goes.
+	 */
+	private endCutOffBlocks(): void {
+		this.searchBlocks.clear();
+		for (const index of [...this.openOutputs].sort((a, b) => a - b))
+			this.closeBlock(index);
 	}
 
 	private applyDelta(index: number, delta: Record<string, unknown>): void {
@@ -348,6 +362,7 @@ export class ReplyComposer {
 			case "message_start": {
 				const message = (event.message ?? {}) as Record<string, unknown>;
 				if (typeof message.id === "string") this.streamedIds.add(message.id);
+				this.endCutOffBlocks();
 				this.streaming = true;
 				this.indexMap = new Map();
 				this.heldDelta = null;
@@ -360,7 +375,7 @@ export class ReplyComposer {
 				this.startMessage({});
 				const block = event.content_block as Block;
 				if (this.isWebSearch(block)) {
-					this.searchBlocks.set(event.index as number, this.openSearch(block));
+					this.searchBlocks.set(event.index as number, this.newSearch(block));
 					this.indexMap.set(event.index as number, null);
 					return null;
 				}
@@ -418,6 +433,8 @@ export class ReplyComposer {
 	): UpstreamMessageEnd | null {
 		const id = typeof message.id === "string" ? message.id : null;
 		if (id && this.streamedIds.has(id)) return null;
+		this.endCutOffBlocks();
+		this.streaming = false;
 		this.startMessage(message);
 		const content = Array.isArray(message.content)
 			? (message.content as Block[])
@@ -426,7 +443,7 @@ export class ReplyComposer {
 			let start: Block = block;
 			let delta: Record<string, unknown> | null = null;
 			if (this.isWebSearch(block)) {
-				const search = this.openSearch(block);
+				const search = this.newSearch(block);
 				search.json = JSON.stringify(block.input ?? {});
 				this.closeSearch(search);
 				continue;
@@ -495,7 +512,7 @@ export class ReplyComposer {
 					errorCode: "unavailable",
 					searchCount: 0,
 				});
-		this.openOutputBlocks = 0;
+		this.endCutOffBlocks();
 		this.flushResults();
 		const held = (this.heldDelta ?? {}) as {
 			delta?: Record<string, unknown>;

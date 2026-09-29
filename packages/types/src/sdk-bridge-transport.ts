@@ -153,6 +153,8 @@ export interface SdkBridgeHostedWebSearch {
 	readonly required: boolean;
 	/** Plain lowercase hostnames every search is limited to; null for no filter. */
 	readonly allowedDomains: readonly string[] | null;
+	/** The client's `external_web_access: false`: cached results only. */
+	readonly externalWebAccess?: false;
 }
 
 /** Facts about the outer request that the bridge records and forwards. */

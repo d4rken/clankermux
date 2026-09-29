@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import type { SdkBridgeTurnMeta } from "@clankermux/types";
 import {
+	assistantMessage,
 	capturingLog,
 	type FakeQuery,
 	foldReply,
@@ -16,6 +17,7 @@ import {
 	parseSse,
 	READ_TOOL,
 	resultMessage,
+	streamEvent,
 	streamedMessage,
 	toolResultMessage,
 	waitFor,
@@ -102,6 +104,55 @@ describe("hosted web search on a bridged turn", () => {
 		const off = await start(h, { ...ask, tools: [READ_TOOL] }, {});
 		expect(off.query.options.tools).toEqual([]);
 		expect(off.query.options.allowedTools).toEqual(["mcp__c__read"]);
+	});
+
+	it("refuses a cache-only search before anything runs, and leaves a parked turn of the conversation parked", async () => {
+		const h = harness();
+		const header = { affinityScope: "client_session", affinityKey: "cache" };
+		const parked = await start(
+			h,
+			{ ...ask, tools: [READ_TOOL] },
+			{ ...header },
+		);
+		parked.query.emit(
+			initMessage(),
+			...streamedMessage([
+				{
+					type: "tool_use",
+					id: "toolu_p",
+					name: "mcp__c__read",
+					input: { path: "a.txt" },
+				},
+			]),
+		);
+		expect((await reply(parked.response)).stop).toBe("tool_use");
+		void parked.query.callTool("toolu_p", "read", { path: "a.txt" });
+		await waitFor(() => h.bridge.status().parked === 1);
+
+		const plan = makePlan();
+		const res = await h.bridge.startTurn({
+			request: messagesRequest(ask),
+			plan,
+			meta: makeMeta({
+				...header,
+				hostedWebSearch: {
+					required: true,
+					allowedDomains: null,
+					externalWebAccess: false,
+				},
+			}),
+			signal: new AbortController().signal,
+		});
+		expect(res.status).toBe(400);
+		expect(
+			((await res.json()) as { error: { type: string; code: string } }).error,
+		).toMatchObject({
+			type: "invalid_request_error",
+			code: "web_search_cache_only_unsupported",
+		});
+		expect(h.sdk.queries).toHaveLength(1);
+		expect(h.bridge.status().parked).toBe(1);
+		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
 	});
 
 	it("replies with the search as server_tool_use and web_search_tool_result, never a client tool_use", async () => {
@@ -349,6 +400,169 @@ describe("hosted web search on a bridged turn", () => {
 		expect(log.turns(t.plan.turnId)[0]?.data).toMatchObject({
 			webSearchCount: 1,
 			webSearchRequests: 2,
+		});
+	});
+
+	describe("an upstream message that ends mid-block", () => {
+		const LIVE = { required: false, allowedDomains: null } as const;
+		/** A streamed message cut off inside its block at index 0. */
+		const cutOff = (block: Record<string, unknown>, delta: unknown) => [
+			streamEvent({
+				type: "message_start",
+				message: {
+					id: `msg_cut_${crypto.randomUUID()}`,
+					type: "message",
+					role: "assistant",
+					model: MODEL,
+					content: [],
+					usage: { input_tokens: 10, output_tokens: 1 },
+				},
+			}),
+			streamEvent({
+				type: "content_block_start",
+				index: 0,
+				content_block: block,
+			}),
+			streamEvent({ type: "content_block_delta", index: 0, delta }),
+		];
+		const partialSearch = cutOff(
+			{ type: "tool_use", id: "toolu_cut", name: "WebSearch", input: {} },
+			{ type: "input_json_delta", partial_json: '{"query":"half' },
+		);
+		/** Every block the reply opened was closed, once. */
+		const balanced = (events: Array<{ data: Record<string, unknown> }>) => {
+			const opened = events
+				.filter((e) => e.data.type === "content_block_start")
+				.map((e) => e.data.index);
+			const closed = events
+				.filter((e) => e.data.type === "content_block_stop")
+				.map((e) => e.data.index);
+			expect(closed).toEqual(opened);
+		};
+
+		it("drops a WebSearch call cut off mid-input: no server_tool_use, no result, no count", async () => {
+			const log = capturingLog();
+			const h = harness({ log });
+			const t = await start(h, ask, { hostedWebSearch: LIVE });
+			t.query.emit(
+				initMessage(),
+				...partialSearch,
+				// Claude Code's result for it, had it run it anyway.
+				toolResultMessage(
+					"toolu_cut",
+					webSearchOutput("half", [["https://x.test"]]),
+				),
+				...streamedMessage([{ type: "text", text: "answer" }]),
+			);
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "answer" }]);
+			balanced(r.events);
+			t.query.emit(resultMessage());
+			await settled(h);
+			await waitFor(() => log.turns(t.plan.turnId).length > 0);
+			expect(log.turns(t.plan.turnId)[0]?.data.webSearchCount).toBeUndefined();
+		});
+
+		it("does not let a cut-off call fail a required search as unanswered, nor count for it", async () => {
+			const h = harness();
+			const t = await start(h, { ...ask, stream: false });
+			t.query.emit(
+				initMessage(),
+				...partialSearch,
+				...streamedMessage([{ type: "text", text: "from memory" }]),
+			);
+			const res = await t.response;
+			expect(res.status).toBe(502);
+			expect(JSON.stringify(await res.json())).not.toContain(
+				"web_search_tool_result",
+			);
+		});
+
+		it("keeps the non-streamed fallback's own WebSearch call and its result", async () => {
+			const h = harness();
+			const t = await start(h, ask);
+			t.query.emit(
+				initMessage(),
+				...partialSearch,
+				assistantMessage(
+					[
+						{
+							type: "tool_use",
+							id: "toolu_full",
+							name: "WebSearch",
+							input: { query: "whole" },
+						},
+					],
+					{ stopReason: "tool_use" },
+				),
+				toolResultMessage(
+					"toolu_cut",
+					webSearchOutput("half", [["https://x.test"]]),
+				),
+				toolResultMessage(
+					"toolu_full",
+					webSearchOutput("whole", [["https://y.test"]]),
+				),
+				...streamedMessage([{ type: "text", text: "answer" }]),
+			);
+			const r = await reply(t.response);
+			expect(r.errors).toEqual([]);
+			expect(r.content).toEqual([
+				{
+					type: "server_tool_use",
+					id: "toolu_full",
+					name: "web_search",
+					input: { query: "whole" },
+				},
+				{
+					type: "web_search_tool_result",
+					tool_use_id: "toolu_full",
+					content: [
+						{
+							type: "web_search_result",
+							url: "https://y.test",
+							title: "title of https://y.test",
+						},
+					],
+				},
+				{ type: "text", text: "answer" },
+			]);
+			balanced(r.events);
+		});
+
+		it("closes a forwarded text block the cut left open, so later results still go out", async () => {
+			const h = harness();
+			const t = await start(h, ask);
+			t.query.emit(
+				initMessage(),
+				...cutOff(
+					{ type: "text", text: "" },
+					{ type: "text_delta", text: "Looking" },
+				),
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_ws",
+						name: "WebSearch",
+						input: { query: "q" },
+					},
+				]),
+				toolResultMessage(
+					"toolu_ws",
+					webSearchOutput("q", [["https://a.test"]]),
+				),
+				...streamedMessage([{ type: "text", text: "found it" }]),
+			);
+			const r = await reply(t.response);
+			expect(r.errors).toEqual([]);
+			expect(r.content.map((b) => b.type)).toEqual([
+				"text",
+				"server_tool_use",
+				"web_search_tool_result",
+				"text",
+			]);
+			expect(r.content[0]).toEqual({ type: "text", text: "Looking" });
+			balanced(r.events);
 		});
 	});
 

@@ -435,6 +435,16 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	webSearchCacheOnly(): BridgeError {
+		return {
+			status: 400,
+			type: "invalid_request_error",
+			code: "web_search_cache_only_unsupported",
+			message:
+				"Claude Code's WebSearch cannot restrict a search to cached results",
+			retryAfter: null,
+		};
+	},
 	webSearchNotPerformed(): BridgeError {
 		return {
 			status: 502,

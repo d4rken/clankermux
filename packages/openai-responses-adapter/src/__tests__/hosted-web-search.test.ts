@@ -203,6 +203,51 @@ describe("hosted web_search on the request side", () => {
 		]);
 	});
 
+	test("answers malformed tools with a 400, not a thrown error", async () => {
+		for (const body of [
+			{ ...PI_SEARCH, tools: {} },
+			{ ...PI_SEARCH, tools: [null] },
+			{ ...PI_SEARCH, tools: [{ type: "web_search" }, null] },
+			{
+				...PI_SEARCH,
+				input: [
+					{ type: "additional_tools", role: "developer", tools: [null] },
+					{ role: "user", content: "hi" },
+				],
+			},
+		]) {
+			const r = await send(body);
+			expect(r.status).toBe(400);
+			expect(r.body).toBeNull();
+			expect((r.json as { error: { type: string } }).error.type).toBe(
+				"invalid_request_error",
+			);
+		}
+	});
+
+	test("carries a cache-only search as such, and a live one without the flag", async () => {
+		const plan = async (tool: Record<string, unknown>) =>
+			(await send({ ...PI_SEARCH, tools: [tool] })).context;
+		const cacheOnly = await plan({
+			type: "web_search",
+			external_web_access: false,
+		});
+		expect(cacheOnly?.hostedWebSearch).toEqual({
+			required: true,
+			allowedDomains: null,
+			externalWebAccess: false,
+		});
+		// Codex's native passthrough still gets the client's own field.
+		expect(JSON.parse(cacheOnly?.nativeBody ?? "{}").tools).toEqual([
+			{ type: "web_search", external_web_access: false },
+		]);
+		for (const value of [true, undefined, "false", 0])
+			expect(
+				(await plan({ type: "web_search", external_web_access: value }))
+					?.hostedWebSearch,
+			).toEqual({ required: true, allowedDomains: null });
+	});
+
 	test("refuses allowed domains that are not plain hostnames", async () => {
 		for (const domains of [
 			["https://bun.sh"],

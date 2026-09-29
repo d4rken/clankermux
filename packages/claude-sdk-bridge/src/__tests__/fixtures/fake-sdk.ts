@@ -263,7 +263,7 @@ let uuidSeq = 0;
 const uuid = () =>
 	`00000000-0000-4000-8000-${String(++uuidSeq).padStart(12, "0")}`;
 
-function streamEvent(
+export function streamEvent(
 	event: Record<string, unknown>,
 	parent: string | null = null,
 ): SDKMessage {
