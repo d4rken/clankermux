@@ -151,6 +151,23 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
 	});
 
+	it("prices GPT-6.1 Sol's 5x output and cheaper cache reads on its own weights", () => {
+		// $2 in / $10 out / $0.10 cache read: 5x output like GPT-6 Sol, but it
+		// reads cache at 0.05x where GPT-6 Sol reads at 0.1x.
+		const entry = entriesFor("openai").find(([id]) => id === "gpt-6.1-sol");
+		expect(entry).toBeDefined();
+		const [, cost] = entry as [string, ModelCost];
+		expect(cost.output / cost.input).toBeCloseTo(5, 9);
+		expect((cost.cache_read as number) / cost.input).toBeCloseTo(0.05, 9);
+
+		const override = MODEL_EQ_WEIGHT_OVERRIDES["gpt-6.1-sol"];
+		expect(override).toBeDefined();
+		expect(override.output).toBeCloseTo(5, 9);
+		expect(override.cacheRead).toBeCloseTo(0.05, 9);
+		expect(override.input).toBe(OPENAI_EQ_WEIGHTS.input);
+		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
+	});
+
 	it("prices Fable/Mythos 5.1's cheaper cache reads on their own weights", () => {
 		// The 5.1 generation reads cache at $0.25/M against $10/M input — 0.025x
 		// where every other Anthropic model reads at 0.1x. Claude Code traffic is

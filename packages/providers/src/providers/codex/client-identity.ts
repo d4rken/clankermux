@@ -13,7 +13,8 @@ import { readChatgptAccountId } from "./identity";
  * newer version of Codex." We override the real client's header with this
  * value, so it must track a version new enough for the models we route
  * (gpt-5.6-sol needs >= 0.144; gpt-6-astra carries `minimal_client_version:
- * 0.153.0` in the Codex catalog, gpt-6-sol and gpt-6-luna carry 0.155.0).
+ * 0.153.0` in the Codex catalog, gpt-6-sol and gpt-6-luna carry 0.155.0,
+ * gpt-6.1-sol carries 0.153.0).
  * Bump this when a new Codex model 400s on the version gate.
  */
 export const CODEX_VERSION = "0.155.1";

@@ -103,6 +103,19 @@ describe("clampChatGptBackendReasoningEffort", () => {
 				"low",
 			);
 		});
+
+		it("gives GPT-6.1 Sol the full GPT-6 set, ultra included", () => {
+			// Its catalog entry lists low..ultra, like GPT-6 Sol's.
+			expect(chatGptBackendReasoningEffortsFor("gpt-6.1-sol")).toBe(
+				CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+			);
+			expect(clampChatGptBackendReasoningEffort("ultra", "gpt-6.1-sol")).toBe(
+				"ultra",
+			);
+			expect(clampChatGptBackendReasoningEffort("none", "gpt-6.1-sol")).toBe(
+				"low",
+			);
+		});
 	});
 });
 

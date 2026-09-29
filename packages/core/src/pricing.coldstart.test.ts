@@ -653,8 +653,9 @@ describe("bundled catalogue coverage", () => {
 	});
 
 	it.each([
-		["gpt-6-sol", 12],
-		["gpt-6-luna", 0.6],
+		["gpt-6.1-sol", 12.1],
+		["gpt-6-sol", 12.2],
+		["gpt-6-luna", 0.61],
 	])("prices %s at its launch rates offline", async (model, expected) => {
 		globalThis.fetch = (async () => {
 			throw new Error("offline");
@@ -662,7 +663,11 @@ describe("bundled catalogue coverage", () => {
 
 		const cost = await estimateCostUSD(
 			model,
-			{ inputTokens: 1_000_000, outputTokens: 1_000_000 },
+			{
+				inputTokens: 1_000_000,
+				outputTokens: 1_000_000,
+				cacheReadInputTokens: 1_000_000,
+			},
 			{ provider: "codex", reportGaps: true },
 		);
 
