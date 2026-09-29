@@ -1009,6 +1009,8 @@ export function createClaudeSdkBridge(
 	): LiveQuery {
 		const { plan, meta } = input.start;
 		const { turn, toolNames, sideRequest } = input;
+		// A side request's tools are refused, so it gets no WebSearch either.
+		const webSearch = sideRequest ? null : (meta.hostedWebSearch ?? null);
 		const dirs = workDirs();
 		let live: LiveQuery | null = null;
 		const context: SdkBridgeInnerContext = {
@@ -1059,6 +1061,7 @@ export function createClaudeSdkBridge(
 				model: input.target.upstreamModel,
 				toolNames: toolNames.exposed,
 				toolServer,
+				webSearch,
 				systemPrompt: input.systemPrompt,
 				effort: turn.effort,
 				maxOutputTokens: turn.maxOutputTokens,
@@ -1093,6 +1096,8 @@ export function createClaudeSdkBridge(
 			},
 			newMessageId: () => `msg_sdk_bridge_${randomId().replaceAll("-", "")}`,
 			forwardToolUse: !sideRequest,
+			webSearch: webSearch !== null,
+			onWebSearch: () => input.recorder.noteWebSearchCall(),
 		});
 		const current = limits();
 		live = new LiveQuery({
@@ -1136,6 +1141,7 @@ export function createClaudeSdkBridge(
 			isShuttingDown: () => shuttingDown,
 			conversationKey: input.convKey,
 			sideRequest,
+			webSearchRequired: webSearch?.required ?? false,
 			discardSession,
 			discardClaudeCodeTranscripts,
 			onPeakRss: notePeakRss,
@@ -1219,7 +1225,7 @@ export function createClaudeSdkBridge(
 		void recorder.insertTurn(row);
 		if (turn.ignoredFields.length)
 			log.info(
-				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code sets its own sampling`,
+				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code does not apply them`,
 			);
 		void recorder.insertLeg(meta.legId, "start", row.startedAt);
 		const leg = newLeg(

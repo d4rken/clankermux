@@ -254,6 +254,7 @@ async function runQuery(input: RunInput) {
 		token: crypto.randomUUID(),
 		model: input.model ?? MODEL,
 		toolNames: names.exposed,
+		webSearch: null,
 		toolServer: createToolServer(mcp, [READ_TOOL], names, async () => ({
 			content: input.toolContent ?? [
 				{ type: "text", text: input.toolResult ?? "R" },
@@ -773,6 +774,7 @@ function meta(
 		translationGaps: null,
 		piPromptVersion: null,
 		sideRequest: null,
+		hostedWebSearch: null,
 		...extra,
 	};
 }

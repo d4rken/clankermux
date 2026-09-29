@@ -1,5 +1,11 @@
 import { Logger } from "@clankermux/logger";
 import {
+	urlCitationsOf,
+	webSearchCallItem,
+	webSearchQueryOf,
+	webSearchResultOf,
+} from "./hosted-web-search";
+import {
 	customToolInput,
 	type ToolIdentity,
 	type ToolTranslation,
@@ -26,8 +32,17 @@ interface State {
 	>;
 	usage: AnthropicUsage;
 	doneSent: boolean;
+	/** Finished items by output index; a reserved slot stays empty until then. */
 	outputItems: Array<Record<string, unknown>>;
 	streamError: { type: string; message: string } | null;
+	includeSources: boolean;
+	/** Hosted searches by tool_use id, from their invocation to their result. */
+	searches: Map<
+		string,
+		{ outputIdx: number; argsBuf: string; query: string | null; done: boolean }
+	>;
+	searchByBlock: Map<number, string>;
+	citationsByBlock: Map<number, unknown[]>;
 }
 
 const encoder = new TextEncoder();
@@ -47,11 +62,65 @@ function emitSse(
 	);
 }
 
+/** The items as the response reports them, in output order. */
+function finishedItems(state: State): Array<Record<string, unknown>> {
+	return state.outputItems.filter(Boolean);
+}
+
+function searchItemId(state: State, outputIdx: number): string {
+	return `${state.responseId}_ws_${outputIdx}`;
+}
+
+/** Fill a search's reserved slot and close its item. */
+function finishSearch(
+	controller: TransformStreamDefaultController,
+	state: State,
+	search: { outputIdx: number; query: string | null; done: boolean },
+	result:
+		| { ok: true; sources: { url: string; title?: string }[] }
+		| { ok: false },
+): void {
+	search.done = true;
+	const itemId = searchItemId(state, search.outputIdx);
+	if (result.ok)
+		emitSse(
+			controller,
+			"response.web_search_call.completed",
+			{
+				type: "response.web_search_call.completed",
+				item_id: itemId,
+				output_index: search.outputIdx,
+			},
+			state,
+		);
+	const item = webSearchCallItem({
+		id: itemId,
+		query: search.query,
+		status: result.ok ? "completed" : "failed",
+		sources: result.ok ? result.sources : [],
+		includeSources: state.includeSources,
+	});
+	state.outputItems[search.outputIdx] = item;
+	emitSse(
+		controller,
+		"response.output_item.done",
+		{
+			type: "response.output_item.done",
+			output_index: search.outputIdx,
+			item,
+		},
+		state,
+	);
+}
+
 function emitDone(
 	controller: TransformStreamDefaultController,
 	state: State,
 ): void {
 	if (state.doneSent) return;
+	// A search the stream never answered did not complete.
+	for (const search of state.searches.values())
+		if (!search.done) finishSearch(controller, state, search, { ok: false });
 	state.doneSent = true;
 
 	emitSse(
@@ -65,7 +134,7 @@ function emitDone(
 				created_at: Math.floor(Date.now() / 1000),
 				model: state.model,
 				status: "completed",
-				output: state.outputItems,
+				output: finishedItems(state),
 				usage: translateAnthropicUsage(state.usage),
 			},
 		},
@@ -128,6 +197,61 @@ function processEvent(
 	if (eventType === "content_block_start") {
 		const blockIndex = data.index as number;
 		const contentBlock = data.content_block as Record<string, unknown>;
+
+		if (
+			contentBlock.type === "server_tool_use" &&
+			contentBlock.name === "web_search"
+		) {
+			const outputIdx = state.outputIndex++;
+			state.searches.set(String(contentBlock.id), {
+				outputIdx,
+				argsBuf:
+					contentBlock.input && Object.keys(contentBlock.input as object).length
+						? JSON.stringify(contentBlock.input)
+						: "",
+				query: null,
+				done: false,
+			});
+			state.searchByBlock.set(blockIndex, String(contentBlock.id));
+			state.ignoredBlockIndices.add(blockIndex);
+			const itemId = searchItemId(state, outputIdx);
+			emitSse(
+				controller,
+				"response.output_item.added",
+				{
+					type: "response.output_item.added",
+					output_index: outputIdx,
+					item: { type: "web_search_call", id: itemId, status: "in_progress" },
+				},
+				state,
+			);
+			emitSse(
+				controller,
+				"response.web_search_call.in_progress",
+				{
+					type: "response.web_search_call.in_progress",
+					item_id: itemId,
+					output_index: outputIdx,
+				},
+				state,
+			);
+			return;
+		}
+		if (contentBlock.type === "web_search_tool_result") {
+			state.ignoredBlockIndices.add(blockIndex);
+			const search = state.searches.get(String(contentBlock.tool_use_id));
+			if (!search || search.done) {
+				log.warn("web_search_tool_result for no search awaiting one; ignored");
+				return;
+			}
+			finishSearch(
+				controller,
+				state,
+				search,
+				webSearchResultOf(contentBlock.content),
+			);
+			return;
+		}
 
 		// Only allocate an output slot for block types we emit events for.
 		// Incrementing unconditionally (e.g. for "thinking" blocks) leaves gaps in
@@ -213,8 +337,19 @@ function processEvent(
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
+			const searchId = state.searchByBlock.get(blockIndex);
+			const search = searchId ? state.searches.get(searchId) : undefined;
+			if (search && delta.type === "input_json_delta")
+				search.argsBuf += (delta.partial_json as string) ?? "";
 			if (state.ignoredBlockIndices.has(blockIndex)) return;
 			log.warn(`content_block_delta for unknown block index ${blockIndex}`);
+			return;
+		}
+
+		if (delta.type === "citations_delta") {
+			const cited = state.citationsByBlock.get(blockIndex) ?? [];
+			cited.push(delta.citation);
+			state.citationsByBlock.set(blockIndex, cited);
 			return;
 		}
 
@@ -263,6 +398,28 @@ function processEvent(
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
+			const searchId = state.searchByBlock.get(blockIndex);
+			const search = searchId ? state.searches.get(searchId) : undefined;
+			if (search) {
+				state.searchByBlock.delete(blockIndex);
+				let input: unknown = null;
+				try {
+					input = search.argsBuf ? JSON.parse(search.argsBuf) : null;
+				} catch {}
+				search.query = webSearchQueryOf(input);
+				if (!search.done)
+					emitSse(
+						controller,
+						"response.web_search_call.searching",
+						{
+							type: "response.web_search_call.searching",
+							item_id: searchItemId(state, search.outputIdx),
+							output_index: search.outputIdx,
+						},
+						state,
+					);
+				return;
+			}
 			if (state.ignoredBlockIndices.has(blockIndex)) return;
 			log.warn(`content_block_stop for unknown block index ${blockIndex}`);
 			return;
@@ -270,6 +427,15 @@ function processEvent(
 
 		if (state.textByBlock.has(blockIndex)) {
 			const fullText = state.textByBlock.get(blockIndex) ?? "";
+			const annotations = urlCitationsOf(
+				state.citationsByBlock.get(blockIndex),
+				fullText,
+			);
+			const part = {
+				type: "output_text",
+				text: fullText,
+				...(annotations.length ? { annotations } : {}),
+			};
 			emitSse(
 				controller,
 				"response.output_text.done",
@@ -290,7 +456,7 @@ function processEvent(
 					item_id: `${state.responseId}_msg_${outputIdx}`,
 					output_index: outputIdx,
 					content_index: 0,
-					part: { type: "output_text", text: fullText },
+					part,
 				},
 				state,
 			);
@@ -298,10 +464,10 @@ function processEvent(
 				type: "message",
 				id: `${state.responseId}_msg_${outputIdx}`,
 				role: "assistant",
-				content: [{ type: "output_text", text: fullText }],
+				content: [part],
 				status: "completed",
 			};
-			state.outputItems.push(doneItem);
+			state.outputItems[outputIdx] = doneItem;
 			emitSse(
 				controller,
 				"response.output_item.done",
@@ -380,7 +546,7 @@ function processEvent(
 					: { arguments: tool.argsBuf }),
 				status: "completed",
 			};
-			state.outputItems.push(doneItem);
+			state.outputItems[outputIdx] = doneItem;
 			emitSse(
 				controller,
 				"response.output_item.done",
@@ -430,7 +596,7 @@ function processEvent(
 					model: state.model,
 					status: "failed",
 					error: { code: errCode, message: errMsg },
-					output: state.outputItems,
+					output: finishedItems(state),
 					usage: translateAnthropicUsage(state.usage),
 				},
 			},
@@ -511,6 +677,7 @@ export function translateAnthropicStreamToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
+	options: { includeSources?: boolean } = {},
 ): Response {
 	if (!anthropicResponse.body) {
 		return new Response(null, { status: anthropicResponse.status });
@@ -536,6 +703,10 @@ export function translateAnthropicStreamToResponses(
 		doneSent: false,
 		outputItems: [],
 		streamError: null,
+		includeSources: options.includeSources ?? false,
+		searches: new Map(),
+		searchByBlock: new Map(),
+		citationsByBlock: new Map(),
 	};
 
 	const transformedBody = anthropicResponse.body.pipeThrough(

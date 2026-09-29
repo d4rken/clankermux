@@ -256,6 +256,35 @@ results. A result at or under that size, or one that carries an image, is
 never rejected with `sdk_bridge_tool_result_too_large`; the request-body and
 context-window limits still apply to it.
 
+## Hosted web search on Claude models
+
+A Responses request on `/wire/openai` whose only tool is a hosted
+`web_search` (or `web_search_preview`) is searched for real when an official
+Anthropic account serves it through the SDK bridge. The response carries
+one `web_search_call` output item per search, in stream order before the
+text it informed, with `status` `completed` or `failed` and
+`action: {type: "search", query}`. `action.sources` (`{type: "url", url,
+title}`) is present only when `include` names
+`web_search_call.action.sources`. A stream emits
+`response.web_search_call.in_progress`, `…searching` and, for a completed
+search, `…completed` for each item.
+
+| `tool_choice` | Effect |
+| --- | --- |
+| absent, `auto` | The model may search. |
+| `none` | No search; the tool is ignored. |
+| `required`, `{type: "web_search"}` | The reply must follow a completed search. Otherwise the request fails with `502`, code `web_search_not_performed`, or with `response.failed` carrying that code once the stream has started. |
+
+`filters.allowed_domains` limits every search to those hostnames and their
+subdomains. Entries must be plain hostnames without a scheme or path, at
+most 100; anything else answers `400 invalid_request_error`.
+`user_location` and `search_context_size` are accepted and not applied.
+
+Web search is ignored, as every other hosted tool (`file_search`,
+`code_interpreter`, `image_generation`, …) is, when the request also carries
+function or custom tools, and on every route that does not end in the SDK
+bridge.
+
 ## Wire and transport rules
 
 Instants are ISO/RFC3339 strings; durations include units in field names. Null

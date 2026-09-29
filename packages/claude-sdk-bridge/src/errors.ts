@@ -435,6 +435,16 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	webSearchNotPerformed(): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "web_search_not_performed",
+			message:
+				"The request requires a web search, and the model answered without completing one",
+			retryAfter: null,
+		};
+	},
 	internal(message: string): BridgeError {
 		return { status: 502, type: "api_error", message, retryAfter: null };
 	},

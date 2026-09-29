@@ -1,5 +1,8 @@
 import type { RequestMeta } from "./api";
-import type { SdkBridgeTranslationGaps } from "./sdk-bridge-transport";
+import type {
+	SdkBridgeHostedWebSearch,
+	SdkBridgeTranslationGaps,
+} from "./sdk-bridge-transport";
 
 /**
  * Original (decompressed, normalized) OpenAI-Responses request carried
@@ -32,6 +35,8 @@ export interface NativeResponsesContext {
 	denyDirectOfficialAnthropic?: boolean;
 	/** For a turn the SDK bridge serves; see SdkBridgeTranslationGaps. */
 	translationGaps?: SdkBridgeTranslationGaps;
+	/** The hosted web search only an SDK bridge turn can serve. */
+	hostedWebSearch?: SdkBridgeHostedWebSearch;
 }
 
 /**
@@ -90,4 +95,16 @@ export function getNativeResponsesMetaContext(
 	meta: RequestMeta,
 ): NativeResponsesContext | undefined {
 	return nativeResponsesMetaContextMap.get(meta);
+}
+
+const hostedWebSearchServed = new WeakSet<NativeResponsesContext>();
+
+/** The SDK bridge took the request's hosted web search into a turn it runs. */
+export function markHostedWebSearchServed(ctx: NativeResponsesContext): void {
+	hostedWebSearchServed.add(ctx);
+}
+
+/** Whether any attempt handed the hosted web search to the SDK bridge. */
+export function wasHostedWebSearchServed(ctx: NativeResponsesContext): boolean {
+	return hostedWebSearchServed.has(ctx);
 }

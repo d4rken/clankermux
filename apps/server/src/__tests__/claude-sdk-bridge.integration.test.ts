@@ -416,5 +416,84 @@ describe.skipIf(reason !== null)(
 			},
 			TIMEOUT,
 		);
+
+		it(
+			"serves pi-web-search's request with a completed web_search_call, its sub-request on the proxy's normal path",
+			async () => {
+				const s = await scenario("piWebSearch");
+				type Search = {
+					status: number;
+					eventTypes: string[];
+					failed: Record<string, unknown> | null;
+					completed: {
+						status: string;
+						output: Array<Record<string, unknown>>;
+					} | null;
+					subRequests: Array<{
+						model: string;
+						tools: unknown;
+						account: string;
+						status: number;
+					}>;
+					mainCalls: number;
+				};
+				const searched = s.searched as Search;
+				const [sub] = searched.subRequests;
+				console.log(
+					`[claude-sdk-bridge] gateway WebSearch sub-request: model=${sub?.model} tools=${JSON.stringify(sub?.tools)} status=${sub?.status}`,
+				);
+				expect(searched.status).toBe(200);
+				expect(searched.failed).toBeNull();
+				expect(searched.subRequests).toHaveLength(1);
+				expect(sub).toMatchObject({ model: "claude-sonnet-5", status: 200 });
+				expect(searched.mainCalls).toBe(2);
+				expect(searched.eventTypes).toEqual(
+					expect.arrayContaining([
+						"response.web_search_call.in_progress",
+						"response.web_search_call.searching",
+						"response.web_search_call.completed",
+						"response.completed",
+					]),
+				);
+				const output = searched.completed?.output ?? [];
+				expect(searched.completed?.status).toBe("completed");
+				expect(output.map((i) => i.type)).toEqual([
+					"web_search_call",
+					"message",
+				]);
+				expect(output[0]).toMatchObject({
+					status: "completed",
+					action: {
+						type: "search",
+						query: "bun release notes",
+						sources: [
+							{
+								type: "url",
+								url: "https://results.example/bun-release-notes/1",
+							},
+							{
+								type: "url",
+								url: "https://results.example/bun-release-notes/2",
+							},
+						],
+					},
+				});
+				// Main call, search sub-request, main call: ordinary inner rows.
+				const inner = s.innerRows as Array<{ status_code: number }>;
+				expect(inner.map((r) => r.status_code)).toEqual([200, 200, 200]);
+
+				// Required, and the model answered from memory: never a completed reply.
+				const unsearched = s.unsearched as Search;
+				expect(unsearched.subRequests).toEqual([]);
+				expect(unsearched.completed).toBeNull();
+				expect(
+					(unsearched.failed?.response as { error: { code: string } }).error
+						.code,
+				).toBe("web_search_not_performed");
+				const turns = s.turns as Array<{ status: string }>;
+				expect(turns.map((t) => t.status)).toEqual(["completed", "failed"]);
+			},
+			TIMEOUT,
+		);
 	},
 );

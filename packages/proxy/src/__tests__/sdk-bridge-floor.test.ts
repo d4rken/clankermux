@@ -13,6 +13,7 @@ import {
 	SdkBridgeUnavailableError,
 	setChatContext,
 	setNativeResponsesRequestContext,
+	wasHostedWebSearchServed,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import { setForcedAccount } from "../handlers";
@@ -524,6 +525,42 @@ describe("Chat Completions through the SDK bridge", () => {
 		await run(req, harness.ctx);
 
 		expect(bridge.starts[0].meta.translationGaps).toEqual(gaps);
+	});
+
+	it("hands the bridge the client's hosted web search and marks it served", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+		const search = { required: true, allowedDomains: ["bun.sh"] };
+		const context = {
+			nativeBody: JSON.stringify({ model: MODEL }),
+			denyDirectOfficialAnthropic: true,
+			hostedWebSearch: search,
+		};
+		const req = messagesRequest({ tool_choice: undefined });
+		setNativeResponsesRequestContext(req, context);
+
+		const { response } = await run(req, harness.ctx);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts[0].meta.hostedWebSearch).toEqual(search);
+		expect(wasHostedWebSearchServed(context)).toBe(true);
+	});
+
+	it("leaves a hosted web search unserved when the route is not bridged", async () => {
+		harness = await makeBridgeHarness([other()], {
+			bridge: makeFakeBridge(),
+		});
+		const context = {
+			nativeBody: JSON.stringify({ model: MODEL }),
+			denyDirectOfficialAnthropic: true,
+			hostedWebSearch: { required: false, allowedDomains: null },
+		};
+		const req = messagesRequest();
+		setNativeResponsesRequestContext(req, context);
+
+		await run(req, harness.ctx);
+
+		expect(wasHostedWebSearchServed(context)).toBe(false);
 	});
 
 	it("tells the bridge the pi prompt layout the client declared, sanitized", async () => {

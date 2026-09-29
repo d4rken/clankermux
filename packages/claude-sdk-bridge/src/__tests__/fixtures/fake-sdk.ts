@@ -428,6 +428,56 @@ export function assistantMessage(
 	} as unknown as SDKMessage;
 }
 
+/**
+ * The user message Claude Code reports once a tool of its own ran: the
+ * tool_result it sends the model, and its structured output
+ * (`tool_use_result`, a `WebSearchOutput` for WebSearch).
+ */
+export function toolResultMessage(
+	toolUseId: string,
+	toolUseResult: unknown,
+	opts: { isError?: boolean; text?: string } = {},
+): SDKMessage {
+	return {
+		type: "user",
+		message: {
+			role: "user",
+			content: [
+				{
+					type: "tool_result",
+					tool_use_id: toolUseId,
+					content: opts.text ?? "Web search results",
+					...(opts.isError ? { is_error: true } : {}),
+				},
+			],
+		},
+		parent_tool_use_id: null,
+		tool_use_result: toolUseResult,
+		uuid: uuid(),
+		session_id: "s",
+	} as unknown as SDKMessage;
+}
+
+/** A `WebSearchOutput` with one result group per list of urls. */
+export function webSearchOutput(
+	query: string,
+	groups: string[][],
+	extra: { commentary?: string[]; searchCount?: number } = {},
+): Record<string, unknown> {
+	return {
+		query,
+		results: [
+			...groups.map((urls, i) => ({
+				tool_use_id: `srvtoolu_${i}`,
+				content: urls.map((url) => ({ title: `title of ${url}`, url })),
+			})),
+			...(extra.commentary ?? []),
+		],
+		durationSeconds: 0.5,
+		searchCount: extra.searchCount ?? groups.length,
+	};
+}
+
 export function resultMessage(
 	opts: {
 		isError?: boolean;
@@ -808,6 +858,7 @@ export function makeMeta(
 		translationGaps: null,
 		piPromptVersion: null,
 		sideRequest: null,
+		hostedWebSearch: null,
 		...overrides,
 	};
 }
@@ -944,7 +995,7 @@ export function foldReply(events: SseEvent[]): {
 			stop = (data.delta as Record<string, unknown>).stop_reason;
 	}
 	for (const block of content) {
-		if (block.type === "tool_use")
+		if (block.type === "tool_use" || block.type === "server_tool_use")
 			block.input = block._json ? JSON.parse(block._json) : {};
 		delete block._json;
 	}

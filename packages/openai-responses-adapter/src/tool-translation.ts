@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Logger } from "@clankermux/logger";
+import { isHostedWebSearchTool } from "./hosted-web-search";
 import type { AnthropicTool, ResponsesRequest, ResponsesTool } from "./types";
 
 export class ToolTranslationError extends Error {}
@@ -52,7 +53,9 @@ export class ToolTranslation {
 				continue;
 			}
 			if (tool.type !== "function" && tool.type !== "custom") {
-				log.warn(`Skipping unsupported/built-in tool type: ${tool.type}`);
+				// The handler says what becomes of a hosted web search.
+				if (!isHostedWebSearchTool(tool))
+					log.warn(`Skipping unsupported/built-in tool type: ${tool.type}`);
 				continue;
 			}
 			const identity: ToolIdentity = {

@@ -2,6 +2,7 @@ import { Logger } from "@clankermux/logger";
 import {
 	type Account,
 	getNativeResponsesMetaContext,
+	markHostedWebSearchServed,
 	type RequestMeta,
 	SDK_BRIDGE_PI_PROMPT_HEADER,
 	SdkBridgeCapacityError,
@@ -115,6 +116,8 @@ export function sdkBridgeTurnMeta(
 		reasoningEffort: meta.reasoningEffort ?? null,
 		translationGaps:
 			getNativeResponsesMetaContext(meta)?.translationGaps ?? null,
+		hostedWebSearch:
+			getNativeResponsesMetaContext(meta)?.hostedWebSearch ?? null,
 		piPromptVersion: sdkBridgeHeaderToken(headers, SDK_BRIDGE_PI_PROMPT_HEADER),
 		sideRequest: sdkBridgeSideRequestMode(headers),
 	};
@@ -204,14 +207,17 @@ export async function proxyViaSdkBridge(input: {
 			input.audit,
 			null,
 			undefined,
-			(request) =>
-				bridge.startTurn({
+			(request) => {
+				const native = getNativeResponsesMetaContext(requestMeta);
+				if (native && meta.hostedWebSearch) markHostedWebSearchServed(native);
+				return bridge.startTurn({
 					request,
 					plan,
 					meta,
 					signal: req.signal,
 					bumpIdleTimeout: input.bumpIdleTimeout,
-				}),
+				});
+			},
 		);
 		return { kind: "response", response };
 	} catch (error) {

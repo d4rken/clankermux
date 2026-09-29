@@ -38,6 +38,7 @@ import type {
 	SdkBridgeTiming,
 	SdkBridgeTurnHistory,
 } from "./types";
+import { webSearchOutcome } from "./web-search";
 
 /** What Claude Code reports when it has rewritten the context it sends. */
 const CONTEXT_REWRITES: ReadonlySet<string> = new Set([
@@ -185,6 +186,8 @@ export interface LiveQueryInit {
 	 * max_tokens stop ends it instead of reaching the client or continuing.
 	 */
 	sideRequest?: boolean;
+	/** The client's hosted web search must complete before the reply may end. */
+	webSearchRequired?: boolean;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
 	/** Claude Code's own copy of the session, which nothing resumes from. */
@@ -614,6 +617,16 @@ export class LiveQuery {
 		const content = composer.legContent();
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";
 		const parks = finalReason === "tool_use" && toolUseIds.length > 0;
+		// The client's search tool must never take an unsearched answer for
+		// one: the reply fails instead, before it closes.
+		if (
+			this.init.webSearchRequired &&
+			!parks &&
+			composer.completedSearches === 0
+		) {
+			this.teardown("error", bridgeErrors.webSearchNotPerformed());
+			return;
+		}
 		// Tool calls handed out now could never be answered: the query dies
 		// with the bridge. The leg fails instead, with the shutdown 503 while
 		// nothing went out, or a closing SSE error once the stream is open.
@@ -1042,11 +1055,43 @@ export class LiveQuery {
 				);
 				return;
 			}
+			case "user":
+				if (message.parent_tool_use_id === null) this.onToolResults(message);
+				return;
 			case "result":
 				this.onResult(message);
 				return;
 			default:
 				return;
+		}
+	}
+
+	/**
+	 * A tool of Claude Code's own ran: a WebSearch call's result goes to the
+	 * reply. Claude Code reports one tool result per message, with the
+	 * tool's structured output beside it.
+	 */
+	private onToolResults(message: Extract<SDKMessage, { type: "user" }>): void {
+		const content = message.message.content;
+		if (!Array.isArray(content) || !this.leg) return;
+		const results = (content as unknown as Block[]).filter(
+			(b) =>
+				b.type === "tool_result" &&
+				this.init.composer.awaitsWebSearch(String(b.tool_use_id)),
+		);
+		const output =
+			content.length === 1
+				? (message as { tool_use_result?: unknown }).tool_use_result
+				: undefined;
+		for (const result of results) {
+			const outcome = webSearchOutcome(output, result.is_error === true);
+			if (
+				this.init.composer.onWebSearchResult(
+					String(result.tool_use_id),
+					outcome,
+				)
+			)
+				this.init.recorder.noteWebSearchResult(outcome.searchCount);
 		}
 	}
 

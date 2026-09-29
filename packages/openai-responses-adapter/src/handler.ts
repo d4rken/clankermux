@@ -2,9 +2,15 @@ import crypto from "node:crypto";
 import { Logger } from "@clankermux/logger";
 import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	type NativeResponsesContext,
 	parseUpstreamError,
 	setNativeResponsesRequestContext,
+	wasHostedWebSearchServed,
 } from "@clankermux/types";
+import {
+	includesWebSearchSources,
+	planHostedWebSearch,
+} from "./hosted-web-search";
 import {
 	extractNativeTerminalResponse,
 	type NativeTerminalFailureReason,
@@ -340,6 +346,29 @@ async function respondToResponsesRequest(
 	// 3. Generate response ID
 	const responseId = `resp_${crypto.randomBytes(12).toString("hex")}`;
 
+	// A hosted web search runs only on a bridged Claude turn; the translated
+	// body never carries it.
+	const webSearch = planHostedWebSearch(body);
+	if (webSearch.kind === "invalid")
+		return Response.json(
+			{
+				error: {
+					type: "invalid_request_error",
+					code: "invalid_request_error",
+					message: webSearch.message,
+				},
+			},
+			{ status: 400 },
+		);
+	if (webSearch.kind === "dropped")
+		if (webSearch.reason === "mixed")
+			log.info(`${webSearch.toolType} dropped: mixed with client tools`);
+		else
+			log.warn(
+				`Skipping unsupported/built-in tool type: ${webSearch.toolType}`,
+			);
+	const includeSources = includesWebSearchSources(body);
+
 	// 4. Translate to Anthropic format
 	let tools: ToolTranslation;
 	let anthropicBody: AnthropicRequest;
@@ -396,7 +425,7 @@ async function respondToResponsesRequest(
 	// — handleProxy re-keys it onto RequestMeta. The client's own stream intent
 	// is not part of that decision (see step 8): the upstream leg is SSE either
 	// way, so it stays a property of `body` here in the adapter.
-	setNativeResponsesRequestContext(syntheticReq, {
+	const nativeContext: NativeResponsesContext = {
 		nativeBody: JSON.stringify(body),
 		// Captured from the ORIGINAL body before translation; the real effort
 		// vocabulary is wider than the narrow type in types.ts, so treat it as an
@@ -413,11 +442,26 @@ async function respondToResponsesRequest(
 		denyDirectOfficialAnthropic: true,
 		translationGaps: {
 			maxTokensDefaulted: body.max_output_tokens === undefined,
-			droppedFields: (["temperature", "top_p"] as const).filter(
-				(field) => (body as unknown as Record<string, unknown>)[field] != null,
-			),
+			droppedFields: [
+				...(["temperature", "top_p"] as const).filter(
+					(field) =>
+						(body as unknown as Record<string, unknown>)[field] != null,
+				),
+				...(webSearch.kind === "served" ? webSearch.droppedFields : []),
+			],
 		},
-	});
+		...(webSearch.kind === "served"
+			? { hostedWebSearch: webSearch.search }
+			: {}),
+	};
+	setNativeResponsesRequestContext(syntheticReq, nativeContext);
+	// Every destination but a bridged Claude turn drops the search.
+	const noteUnservedSearch = () => {
+		if (webSearch.kind === "served" && !wasHostedWebSearchServed(nativeContext))
+			log.warn(
+				`Skipping unsupported/built-in tool type: ${webSearch.toolType}`,
+			);
+	};
 
 	// 6. Forward to proxy
 	log.info(`Forwarding responses request to ${messagesUrl.pathname}`);
@@ -431,7 +475,9 @@ async function respondToResponsesRequest(
 			apiKeyName,
 		);
 		captureProxyResponse(anthropicResp);
+		noteUnservedSearch();
 	} catch (err) {
+		noteUnservedSearch();
 		const statusCode =
 			typeof err === "object" &&
 			err !== null &&
@@ -596,6 +642,7 @@ async function respondToResponsesRequest(
 			responseId,
 			body.model,
 			tools,
+			{ includeSources },
 		);
 	}
 
@@ -621,6 +668,7 @@ async function respondToResponsesRequest(
 			responseId,
 			body.model,
 			tools,
+			{ includeSources },
 		);
 		return Response.json(translated);
 	} catch {

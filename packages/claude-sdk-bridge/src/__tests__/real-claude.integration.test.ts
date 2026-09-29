@@ -940,6 +940,186 @@ describe.skipIf(reason !== null)(
 			TIMEOUT,
 		);
 
+		describe("a client's hosted web search", () => {
+			type Search = {
+				reply: {
+					status: number;
+					stop?: unknown;
+					content?: Array<Record<string, unknown>>;
+					errors?: Array<{ data: { error: Record<string, unknown> } }>;
+					body?: Record<string, unknown>;
+				};
+				turnStatus: string;
+				subRequests: Array<Record<string, unknown>>;
+				mainTools: string[][];
+			};
+			const search = async (name: string) =>
+				scenario(await results(), "webSearch")[name] as Search;
+
+			it(
+				"runs Claude Code's WebSearch through the gateway path and replies with Anthropic's server-tool blocks",
+				async () => {
+					const s = await search("searched");
+					const [sub] = s.subRequests;
+					console.log(
+						`[claude-sdk-bridge] WebSearch sub-request: model=${sub?.model} stream=${sub?.stream} tools=${JSON.stringify(sub?.tools)} tool_choice=${JSON.stringify(sub?.toolChoice)} thinking=${JSON.stringify(sub?.thinking)} anthropic-beta=${sub?.beta}`,
+					);
+					expect(s.subRequests).toHaveLength(1);
+					// The turn's own model: no model outside the frozen plan.
+					expect(sub).toMatchObject({
+						model: "claude-sonnet-5",
+						stream: true,
+						status: 200,
+						tools: [
+							expect.objectContaining({
+								type: "web_search_20250305",
+								name: "web_search",
+							}),
+						],
+					});
+					expect(JSON.stringify(sub?.messages)).toContain(
+						"Perform a web search for the query: bun release notes",
+					);
+					// Only WebSearch: no other tool of Claude Code's own.
+					for (const tools of s.mainTools) expect(tools).toEqual(["WebSearch"]);
+					expect(s.reply).toMatchObject({ status: 200, stop: "end_turn" });
+					const content = s.reply.content ?? [];
+					expect(content.map((b) => b.type)).toEqual([
+						"server_tool_use",
+						"web_search_tool_result",
+						"text",
+					]);
+					expect(content[0]).toMatchObject({
+						name: "web_search",
+						input: { query: "bun release notes" },
+					});
+					expect(content[1]?.content).toEqual([
+						{
+							type: "web_search_result",
+							url: "https://results.example/bun-release-notes/1",
+							title: "Result 1 for bun release notes",
+						},
+						{
+							type: "web_search_result",
+							url: "https://results.example/bun-release-notes/2",
+							title: "Result 2 for bun release notes",
+						},
+					]);
+					expect(s.turnStatus).toBe("completed");
+				},
+				TIMEOUT,
+			);
+
+			it(
+				"reads the result from the SDK's WebSearch envelopes",
+				async () => {
+					const s = scenario(await results(), "webSearch");
+					const envelopes = s.envelopes as {
+						toolUse: Array<Record<string, unknown>>;
+						toolResults: Array<{ toolUseResult: Record<string, unknown> }>;
+					};
+					expect(envelopes.toolUse).toEqual([
+						expect.objectContaining({
+							name: "WebSearch",
+							input: { query: "bun release notes" },
+						}),
+					]);
+					expect(envelopes.toolResults).toHaveLength(1);
+					expect(envelopes.toolResults[0]?.toolUseResult).toMatchObject({
+						query: "bun release notes",
+						results: [
+							{
+								tool_use_id: expect.any(String),
+								content: [
+									{
+										title: "Result 1 for bun release notes",
+										url: "https://results.example/bun-release-notes/1",
+									},
+									{
+										title: "Result 2 for bun release notes",
+										url: "https://results.example/bun-release-notes/2",
+									},
+								],
+							},
+							"Found results for bun release notes.",
+						],
+						searchCount: 1,
+					});
+				},
+				TIMEOUT,
+			);
+
+			it(
+				"answers stream:false with the search blocks in the JSON message",
+				async () => {
+					const s = await search("nonStreamed");
+					expect(s.reply.status).toBe(200);
+					expect(
+						(s.reply.body?.content as Array<{ type: string }>).map(
+							(b) => b.type,
+						),
+					).toEqual(["server_tool_use", "web_search_tool_result", "text"]);
+				},
+				TIMEOUT,
+			);
+
+			it(
+				"holds every search to the client's domains, and refuses one the model widens",
+				async () => {
+					const filtered = await search("filtered");
+					expect(filtered.subRequests[0]?.tools).toEqual([
+						expect.objectContaining({ allowed_domains: ["docs.example"] }),
+					]);
+					expect(filtered.reply.status).toBe(200);
+					expect(JSON.stringify(filtered.reply.content)).toContain(
+						"https://docs.example/",
+					);
+
+					const widened = await search("widened");
+					expect(widened.subRequests).toEqual([]);
+					const result = widened.reply.content?.find(
+						(b) => b.type === "web_search_tool_result",
+					);
+					expect(result?.content).toEqual({
+						type: "web_search_tool_result_error",
+						error_code: "unavailable",
+					});
+					expect(widened.reply.errors?.[0]?.data.error).toMatchObject({
+						code: "web_search_not_performed",
+					});
+					expect(widened.turnStatus).toBe("failed");
+				},
+				TIMEOUT,
+			);
+
+			it(
+				"fails a required search that errored or never happened, never passing it as an answer",
+				async () => {
+					const failed = await search("failed");
+					expect(
+						failed.reply.content?.find(
+							(b) => b.type === "web_search_tool_result",
+						)?.content,
+					).toEqual({
+						type: "web_search_tool_result_error",
+						error_code: "unavailable",
+					});
+					expect(failed.reply.errors?.[0]?.data.error).toMatchObject({
+						code: "web_search_not_performed",
+					});
+
+					const unsearched = await search("unsearched");
+					expect(unsearched.subRequests).toEqual([]);
+					expect(unsearched.reply.stop).toBeNull();
+					expect(unsearched.reply.errors?.[0]?.data.error).toMatchObject({
+						code: "web_search_not_performed",
+					});
+					expect(unsearched.turnStatus).toBe("failed");
+				},
+				TIMEOUT,
+			);
+		});
+
 		it(
 			"refuses a model call larger than maxHistoryBytes with 413",
 			async () => {

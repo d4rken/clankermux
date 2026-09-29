@@ -65,7 +65,8 @@ export class MessageReducer {
 
 	result(): Record<string, unknown> {
 		const content = this.blocks.filter(Boolean).map(({ _json, ...block }) => {
-			if (block.type !== "tool_use") return block;
+			if (block.type !== "tool_use" && block.type !== "server_tool_use")
+				return block;
 			let input: unknown = block.input ?? {};
 			if (_json) {
 				try {
