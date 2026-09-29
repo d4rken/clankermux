@@ -459,6 +459,7 @@ export const bridgeErrors = {
 		return {
 			status: 502,
 			type: "api_error",
+			code: "sdk_bridge_interleaved_blocks",
 			message: `The model's reply could not be relayed: ${why}`,
 			retryAfter: null,
 		};

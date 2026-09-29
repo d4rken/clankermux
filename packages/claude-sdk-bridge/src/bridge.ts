@@ -1094,7 +1094,7 @@ export function createClaudeSdkBridge(
 				turnToolIds.set(plan.turnId, ids);
 				live?.onToolUseForwarded();
 			},
-			onToolUseWithheld: (id) => live?.onToolUseWithheld(id),
+			onToolUseWithheld: (id, reason) => live?.onToolUseWithheld(id, reason),
 			onStreamFault: (why) => live?.onStreamFault(why),
 			newMessageId: () => `msg_sdk_bridge_${randomId().replaceAll("-", "")}`,
 			forwardToolUse: !sideRequest,

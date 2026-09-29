@@ -964,7 +964,7 @@ describe("a turn whose reply the client already has, and whose session goes", ()
 		).toBe("rebuild_transcript");
 	});
 
-	it("a refusal after a tool call, then an error result: completed, annotated, counted, and the next turn rebuilds", async () => {
+	it("a refusal after a withheld tool call, then an error result: completed, annotated, counted, and the next turn rebuilds", async () => {
 		const h = harness();
 		const t = await start(h, { tools, messages: [first] }, { meta: session });
 		await mirrored(t, "TOOL read a.txt");
@@ -982,6 +982,8 @@ describe("a turn whose reply the client already has, and whose session goes", ()
 		t.query.emit(initMessage(), ...stream);
 		const r = await reply(t.response);
 		expect(r.stop).toBe("refusal");
+		// A call in a message that did not stop on tool_use never reaches the client.
+		expect(r.content).toEqual([]);
 		// What Claude Code reports once its aborted call is answered.
 		t.query.emit(
 			assistantMessage([{ type: "text", text: "API Error: 401" }], {

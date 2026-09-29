@@ -1041,6 +1041,224 @@ describe("parked tool calls", () => {
 			await settled(h);
 			expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("failed");
 		});
+
+		it("never shows a call completed in a message whose stream then died: only the refetched calls, once", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			const whole = streamedMessage([
+				{
+					type: "tool_use",
+					id: "toolu_a",
+					name: "mcp__c__read",
+					input: { path: "a" },
+				},
+			]);
+			t.query.emit(
+				initMessage(),
+				// message_start, A's block whole, then B cut off mid-input.
+				...whole.slice(0, 4),
+				streamEvent({
+					type: "content_block_start",
+					index: 1,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_b",
+						name: "mcp__c__read",
+						input: {},
+					},
+				}),
+				streamEvent({
+					type: "content_block_delta",
+					index: 1,
+					delta: { type: "input_json_delta", partial_json: '{"pa' },
+				}),
+			);
+			// Claude Code started A as soon as its block was complete.
+			const oldA = t.query.callTool("toolu_a", "read", { path: "a" });
+			await Bun.sleep(20);
+			t.query.emit(
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_a2",
+						name: "mcp__c__read",
+						input: { path: "a" },
+					},
+					{
+						type: "tool_use",
+						id: "toolu_b2",
+						name: "mcp__c__read",
+						input: { path: "b" },
+					},
+				]),
+			);
+			expect(await oldA).toEqual(CUT_OFF);
+			const r = await reply(t.response);
+			expect(r.content.map((b) => b.id)).toEqual(["toolu_a2", "toolu_b2"]);
+			expect(JSON.stringify(r.events)).not.toContain('"toolu_a"');
+			expect(JSON.stringify(r.events)).not.toContain('"toolu_b"');
+		});
+
+		it("withholds a message's valid call with its truncated sibling on max_tokens, and the turn goes on", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			const whole = streamedMessage([
+				{
+					type: "tool_use",
+					id: "toolu_a",
+					name: "mcp__c__read",
+					input: { path: "a" },
+				},
+			]);
+			t.query.emit(
+				initMessage(),
+				...whole.slice(0, 4),
+				streamEvent({
+					type: "content_block_start",
+					index: 1,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_b",
+						name: "mcp__c__read",
+						input: {},
+					},
+				}),
+				streamEvent({
+					type: "content_block_delta",
+					index: 1,
+					delta: { type: "input_json_delta", partial_json: '{"path":"b' },
+				}),
+				streamEvent({ type: "content_block_stop", index: 1 }),
+				streamEvent({
+					type: "message_delta",
+					delta: { stop_reason: "max_tokens", stop_sequence: null },
+					usage: { output_tokens: 5 },
+				}),
+				streamEvent({ type: "message_stop" }),
+			);
+			const a = await t.query.callTool("toolu_a", "read", { path: "a" });
+			const b = await t.query.callTool("toolu_b", "read", {});
+			expect(a.isError).toBe(true);
+			expect(JSON.stringify(a.content)).toContain(
+				'stop reason \\"max_tokens\\"',
+			);
+			expect(b).toEqual(CUT_OFF);
+			t.query.emit(
+				...streamedMessage([{ type: "text", text: "Out of room." }]),
+				resultMessage(),
+			);
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "Out of room." }]);
+			expect(r.stop).toBe("end_turn");
+			await settled(h);
+			expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+				status: "completed",
+				errorMessage: null,
+			});
+		});
+
+		it("withholds complete calls of a message that stopped on max_tokens, and the turn goes on", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage(
+					[
+						{
+							type: "tool_use",
+							id: "toolu_a",
+							name: "mcp__c__read",
+							input: { path: "a" },
+						},
+					],
+					{ stopReason: "max_tokens" },
+				),
+			);
+			const a = await t.query.callTool("toolu_a", "read", { path: "a" });
+			expect(a.isError).toBe(true);
+			t.query.emit(
+				...streamedMessage([{ type: "text", text: "done" }]),
+				resultMessage(),
+			);
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "done" }]);
+			await settled(h);
+			expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("completed");
+		});
+
+		it("fails a reply whose client tool call starts inside streamed text with 502 sdk_bridge_interleaved_blocks, keeping the text", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "Reading." }]).slice(0, 3),
+				streamEvent({
+					type: "content_block_start",
+					index: 1,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_a",
+						name: "mcp__c__read",
+						input: {},
+					},
+				}),
+			);
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "Reading." }]);
+			expect(JSON.stringify(r.events)).not.toContain("toolu_a");
+			expect(r.errors.map((e) => e.data.error)).toEqual([
+				{
+					type: "api_error",
+					code: "sdk_bridge_interleaved_blocks",
+					message: expect.stringContaining("could not be relayed"),
+				},
+			]);
+			await settled(h);
+			expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+				status: "failed",
+				httpStatus: 502,
+				errorType: "api_error",
+			});
+		});
+	});
+
+	it("ends a non-streamed reply whose tool call Claude Code made before the envelope arrived", async () => {
+		const h = harness();
+		const t = await start(h, { tools, messages: [first] });
+		t.query.emit(initMessage());
+		const call = t.query.callTool("toolu_f", "read", { path: "f" });
+		await Bun.sleep(30);
+		t.query.emit(
+			assistantMessage([
+				{
+					type: "tool_use",
+					id: "toolu_f",
+					name: "mcp__c__read",
+					input: { path: "f" },
+				},
+			]),
+		);
+		const r = await reply(t.response);
+		expect(r.stop).toBe("tool_use");
+		expect(r.content).toEqual([
+			{ type: "tool_use", id: "toolu_f", name: "read", input: { path: "f" } },
+		]);
+		continueTurn(h, t.plan.turnId, {
+			tools,
+			messages: [
+				first,
+				{ role: "assistant", content: r.content },
+				{
+					role: "user",
+					content: [
+						{ type: "tool_result", tool_use_id: "toolu_f", content: "F" },
+					],
+				},
+			],
+		});
+		expect(((await call).content as Array<{ text: string }>)[0]?.text).toBe(
+			"F",
+		);
 	});
 
 	it("does not forward a tool the client does not have, and keeps one message per reply", async () => {

@@ -181,16 +181,26 @@ pipeline. The client keeps executing its own tools.
   `resumeSessionAt` avoids that only for Claude Code's own transcript (a
   released park); a synthetic one is refused at that point ("No message
   found with message.uuid").
-- **Client tool calls in the reply.** A streamed `tool_use` reaches the
-  client only once its block stops with input that parses as a JSON object,
-  then whole (start, one `input_json_delta`, stop); only then is it the leg's
-  (`ReplyComposer`). One cut off mid-input (the stream died and Claude Code
-  fetches the message again) or truncated at a `max_tokens` stop is withheld,
-  and Claude Code's MCP call of it, if it makes one, gets an error result at
-  once (`cutOffResult`) instead of parking. A block starting while one is
-  buffered fails the reply with 502. So clients see no tool arguments stream
-  on bridged turns; text and thinking still do. A non-streamed message's
-  calls carry whole inputs and go out at once.
+- **Client tool calls in the reply.** The client runs every `tool_use` it
+  is shown, so a model message's client calls go out together or not at
+  all (`ReplyComposer`). In a streamed message, the first client call and
+  every block after it are held until `message_stop`; text and thinking
+  before it stream live. The calls go out, in upstream order and each whole
+  (`input_json_delta` in 64 KiB pieces: the Chat adapter refuses SSE frames
+  over 1 MiB), only when the message stopped on `tool_use` and every input
+  parsed as a JSON object; only then are they the leg's. Otherwise all of
+  them are withheld and the held text still goes out. A message cut off
+  without `message_stop` withholds all its calls: Claude Code discards it
+  and fetches it again, and a call shown from it would run twice. A
+  non-streamed envelope follows the same rule with `tool_use` or no stop
+  reason. Claude Code's MCP call of a withheld call gets an error result at
+  once saying why (`withheldResult`: cut off, not an object, the stop
+  reason, or a sibling's failure). The call and that result stay in Claude
+  Code's own transcript and the client never sees them, as with WebSearch
+  calls. A block starting inside a client call, or a client call starting
+  inside another open block, fails the reply with 502
+  `sdk_bridge_interleaved_blocks`. So clients see no tool arguments stream
+  on bridged turns; text and thinking still do.
 - **Text sent with tool results** goes to Claude Code before the results,
   while it still waits on the MCP calls; it then sends it after them in the
   same model request. Sent after the results, it became a turn of its own
@@ -271,10 +281,10 @@ made private, never deleted: no pid says whether a process still uses them.
   `stop_reason: refusal`, and the turn is `completed`: the error result
   Claude Code reports after a refusal does not fail it. Its session keeps
   the refused exchange as the client has it, so the next turn resumes it.
-  A reply that ends on anything but `tool_use` after forwarding a call (a
-  refusal after a tool_use) settles the turn the same way, with that
-  reason in its `error_message`: the started calls are answered as aborted,
-  the process ends at once, and the next turn rebuilds.
+  A reply that ends on anything but `tool_use` with client calls in it (a
+  refusal after a tool_use: its calls are withheld, above) settles the turn
+  the same way, with that reason in its `error_message`: the process ends
+  at once, and the next turn rebuilds.
 - Every tool is listed with `anthropic/maxResultSizeChars` at
   `MAX_TOOL_RESULT_CHARS`. Without it Claude Code previews any result over
   50,000 characters, and answers one over 25,000 tokens (it counts them
@@ -347,8 +357,8 @@ annotations from URLs in the text was declined on 2026-09-29.
   commentary with `searchCount: 0`, `is_error` (a hook denial included), or
   a missing or invalid output fails with `unavailable`. A call still
   unanswered at the reply's end fails the same way. A call becomes the
-  leg's only once its block completes, as a client tool call does (above):
-  a streamed message cut off inside a
+  leg's only once its block completes (after a client call, once its
+  message stops, above): a streamed message cut off inside a
   WebSearch input (Claude Code then fetches the call again, or not) drops
   that partial call, which never gets a result and never counts. At a new
   upstream message a forwarded block the cut left open is closed on the

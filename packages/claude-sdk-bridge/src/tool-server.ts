@@ -195,17 +195,25 @@ export function sideRequestToolResult(): McpToolResult {
 	};
 }
 
-/** What a call gets whose tool_use the client never saw: its input did not complete. */
-export function cutOffResult(): McpToolResult {
-	return {
-		content: [
-			{
-				type: "text",
-				text: "The tool call's input was cut off before it completed; call the tool again.",
-			},
-		],
-		isError: true,
-	};
+/** Why a client tool call never reached the client. */
+export type WithheldReason =
+	| { kind: "cut_off" }
+	| { kind: "not_object" }
+	| { kind: "stop_reason"; stopReason: string }
+	| { kind: "sibling" };
+
+/** What Claude Code's call of a tool_use the client never saw gets. */
+export function withheldResult(reason: WithheldReason): McpToolResult {
+	const text = {
+		cut_off:
+			"The tool call's input was cut off before it completed; call the tool again.",
+		not_object:
+			"The tool call's input was not a JSON object; call the tool again with an object.",
+		stop_reason: `The tool call was not delivered: the model's message ended with stop reason "${reason.kind === "stop_reason" ? reason.stopReason : ""}"; call the tool again.`,
+		sibling:
+			"The tool call was not delivered: another tool call in the same message did not complete; call the tools again.",
+	}[reason.kind];
+	return { content: [{ type: "text", text }], isError: true };
 }
 
 export function abortedResult(reason: string): McpToolResult {
@@ -248,7 +256,8 @@ export class ParkedCalls {
 		return new Promise((resolve) => this.parked.set(id, resolve));
 	}
 
-	deliver(id: string, result: McpToolResult): "resolved" | "early" {
+	deliver(id: string, result: McpToolResult): "resolved" | "early" | "closed" {
+		if (this.closedReason !== null) return "closed";
 		const resolve = this.parked.get(id);
 		if (resolve) {
 			this.parked.delete(id);
