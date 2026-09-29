@@ -22,6 +22,7 @@ import {
 	errorLabel,
 	translateAnthropicStreamToResponses,
 } from "./stream-translator";
+import { CONTEXT_WINDOW_EXCEEDED } from "./terminal-status";
 import {
 	createToolTranslation,
 	type ToolTranslation,
@@ -686,17 +687,20 @@ async function respondToResponsesRequest(
 			{ status: 502 },
 		);
 	}
-	// A context overflow is answered the way an upstream 400 for one is.
-	if (translated.status === "failed" && translated.error)
+	if (translated.status === "failed" && translated.error) {
+		// A context overflow is answered the way an upstream 400 for one is;
+		// anything else is the upstream's reply failing, as above.
+		const overflow = translated.error.code === CONTEXT_WINDOW_EXCEEDED.code;
 		return Response.json(
 			{
 				error: {
 					message: translated.error.message,
-					type: "invalid_request_error",
+					type: overflow ? "invalid_request_error" : "api_error",
 					code: translated.error.code,
 				},
 			},
-			{ status: 400 },
+			{ status: overflow ? 400 : 502 },
 		);
+	}
 	return Response.json(translated);
 }

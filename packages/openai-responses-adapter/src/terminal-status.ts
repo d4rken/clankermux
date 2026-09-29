@@ -33,3 +33,26 @@ export function responsesTerminalStatus(
 		return { status: "failed", error: CONTEXT_WINDOW_EXCEEDED };
 	return { status: "completed" };
 }
+
+/**
+ * {@link responsesTerminalStatus} for a reply that withheld a custom tool
+ * call whose input did not parse. A reply that would otherwise complete
+ * fails, so no client takes it as finished without the call.
+ */
+export function withheldToolCallTerminalStatus(
+	stopReason: string | null | undefined,
+	clientCappedOutput: boolean,
+): ResponsesTerminalStatus {
+	const terminal = responsesTerminalStatus(stopReason, clientCappedOutput);
+	if (terminal.status !== "completed") return terminal;
+	return {
+		status: "failed",
+		error: {
+			code: "invalid_tool_arguments",
+			message:
+				stopReason === "max_tokens"
+					? "Upstream reached the output token limit inside a custom tool call's input"
+					: "Upstream returned invalid custom tool arguments; expected an input string",
+		},
+	};
+}

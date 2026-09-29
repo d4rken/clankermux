@@ -8,6 +8,7 @@ import {
 import {
 	type ResponsesTerminalStatus,
 	responsesTerminalStatus,
+	withheldToolCallTerminalStatus,
 } from "./terminal-status";
 import {
 	customToolInput,
@@ -156,28 +157,13 @@ function emitTerminal(
 	);
 }
 
-/**
- * The terminal for a reply that reached `message_stop`. A withheld custom
- * tool call fails a reply that would otherwise complete, so no client runs
- * input the model never finished.
- */
+/** The terminal for a reply that reached `message_stop`. */
 function replyTerminal(state: State): ResponsesTerminalStatus {
-	const terminal = responsesTerminalStatus(
-		state.stopReason,
-		state.clientCappedOutput,
-	);
-	if (!state.withheldCustomToolCall || terminal.status !== "completed")
-		return terminal;
-	return {
-		status: "failed",
-		error: {
-			code: "invalid_tool_arguments",
-			message:
-				state.stopReason === "max_tokens"
-					? "Upstream reached the output token limit inside a custom tool call's input"
-					: "Upstream returned invalid custom tool arguments; expected an input string",
-		},
-	};
+	return (
+		state.withheldCustomToolCall
+			? withheldToolCallTerminalStatus
+			: responsesTerminalStatus
+	)(state.stopReason, state.clientCappedOutput);
 }
 
 const MAX_ERROR_LABEL = 128;

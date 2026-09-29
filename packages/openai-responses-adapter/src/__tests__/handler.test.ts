@@ -1656,4 +1656,77 @@ describe("terminal status follows who capped the output", () => {
 			code: "context_length_exceeded",
 		});
 	});
+
+	describe("a non-streamed custom tool call without valid input", () => {
+		async function sendCustom(
+			stopReason: string,
+			extra: Record<string, unknown>,
+		): Promise<Response> {
+			const handleProxy: HandleProxyFn = async (req) => {
+				const sent = (await req.json()) as { tools: Array<{ name: string }> };
+				return Response.json({
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					model: "claude-haiku-4-5",
+					content: [
+						{ type: "text", text: "Running it." },
+						{
+							type: "tool_use",
+							id: "c",
+							name: sent.tools[0]?.name,
+							input: {},
+						},
+					],
+					stop_reason: stopReason,
+					stop_sequence: null,
+					usage: { input_tokens: 10, output_tokens: 5 },
+				});
+			};
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: "Hi",
+					tools: [{ type: "custom", name: "exec" }],
+					stream: false,
+					...extra,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+			return handleResponsesRequest(req, new URL(req.url), handleProxy, {});
+		}
+
+		test("cut off under the client's cap: 200 incomplete without the call", async () => {
+			const resp = await sendCustom("max_tokens", { max_output_tokens: 100 });
+			expect(resp.status).toBe(200);
+			const body = await resp.json();
+			expect(body).toMatchObject({
+				status: "incomplete",
+				incomplete_details: { reason: "max_output_tokens" },
+			});
+			expect(body.output.map((item: { type: string }) => item.type)).toEqual([
+				"message",
+			]);
+		});
+
+		test("cut off under the supplied cap: 502 invalid_tool_arguments", async () => {
+			const resp = await sendCustom("max_tokens", {});
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error).toMatchObject({
+				type: "api_error",
+				code: "invalid_tool_arguments",
+				message: expect.stringContaining("output token limit"),
+			});
+		});
+
+		test("in a finished reply: 502 invalid_upstream_response", async () => {
+			const resp = await sendCustom("tool_use", { max_output_tokens: 100 });
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error).toMatchObject({
+				type: "api_error",
+				code: "invalid_upstream_response",
+			});
+		});
+	});
 });

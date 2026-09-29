@@ -396,6 +396,60 @@ describe("tool translation identity and invalid output", () => {
 			});
 		});
 	});
+
+	describe("non-streamed custom tool input the reply did not finish", () => {
+		function translate(stopReason: string, clientCappedOutput: boolean) {
+			const ctx = createToolTranslation(request());
+			return translateAnthropicResponseToResponses(
+				{
+					id: "msg",
+					type: "message",
+					role: "assistant",
+					model: "m",
+					content: [
+						{ type: "text", text: "Running it." },
+						// What Anthropic reports for input it cut off mid-string.
+						{ type: "tool_use", id: "c", name: ctx.tools[1].name, input: {} },
+					],
+					stop_reason: stopReason,
+					stop_sequence: null,
+					usage: { input_tokens: 1, output_tokens: 7 },
+				},
+				"resp",
+				"alias",
+				ctx,
+				{ clientCappedOutput },
+			);
+		}
+
+		test("cut off under the client's cap: incomplete without the call", () => {
+			const result = translate("max_tokens", true);
+			expect(result).toMatchObject({
+				status: "incomplete",
+				incomplete_details: { reason: "max_output_tokens" },
+				usage: { output_tokens: 7 },
+			});
+			expect(result.output.map((item) => item.type)).toEqual(["message"]);
+		});
+
+		test("cut off under the supplied cap: failed without the call", () => {
+			const result = translate("max_tokens", false);
+			expect(result).toMatchObject({
+				status: "failed",
+				error: {
+					code: "invalid_tool_arguments",
+					message: expect.stringContaining("output token limit"),
+				},
+			});
+			expect(result.output.map((item) => item.type)).toEqual(["message"]);
+		});
+
+		test("malformed in a finished reply: throws", () => {
+			expect(() => translate("tool_use", true)).toThrow(
+				"expected an input string",
+			);
+		});
+	});
 });
 
 test("nested namespaces fail explicitly instead of losing their parent", () => {
