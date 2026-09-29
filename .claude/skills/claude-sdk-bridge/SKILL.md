@@ -284,7 +284,11 @@ made private, never deleted: no pid says whether a process still uses them.
 
 A Responses request whose only tool is a hosted `web_search` gets a real
 search: Claude Code's own WebSearch. The docs' "Hosted web search on Claude
-models" is the client contract.
+models" is the client contract. Claude Code gets the results back as a
+tool result, so its answer carries no `web_search_result_location`
+citations and the Responses reply no `url_citation` annotations (pi-web-search
+then reports 0 citations and relies on `action.sources`). Synthesizing
+annotations from URLs in the text was declined on 2026-09-29.
 
 - **Request.** The Responses adapter never puts the tool in the translated
   body (every other destination drops it, as before). `planHostedWebSearch`

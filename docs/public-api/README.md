@@ -267,7 +267,9 @@ text it informed, with `status` `completed` or `failed` and
 title}`) is present only when `include` names
 `web_search_call.action.sources`. A stream emits
 `response.web_search_call.in_progress`, `…searching` and, for a completed
-search, `…completed` for each item.
+search, `…completed` for each item. The answer text normally carries no
+`url_citation` annotations, because Claude Code's reply has no structured
+citations; read the sources from `action.sources`.
 
 | `tool_choice` | Effect |
 | --- | --- |
