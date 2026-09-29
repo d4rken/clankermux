@@ -181,6 +181,16 @@ pipeline. The client keeps executing its own tools.
   `resumeSessionAt` avoids that only for Claude Code's own transcript (a
   released park); a synthetic one is refused at that point ("No message
   found with message.uuid").
+- **Client tool calls in the reply.** A streamed `tool_use` reaches the
+  client only once its block stops with input that parses as a JSON object,
+  then whole (start, one `input_json_delta`, stop); only then is it the leg's
+  (`ReplyComposer`). One cut off mid-input (the stream died and Claude Code
+  fetches the message again) or truncated at a `max_tokens` stop is withheld,
+  and Claude Code's MCP call of it, if it makes one, gets an error result at
+  once (`cutOffResult`) instead of parking. A block starting while one is
+  buffered fails the reply with 502. So clients see no tool arguments stream
+  on bridged turns; text and thinking still do. A non-streamed message's
+  calls carry whole inputs and go out at once.
 - **Text sent with tool results** goes to Claude Code before the results,
   while it still waits on the MCP calls; it then sends it after them in the
   same model request. Sent after the results, it became a turn of its own
@@ -337,7 +347,8 @@ annotations from URLs in the text was declined on 2026-09-29.
   commentary with `searchCount: 0`, `is_error` (a hook denial included), or
   a missing or invalid output fails with `unavailable`. A call still
   unanswered at the reply's end fails the same way. A call becomes the
-  leg's only once its block completes: a streamed message cut off inside a
+  leg's only once its block completes, as a client tool call does (above):
+  a streamed message cut off inside a
   WebSearch input (Claude Code then fetches the call again, or not) drops
   that partial call, which never gets a result and never counts. At a new
   upstream message a forwarded block the cut left open is closed on the

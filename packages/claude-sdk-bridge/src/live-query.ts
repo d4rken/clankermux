@@ -27,6 +27,7 @@ import type {
 import type { LegResponse } from "./sse";
 import {
 	abortedResult,
+	cutOffResult,
 	type McpToolResult,
 	type ParkedCalls,
 	toMcpResult,
@@ -509,6 +510,24 @@ export class LiveQuery {
 					this.init.maxParkedCalls,
 				),
 			};
+	}
+
+	/**
+	 * A client tool call that never reached the client (its input did not
+	 * complete). Claude Code's call of it, parked already or still to come,
+	 * is answered with an error at once instead of waiting on the client.
+	 */
+	onToolUseWithheld(toolUseId: string): void {
+		this.init.parked.deliver(toolUseId, cutOffResult());
+	}
+
+	/** Claude Code's model stream cannot be relayed in order; the reply fails. */
+	onStreamFault(why: string): void {
+		this.init.log.warn(`SDK bridge turn ${this.turnId}: ${why}`);
+		this.pendingTeardown ??= {
+			reason: "error",
+			error: bridgeErrors.interleavedBlocks(why),
+		};
 	}
 
 	/** Claude Code called one of the client's tools; park it until the client answers. */

@@ -195,6 +195,19 @@ export function sideRequestToolResult(): McpToolResult {
 	};
 }
 
+/** What a call gets whose tool_use the client never saw: its input did not complete. */
+export function cutOffResult(): McpToolResult {
+	return {
+		content: [
+			{
+				type: "text",
+				text: "The tool call's input was cut off before it completed; call the tool again.",
+			},
+		],
+		isError: true,
+	};
+}
+
 export function abortedResult(reason: string): McpToolResult {
 	return {
 		content: [{ type: "text", text: `Tool call aborted (${reason})` }],

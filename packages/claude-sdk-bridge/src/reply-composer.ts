@@ -46,7 +46,31 @@ interface Accumulated {
 	text?: string;
 	id?: string;
 	name?: string;
-	json?: string;
+	input?: unknown;
+}
+
+/** A client tool call whose input is still streaming. */
+interface PendingToolUse {
+	/** Its upstream block index. */
+	index: number;
+	block: Block;
+	/** The client's name for the tool. */
+	name: string;
+	json: string;
+}
+
+/** A tool call's input as the model completed it: a JSON object, or nothing. */
+function parseToolInput(json: string): Record<string, unknown> | null {
+	// A call without arguments streams no input, or an empty delta.
+	if (json === "") return {};
+	try {
+		const input: unknown = JSON.parse(json);
+		return input !== null && typeof input === "object" && !Array.isArray(input)
+			? (input as Record<string, unknown>)
+			: null;
+	} catch {
+		return null;
+	}
 }
 
 /** One of Claude Code's WebSearch calls, shown to the client as Anthropic's server tool. */
@@ -63,7 +87,9 @@ interface Search {
  * a single message per request, so later messages of the same leg are merged
  * in with continued block indexes. Only the client's own tools are forwarded,
  * renamed back to the client's names: forwarding any other tool_use would
- * leave the client waiting on a call it cannot answer.
+ * leave the client waiting on a call it cannot answer. A streamed tool call
+ * goes out only once its block completes with an input that parses: the
+ * client would run one cut off mid-input, which Claude Code never runs.
  */
 export class ReplyComposer {
 	private sink: ((event: StreamEvent) => void) | null = null;
@@ -94,12 +120,24 @@ export class ReplyComposer {
 	private openOutputs = new Set<number>();
 	/** Searches of this leg whose result was a completed search. */
 	completedSearches = 0;
+	/** The client tool call whose input is streaming now; nothing of it went out. */
+	private pendingToolUse: PendingToolUse | null = null;
+	/** The model stream broke its one-block-at-a-time order; nothing more goes out. */
+	private faulted = false;
 
 	constructor(
 		private readonly opts: {
 			toolNames: ToolNames;
 			/** A client tool_use was forwarded; its id now names this turn. */
 			onToolUse: (id: string) => void;
+			/**
+			 * A client tool_use whose input never completed (cut off, or
+			 * truncated JSON) was not forwarded; Claude Code's call of it, if
+			 * it makes one, must not wait for the client.
+			 */
+			onToolUseWithheld?: (id: string) => void;
+			/** A block started while a tool call was still buffered: the reply cannot be composed. */
+			onStreamFault?: (why: string) => void;
 			newMessageId: () => string;
 			/** False for a side request, whose tool calls no client runs. */
 			forwardToolUse?: boolean;
@@ -129,6 +167,7 @@ export class ReplyComposer {
 
 	/** Start a new leg writing to `sink`. */
 	attach(sink: (event: StreamEvent) => void): void {
+		this.faulted = false;
 		this.sink = sink;
 		this.streaming = false;
 		this.legStarted = false;
@@ -146,6 +185,8 @@ export class ReplyComposer {
 		this.queuedResults = [];
 		this.openOutputs = new Set();
 		this.completedSearches = 0;
+		// A call an earlier leg left buffered never reaches this one's client.
+		this.withholdPendingToolUse();
 	}
 
 	detach(): void {
@@ -163,19 +204,21 @@ export class ReplyComposer {
 			.flatMap(([, block]): Block[] => {
 				if (block.type === "text")
 					return [{ type: "text", text: block.text ?? "" }];
-				if (block.type === "tool_use") {
-					let input: unknown = {};
-					try {
-						input = block.json ? JSON.parse(block.json) : {};
-					} catch {}
-					return [{ type: "tool_use", id: block.id, name: block.name, input }];
-				}
+				if (block.type === "tool_use")
+					return [
+						{
+							type: "tool_use",
+							id: block.id,
+							name: block.name,
+							input: block.input,
+						},
+					];
 				return [];
 			});
 	}
 
 	private emit(event: StreamEvent): void {
-		this.sink?.(event);
+		if (!this.faulted) this.sink?.(event);
 	}
 
 	private startMessage(message: Record<string, unknown>): void {
@@ -282,7 +325,7 @@ export class ReplyComposer {
 	}
 
 	private flushResults(): void {
-		if (this.openOutputs.size > 0 || !this.sink) return;
+		if (this.openOutputs.size > 0 || this.pendingToolUse || !this.sink) return;
 		for (const block of this.queuedResults.splice(0)) {
 			const index = this.nextIndex++;
 			this.emit({ type: "content_block_start", index, content_block: block });
@@ -290,24 +333,72 @@ export class ReplyComposer {
 		}
 	}
 
-	/** Open an output block for an upstream block; null when it is not forwarded. */
+	/** The client's name for a tool_use block it is to see; null for any other block. */
+	private clientToolName(block: Block): string | null {
+		if (block.type !== "tool_use" || this.opts.forwardToolUse === false)
+			return null;
+		return this.opts.toolNames.clientName(String(block.name ?? ""));
+	}
+
+	/**
+	 * A complete client tool call goes out whole, and only then is it the
+	 * leg's: the client runs what it is shown.
+	 */
+	private publishToolUse(
+		block: Block,
+		name: string,
+		input: Record<string, unknown>,
+		json: string,
+	): void {
+		const id = String(block.id);
+		this.forwardedThisMessage++;
+		this.legToolUseIds.push(id);
+		this.opts.onToolUse(id);
+		const index = this.nextIndex++;
+		this.accumulated.set(index, { type: "tool_use", id, name, input });
+		this.emit({
+			type: "content_block_start",
+			index,
+			content_block: { ...block, name, input: {} },
+		});
+		this.emit({
+			type: "content_block_delta",
+			index,
+			delta: { type: "input_json_delta", partial_json: json },
+		});
+		this.emit({ type: "content_block_stop", index });
+		this.flushResults();
+	}
+
+	/** The buffered tool call's block stopped: it goes out whole if its input parses. */
+	private completePendingToolUse(pending: PendingToolUse): void {
+		this.pendingToolUse = null;
+		const input = parseToolInput(pending.json);
+		if (input === null) this.withhold(pending);
+		else
+			this.publishToolUse(
+				pending.block,
+				pending.name,
+				input,
+				pending.json === "" ? "{}" : pending.json,
+			);
+	}
+
+	/** A buffered tool call that will never complete goes, unseen. */
+	private withholdPendingToolUse(): void {
+		const pending = this.pendingToolUse;
+		if (!pending) return;
+		this.pendingToolUse = null;
+		this.withhold(pending);
+	}
+
+	private withhold(pending: PendingToolUse): void {
+		this.opts.onToolUseWithheld?.(String(pending.block.id));
+		this.flushResults();
+	}
+
+	/** Open an output block for an upstream text or thinking block; null when it is not forwarded. */
 	private openBlock(block: Block): number | null {
-		let out: Block;
-		if (block.type === "tool_use") {
-			if (this.opts.forwardToolUse === false) return null;
-			const name = this.opts.toolNames.clientName(String(block.name ?? ""));
-			if (name === null) return null;
-			const id = String(block.id);
-			out = { ...block, name };
-			this.forwardedThisMessage++;
-			this.legToolUseIds.push(id);
-			this.opts.onToolUse(id);
-			const index = this.nextIndex++;
-			this.accumulated.set(index, { type: "tool_use", id, name, json: "" });
-			this.emit({ type: "content_block_start", index, content_block: out });
-			this.openOutputs.add(index);
-			return index;
-		}
 		if (!FORWARDED_BLOCKS.has(block.type)) return null;
 		const index = this.nextIndex++;
 		this.accumulated.set(index, { type: block.type, text: "" });
@@ -326,10 +417,12 @@ export class ReplyComposer {
 	 * A new upstream message, or the reply's end, while the last one was cut
 	 * off mid-block (a stream that failed, which Claude Code fetches again).
 	 * A forwarded block it left open is closed with what it carried; a
-	 * WebSearch call cut off in its input was never shown, and goes.
+	 * client tool call or WebSearch call cut off in its input was never
+	 * shown, and goes.
 	 */
 	private endCutOffBlocks(): void {
 		this.searchBlocks.clear();
+		this.withholdPendingToolUse();
 		for (const index of [...this.openOutputs].sort((a, b) => a - b))
 			this.closeBlock(index);
 	}
@@ -338,8 +431,6 @@ export class ReplyComposer {
 		const acc = this.accumulated.get(index);
 		if (acc && delta.type === "text_delta")
 			acc.text = (acc.text ?? "") + String(delta.text ?? "");
-		if (acc && delta.type === "input_json_delta")
-			acc.json = (acc.json ?? "") + String(delta.partial_json ?? "");
 		this.emit({ type: "content_block_delta", index, delta });
 	}
 
@@ -358,6 +449,7 @@ export class ReplyComposer {
 
 	/** One `stream_event` of the main thread. */
 	onStreamEvent(event: StreamEvent): UpstreamMessageEnd | null {
+		if (this.faulted) return null;
 		switch (event.type) {
 			case "message_start": {
 				const message = (event.message ?? {}) as Record<string, unknown>;
@@ -372,8 +464,30 @@ export class ReplyComposer {
 				return null;
 			}
 			case "content_block_start": {
+				// A model streams one block at a time; a block starting inside
+				// a buffered tool call could only be reordered around it.
+				const pending = this.pendingToolUse;
+				if (pending) {
+					this.pendingToolUse = null;
+					this.faulted = true;
+					this.opts.onStreamFault?.(
+						`block ${String(event.index)} started while the tool call in block ${pending.index} was still streaming`,
+					);
+					return null;
+				}
 				this.startMessage({});
 				const block = event.content_block as Block;
+				const toolName = this.clientToolName(block);
+				if (toolName !== null) {
+					this.pendingToolUse = {
+						index: event.index as number,
+						block,
+						name: toolName,
+						json: "",
+					};
+					this.indexMap.set(event.index as number, null);
+					return null;
+				}
 				if (this.isWebSearch(block)) {
 					this.searchBlocks.set(event.index as number, this.newSearch(block));
 					this.indexMap.set(event.index as number, null);
@@ -386,6 +500,12 @@ export class ReplyComposer {
 			case "content_block_delta": {
 				const search = this.searchBlocks.get(event.index as number);
 				const delta = event.delta as Record<string, unknown>;
+				const pending = this.pendingToolUse;
+				if (
+					pending?.index === (event.index as number) &&
+					delta.type === "input_json_delta"
+				)
+					pending.json += String(delta.partial_json ?? "");
 				if (search && delta.type === "input_json_delta")
 					search.json += String(delta.partial_json ?? "");
 				const out = this.indexMap.get(event.index as number);
@@ -393,6 +513,11 @@ export class ReplyComposer {
 				return null;
 			}
 			case "content_block_stop": {
+				const pending = this.pendingToolUse;
+				if (pending?.index === (event.index as number)) {
+					this.completePendingToolUse(pending);
+					return null;
+				}
 				const search = this.searchBlocks.get(event.index as number);
 				if (search) {
 					this.searchBlocks.delete(event.index as number);
@@ -412,6 +537,8 @@ export class ReplyComposer {
 				return null;
 			}
 			case "message_stop": {
+				// A tool call whose block never stopped did not complete.
+				this.withholdPendingToolUse();
 				this.streaming = false;
 				const delta = (this.heldDelta?.delta ?? {}) as {
 					stop_reason?: string | null;
@@ -448,15 +575,17 @@ export class ReplyComposer {
 				this.closeSearch(search);
 				continue;
 			}
+			if (block.type === "tool_use") {
+				// A message fetched without streaming carries each input whole.
+				const name = this.clientToolName(block);
+				const input = (block.input ?? {}) as Record<string, unknown>;
+				if (name !== null)
+					this.publishToolUse(block, name, input, JSON.stringify(input));
+				continue;
+			}
 			if (block.type === "text") {
 				start = { type: "text", text: "" };
 				delta = { type: "text_delta", text: block.text ?? "" };
-			} else if (block.type === "tool_use") {
-				start = { ...block, input: {} };
-				delta = {
-					type: "input_json_delta",
-					partial_json: JSON.stringify(block.input ?? {}),
-				};
 			} else if (block.type === "thinking") {
 				start = { type: "thinking", thinking: "", signature: "" };
 				this.openAndReplay(start, [
