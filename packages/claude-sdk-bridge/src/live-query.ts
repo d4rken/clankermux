@@ -496,6 +496,25 @@ export class LiveQuery {
 		if (outcome.status >= 400) void this.init.recorder.bump({ innerErrors: 1 });
 	}
 
+	/**
+	 * Whether `count` more client tool calls fit the per-turn parked-call
+	 * limit. When they do not, none of them goes out and the turn is torn
+	 * down with the limit's error.
+	 */
+	admitToolUses(count: number): boolean {
+		const total = this.toolUsesThisLeg + count;
+		if (total <= this.init.maxParkedCalls) return true;
+		this.pendingTeardown ??= {
+			reason: "limit",
+			error: bridgeErrors.limit(
+				"maxParkedCallsPerTurn",
+				total,
+				this.init.maxParkedCalls,
+			),
+		};
+		return false;
+	}
+
 	/** A forwarded client tool_use: counted against the per-turn parked-call limit. */
 	onToolUseForwarded(): void {
 		this.toolUsesThisLeg++;
@@ -651,6 +670,9 @@ export class LiveQuery {
 		// answers the leg instead.
 		if (!leg || this.pendingTeardown) return;
 		const composer = this.init.composer;
+		// What a cut-off message held goes out (or is withheld) before the
+		// leg's content and calls are read.
+		composer.closeCutOffMessage();
 		const toolUseIds = [...composer.legToolUseIds];
 		const content = composer.legContent();
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";

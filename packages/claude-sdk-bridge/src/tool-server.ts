@@ -200,7 +200,8 @@ export type WithheldReason =
 	| { kind: "cut_off" }
 	| { kind: "not_object" }
 	| { kind: "stop_reason"; stopReason: string }
-	| { kind: "sibling" };
+	| { kind: "sibling" }
+	| { kind: "limit" };
 
 /** What Claude Code's call of a tool_use the client never saw gets. */
 export function withheldResult(reason: WithheldReason): McpToolResult {
@@ -212,6 +213,8 @@ export function withheldResult(reason: WithheldReason): McpToolResult {
 		stop_reason: `The tool call was not delivered: the model's message ended with stop reason "${reason.kind === "stop_reason" ? reason.stopReason : ""}"; call the tool again.`,
 		sibling:
 			"The tool call was not delivered: another tool call in the same message did not complete; call the tools again.",
+		limit:
+			"The tool call was not delivered: the turn made more parallel tool calls than it may.",
 	}[reason.kind];
 	return { content: [{ type: "text", text }], isError: true };
 }

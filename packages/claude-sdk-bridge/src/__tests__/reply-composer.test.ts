@@ -8,7 +8,9 @@ import {
 import { sseFrame } from "../sse";
 import { ToolNames, type WithheldReason } from "../tool-server";
 
-function composer(opts: { webSearch?: boolean } = {}) {
+function composer(
+	opts: { webSearch?: boolean; admit?: (count: number) => boolean } = {},
+) {
 	const sent: StreamEvent[] = [];
 	const forwarded: string[] = [];
 	const withheld: Array<[string, WithheldReason]> = [];
@@ -24,6 +26,7 @@ function composer(opts: { webSearch?: boolean } = {}) {
 			calls.push(`withhold ${id}`);
 		},
 		onStreamFault: () => calls.push("fault"),
+		admitToolUses: opts.admit,
 		newMessageId: () => "msg_leg",
 		webSearch: opts.webSearch,
 	});
@@ -528,6 +531,197 @@ describe("ReplyComposer: client tool calls in non-streamed messages", () => {
 		expect(withheld).toEqual([
 			["toolu_a", { kind: "sibling" }],
 			["toolu_b", { kind: "not_object" }],
+		]);
+	});
+
+	it("takes a call without an input as not an object", () => {
+		const { c, sent, withheld } = composer();
+		c.onAssistantMessage(
+			envelope(
+				[{ type: "tool_use", id: "toolu_a", name: "mcp__c__read" }],
+				"tool_use",
+			),
+		);
+		expect(shown(sent)).toEqual([]);
+		expect(withheld).toEqual([["toolu_a", { kind: "not_object" }]]);
+	});
+
+	it("counts a null-stop envelope's withheld calls as the last message's", () => {
+		const { c } = composer();
+		c.onAssistantMessage(envelope([read("toolu_a", null)], null));
+		expect(c.lastMessageWithheldCalls).toBe(true);
+		c.onAssistantMessage(envelope([{ type: "text", text: "ok" }], "end_turn"));
+		expect(c.lastMessageWithheldCalls).toBe(false);
+	});
+});
+
+describe("ReplyComposer: the same inputs streamed and not", () => {
+	for (const [label, bad] of [
+		["null", null],
+		["an array", ["a"]],
+		["a number", 5],
+		["a string", "a"],
+	] as const)
+		it(`withholds ${label} with its valid sibling either way`, () => {
+			const expected = [
+				["toolu_a", { kind: "sibling" }],
+				["toolu_b", { kind: "not_object" }],
+			];
+			const streamed = composer();
+			feed(streamed.c, [
+				messageStart(),
+				...call(0, "toolu_a", '{"path":"a"}'),
+				...call(1, "toolu_b", JSON.stringify(bad)),
+				...messageEnd("tool_use"),
+			]);
+			expect(streamed.withheld).toEqual(expected as never);
+			expect(shown(streamed.sent)).toEqual([]);
+			const whole = composer();
+			whole.c.onAssistantMessage({
+				id: `msg_${crypto.randomUUID()}`,
+				content: [
+					{
+						type: "tool_use",
+						id: "toolu_a",
+						name: "mcp__c__read",
+						input: { path: "a" },
+					},
+					{ type: "tool_use", id: "toolu_b", name: "mcp__c__read", input: bad },
+				],
+				stop_reason: "tool_use",
+			});
+			expect(whole.withheld).toEqual(expected as never);
+			expect(shown(whole.sent)).toEqual([]);
+		});
+});
+
+describe("ReplyComposer: round-two guards", () => {
+	it("faults on a client tool call starting inside a block it does not forward", () => {
+		const { c, sent, calls } = composer();
+		feed(c, [
+			messageStart(),
+			{
+				type: "content_block_start",
+				index: 0,
+				content_block: {
+					type: "tool_use",
+					id: "toolu_x",
+					name: "Bash",
+					input: {},
+				},
+			},
+			json(0, '{"command":'),
+			toolStart(1, "toolu_a"),
+		]);
+		expect(calls).toEqual(["withhold toolu_a", "fault"]);
+		expect(shown(sent)).toEqual([]);
+	});
+
+	it("does not fault on a client tool call after an unforwarded block stopped", () => {
+		const { c, sent, calls } = composer();
+		feed(c, [
+			messageStart(),
+			{
+				type: "content_block_start",
+				index: 0,
+				content_block: {
+					type: "tool_use",
+					id: "toolu_x",
+					name: "Bash",
+					input: {},
+				},
+			},
+			json(0, "{}"),
+			stop(0),
+			...call(1, "toolu_a", "{}"),
+			...messageEnd("tool_use"),
+		]);
+		expect(calls).toEqual(["forward toolu_a"]);
+		expect(shown(sent)).toEqual(["tool_use:toolu_a"]);
+	});
+
+	it("withholds every call of a message the limit refuses, sending none", () => {
+		const asked: number[] = [];
+		const { c, sent, withheld } = composer({
+			admit: (count) => {
+				asked.push(count);
+				return false;
+			},
+		});
+		const end = feed(c, [
+			messageStart(),
+			...call(0, "toolu_a", "{}"),
+			...call(1, "toolu_b", "{}"),
+			...messageEnd("tool_use"),
+		]);
+		expect(asked).toEqual([2]);
+		expect(end).toEqual({ kind: "continue", stopReason: "tool_use" });
+		expect(shown(sent)).toEqual([]);
+		expect(withheld).toEqual([
+			["toolu_a", { kind: "limit" }],
+			["toolu_b", { kind: "limit" }],
+		]);
+		expect(c.legToolUseIds).toEqual([]);
+		c.onAssistantMessage({
+			id: "msg_whole",
+			content: [
+				{ type: "tool_use", id: "toolu_c", name: "mcp__c__read", input: {} },
+			],
+			stop_reason: null,
+		});
+		expect(asked).toEqual([2, 1]);
+		expect(shown(sent)).toEqual([]);
+		expect(withheld.at(-1)).toEqual(["toolu_c", { kind: "limit" }]);
+	});
+
+	it("releases a cut-off message's held text into the leg's content before the reply ends", () => {
+		const { c, sent, withheld } = composer();
+		feed(c, [
+			messageStart(),
+			...call(0, "toolu_a", "{}"),
+			textStart(1),
+			text(1, "after"),
+			stop(1),
+		]);
+		expect(c.legContent()).toEqual([]);
+		expect(c.lastMessageWithheldCalls).toBe(false);
+		c.closeCutOffMessage();
+		expect(c.legContent()).toEqual([{ type: "text", text: "after" }]);
+		expect(shown(sent)).toEqual(["text"]);
+		expect(withheld).toEqual([["toolu_a", CUT]]);
+		expect(c.lastMessageWithheldCalls).toBe(true);
+	});
+
+	it("sends a held search's result right after its call", () => {
+		const { c, sent } = composer({ webSearch: true });
+		feed(c, [
+			messageStart(),
+			...call(0, "toolu_a", "{}"),
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: {
+					type: "tool_use",
+					id: "toolu_ws",
+					name: "WebSearch",
+					input: {},
+				},
+			},
+			json(1, '{"query":"q"}'),
+			stop(1),
+			...call(2, "toolu_b", "{}"),
+		]);
+		c.onWebSearchResult("toolu_ws", {
+			status: "completed",
+			sources: [{ url: "https://a.test", title: "a" }],
+			searchCount: 1,
+		});
+		feed(c, messageEnd("tool_use"));
+		expect(shown(sent)).toEqual([
+			"tool_use:toolu_a",
+			"server_tool_use:toolu_ws",
+			"web_search_tool_result",
+			"tool_use:toolu_b",
 		]);
 	});
 });

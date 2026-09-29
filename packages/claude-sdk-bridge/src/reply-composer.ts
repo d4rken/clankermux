@@ -126,6 +126,8 @@ interface Search {
 	json: string;
 	/** Its result is queued or sent. */
 	answered: boolean;
+	/** Its `server_tool_use` went out; its result may follow. */
+	shown: boolean;
 }
 
 /**
@@ -175,6 +177,7 @@ export class ReplyComposer {
 	/** Input and cache counts of the leg's latest model call. */
 	private lastInputUsage: Record<string, number> = {};
 	private forwardedThisMessage = 0;
+	/** Client calls the current (or last) model message withheld. */
 	private withheldThisMessage = 0;
 	private readonly streamedIds = new Set<string>();
 	private streaming = false;
@@ -182,8 +185,6 @@ export class ReplyComposer {
 	/** tool_use ids handed to the client in the current leg. */
 	legToolUseIds: string[] = [];
 	lastStopReason: string | null = null;
-	/** The last model message to end withheld client tool calls. */
-	lastMessageWithheldCalls = false;
 	/** The leg's WebSearch calls the client was shown, by tool_use id. */
 	private searches = new Map<string, Search>();
 	/**
@@ -192,7 +193,9 @@ export class ReplyComposer {
 	 */
 	private searchBlocks = new Map<number, Search>();
 	/** Results waiting for the output blocks open now to close. */
-	private queuedResults: Block[] = [];
+	private queuedResults: Array<{ search: Search; block: Block }> = [];
+	/** Upstream blocks of the current message started and not yet stopped, forwarded or not. */
+	private openUpstream = new Set<number>();
 	/** Forwarded output blocks started and not yet stopped. */
 	private openOutputs = new Set<number>();
 	/** Searches of this leg whose result was a completed search. */
@@ -212,6 +215,11 @@ export class ReplyComposer {
 			 * if it makes one, must not wait for the client.
 			 */
 			onToolUseWithheld?: (id: string, reason: WithheldReason) => void;
+			/**
+			 * Whether `count` more client tool calls fit the leg. False
+			 * withholds every call of the message; the caller ends the leg.
+			 */
+			admitToolUses?: (count: number) => boolean;
 			/** Blocks overlapped around a client tool call: the reply cannot be composed. */
 			onStreamFault?: (why: string) => void;
 			newMessageId: () => string;
@@ -259,16 +267,30 @@ export class ReplyComposer {
 		this.accumulated = new Map();
 		this.legToolUseIds = [];
 		this.lastStopReason = null;
-		this.lastMessageWithheldCalls = false;
 		this.searches = new Map();
 		this.searchBlocks = new Map();
 		this.queuedResults = [];
 		this.openOutputs = new Set();
+		this.openUpstream = new Set();
 		this.completedSearches = 0;
 	}
 
 	detach(): void {
 		this.sink = null;
+	}
+
+	/** The leg's last model message withheld client tool calls, whichever path withheld them. */
+	get lastMessageWithheldCalls(): boolean {
+		return this.withheldThisMessage > 0;
+	}
+
+	/**
+	 * The leg's reply is ending: a message cut off mid-way gives up what it
+	 * held now, so the leg's content and withheld calls are final before
+	 * anyone reads them.
+	 */
+	closeCutOffMessage(): void {
+		this.endCutOffBlocks();
 	}
 
 	/**
@@ -332,7 +354,7 @@ export class ReplyComposer {
 	}
 
 	private newSearch(block: Block): Search {
-		return { id: String(block.id), json: "", answered: false };
+		return { id: String(block.id), json: "", answered: false, shown: false };
 	}
 
 	/** A complete WebSearch call is the leg's, and its result is taken. */
@@ -347,6 +369,7 @@ export class ReplyComposer {
 	 * lists the bridge set.
 	 */
 	private emitSearch(search: Search): void {
+		search.shown = true;
 		let input: unknown = null;
 		try {
 			input = search.json ? JSON.parse(search.json) : null;
@@ -393,31 +416,45 @@ export class ReplyComposer {
 		search.answered = true;
 		if (outcome.status === "completed") this.completedSearches++;
 		this.queuedResults.push({
-			type: "web_search_tool_result",
-			tool_use_id: id,
-			content:
-				outcome.status === "completed"
-					? outcome.sources.map((s) => ({
-							type: "web_search_result",
-							url: s.url,
-							title: s.title,
-						}))
-					: {
-							type: "web_search_tool_result_error",
-							error_code: outcome.errorCode,
-						},
+			search,
+			block: {
+				type: "web_search_tool_result",
+				tool_use_id: id,
+				content:
+					outcome.status === "completed"
+						? outcome.sources.map((s) => ({
+								type: "web_search_result",
+								url: s.url,
+								title: s.title,
+							}))
+						: {
+								type: "web_search_tool_result_error",
+								error_code: outcome.errorCode,
+							},
+			},
 		});
 		this.flushResults();
 		return true;
 	}
 
+	/** Queued results go out once no block is open or held, each after its own call. */
 	private flushResults(): void {
 		if (this.openOutputs.size > 0 || this.held.length > 0 || !this.sink) return;
-		for (const block of this.queuedResults.splice(0)) {
+		const waiting: typeof this.queuedResults = [];
+		for (const queued of this.queuedResults.splice(0)) {
+			if (!queued.search.shown) {
+				waiting.push(queued);
+				continue;
+			}
 			const index = this.nextIndex++;
-			this.emit({ type: "content_block_start", index, content_block: block });
+			this.emit({
+				type: "content_block_start",
+				index,
+				content_block: queued.block,
+			});
 			this.emit({ type: "content_block_stop", index });
 		}
+		this.queuedResults = waiting;
 	}
 
 	/** The client's name for a tool_use block it is to see; null for any other block. */
@@ -470,14 +507,18 @@ export class ReplyComposer {
 	): void {
 		const held = this.held;
 		if (!held.length) return;
+		this.held = [];
 		const tools = held.filter((h) => h.kind === "tool");
 		const inputs = tools.map((t) =>
 			t.stopped && !end.cutOff ? streamedToolInput(t.json) : CUT_OFF,
 		);
-		const reasons = withheldReasons(
-			inputs,
-			!end.cutOff && end.stopReason === "tool_use",
-			end.cutOff ? null : end.stopReason,
+		const reasons = this.admitted(
+			withheldReasons(
+				inputs,
+				!end.cutOff && end.stopReason === "tool_use",
+				end.cutOff ? null : end.stopReason,
+			),
+			inputs.length,
 		);
 		let call = 0;
 		for (const item of held) {
@@ -496,8 +537,20 @@ export class ReplyComposer {
 				this.closeBlock(out);
 			} else if (item.stopped) this.emitSearch(item.search);
 		}
-		this.held = [];
 		this.flushResults();
+	}
+
+	/**
+	 * `reasons` for a message's calls, or the limit's when publishing them
+	 * would take the leg past it: then none goes out.
+	 */
+	private admitted(
+		reasons: WithheldReason[] | null,
+		calls: number,
+	): WithheldReason[] | null {
+		if (reasons || calls === 0 || (this.opts.admitToolUses?.(calls) ?? true))
+			return reasons;
+		return Array.from({ length: calls }, () => ({ kind: "limit" as const }));
 	}
 
 	/** Held blocks that will never reach the client go; their calls are withheld. */
@@ -556,8 +609,6 @@ export class ReplyComposer {
 
 	private endOfUpstreamMessage(stopReason: string | null): UpstreamMessageEnd {
 		this.lastStopReason = stopReason;
-		this.lastMessageWithheldCalls = this.withheldThisMessage > 0;
-		this.withheldThisMessage = 0;
 		const forwarded = this.forwardedThisMessage;
 		this.forwardedThisMessage = 0;
 		if (stopReason === "tool_use")
@@ -581,6 +632,7 @@ export class ReplyComposer {
 				const message = (event.message ?? {}) as Record<string, unknown>;
 				if (typeof message.id === "string") this.streamedIds.add(message.id);
 				this.endCutOffBlocks();
+				this.openUpstream = new Set();
 				this.streaming = true;
 				this.indexMap = new Map();
 				this.heldDelta = null;
@@ -611,6 +663,7 @@ export class ReplyComposer {
 			}
 			case "content_block_stop": {
 				const index = event.index as number;
+				this.openUpstream.delete(index);
 				const held = this.heldAt(index);
 				if (held) {
 					held.stopped = true;
@@ -662,10 +715,9 @@ export class ReplyComposer {
 				`block ${index} started while the client tool call in block ${open.index} was still streaming`,
 			);
 		const toolName = this.clientToolName(block);
-		if (
-			toolName !== null &&
-			(open || this.openOutputs.size > 0 || this.searchBlocks.size > 0)
-		) {
+		const overlaps = this.openUpstream.size > 0;
+		this.openUpstream.add(index);
+		if (toolName !== null && overlaps) {
 			this.held.push({
 				kind: "tool",
 				index,
@@ -727,6 +779,7 @@ export class ReplyComposer {
 		const id = typeof message.id === "string" ? message.id : null;
 		if (id && this.streamedIds.has(id)) return null;
 		this.endCutOffBlocks();
+		this.openUpstream = new Set();
 		this.withheldThisMessage = 0;
 		this.streaming = false;
 		this.startMessage(message);
@@ -738,15 +791,19 @@ export class ReplyComposer {
 		const inputs = content
 			.filter((block) => this.clientToolName(block) !== null)
 			.map((block): ToolInput => {
-				const input = block.input ?? {};
+				// The Messages API always sends a call's input, `{}` without arguments.
+				const input = block.input;
 				return isPlainObject(input)
 					? { ok: true, input, json: JSON.stringify(input) }
 					: { ok: false, reason: { kind: "not_object" } };
 			});
-		const reasons = withheldReasons(
-			inputs,
-			stopReason === null || stopReason === "tool_use",
-			stopReason,
+		const reasons = this.admitted(
+			withheldReasons(
+				inputs,
+				stopReason === null || stopReason === "tool_use",
+				stopReason,
+			),
+			inputs.length,
 		);
 		let call = 0;
 		for (const block of content) {

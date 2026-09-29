@@ -193,12 +193,16 @@ pipeline. The client keeps executing its own tools.
   without `message_stop` withholds all its calls: Claude Code discards it
   and fetches it again, and a call shown from it would run twice. A
   non-streamed envelope follows the same rule with `tool_use` or no stop
-  reason. Claude Code's MCP call of a withheld call gets an error result at
-  once saying why (`withheldResult`: cut off, not an object, the stop
-  reason, or a sibling's failure). The call and that result stay in Claude
-  Code's own transcript and the client never sees them, as with WebSearch
-  calls. A block starting inside a client call, or a client call starting
-  inside another open block, fails the reply with 502
+  reason; a call without an `input` object (absent, null, an array, a
+  primitive) is not an object there either. A message whose calls would
+  take the leg past `maxParkedCallsPerTurn` sends none of them, and the
+  turn fails with the limit's 400. Claude Code's MCP call of a withheld call
+  gets an error result at once saying why (`withheldResult`: cut off, not
+  an object, the stop reason, a sibling's failure, the limit). The call and
+  that result stay in Claude Code's own transcript and the client never
+  sees them, as with WebSearch calls. A block starting inside a client
+  call, or a client call starting inside any other open block (forwarded
+  or not, Claude Code's own tools included), fails the reply with 502
   `sdk_bridge_interleaved_blocks`. So clients see no tool arguments stream
   on bridged turns; text and thinking still do.
 - **Text sent with tool results** goes to Claude Code before the results,

@@ -1222,6 +1222,60 @@ describe("parked tool calls", () => {
 		});
 	});
 
+	describe("a reply whose last message withheld its calls", () => {
+		const SETTLED = "with tool calls the client will not answer";
+
+		it("settles when a null-stop envelope withheld them", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			t.query.emit(
+				initMessage(),
+				assistantMessage([
+					{ type: "text", text: "Reading." },
+					{
+						type: "tool_use",
+						id: "toolu_n",
+						name: "mcp__c__read",
+						input: null,
+					},
+				]),
+			);
+			expect((await t.query.callTool("toolu_n", "read", {})).isError).toBe(
+				true,
+			);
+			t.query.emit(resultMessage());
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "Reading." }]);
+			await settled(h);
+			const row = h.repo.turns.get(t.plan.turnId);
+			expect(row?.status).toBe("completed");
+			expect(String(row?.errorMessage)).toContain(SETTLED);
+		});
+
+		it("settles when the reply's end withheld a cut-off message's calls, and keeps the text it held", async () => {
+			const h = harness();
+			const t = await start(h, { tools, messages: [first] });
+			const whole = streamedMessage([
+				{
+					type: "tool_use",
+					id: "toolu_c",
+					name: "mcp__c__read",
+					input: { path: "c" },
+				},
+				{ type: "text", text: "after" },
+			]);
+			// Everything up to the text's content_block_stop: no message_stop.
+			t.query.emit(initMessage(), ...whole.slice(0, 7), resultMessage());
+			const r = await reply(t.response);
+			expect(r.content).toEqual([{ type: "text", text: "after" }]);
+			expect(JSON.stringify(r.events)).not.toContain("toolu_c");
+			await settled(h);
+			const row = h.repo.turns.get(t.plan.turnId);
+			expect(row?.status).toBe("completed");
+			expect(String(row?.errorMessage)).toContain(SETTLED);
+		});
+	});
+
 	it("ends a non-streamed reply whose tool call Claude Code made before the envelope arrived", async () => {
 		const h = harness();
 		const t = await start(h, { tools, messages: [first] });
@@ -1903,6 +1957,43 @@ describe("parked tool calls", () => {
 				message: "SDK bridge limit maxParkedCallsPerTurn exceeded: 2 > 1",
 			},
 		});
+		// None of the message's calls went out before the limit refused them.
+		expect(JSON.stringify(r.events)).not.toContain("toolu_");
+		await settled(h);
+		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("failed");
+	});
+
+	it("stops a turn whose non-streamed message issues more calls than the limit, sending none", async () => {
+		const h = harness({ limits: () => ({ maxParkedCallsPerTurn: 1 }) });
+		const t = await start(h, { tools, messages: [first] });
+		t.query.emit(
+			initMessage(),
+			assistantMessage(
+				[
+					{ type: "text", text: "Reading both." },
+					{
+						type: "tool_use",
+						id: "toolu_1",
+						name: "mcp__c__read",
+						input: {},
+					},
+					{
+						type: "tool_use",
+						id: "toolu_2",
+						name: "mcp__c__read",
+						input: {},
+					},
+				],
+				{ stopReason: "tool_use" },
+			),
+		);
+		const r = await reply(t.response);
+		expect(r.errors[0]?.data).toMatchObject({
+			error: {
+				message: "SDK bridge limit maxParkedCallsPerTurn exceeded: 2 > 1",
+			},
+		});
+		expect(JSON.stringify(r.events)).not.toContain("toolu_");
 		await settled(h);
 		expect(h.repo.turns.get(t.plan.turnId)?.status).toBe("failed");
 	});
