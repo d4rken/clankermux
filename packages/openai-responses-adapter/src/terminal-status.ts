@@ -7,8 +7,17 @@ export type ResponsesTerminalStatus =
 
 export const CONTEXT_WINDOW_EXCEEDED: ResponsesError = {
 	code: "context_length_exceeded",
-	message: "The model's context window filled up before the reply finished",
+	message:
+		"Your input exceeds the context window of this model. Please adjust your input and try again.",
 };
+
+/** Whether a reply with this `stop_reason` may end inside a tool call's input. */
+export function stoppedMidOutput(stopReason: string | null | undefined) {
+	return (
+		stopReason === "max_tokens" ||
+		stopReason === "model_context_window_exceeded"
+	);
+}
 
 /**
  * The Responses status of a reply that ended with Anthropic's `stop_reason`.

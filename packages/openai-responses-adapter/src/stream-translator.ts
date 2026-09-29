@@ -121,6 +121,33 @@ function finishSearch(
 	);
 }
 
+function emitToolCallAdded(
+	controller: TransformStreamDefaultController,
+	state: State,
+	outputIdx: number,
+	callId: string,
+	identity: ToolIdentity,
+): void {
+	emitSse(
+		controller,
+		"response.output_item.added",
+		{
+			type: "response.output_item.added",
+			output_index: outputIdx,
+			item: {
+				type: identity.type === "custom" ? "custom_tool_call" : "function_call",
+				id: `${state.responseId}_fc_${outputIdx}`,
+				call_id: callId,
+				name: identity.name,
+				...(identity.namespace ? { namespace: identity.namespace } : {}),
+				...(identity.type === "custom" ? { input: "" } : { arguments: "" }),
+				status: "in_progress",
+			},
+		},
+		state,
+	);
+}
+
 const STREAM_TRUNCATED: ResponsesError = {
 	code: "stream_truncated",
 	message: "Upstream stream ended before message_stop",
@@ -219,6 +246,16 @@ function processEvent(
 	}
 
 	if (eventType === "content_block_start") {
+		// A reply is cut off only in its last block, so a withheld call with a
+		// block after it was malformed. Nothing after it may reach the client.
+		if (state.withheldCustomToolCall) {
+			emitTerminal(
+				controller,
+				state,
+				withheldToolCallTerminalStatus(null, state.clientCappedOutput),
+			);
+			return;
+		}
 		const blockIndex = data.index as number;
 		const contentBlock = data.content_block as Record<string, unknown>;
 
@@ -332,25 +369,16 @@ function processEvent(
 						? JSON.stringify(contentBlock.input)
 						: "",
 			});
-			emitSse(
-				controller,
-				"response.output_item.added",
-				{
-					type: "response.output_item.added",
-					output_index: outputIdx,
-					item: {
-						type:
-							identity.type === "custom" ? "custom_tool_call" : "function_call",
-						id: `${state.responseId}_fc_${outputIdx}`,
-						call_id: contentBlock.id as string,
-						name: identity.name,
-						...(identity.namespace ? { namespace: identity.namespace } : {}),
-						...(identity.type === "custom" ? { input: "" } : { arguments: "" }),
-						status: "in_progress",
-					},
-				},
-				state,
-			);
+			// A custom call's input streams no deltas, so it is announced whole
+			// at its content_block_stop, and only if that input parses.
+			if (identity.type !== "custom")
+				emitToolCallAdded(
+					controller,
+					state,
+					outputIdx,
+					contentBlock.id as string,
+					identity,
+				);
 		}
 		return;
 	}
@@ -517,6 +545,7 @@ function processEvent(
 					state.withheldCustomToolCall = true;
 					return;
 				}
+				emitToolCallAdded(controller, state, outputIdx, tool.callId, identity);
 				emitSse(
 					controller,
 					"response.custom_tool_call_input.delta",
@@ -679,9 +708,13 @@ export function translateAnthropicStreamToResponses(
 	tools?: ToolTranslation,
 	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
 ): Response {
-	if (!anthropicResponse.body) {
+	if (!anthropicResponse.body && !anthropicResponse.ok) {
 		return new Response(null, { status: anthropicResponse.status });
 	}
+	// A successful reply without a body is one that ended before it began.
+	const upstreamBody =
+		anthropicResponse.body ??
+		new ReadableStream<Uint8Array>({ start: (c) => c.close() });
 
 	// Per-request decoder: TextDecoder is stateful (buffers incomplete UTF-8
 	// sequences across chunks), so a shared singleton would corrupt concurrent streams.
@@ -711,7 +744,7 @@ export function translateAnthropicStreamToResponses(
 		citationsByBlock: new Map(),
 	};
 
-	const transformedBody = anthropicResponse.body.pipeThrough(
+	const transformedBody = upstreamBody.pipeThrough(
 		new TransformStream<Uint8Array, Uint8Array>({
 			transform(chunk, controller) {
 				try {

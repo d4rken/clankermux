@@ -1720,6 +1720,17 @@ describe("terminal status follows who capped the output", () => {
 			});
 		});
 
+		test("cut off by the context window: 400 context_length_exceeded", async () => {
+			const resp = await sendCustom("model_context_window_exceeded", {});
+			expect(resp.status).toBe(400);
+			expect((await resp.json()).error).toEqual({
+				message:
+					"Your input exceeds the context window of this model. Please adjust your input and try again.",
+				type: "invalid_request_error",
+				code: "context_length_exceeded",
+			});
+		});
+
 		test("in a finished reply: 502 invalid_upstream_response", async () => {
 			const resp = await sendCustom("tool_use", { max_output_tokens: 100 });
 			expect(resp.status).toBe(502);

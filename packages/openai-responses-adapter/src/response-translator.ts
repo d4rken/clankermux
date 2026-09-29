@@ -6,6 +6,7 @@ import {
 } from "./hosted-web-search";
 import {
 	responsesTerminalStatus,
+	stoppedMidOutput,
 	withheldToolCallTerminalStatus,
 } from "./terminal-status";
 import { customToolInput, type ToolTranslation } from "./tool-translation";
@@ -89,9 +90,9 @@ export function translateAnthropicResponseToResponses(
 				try {
 					input = customToolInput(block.input);
 				} catch (error) {
-					// Only input the output limit cut off is withheld; any other is
+					// Only input the reply was cut off in is withheld; any other is
 					// an upstream fault.
-					if (resp.stop_reason !== "max_tokens") throw error;
+					if (!stoppedMidOutput(resp.stop_reason)) throw error;
 					withheldCustomToolCall = true;
 					continue;
 				}

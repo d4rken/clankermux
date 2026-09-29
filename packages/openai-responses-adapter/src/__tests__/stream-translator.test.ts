@@ -1055,7 +1055,9 @@ describe("terminal status", () => {
 				status: "failed",
 				error: {
 					code: "context_length_exceeded",
-					message: expect.stringContaining("context window"),
+					// The wording clients match to recognize an overflow.
+					message:
+						"Your input exceeds the context window of this model. Please adjust your input and try again.",
 				},
 				usage: { input_tokens: 9, output_tokens: 4 },
 			});
@@ -1140,6 +1142,21 @@ describe("terminal status", () => {
 		const terminal = await terminalOf(new Response(""));
 		expect(terminal.event).toBe("response.failed");
 		expect(terminal.data.response.output).toEqual([]);
+	});
+
+	test("a successful response without a body fails as truncated", async () => {
+		const translated = translateAnthropicStreamToResponses(
+			new Response(null, { status: 200 }),
+			"resp_t",
+			"test-model",
+		);
+		expect(translated.status).toBe(200);
+		expect(translated.headers.get("content-type")).toBe("text/event-stream");
+		const events = await collectSseEvents(translated);
+		expect(events.map((event) => event.event)).toEqual(["response.failed"]);
+		expect(events[0]?.data).toMatchObject({
+			response: { status: "failed", error: { code: "stream_truncated" } },
+		});
 	});
 
 	for (const stopReason of [
