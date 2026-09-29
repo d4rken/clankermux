@@ -22,7 +22,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import {
+	SDK_BRIDGE_HISTORY_HEADER,
+	type SdkBridgeTurnMeta,
+} from "@clankermux/types";
 import { parkTurnIdentity } from "../released-parks";
 import {
 	assistantMessage,
@@ -1027,6 +1030,101 @@ describe("across a restart", () => {
 		);
 		expect((await finishResumed(b, q2, response)).status).toBe(200);
 		expect(repo.turns.get(p.turnId)?.status).toBe("completed");
+	});
+
+	describe("keeps the park's client session for the conversation it resumes", () => {
+		const session = {
+			affinityScope: "client_session",
+			affinityKey: "sess-restart",
+		} as const;
+		/** A pi compaction: a new first message, fewer messages than stored. */
+		const compacted: Msg[] = [
+			{
+				role: "user",
+				content:
+					"The conversation history before this point was compacted into the following summary: read",
+			},
+			{ role: "assistant", content: [{ type: "text", text: "kept" }] },
+			{ role: "user", content: "next" },
+		];
+
+		/** A scoped turn released by one bridge and resumed to the end by a new one. */
+		async function resumedAfterRestart(
+			resumeMeta: Partial<SdkBridgeTurnMeta>,
+			change?: (descriptor: Record<string, unknown>) => void,
+		) {
+			const workRoot = tempRoot();
+			const repo = memoryTurnRepo();
+			const parkRepo = memoryParkRepo(repo.turns);
+			const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+			const p = await parkTurn(a, { meta: session });
+			await released(a, p);
+			await a.bridge.dispose();
+			const park = parkRepo.parks.get(p.turnId);
+			if (change && park) {
+				const descriptor = JSON.parse(park.descriptor) as Record<
+					string,
+					unknown
+				>;
+				change(descriptor);
+				park.descriptor = JSON.stringify(descriptor);
+			}
+
+			const b = await releaseHarness({ workRoot, repo, parkRepo });
+			expect(b.bridge.status().releasedParks).toBe(1);
+			const response = answer(b, p, results(p), resumeMeta);
+			const q2 = await b.sdk.next();
+			expect((await finishResumed(b, q2, response)).status).toBe(200);
+			expect(repo.turns.get(p.turnId)?.status).toBe("completed");
+			await Bun.sleep(10);
+			return b;
+		}
+
+		/** The history header of a turn started on `h` with `messages`. */
+		async function historyOf(h: Harness, messages: Msg[]) {
+			const response = h.bridge.startTurn({
+				request: messagesRequest({ tools: [READ_TOOL], messages }),
+				plan: makePlan(),
+				meta: makeMeta(session),
+				signal: new AbortController().signal,
+			});
+			const query = await h.sdk.next();
+			query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "after" }]),
+				resultMessage(),
+			);
+			return (await response).headers.get(SDK_BRIDGE_HISTORY_HEADER);
+		}
+
+		it("so a compaction right after the resume is labelled one", async () => {
+			const b = await resumedAfterRestart(session);
+			expect(await historyOf(b, compacted)).toBe(
+				"rebuild_transcript; reason=compaction",
+			);
+		});
+
+		it("whatever session headers the results arrive with", async () => {
+			for (const meta of [
+				{},
+				{ affinityScope: "client_session", affinityKey: "sess-other" },
+			] as const) {
+				const b = await resumedAfterRestart(meta);
+				expect(await historyOf(b, compacted)).toBe(
+					"rebuild_transcript; reason=compaction",
+				);
+			}
+		});
+
+		it("and still resumes a park stored before it kept one", async () => {
+			const b = await resumedAfterRestart(session, (descriptor) => {
+				delete descriptor.scopeKey;
+			});
+			// Without the scope a compaction cannot be told from a new start.
+			expect(await historyOf(b, compacted)).toBe(
+				"rebuild_transcript; reason=unknown",
+			);
+		});
 	});
 
 	it("recovers every record state and leaves only resumable parks", async () => {

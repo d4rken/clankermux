@@ -1188,6 +1188,7 @@ export function createClaudeSdkBridge(
 		systemPrompt: SystemPromptDecision,
 		startedAt: number,
 		history: SdkBridgeTurnHistory,
+		scopeKey: string | null,
 	): ResumeDescriptor {
 		return {
 			v: 1,
@@ -1202,6 +1203,7 @@ export function createClaudeSdkBridge(
 			projectAttributionSource: start.meta.projectAttributionSource,
 			turnStartedAt: startedAt,
 			history,
+			scopeKey,
 		};
 	}
 
@@ -1586,10 +1588,14 @@ export function createClaudeSdkBridge(
 				sideRequest: false,
 				recorder,
 				startedAt,
-				descriptor: describe(input, turn, systemPrompt, startedAt, {
-					mode: history.mode,
-					reason: history.reason,
-				}),
+				descriptor: describe(
+					input,
+					turn,
+					systemPrompt,
+					startedAt,
+					{ mode: history.mode, reason: history.reason },
+					scopeKey,
+				),
 			});
 			// The query owns the claim from here.
 			claimReleased = true;
@@ -1737,6 +1743,7 @@ export function createClaudeSdkBridge(
 					input.systemPrompt,
 					input.startedAt,
 					{ mode: "resume", reason: null },
+					null,
 				),
 			});
 		} catch (error) {
@@ -2078,8 +2085,13 @@ export function createClaudeSdkBridge(
 				return refuse(bridgeErrors.parkStoreUnavailable());
 			}
 			if (!dbClaimed) return refuse(bridgeErrors.staleToolResults());
+			// The park's own scope, like its key: the results' headers name neither.
 			claim = convKey
-				? await conversations.claim(convKey, timing.settleWaitMs)
+				? await conversations.claim(
+						convKey,
+						timing.settleWaitMs,
+						descriptor.scopeKey ?? null,
+					)
 				: null;
 			const { query: run, mcp } = await loadSdks();
 			// No await from here to the launch.

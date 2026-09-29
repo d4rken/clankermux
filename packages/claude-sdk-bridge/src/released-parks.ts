@@ -60,6 +60,11 @@ export interface ResumeDescriptor {
 	turnStartedAt: number;
 	/** The turn's own history decision; absent in parks stored before it was kept. */
 	history?: SdkBridgeTurnHistory;
+	/**
+	 * The turn's `conversationScopeKey`, which the resume registers its
+	 * conversation under; absent in parks stored before it was kept.
+	 */
+	scopeKey?: string | null;
 }
 
 function stringOrNull(value: unknown): string | null {
