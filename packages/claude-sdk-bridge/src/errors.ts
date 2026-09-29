@@ -455,6 +455,15 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	interleavedBlocks(why: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "sdk_bridge_interleaved_blocks",
+			message: `The model's reply could not be relayed: ${why}`,
+			retryAfter: null,
+		};
+	},
 	internal(message: string): BridgeError {
 		return { status: 502, type: "api_error", message, retryAfter: null };
 	},

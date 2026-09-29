@@ -30,6 +30,8 @@ import {
 	type McpToolResult,
 	type ParkedCalls,
 	toMcpResult,
+	type WithheldReason,
+	withheldResult,
 } from "./tool-server";
 import type { Block, ClientMessage } from "./turn-request";
 import type {
@@ -494,6 +496,25 @@ export class LiveQuery {
 		if (outcome.status >= 400) void this.init.recorder.bump({ innerErrors: 1 });
 	}
 
+	/**
+	 * Whether `count` more client tool calls fit the per-turn parked-call
+	 * limit. When they do not, none of them goes out and the turn is torn
+	 * down with the limit's error.
+	 */
+	admitToolUses(count: number): boolean {
+		const total = this.toolUsesThisLeg + count;
+		if (total <= this.init.maxParkedCalls) return true;
+		this.pendingTeardown ??= {
+			reason: "limit",
+			error: bridgeErrors.limit(
+				"maxParkedCallsPerTurn",
+				total,
+				this.init.maxParkedCalls,
+			),
+		};
+		return false;
+	}
+
 	/** A forwarded client tool_use: counted against the per-turn parked-call limit. */
 	onToolUseForwarded(): void {
 		this.toolUsesThisLeg++;
@@ -511,6 +532,27 @@ export class LiveQuery {
 			};
 	}
 
+	/**
+	 * A client tool call that never reached the client. Claude Code's call
+	 * of it, parked already or still to come, is answered with an error at
+	 * once instead of waiting on the client.
+	 */
+	onToolUseWithheld(toolUseId: string, reason: WithheldReason): void {
+		if (
+			this.init.parked.deliver(toolUseId, withheldResult(reason)) === "resolved"
+		)
+			this.armIdle();
+	}
+
+	/** Claude Code's model stream cannot be relayed in order; the reply fails. */
+	onStreamFault(why: string): void {
+		this.init.log.error(`SDK bridge turn ${this.turnId}: ${why}`);
+		this.pendingTeardown ??= {
+			reason: "error",
+			error: bridgeErrors.interleavedBlocks(why),
+		};
+	}
+
 	/** Claude Code called one of the client's tools; park it until the client answers. */
 	onToolCall(toolUseId: string): Promise<McpToolResult> {
 		if (this.state === "closed")
@@ -519,15 +561,28 @@ export class LiveQuery {
 		// its tool call is the sign that the reply is complete. During a
 		// streamed message it is not: Claude Code starts each tool as soon as
 		// its block is complete, before the message's other blocks.
+		const result = this.init.parked.wait(toolUseId);
+		this.endLegOnCalledTool();
+		this.armIdle();
+		return result;
+	}
+
+	/**
+	 * A reply Claude Code fetched without streaming carries no message_stop:
+	 * Claude Code's call of a tool it forwarded is the sign that the reply is
+	 * complete, whether the call parked before its envelope arrived or after.
+	 * During a streamed message it is not: Claude Code starts each tool as
+	 * soon as its block is complete, before the message's other blocks.
+	 */
+	private endLegOnCalledTool(): void {
+		const composer = this.init.composer;
 		if (
 			this.leg &&
 			this.state === "running" &&
-			!this.init.composer.streamingMessage &&
-			this.init.composer.legToolUseIds.includes(toolUseId)
+			!composer.streamingMessage &&
+			composer.legToolUseIds.some((id) => this.init.parked.has(id))
 		)
 			this.endLeg("tool_use");
-		this.armIdle();
-		return this.init.parked.wait(toolUseId);
 	}
 
 	/**
@@ -611,8 +666,13 @@ export class LiveQuery {
 	/** The leg's reply is complete. */
 	private endLeg(stopReason: string | null): void {
 		const leg = this.leg;
-		if (!leg) return;
+		// A teardown the same message raised (a call limit, a stream fault)
+		// answers the leg instead.
+		if (!leg || this.pendingTeardown) return;
 		const composer = this.init.composer;
+		// What a cut-off message held goes out (or is withheld) before the
+		// leg's content and calls are read.
+		composer.closeCutOffMessage();
 		const toolUseIds = [...composer.legToolUseIds];
 		const content = composer.legContent();
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";
@@ -675,14 +735,13 @@ export class LiveQuery {
 		}
 		this.state = "finishing";
 		this.register([...this.clientMessages, { role: "assistant", content }]);
-		// Calls Claude Code started for a reply that did not end on them (a
-		// refusal after a tool_use) are never answered by the client: without
-		// an answer the process waits out the parked timeout holding its slot,
-		// and answered as aborted they would put a call and a result the
-		// client never had into the session.
-		if (toolUseIds.length)
+		// Calls in a reply that did not end on them (a refusal after a
+		// tool_use, withheld with its message) are never answered by the
+		// client: the session holds a call and maybe a result the client
+		// never had, and forwarded ones would wait out the parked timeout.
+		if (toolUseIds.length || composer.lastMessageWithheldCalls)
 			this.settleDelivered(
-				`The reply ended (${finalReason}) after Claude Code started tool calls the client will not answer; its session will not be resumed`,
+				`The reply ended (${finalReason}) with tool calls the client will not answer; its session will not be resumed`,
 			);
 	}
 
@@ -1053,6 +1112,7 @@ export class LiveQuery {
 						message.message as unknown as Record<string, unknown>,
 					),
 				);
+				this.endLegOnCalledTool();
 				return;
 			}
 			case "user":

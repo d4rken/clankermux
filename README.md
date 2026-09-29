@@ -151,6 +151,9 @@ What differs from a direct request:
   one included, is a 400 (`sdk_bridge_side_request_unknown`). On a route
   that is not served this way the header does nothing.
 * `max_tokens` applies to each model call, not to the whole reply.
+* Tool calls are not streamed: a model message's calls arrive whole once the
+  message ends, and only when all of them completed. Text and thinking still
+  stream.
 * Each user turn starts a Claude Code process, which adds 1–3 s. A
   conversation resumes across turns only when the client sends a session
   header (pi does); otherwise each turn rebuilds it from the history.
