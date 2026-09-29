@@ -257,6 +257,61 @@ describe("translateAnthropicResponseToResponses", () => {
 		expect(result.created_at).toBeGreaterThan(0);
 	});
 
+	describe("terminal status", () => {
+		const toolReply: AnthropicResponse["content"] = [
+			{ type: "text", text: "Reading it." },
+			{ type: "tool_use", id: "toolu_1", name: "read", input: {} },
+		];
+
+		for (const stopReason of ["max_tokens", "model_context_window_exceeded"])
+			test(`${stopReason} mid tool_use is incomplete for max_output_tokens`, () => {
+				const result = translateAnthropicResponseToResponses(
+					makeBaseResponse({ content: toolReply, stop_reason: stopReason }),
+					"resp_t",
+					"m",
+				);
+				expect(result.status).toBe("incomplete");
+				expect(result.incomplete_details).toEqual({
+					reason: "max_output_tokens",
+				});
+				expect(result.output.map((item) => item.type)).toEqual([
+					"message",
+					"function_call",
+				]);
+				expect(result.usage).toMatchObject({ output_tokens: 20 });
+			});
+
+		test("refusal is incomplete for content_filter", () => {
+			const result = translateAnthropicResponseToResponses(
+				makeBaseResponse({
+					content: [{ type: "text", text: "I can't help with that." }],
+					stop_reason: "refusal",
+				}),
+				"resp_t",
+				"m",
+			);
+			expect(result.status).toBe("incomplete");
+			expect(result.incomplete_details).toEqual({ reason: "content_filter" });
+		});
+
+		for (const stopReason of [
+			"tool_use",
+			"end_turn",
+			"stop_sequence",
+			"pause_turn",
+			null,
+		])
+			test(`${stopReason} stays completed`, () => {
+				const result = translateAnthropicResponseToResponses(
+					makeBaseResponse({ content: toolReply, stop_reason: stopReason }),
+					"resp_t",
+					"m",
+				);
+				expect(result.status).toBe("completed");
+				expect(result).not.toHaveProperty("incomplete_details");
+			});
+	});
+
 	test("multiple text blocks → one OutputMessageItem per block", () => {
 		const resp = makeBaseResponse({
 			content: [

@@ -5,6 +5,7 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
+import { responsesTerminalStatus } from "./terminal-status";
 import {
 	customToolInput,
 	type ToolIdentity,
@@ -31,10 +32,10 @@ interface State {
 		{ callId: string; identity: ToolIdentity; argsBuf: string }
 	>;
 	usage: AnthropicUsage;
+	stopReason: string | null;
 	doneSent: boolean;
 	/** Finished items by output index; a reserved slot stays empty until then. */
 	outputItems: Array<Record<string, unknown>>;
-	streamError: { type: string; message: string } | null;
 	includeSources: boolean;
 	/** Hosted searches by tool_use id, from their invocation to their result. */
 	searches: Map<
@@ -123,17 +124,49 @@ function emitDone(
 		if (!search.done) finishSearch(controller, state, search, { ok: false });
 	state.doneSent = true;
 
+	const terminal = responsesTerminalStatus(state.stopReason);
+	const eventType =
+		terminal.status === "incomplete"
+			? "response.incomplete"
+			: "response.completed";
 	emitSse(
 		controller,
-		"response.completed",
+		eventType,
 		{
-			type: "response.completed",
+			type: eventType,
 			response: {
 				id: state.responseId,
 				object: "response",
 				created_at: Math.floor(Date.now() / 1000),
 				model: state.model,
-				status: "completed",
+				...terminal,
+				output: finishedItems(state),
+				usage: translateAnthropicUsage(state.usage),
+			},
+		},
+		state,
+	);
+}
+
+function emitFailed(
+	controller: TransformStreamDefaultController,
+	state: State,
+	error: { code: string; message: string },
+): void {
+	if (state.doneSent) return;
+	state.doneSent = true;
+	emitSse(
+		controller,
+		"response.failed",
+		{
+			type: "response.failed",
+			response: {
+				id: state.responseId,
+				object: "response",
+				created_at: Math.floor(Date.now() / 1000),
+				model: state.model,
+				status: "failed",
+				error,
 				output: finishedItems(state),
 				usage: translateAnthropicUsage(state.usage),
 			},
@@ -566,6 +599,9 @@ function processEvent(
 			state.usage,
 			data.usage as Record<string, unknown> | undefined,
 		);
+		const stopReason = (data.delta as Record<string, unknown> | undefined)
+			?.stop_reason;
+		if (typeof stopReason === "string") state.stopReason = stopReason;
 		return;
 	}
 
@@ -581,27 +617,10 @@ function processEvent(
 			typeof err?.message === "string" && err.message.trim()
 				? err.message
 				: "An error occurred during streaming";
-		const errCode = errorLabel(err?.code) ?? errType;
-		state.streamError = { type: errType, message: errMsg };
-		state.doneSent = true;
-		emitSse(
-			controller,
-			"response.failed",
-			{
-				type: "response.failed",
-				response: {
-					id: state.responseId,
-					object: "response",
-					created_at: Math.floor(Date.now() / 1000),
-					model: state.model,
-					status: "failed",
-					error: { code: errCode, message: errMsg },
-					output: finishedItems(state),
-					usage: translateAnthropicUsage(state.usage),
-				},
-			},
-			state,
-		);
+		emitFailed(controller, state, {
+			code: errorLabel(err?.code) ?? errType,
+			message: errMsg,
+		});
 		return;
 	}
 
@@ -700,9 +719,9 @@ export function translateAnthropicStreamToResponses(
 		textByBlock: new Map(),
 		toolByBlock: new Map(),
 		usage: { input_tokens: 0, output_tokens: 0 },
+		stopReason: null,
 		doneSent: false,
 		outputItems: [],
-		streamError: null,
 		includeSources: options.includeSources ?? false,
 		searches: new Map(),
 		searchByBlock: new Map(),
@@ -740,8 +759,12 @@ export function translateAnthropicStreamToResponses(
 						parseAndProcessEvent(state.lineBuffer, controller, state);
 						state.lineBuffer = "";
 					}
-					// Ensure done event is always emitted
-					emitDone(controller, state);
+					// Only message_stop completes a reply; a body that ends before it
+					// was cut off, even after a message_delta.
+					emitFailed(controller, state, {
+						code: "stream_truncated",
+						message: "Upstream stream ended before message_stop",
+					});
 				} catch (err) {
 					log.warn(`Stream flush error: ${String(err)}`);
 				}

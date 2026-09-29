@@ -4,6 +4,7 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
+import { responsesTerminalStatus } from "./terminal-status";
 import { customToolInput, type ToolTranslation } from "./tool-translation";
 import type {
 	AnthropicResponse,
@@ -111,7 +112,7 @@ export function translateAnthropicResponseToResponses(
 		object: "response",
 		created_at: Math.floor(Date.now() / 1000),
 		model: resp.model || model,
-		status: "completed",
+		...responsesTerminalStatus(resp.stop_reason),
 		output,
 		usage: translateAnthropicUsage(resp.usage),
 	};

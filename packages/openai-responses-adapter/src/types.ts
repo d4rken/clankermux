@@ -165,10 +165,15 @@ export interface ResponsesResponse {
 	object: "response";
 	created_at: number;
 	model: string;
-	status: "completed" | "failed" | "cancelled";
+	status: "completed" | "incomplete" | "failed" | "cancelled";
+	incomplete_details?: ResponsesIncompleteDetails;
 	output: OutputItem[];
 	usage?: ResponsesUsage;
 	error?: ResponsesError;
+}
+
+export interface ResponsesIncompleteDetails {
+	reason: "max_output_tokens" | "content_filter";
 }
 
 export type OutputItem =
