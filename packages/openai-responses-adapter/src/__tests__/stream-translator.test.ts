@@ -1229,15 +1229,13 @@ describe("reasoning items", () => {
 			[3, "custom_tool_call"],
 			[4, "web_search_call"],
 		]);
-		expect(terminalOutput(events).map((item) => [item.type, item.id])).toEqual(
-			[
-				["reasoning", "resp_rs_rs_0"],
-				["message", "resp_rs_msg_1"],
-				["function_call", "resp_rs_fc_2"],
-				["custom_tool_call", "resp_rs_fc_3"],
-				["web_search_call", "resp_rs_ws_4"],
-			],
-		);
+		expect(terminalOutput(events).map((item) => [item.type, item.id])).toEqual([
+			["reasoning", "resp_rs_rs_0"],
+			["message", "resp_rs_msg_1"],
+			["function_call", "resp_rs_fc_2"],
+			["custom_tool_call", "resp_rs_fc_3"],
+			["web_search_call", "resp_rs_ws_4"],
+		]);
 		expect(events.at(-1)?.event).toBe("response.completed");
 		expect(events.map((event) => event.data.sequence_number)).toEqual(
 			events.map((_, index) => index),
@@ -1656,9 +1654,15 @@ describe("heartbeat", () => {
 		heartbeatMs = HEARTBEAT_MS,
 		tools?: ToolTranslation,
 	): Response {
-		return translateAnthropicStreamToResponses(upstream, "resp_hb", "m", tools, {
-			heartbeatMs,
-		});
+		return translateAnthropicStreamToResponses(
+			upstream,
+			"resp_hb",
+			"m",
+			tools,
+			{
+				heartbeatMs,
+			},
+		);
 	}
 
 	function within(chunks: Chunk[], from: number, to: number): Chunk[] {
@@ -1797,9 +1801,7 @@ describe("heartbeat", () => {
 			const window = within(out.chunks, from, to);
 			expect(window.length).toBeGreaterThanOrEqual(3);
 			expect(window.every((chunk) => chunk.text === KEEPALIVE)).toBe(true);
-			expect(longestSilence(out.chunks, from, to)).toBeLessThan(
-				SILENCE_BOUND,
-			);
+			expect(longestSilence(out.chunks, from, to)).toBeLessThan(SILENCE_BOUND);
 
 			await out.reader.cancel();
 			await out.finished;
