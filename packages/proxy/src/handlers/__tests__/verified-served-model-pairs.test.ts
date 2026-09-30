@@ -17,6 +17,15 @@ describe("verified served-model pairs", () => {
 			).toBe(false);
 		});
 
+		it("accepts the grok-4.7 build rename in either direction", () => {
+			expect(
+				isModelSubstitution("grok-4.7", "grok-4.7-build", "grok-subscription"),
+			).toBe(false);
+			expect(
+				isModelSubstitution("grok-4.7-build", "grok-4.7", "grok-subscription"),
+			).toBe(false);
+		});
+
 		it("accepts the pair in either direction", () => {
 			// The table states an equivalence, not a direction: both ids name one
 			// model, so a request for either answered by either is not a swap.
@@ -46,11 +55,25 @@ describe("verified served-model pairs", () => {
 				),
 			).toBe(true);
 			expect(
-				isModelSubstitution("grok-4.7", "grok-4.7-build", "grok-subscription"),
+				isModelSubstitution(
+					"grok-4.7-build",
+					"grok-4.7-build-fast",
+					"grok-subscription",
+				),
 			).toBe(true);
 		});
 
 		it("does not extend the pair to a different model", () => {
+			expect(
+				isModelSubstitution("grok-4.8", "grok-4.8-build", "grok-subscription"),
+			).toBe(true);
+			expect(
+				isModelSubstitution(
+					"grok-4.6-build",
+					"grok-4.7-build",
+					"grok-subscription",
+				),
+			).toBe(true);
 			expect(
 				isModelSubstitution("grok-4.6", "grok-4.5-build", "grok-subscription"),
 			).toBe(true);
@@ -61,6 +84,17 @@ describe("verified served-model pairs", () => {
 	});
 
 	describe("scope", () => {
+		it.each([
+			undefined,
+			"grok",
+			"openrouter",
+			"",
+		])("does not accept the grok-4.7 rename for provider %s", (provider) => {
+			expect(isModelSubstitution("grok-4.7", "grok-4.7-build", provider)).toBe(
+				true,
+			);
+		});
+
 		it("is unreachable without a provider", () => {
 			expect(isModelSubstitution("grok-4.6", "grok-4.6-build")).toBe(true);
 		});

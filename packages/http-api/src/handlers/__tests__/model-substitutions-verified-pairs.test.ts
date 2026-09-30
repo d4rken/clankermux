@@ -59,6 +59,28 @@ describe("computeModelSubstitutions — verified served-model pairs", () => {
 		expect(result.degraded).toEqual([]);
 	});
 
+	it("does not report historical grok-4.7 build responses as substitutions", () => {
+		const result = computeModelSubstitutions(
+			raw({
+				pairs: [
+					pairRow({
+						outgoingModel: "grok-4.7",
+						reportedModel: "grok-4.7-build",
+						substituted: 21,
+					}),
+				],
+				comparable: [
+					{ accountId: "a", outgoingModel: "grok-4.7", comparable: 21 },
+				],
+			}),
+			[account("a", "Grok-me")],
+			NOW,
+		);
+
+		expect(result.pairs).toEqual([]);
+		expect(result.degraded).toEqual([]);
+	});
+
 	// The pair is a fact about ONE provider's naming, not about the two ids.
 	it("still reports the same two ids on a different provider", () => {
 		const result = computeModelSubstitutions(

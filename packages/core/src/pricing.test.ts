@@ -879,16 +879,17 @@ describe("bundled xAI subscription pricing (offline fallback)", () => {
 		expect(getPricingGaps()).toEqual([]);
 	});
 
-	it("prices the served name grok-4.6-build exactly as grok-4.6", async () => {
+	it.each([
+		"grok-4.6",
+		"grok-4.7",
+	])("prices the served build name exactly as %s", async (model) => {
 		const served = await estimateCostUSD(
-			"grok-4.6-build",
+			`${model}-build`,
 			tokens,
 			subscription,
 		);
 		expect(served).toBeCloseTo(8.5, 6);
-		expect(served).toBe(
-			await estimateCostUSD("grok-4.6", tokens, subscription),
-		);
+		expect(served).toBe(await estimateCostUSD(model, tokens, subscription));
 		expect(getPricingGaps()).toEqual([]);
 	});
 
