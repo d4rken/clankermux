@@ -15,10 +15,10 @@ import {
 describe("User-Agent constants", () => {
 	it("match the real clients' format", () => {
 		expect(CODEX_USER_AGENT).toBe(
-			"codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)",
+			"codex_exec/0.159.2 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.159.2)",
 		);
 		expect(CODEX_LOGIN_USER_AGENT).toBe(
-			"codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color",
+			"codex_cli_rs/0.159.2 (Debian 13.0.0; x86_64) xterm-256color",
 		);
 	});
 });
@@ -40,7 +40,7 @@ describe("alignCodexClientUserAgent", () => {
 				"codex_vscode",
 			),
 		).toBe(
-			"codex_vscode/0.155.1 (Windows 10.0.26100; x86_64) vscode/1.99.0 (codex_vscode; 26.5.1)",
+			"codex_vscode/0.159.2 (Windows 10.0.26100; x86_64) vscode/1.99.0 (codex_vscode; 26.5.1)",
 		);
 	});
 
@@ -50,7 +50,7 @@ describe("alignCodexClientUserAgent", () => {
 				"Codex Desktop/0.160.0 (Mac OS 15.5.0; arm64) unknown",
 				"Codex Desktop",
 			),
-		).toBe("Codex Desktop/0.155.1 (Mac OS 15.5.0; arm64) unknown");
+		).toBe("Codex Desktop/0.159.2 (Mac OS 15.5.0; arm64) unknown");
 	});
 
 	it("rejects anything that is not a first-party Codex client", () => {
@@ -184,25 +184,25 @@ describe("codexBackendClientHeaders", () => {
 });
 
 describe("codexAuthorizeUrlParams", () => {
-	it("encodes every value", () => {
+	it("form-encodes every value", () => {
 		expect(
 			codexAuthorizeUrlParams({
 				clientId: CODEX_CLIENT_ID,
-				redirectUri: "http://localhost:1455/auth/callback",
+				redirectUri: "http://127.0.0.1:1455/auth/callback",
 				scopes: ["openid", "profile"],
 				codeChallenge: "a+b",
-				state: "s/1",
-			}),
+				state: "s/1~",
+			}).split("&"),
 		).toEqual([
 			"response_type=code",
 			`client_id=${CODEX_CLIENT_ID}`,
-			"redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
-			"scope=openid%20profile",
+			"redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback",
 			"code_challenge=a%2Bb",
 			"code_challenge_method=S256",
+			"state=s%2F1%7E",
+			"scope=openid+profile",
 			"id_token_add_organizations=true",
 			"codex_cli_simplified_flow=true",
-			"state=s%2F1",
 			"originator=codex_cli_rs",
 		]);
 	});

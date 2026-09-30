@@ -69,8 +69,8 @@ const TOKEN_WITH_ACCOUNT = jwt({
 });
 
 const EXEC_UA =
-	"codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)";
-const LOGIN_UA = "codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color";
+	"codex_exec/0.159.2 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.159.2)";
+const LOGIN_UA = "codex_cli_rs/0.159.2 (Debian 13.0.0; x86_64) xterm-256color";
 
 const BACKEND_CLIENT_WITH_ACCOUNT: Pairs = [
 	["accept", "*/*"],
@@ -88,7 +88,7 @@ const MODELS_WITH_ACCOUNT: Pairs = [
 	["chatgpt-account-id", "acct-123"],
 	["originator", "codex_exec"],
 	["user-agent", EXEC_UA],
-	["version", "0.155.1"],
+	["version", "0.159.2"],
 ];
 
 const MODELS_WITHOUT_ACCOUNT: Pairs = MODELS_WITH_ACCOUNT.filter(
@@ -102,7 +102,7 @@ const EXEC_BASE: Pairs = [
 	["content-type", "application/json"],
 	["originator", "codex_exec"],
 	["user-agent", EXEC_UA],
-	["version", "0.155.1"],
+	["version", "0.159.2"],
 ];
 
 /** What every translated request to chatgpt.com carries, before any session headers. */
@@ -233,7 +233,7 @@ describe("Codex identity golden: inference headers (prepareHeaders)", () => {
 				...CODEX_TUI_CONTINUITY,
 				[
 					"x-clankermux-codex-client-user-agent",
-					"codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)",
+					"codex-tui/0.159.2 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.159.2)",
 				],
 			]),
 		);
@@ -409,9 +409,9 @@ describe("Codex identity golden: native Responses passthrough", () => {
 				["originator", "codex-tui"],
 				[
 					"user-agent",
-					"codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)",
+					"codex-tui/0.159.2 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.159.2)",
 				],
-				["version", "0.155.1"],
+				["version", "0.159.2"],
 				...CODEX_TUI_CONTINUITY,
 				["x-clankermux-native-responses", "1"],
 				["x-clankermux-request-stream", "true"],
@@ -521,11 +521,11 @@ describe("Codex identity golden: side calls", () => {
 		});
 		expect(calls.map(({ url, method }) => [url, method])).toEqual([
 			[
-				"https://chatgpt.com/backend-api/codex/models?client_version=0.155.1",
+				"https://chatgpt.com/backend-api/codex/models?client_version=0.159.2",
 				"GET",
 			],
 			[
-				"https://chatgpt.com/backend-api/codex/models?client_version=0.155.1",
+				"https://chatgpt.com/backend-api/codex/models?client_version=0.159.2",
 				"GET",
 			],
 		]);
@@ -650,17 +650,17 @@ describe("Codex identity golden: OAuth", () => {
 			verifier: "verifier",
 			challenge: "challenge",
 		});
-		expect(url.replace(/state=[0-9a-f]{64}/, "state=STATE")).toBe(
+		expect(url.replace(/state=[\w-]{43}&/, "state=STATE&")).toBe(
 			"https://auth.openai.com/oauth/authorize" +
 				"?response_type=code" +
 				"&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
-				"&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" +
-				"&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke" +
+				"&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback" +
 				"&code_challenge=challenge" +
 				"&code_challenge_method=S256" +
+				"&state=STATE" +
+				"&scope=openid+profile+email+offline_access+api.connectors.read+api.connectors.invoke" +
 				"&id_token_add_organizations=true" +
 				"&codex_cli_simplified_flow=true" +
-				"&state=STATE" +
 				"&originator=codex_cli_rs",
 		);
 	});
@@ -675,9 +675,9 @@ describe("Codex identity golden: OAuth", () => {
 				method: "POST",
 				headers: LOGIN_FORM,
 				body:
-					"grant_type=authorization_code&code=code-1" +
-					"&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback" +
-					"&client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_verifier=verifier-1",
+					"grant_type=authorization_code&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
+					"&code=code-1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback" +
+					"&code_verifier=verifier-1",
 			},
 		]);
 	});
@@ -736,9 +736,9 @@ describe("Codex identity golden: OAuth", () => {
 				method: "POST",
 				headers: LOGIN_FORM,
 				body:
-					"grant_type=authorization_code&code=auth-code" +
-					"&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback" +
-					"&client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_verifier=cv",
+					"grant_type=authorization_code&client_id=app_EMoamEEZ73f0CkXaXp7hrann" +
+					"&code=auth-code&redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback" +
+					"&code_verifier=cv",
 			},
 		]);
 	});

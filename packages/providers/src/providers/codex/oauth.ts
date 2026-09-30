@@ -18,7 +18,7 @@ const oauthLog = new Logger("CodexOAuthProvider");
 
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const REDIRECT_URI = "http://localhost:1455/auth/callback";
+const REDIRECT_URI = "http://127.0.0.1:1455/auth/callback";
 
 export class CodexOAuthProvider implements OAuthProvider {
 	getOAuthConfig(): OAuthProviderConfig {
@@ -38,7 +38,7 @@ export class CodexOAuthProvider implements OAuthProvider {
 			scopes: config.scopes,
 			codeChallenge: pkce.challenge,
 			state: this.generateSecureRandomState(),
-		}).join("&");
+		});
 
 		return `${config.authorizeUrl}?${params}`;
 	}
@@ -52,9 +52,9 @@ export class CodexOAuthProvider implements OAuthProvider {
 
 		const body = new URLSearchParams({
 			grant_type: "authorization_code",
+			client_id: config.clientId,
 			code,
 			redirect_uri: config.redirectUri,
-			client_id: config.clientId,
 			code_verifier: verifier,
 		});
 
@@ -109,10 +109,8 @@ export class CodexOAuthProvider implements OAuthProvider {
 	}
 
 	private generateSecureRandomState(): string {
-		const array = new Uint8Array(32);
-		crypto.getRandomValues(array);
-		return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join(
-			"",
+		return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+			"base64url",
 		);
 	}
 }

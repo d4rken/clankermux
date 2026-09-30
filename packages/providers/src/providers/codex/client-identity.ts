@@ -7,17 +7,12 @@ import { NATIVE_RESPONSES_REQUEST_HEADER } from "@clankermux/types";
 import { readChatgptAccountId } from "./identity";
 
 /**
- * Codex CLI version advertised via the `Version` header, the User-Agent and the
- * model catalogue's `client_version`. The backend GATES newer models behind a
- * minimum client version: too-old here → 400 "The '<model>' model requires a
- * newer version of Codex." We override the real client's header with this
- * value, so it must track a version new enough for the models we route
- * (gpt-5.6-sol needs >= 0.144; gpt-6-astra carries `minimal_client_version:
- * 0.153.0` in the Codex catalog, gpt-6-sol and gpt-6-luna carry 0.155.0,
- * gpt-6.1-sol carries 0.153.0).
- * Bump this when a new Codex model 400s on the version gate.
+ * Pinned Codex CLI version for request headers, User-Agent and model discovery.
+ * Keep this new enough for the models we route; do not rely solely on catalogue
+ * minimum versions. Revisit it when requests fail a version gate or a model is
+ * missing from every Codex account's discovered models.
  */
-export const CODEX_VERSION = "0.155.1";
+export const CODEX_VERSION = "0.159.2";
 
 /** The OS/arch segment of the User-Agent. Pinned, not read from the host. */
 export const CODEX_PLATFORM = "Debian 13.0.0; x86_64";
@@ -48,12 +43,12 @@ function userAgentPrefix(originator: string): string {
 }
 
 /**
- * `codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)`.
+ * `codex_exec/0.159.2 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.159.2)`.
  * The trailing group names the client that initialized the session.
  */
 export const CODEX_USER_AGENT = `${userAgentPrefix(CODEX_EXEC_ORIGINATOR)} (${CODEX_EXEC_ORIGINATOR}; ${CODEX_VERSION})`;
 
-/** `codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color`: no client yet. */
+/** `codex_cli_rs/0.159.2 (Debian 13.0.0; x86_64) xterm-256color`: no client yet. */
 export const CODEX_LOGIN_USER_AGENT = userAgentPrefix(CODEX_LOGIN_ORIGINATOR);
 
 /**
@@ -123,7 +118,7 @@ function isCodexClientOriginator(originator: string): boolean {
  *
  *   originator "codex-tui",
  *   "codex-tui/0.160.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.160.0)"
- *   → "codex-tui/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.155.1)"
+ *   → "codex-tui/0.159.2 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.159.2)"
  *
  * The trailing group is only rewritten when it repeats the build version: a
  * client like the VS Code extension reports its own version there.
@@ -387,20 +382,18 @@ export interface CodexAuthorizeUrlInput {
 	state: string;
 }
 
-/** The authorize URL's query parameters, encoded, in the real client's order. */
-export function codexAuthorizeUrlParams(
-	input: CodexAuthorizeUrlInput,
-): string[] {
-	return [
-		"response_type=code",
-		`client_id=${encodeURIComponent(input.clientId)}`,
-		`redirect_uri=${encodeURIComponent(input.redirectUri)}`,
-		`scope=${encodeURIComponent(input.scopes.join(" "))}`,
-		`code_challenge=${encodeURIComponent(input.codeChallenge)}`,
-		"code_challenge_method=S256",
-		"id_token_add_organizations=true",
-		"codex_cli_simplified_flow=true",
-		`state=${encodeURIComponent(input.state)}`,
-		`originator=${encodeURIComponent(CODEX_LOGIN_ORIGINATOR)}`,
-	];
+/** The authorize URL's query string, form-encoded, in the real client's order. */
+export function codexAuthorizeUrlParams(input: CodexAuthorizeUrlInput): string {
+	return new URLSearchParams([
+		["response_type", "code"],
+		["client_id", input.clientId],
+		["redirect_uri", input.redirectUri],
+		["code_challenge", input.codeChallenge],
+		["code_challenge_method", "S256"],
+		["state", input.state],
+		["scope", input.scopes.join(" ")],
+		["id_token_add_organizations", "true"],
+		["codex_cli_simplified_flow", "true"],
+		["originator", CODEX_LOGIN_ORIGINATOR],
+	]).toString();
 }
