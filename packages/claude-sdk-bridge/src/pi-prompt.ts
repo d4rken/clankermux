@@ -22,7 +22,11 @@
  * operator's and is forwarded byte for byte, never parsed.
  */
 
-/** pi's harness text, identical across the pi releases that share it. */
+/**
+ * pi's harness head as the strip recognizes it: the exact stock preamble and
+ * the ordered section names. Releases that agree on both share one, whatever
+ * the sections hold.
+ */
 interface PiPromptHead {
 	stockPreamble: string;
 	/** The sections that follow a stock preamble, in order. */
@@ -31,7 +35,7 @@ interface PiPromptHead {
 
 const HEADS: ReadonlyArray<{ versions: string[]; head: PiPromptHead }> = [
 	{
-		versions: ["0.87"],
+		versions: ["0.87", "0.99"],
 		head: {
 			stockPreamble:
 				"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",

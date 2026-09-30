@@ -10,6 +10,7 @@ import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/types";
 import {
 	resultMessage,
 	streamedMessage,
@@ -17,7 +18,7 @@ import {
 import { startMockUpstream } from "../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/mock-upstream";
 import {
 	expectedAppend,
-	loadPiPromptFixtures,
+	loadPiPromptFixture,
 	type PiPromptFixture,
 } from "../../../../packages/claude-sdk-bridge/src/__tests__/fixtures/pi-prompt-fixtures";
 import { fakeQueryFn } from "./fixtures/scripted-claude-code";
@@ -125,12 +126,8 @@ function send(
 	);
 }
 
-const fixtures = loadPiPromptFixtures("0.87");
-const byName = (name: string): PiPromptFixture => {
-	const found = fixtures.find((f) => f.name === name);
-	if (!found) throw new Error(`no fixture ${name}`);
-	return found;
-};
+const byName = (name: string, version = "0.87"): PiPromptFixture =>
+	loadPiPromptFixture(version, name);
 
 async function turnRow(gw: Gateway) {
 	const [row] = await gw.query<{
@@ -145,40 +142,45 @@ async function turnRow(gw: Gateway) {
 
 for (const endpoint of ["responses", "chat"] as const)
 	describe(`pi's system prompt at /wire/openai ${endpoint}`, () => {
-		for (const name of [
-			"stock-all",
-			"context-verbatim",
-			"subagent-persona",
-			"forced-prompt",
-			"stock-extension-section",
-			"forced-claude-context-and-agents",
-			"collapsed-tools-change",
-			"collapsed-section-update",
-		])
-			it(`${name}: Claude Code starts with pi's prompt minus its head appended, byte for byte`, async () => {
-				const h = await harness();
-				const f = byName(name);
-				const pending = send(h.gw, endpoint, f);
-				const query = await h.sdk.next();
-				expect(query.options.systemPrompt).toEqual({
-					type: "preset",
-					preset: "claude_code",
-					append: expectedAppend(f) as string,
-					snapshot: false,
+		for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
+			for (const name of [
+				"stock-all",
+				"context-verbatim",
+				"subagent-persona",
+				"subagent-append",
+				"forced-prompt",
+				"stock-extension-section",
+				"forced-claude-context-and-agents",
+				"claude-context-section",
+				"herdr-child",
+				"collapsed-tools-change",
+				"collapsed-section-update",
+			])
+				it(`pi ${version} ${name}: Claude Code starts with pi's prompt minus its head appended, byte for byte`, async () => {
+					const h = await harness();
+					const f = byName(name, version);
+					const pending = send(h.gw, endpoint, f, {
+						"x-clankermux-pi-prompt": version,
+					});
+					const query = await h.sdk.next();
+					expect(query.options.systemPrompt).toEqual({
+						type: "preset",
+						preset: "claude_code",
+						append: expectedAppend(f) as string,
+						snapshot: false,
+					});
+					query.emit(
+						...streamedMessage([{ type: "text", text: "ok" }]),
+						resultMessage(),
+					);
+					query.end();
+					expect((await pending).status).toBe(200);
+					const row = await turnRow(h.gw);
+					expect(row?.system_prompt_policy).toBe("pi-head-v1");
+					expect(JSON.parse(row?.system_prompt_detail ?? "null")).toMatchObject(
+						{ outcome: "forwarded", version },
+					);
 				});
-				query.emit(
-					...streamedMessage([{ type: "text", text: "ok" }]),
-					resultMessage(),
-				);
-				query.end();
-				expect((await pending).status).toBe(200);
-				const row = await turnRow(h.gw);
-				expect(row?.system_prompt_policy).toBe("pi-head-v1");
-				expect(JSON.parse(row?.system_prompt_detail ?? "null")).toMatchObject({
-					outcome: "forwarded",
-					version: "0.87",
-				});
-			});
 
 		it("refuses a pi turn without the layout header with a named 400", async () => {
 			const h = await harness();

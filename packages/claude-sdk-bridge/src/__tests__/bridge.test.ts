@@ -2092,7 +2092,7 @@ describe("pi's system prompt", () => {
 		[
 			"under an unknown layout",
 			"You are pi",
-			{ piPromptVersion: "0.99" },
+			{ piPromptVersion: "0.88" },
 			"sdk_bridge_prompt_unsupported",
 			"unsupported_version",
 		],
