@@ -613,22 +613,31 @@ describe("translateAnthropicStreamToResponses", () => {
 						}),
 						sseEvent("content_block_start", {
 							index: 0,
-							content_block: { type: "thinking", thinking: "" },
-						}),
-						sseEvent("content_block_delta", {
-							index: 0,
-							delta: { type: "thinking_delta", thinking: "internal" },
+							content_block: { type: "redacted_thinking", data: "opaque" },
 						}),
 						sseEvent("content_block_stop", { index: 0 }),
 						sseEvent("content_block_start", {
 							index: 1,
-							content_block: { type: "text", text: "" },
+							content_block: { type: "thinking", thinking: "" },
 						}),
 						sseEvent("content_block_delta", {
 							index: 1,
-							delta: { type: "text_delta", text: "visible" },
+							delta: { type: "thinking_delta", thinking: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 1,
+							delta: { type: "signature_delta", signature: "sig" },
 						}),
 						sseEvent("content_block_stop", { index: 1 }),
+						sseEvent("content_block_start", {
+							index: 2,
+							content_block: { type: "text", text: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 2,
+							delta: { type: "text_delta", text: "visible" },
+						}),
+						sseEvent("content_block_stop", { index: 2 }),
 						sseEvent("message_stop", {}),
 					]),
 					"resp_thinking",
@@ -636,12 +645,10 @@ describe("translateAnthropicStreamToResponses", () => {
 				),
 			);
 
-			expect(warning).not.toHaveBeenCalledWith(
-				"content_block_delta for unknown block index 0",
-			);
-			expect(warning).not.toHaveBeenCalledWith(
-				"content_block_stop for unknown block index 0",
-			);
+			expect(warning).not.toHaveBeenCalled();
+			expect(
+				events.filter((event) => event.event.includes("reasoning")),
+			).toEqual([]);
 			expect(
 				events.find((event) => event.event === "response.output_text.delta")
 					?.data,
@@ -948,6 +955,394 @@ describe("translateAnthropicStreamToResponses", () => {
 		expect(raw.indexOf(": keepalive")).toBeLessThan(
 			raw.indexOf("event: response.completed"),
 		);
+	});
+});
+
+describe("reasoning items", () => {
+	type Event = { event: string; data: Record<string, unknown> };
+
+	const START = sseEvent("message_start", {
+		message: { id: "msg_rs", usage: { input_tokens: 3, output_tokens: 0 } },
+	});
+	const END = [
+		sseEvent("message_delta", {
+			delta: { stop_reason: "end_turn" },
+			usage: { output_tokens: 9 },
+		}),
+		sseEvent("message_stop", {}),
+	];
+
+	function thinkingStart(index: number, thinking: string): string {
+		return sseEvent("content_block_start", {
+			index,
+			content_block: { type: "thinking", thinking },
+		});
+	}
+	function thinkingDelta(index: number, thinking: string): string {
+		return sseEvent("content_block_delta", {
+			index,
+			delta: { type: "thinking_delta", thinking },
+		});
+	}
+	function signature(index: number): string {
+		return sseEvent("content_block_delta", {
+			index,
+			delta: { type: "signature_delta", signature: "EqQBCgIYAhIM" },
+		});
+	}
+	function stop(index: number): string {
+		return sseEvent("content_block_stop", { index });
+	}
+	function textBlock(index: number, text: string): string[] {
+		return [
+			sseEvent("content_block_start", {
+				index,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("content_block_delta", {
+				index,
+				delta: { type: "text_delta", text },
+			}),
+			stop(index),
+		];
+	}
+
+	async function translate(
+		blocks: string[],
+		tools?: ToolTranslation,
+	): Promise<Event[]> {
+		return (await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream([START, ...blocks]),
+				"resp_rs",
+				"test-model",
+				tools,
+			),
+		)) as Event[];
+	}
+
+	function reasoningEvents(events: Event[]): Event[] {
+		return events.filter(
+			(event) =>
+				event.event.includes("reasoning") ||
+				(event.data.item as { type?: string } | undefined)?.type ===
+					"reasoning" ||
+				(event.data.part as { type?: string } | undefined)?.type ===
+					"reasoning_text",
+		);
+	}
+
+	function terminalOutput(events: Event[]): Array<Record<string, unknown>> {
+		return (
+			events.at(-1)?.data.response as {
+				output: Array<Record<string, unknown>>;
+			}
+		).output;
+	}
+
+	const ITEM = {
+		type: "reasoning",
+		id: "resp_rs_rs_0",
+		summary: [],
+		content: [{ type: "reasoning_text", text: "Let me think." }],
+	};
+
+	test("thinking becomes a raw reasoning item with its own event sequence", async () => {
+		const events = await translate([
+			thinkingStart(0, ""),
+			thinkingDelta(0, "Let me "),
+			thinkingDelta(0, "think."),
+			signature(0),
+			stop(0),
+			...END,
+		]);
+
+		expect(events.map((event) => event.event)).toEqual([
+			"response.created",
+			"response.in_progress",
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.reasoning_text.delta",
+			"response.reasoning_text.delta",
+			"response.reasoning_text.done",
+			"response.content_part.done",
+			"response.output_item.done",
+			"response.completed",
+		]);
+		expect(events.slice(2, 9).map((event) => event.data)).toEqual([
+			{
+				sequence_number: 2,
+				type: "response.output_item.added",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "resp_rs_rs_0",
+					summary: [],
+					content: [],
+				},
+			},
+			{
+				sequence_number: 3,
+				type: "response.content_part.added",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				part: { type: "reasoning_text", text: "" },
+			},
+			{
+				sequence_number: 4,
+				type: "response.reasoning_text.delta",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				delta: "Let me ",
+			},
+			{
+				sequence_number: 5,
+				type: "response.reasoning_text.delta",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				delta: "think.",
+			},
+			{
+				sequence_number: 6,
+				type: "response.reasoning_text.done",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				text: "Let me think.",
+			},
+			{
+				sequence_number: 7,
+				type: "response.content_part.done",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				part: { type: "reasoning_text", text: "Let me think." },
+			},
+			{
+				sequence_number: 8,
+				type: "response.output_item.done",
+				output_index: 0,
+				item: ITEM,
+			},
+		]);
+		expect(terminalOutput(events)).toEqual([ITEM]);
+	});
+
+	test("text in the block start is the first fragment", async () => {
+		for (const [blocks, deltas] of [
+			[[thinkingStart(0, "Let me think.")], ["Let me think."]],
+			[
+				[thinkingStart(0, "Let me "), thinkingDelta(0, "think.")],
+				["Let me ", "think."],
+			],
+		] as const) {
+			const events = await translate([...blocks, stop(0), ...END]);
+			const reasoning = reasoningEvents(events);
+			expect(reasoning.map((event) => event.event)).toEqual([
+				"response.output_item.added",
+				"response.content_part.added",
+				...deltas.map(() => "response.reasoning_text.delta"),
+				"response.reasoning_text.done",
+				"response.content_part.done",
+				"response.output_item.done",
+			]);
+			expect(
+				reasoning
+					.filter((event) => event.event === "response.reasoning_text.delta")
+					.map((event) => event.data.delta),
+			).toEqual([...deltas]);
+			expect(terminalOutput(events)).toEqual([ITEM]);
+		}
+	});
+
+	test("output indices stay contiguous across every item kind, with sequence numbers unbroken", async () => {
+		const tools = new ToolTranslation();
+		tools.add([{ type: "custom", name: "exec" }]);
+		const events = await translate(
+			[
+				thinkingStart(0, ""),
+				thinkingDelta(0, "Let me think."),
+				signature(0),
+				stop(0),
+				...textBlock(1, "Reading."),
+				sseEvent("content_block_start", {
+					index: 2,
+					content_block: { type: "tool_use", id: "toolu_f", name: "read" },
+				}),
+				sseEvent("content_block_delta", {
+					index: 2,
+					delta: { type: "input_json_delta", partial_json: '{"p":"x"}' },
+				}),
+				stop(2),
+				sseEvent("content_block_start", {
+					index: 3,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: tools.tools[0]?.name,
+						input: {},
+					},
+				}),
+				sseEvent("content_block_delta", {
+					index: 3,
+					delta: { type: "input_json_delta", partial_json: '{"input":"ls"}' },
+				}),
+				stop(3),
+				sseEvent("content_block_start", {
+					index: 4,
+					content_block: {
+						type: "server_tool_use",
+						id: "srvtoolu_1",
+						name: "web_search",
+						input: { query: "bun" },
+					},
+				}),
+				stop(4),
+				sseEvent("content_block_start", {
+					index: 5,
+					content_block: {
+						type: "web_search_tool_result",
+						tool_use_id: "srvtoolu_1",
+						content: [{ type: "web_search_result", url: "https://bun.sh" }],
+					},
+				}),
+				stop(5),
+				...END,
+			],
+			tools,
+		);
+
+		expect(
+			events
+				.filter((event) => event.event === "response.output_item.added")
+				.map((event) => [
+					event.data.output_index,
+					(event.data.item as { type: string }).type,
+				]),
+		).toEqual([
+			[0, "reasoning"],
+			[1, "message"],
+			[2, "function_call"],
+			[3, "custom_tool_call"],
+			[4, "web_search_call"],
+		]);
+		expect(terminalOutput(events).map((item) => [item.type, item.id])).toEqual(
+			[
+				["reasoning", "resp_rs_rs_0"],
+				["message", "resp_rs_msg_1"],
+				["function_call", "resp_rs_fc_2"],
+				["custom_tool_call", "resp_rs_fc_3"],
+				["web_search_call", "resp_rs_ws_4"],
+			],
+		);
+		expect(events.at(-1)?.event).toBe("response.completed");
+		expect(events.map((event) => event.data.sequence_number)).toEqual(
+			events.map((_, index) => index),
+		);
+	});
+
+	test("a thinking block without text claims no slot", async () => {
+		const events = await translate([
+			thinkingStart(0, ""),
+			thinkingDelta(0, ""),
+			signature(0),
+			stop(0),
+			...textBlock(1, "Answer."),
+			...END,
+		]);
+		expect(reasoningEvents(events)).toEqual([]);
+		expect(
+			events.find((event) => event.event === "response.output_item.added")
+				?.data,
+		).toMatchObject({ output_index: 0, item: { id: "resp_rs_msg_0" } });
+		expect(terminalOutput(events)).toEqual([
+			expect.objectContaining({ type: "message", id: "resp_rs_msg_0" }),
+		]);
+	});
+
+	test("signature deltas and redacted thinking emit nothing and warn nothing", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			const events = await translate([
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: { type: "redacted_thinking", data: "opaque" },
+				}),
+				stop(0),
+				thinkingStart(1, ""),
+				thinkingDelta(1, "Let me think."),
+				signature(1),
+				signature(1),
+				stop(1),
+				...textBlock(2, "Answer."),
+				...END,
+			]);
+			expect(warning).not.toHaveBeenCalled();
+			expect(
+				events.filter(
+					(event) => event.event === "response.reasoning_text.delta",
+				),
+			).toHaveLength(1);
+			expect(
+				terminalOutput(events).map((item) => [item.type, item.id]),
+			).toEqual([
+				["reasoning", "resp_rs_rs_0"],
+				["message", "resp_rs_msg_1"],
+			]);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("reasoning cut off by EOF is left out of the terminal output", async () => {
+		const events = await translate([
+			thinkingStart(0, "Let me think."),
+			stop(0),
+			thinkingStart(1, "Then "),
+			thinkingDelta(1, "again"),
+		]);
+		expect(events.at(-1)?.event).toBe("response.failed");
+		expect(
+			events
+				.filter((event) => event.event === "response.output_item.done")
+				.map((event) => event.data.output_index),
+		).toEqual([0]);
+		expect(terminalOutput(events)).toEqual([ITEM]);
+	});
+
+	test("a thinking block after a withheld custom tool call ends the response", async () => {
+		const tools = new ToolTranslation();
+		tools.add([{ type: "custom", name: "exec" }]);
+		const events = await translate(
+			[
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: tools.tools[0]?.name,
+						input: {},
+					},
+				}),
+				sseEvent("content_block_delta", {
+					index: 0,
+					delta: { type: "input_json_delta", partial_json: '{"input":"pri' },
+				}),
+				stop(0),
+				thinkingStart(1, "Let me think."),
+				stop(1),
+				...END,
+			],
+			tools,
+		);
+		expect(reasoningEvents(events)).toEqual([]);
+		expect(events.at(-1)?.event).toBe("response.failed");
+		expect(terminalOutput(events)).toEqual([]);
 	});
 });
 
@@ -1338,7 +1733,7 @@ describe("heartbeat", () => {
 
 	for (const { name, tools, prelude, filler } of [
 		{
-			name: "suppressed thinking and signature deltas",
+			name: "a thinking block with no text yet",
 			tools: undefined,
 			prelude: [
 				sseEvent("content_block_start", {
@@ -1352,7 +1747,7 @@ describe("heartbeat", () => {
 					delta:
 						i % 2
 							? { type: "signature_delta", signature: "sig" }
-							: { type: "thinking_delta", thinking: "hmm " },
+							: { type: "thinking_delta", thinking: "" },
 				})}\n\n`,
 		},
 		{

@@ -180,7 +180,8 @@ export type OutputItem =
 	| OutputMessageItem
 	| OutputFunctionCallItem
 	| OutputCustomToolCallItem
-	| OutputWebSearchCallItem;
+	| OutputWebSearchCallItem
+	| OutputReasoningItem;
 
 export interface OutputMessageItem {
 	type: "message";
@@ -232,6 +233,14 @@ export interface OutputWebSearchCallItem {
 		query?: string;
 		sources?: Array<{ type: "url"; url: string; title?: string }>;
 	};
+}
+
+/** Raw reasoning text; no summary and no `encrypted_content`. */
+export interface OutputReasoningItem {
+	type: "reasoning";
+	id: string;
+	summary: [];
+	content: Array<{ type: "reasoning_text"; text: string }>;
 }
 
 export interface ResponsesUsage {
@@ -343,12 +352,25 @@ export type AnthropicResponseContent =
 	| AnthropicTextResponseContent
 	| AnthropicToolUseResponseContent
 	| AnthropicServerToolUseResponseContent
-	| AnthropicWebSearchToolResultContent;
+	| AnthropicWebSearchToolResultContent
+	| AnthropicThinkingResponseContent
+	| AnthropicRedactedThinkingResponseContent;
 
 export interface AnthropicTextResponseContent {
 	type: "text";
 	text: string;
 	citations?: unknown;
+}
+
+export interface AnthropicThinkingResponseContent {
+	type: "thinking";
+	thinking: string;
+	signature?: string;
+}
+
+export interface AnthropicRedactedThinkingResponseContent {
+	type: "redacted_thinking";
+	data: string;
 }
 
 /** A server tool's invocation; the adapter maps `web_search` only. */

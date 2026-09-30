@@ -360,4 +360,52 @@ describe("translateAnthropicResponseToResponses", () => {
 			).toBe("world");
 		}
 	});
+
+	test("thinking becomes a raw reasoning item, in block order, as the stream mints it", () => {
+		const result = translateAnthropicResponseToResponses(
+			makeBaseResponse({
+				content: [
+					{ type: "redacted_thinking", data: "opaque" },
+					{ type: "thinking", thinking: "", signature: "sig" },
+					{ type: "thinking", thinking: "Let me think.", signature: "sig" },
+					{ type: "text", text: "Reading." },
+					{ type: "thinking", thinking: "Then again.", signature: "sig" },
+					{ type: "tool_use", id: "toolu_1", name: "read", input: {} },
+				],
+				stop_reason: "tool_use",
+			}),
+			"resp_rs",
+			"model",
+		);
+
+		expect(result.output).toEqual([
+			{
+				type: "reasoning",
+				id: "resp_rs_rs_0",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Let me think." }],
+			},
+			{
+				type: "message",
+				id: "resp_rs_msg_1",
+				role: "assistant",
+				content: [{ type: "output_text", text: "Reading." }],
+				status: "completed",
+			},
+			{
+				type: "reasoning",
+				id: "resp_rs_rs_2",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Then again." }],
+			},
+			{
+				type: "function_call",
+				id: "resp_rs_fc_3",
+				call_id: "toolu_1",
+				name: "read",
+				arguments: "{}",
+				status: "completed",
+			},
+		]);
+	});
 });

@@ -5,6 +5,7 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
+import { reasoningItem, reasoningItemId } from "./reasoning-items";
 import {
 	type ResponsesTerminalStatus,
 	responsesTerminalStatus,
@@ -15,7 +16,11 @@ import {
 	type ToolIdentity,
 	type ToolTranslation,
 } from "./tool-translation";
-import type { AnthropicUsage, ResponsesError } from "./types";
+import type {
+	AnthropicUsage,
+	OutputReasoningItem,
+	ResponsesError,
+} from "./types";
 import { mergeAnthropicUsage, translateAnthropicUsage } from "./usage";
 
 const log = new Logger("openai-responses-adapter");
@@ -31,6 +36,8 @@ interface State {
 	blockIndexToOutput: Map<number, number>;
 	ignoredBlockIndices: Set<number>;
 	textByBlock: Map<number, string>;
+	/** Thinking blocks until their stop; each claims a slot at its first text. */
+	reasoningByBlock: Map<number, Reasoning>;
 	toolByBlock: Map<
 		number,
 		{ callId: string; identity: ToolIdentity; argsBuf: string }
@@ -42,7 +49,7 @@ interface State {
 	withheldCustomToolCall: boolean;
 	doneSent: boolean;
 	/** Finished items by output index; a reserved slot stays empty until then. */
-	outputItems: Array<Record<string, unknown>>;
+	outputItems: Array<Record<string, unknown> | OutputReasoningItem>;
 	includeSources: boolean;
 	/** Hosted searches by tool_use id, from their invocation to their result. */
 	searches: Map<
@@ -56,6 +63,11 @@ interface State {
 	heartbeat: Timer | undefined;
 	/** Nothing more may reach the client: the reply ended or the client is gone. */
 	closed: boolean;
+}
+
+interface Reasoning {
+	outputIdx: number | undefined;
+	text: string;
 }
 
 const encoder = new TextEncoder();
@@ -128,7 +140,9 @@ function emitSse(
 }
 
 /** The items as the response reports them, in output order. */
-function finishedItems(state: State): Array<Record<string, unknown>> {
+function finishedItems(
+	state: State,
+): Array<Record<string, unknown> | OutputReasoningItem> {
 	return state.outputItems.filter(Boolean);
 }
 
@@ -201,6 +215,103 @@ function emitToolCallAdded(
 				status: "in_progress",
 			},
 		},
+		state,
+	);
+}
+
+/** Stream one fragment of a thinking block, opening its item at the first. */
+function appendReasoning(
+	controller: TransformStreamDefaultController,
+	state: State,
+	reasoning: Reasoning,
+	fragment: unknown,
+): void {
+	if (typeof fragment !== "string" || !fragment) return;
+	let outputIdx = reasoning.outputIdx;
+	const opening = outputIdx === undefined;
+	if (outputIdx === undefined) {
+		outputIdx = state.outputIndex++;
+		reasoning.outputIdx = outputIdx;
+	}
+	const id = reasoningItemId(state.responseId, outputIdx);
+	if (opening) {
+		emitSse(
+			controller,
+			"response.output_item.added",
+			{
+				type: "response.output_item.added",
+				output_index: outputIdx,
+				item: { type: "reasoning", id, summary: [], content: [] },
+			},
+			state,
+		);
+		emitSse(
+			controller,
+			"response.content_part.added",
+			{
+				type: "response.content_part.added",
+				item_id: id,
+				output_index: outputIdx,
+				content_index: 0,
+				part: { type: "reasoning_text", text: "" },
+			},
+			state,
+		);
+	}
+	reasoning.text += fragment;
+	emitSse(
+		controller,
+		"response.reasoning_text.delta",
+		{
+			type: "response.reasoning_text.delta",
+			item_id: id,
+			output_index: outputIdx,
+			content_index: 0,
+			delta: fragment,
+		},
+		state,
+	);
+}
+
+function finishReasoning(
+	controller: TransformStreamDefaultController,
+	state: State,
+	reasoning: Reasoning,
+): void {
+	const outputIdx = reasoning.outputIdx;
+	if (outputIdx === undefined) return;
+	const id = reasoningItemId(state.responseId, outputIdx);
+	const { text } = reasoning;
+	emitSse(
+		controller,
+		"response.reasoning_text.done",
+		{
+			type: "response.reasoning_text.done",
+			item_id: id,
+			output_index: outputIdx,
+			content_index: 0,
+			text,
+		},
+		state,
+	);
+	emitSse(
+		controller,
+		"response.content_part.done",
+		{
+			type: "response.content_part.done",
+			item_id: id,
+			output_index: outputIdx,
+			content_index: 0,
+			part: { type: "reasoning_text", text },
+		},
+		state,
+	);
+	const item = reasoningItem(id, text);
+	state.outputItems[outputIdx] = item;
+	emitSse(
+		controller,
+		"response.output_item.done",
+		{ type: "response.output_item.done", output_index: outputIdx, item },
 		state,
 	);
 }
@@ -375,9 +486,15 @@ function processEvent(
 			return;
 		}
 
-		// Only allocate an output slot for block types we emit events for.
-		// Incrementing unconditionally (e.g. for "thinking" blocks) leaves gaps in
-		// output_index that confuse clients expecting a contiguous sequence.
+		// output_index is contiguous: a slot goes only to a block that produces
+		// an item. A thinking block claims one at its first reasoning text, so an
+		// empty one gets none; redacted thinking and unknown blocks never do.
+		if (contentBlock.type === "thinking") {
+			const reasoning: Reasoning = { outputIdx: undefined, text: "" };
+			state.reasoningByBlock.set(blockIndex, reasoning);
+			appendReasoning(controller, state, reasoning, contentBlock.thinking);
+			return;
+		}
 		if (contentBlock.type !== "text" && contentBlock.type !== "tool_use") {
 			state.ignoredBlockIndices.add(blockIndex);
 			return;
@@ -447,6 +564,14 @@ function processEvent(
 	if (eventType === "content_block_delta") {
 		const blockIndex = data.index as number;
 		const delta = data.delta as Record<string, unknown>;
+		const reasoning = state.reasoningByBlock.get(blockIndex);
+		if (reasoning) {
+			// A signature_delta only authenticates the thinking; it has no
+			// Responses counterpart.
+			if (delta.type === "thinking_delta")
+				appendReasoning(controller, state, reasoning, delta.thinking);
+			return;
+		}
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
@@ -508,6 +633,12 @@ function processEvent(
 
 	if (eventType === "content_block_stop") {
 		const blockIndex = data.index as number;
+		const reasoning = state.reasoningByBlock.get(blockIndex);
+		if (reasoning) {
+			state.reasoningByBlock.delete(blockIndex);
+			finishReasoning(controller, state, reasoning);
+			return;
+		}
 		const outputIdx = state.blockIndexToOutput.get(blockIndex);
 
 		if (outputIdx === undefined) {
@@ -784,6 +915,7 @@ export function translateAnthropicStreamToResponses(
 		blockIndexToOutput: new Map(),
 		ignoredBlockIndices: new Set(),
 		textByBlock: new Map(),
+		reasoningByBlock: new Map(),
 		toolByBlock: new Map(),
 		usage: { input_tokens: 0, output_tokens: 0 },
 		stopReason: null,
