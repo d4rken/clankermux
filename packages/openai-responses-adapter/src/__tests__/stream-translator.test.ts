@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Logger } from "@clankermux/logger";
 import { translateAnthropicStreamToResponses } from "../stream-translator";
+import { ToolTranslation } from "../tool-translation";
 
 async function collectSseEvents(
 	response: Response,
@@ -1186,4 +1187,384 @@ describe("terminal status", () => {
 				}),
 			]);
 		});
+});
+
+describe("heartbeat", () => {
+	const HEARTBEAT_MS = 40;
+	// The guarantee is HEARTBEAT_MS plus one tick; the rest is scheduling slack.
+	const SILENCE_BOUND = HEARTBEAT_MS * 2.5;
+	const KEEPALIVE = ": keepalive\n\n";
+	const MESSAGE_START = sseEvent("message_start", {
+		type: "message_start",
+		message: { id: "msg_hb", usage: { input_tokens: 1, output_tokens: 0 } },
+	});
+	const MESSAGE_STOP = sseEvent("message_stop", { type: "message_stop" });
+	const TEXT_START = sseEvent("content_block_start", {
+		index: 0,
+		content_block: { type: "text", text: "" },
+	});
+
+	/** An upstream body the test writes as it goes. */
+	function liveUpstream() {
+		const encoder = new TextEncoder();
+		let controller!: ReadableStreamDefaultController<Uint8Array>;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				start: (c) => {
+					controller = c;
+				},
+			}),
+			{ headers: { "Content-Type": "text/event-stream" } },
+		);
+		return {
+			response,
+			send: (text: string) => controller.enqueue(encoder.encode(text)),
+			frame: (event: string) =>
+				controller.enqueue(encoder.encode(`${event}\n\n`)),
+			close: () => controller.close(),
+			error: (reason: unknown) => controller.error(reason),
+		};
+	}
+
+	type Chunk = { at: number; text: string };
+
+	/** Reads a response to its end, timestamping each chunk on arrival. */
+	function readTimed(response: Response) {
+		const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+		const chunks: Chunk[] = [];
+		/** The read error, or undefined at a clean end. */
+		const finished = (async (): Promise<unknown> => {
+			try {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) return undefined;
+					chunks.push({
+						at: performance.now(),
+						text: decoder.decode(value, { stream: true }),
+					});
+				}
+			} catch (err) {
+				return err ?? new Error("read failed");
+			}
+		})();
+		return {
+			reader,
+			chunks,
+			finished,
+			text: () => chunks.map((chunk) => chunk.text).join(""),
+		};
+	}
+
+	function translate(
+		upstream: Response,
+		heartbeatMs = HEARTBEAT_MS,
+		tools?: ToolTranslation,
+	): Response {
+		return translateAnthropicStreamToResponses(upstream, "resp_hb", "m", tools, {
+			heartbeatMs,
+		});
+	}
+
+	function within(chunks: Chunk[], from: number, to: number): Chunk[] {
+		return chunks.filter((chunk) => chunk.at >= from && chunk.at <= to);
+	}
+
+	/** The longest stretch of [from, to] in which nothing arrived. */
+	function longestSilence(chunks: Chunk[], from: number, to: number): number {
+		let last = from;
+		let longest = 0;
+		for (const { at } of within(chunks, from, to)) {
+			longest = Math.max(longest, at - last);
+			last = at;
+		}
+		return Math.max(longest, to - last);
+	}
+
+	function keepalivesIn(text: string): number {
+		return text.split(KEEPALIVE).length - 1;
+	}
+
+	/** Every interval started while watching, and whether each was cleared. */
+	function watchIntervals() {
+		const started = spyOn(globalThis, "setInterval");
+		const cleared = spyOn(globalThis, "clearInterval");
+		const timers = () => started.mock.results.map((result) => result.value);
+		return {
+			timers,
+			allCleared: () =>
+				timers().every((timer) =>
+					cleared.mock.calls.some(([id]) => id === timer),
+				),
+			restore: () => {
+				started.mockRestore();
+				cleared.mockRestore();
+			},
+		};
+	}
+
+	async function until(condition: () => boolean): Promise<void> {
+		const deadline = performance.now() + 2_000;
+		while (!condition()) {
+			if (performance.now() > deadline) throw new Error("condition not met");
+			await Bun.sleep(2);
+		}
+	}
+
+	test("a quiet upstream gets keepalives on schedule without any ping", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response));
+		upstream.frame(MESSAGE_START);
+		await until(() => out.text().includes("response.in_progress"));
+
+		const from = performance.now();
+		await Bun.sleep(300);
+		const to = performance.now();
+
+		const window = within(out.chunks, from, to);
+		expect(window.length).toBeGreaterThanOrEqual(3);
+		expect(window.every((chunk) => chunk.text === KEEPALIVE)).toBe(true);
+		expect(longestSilence(out.chunks, from, to)).toBeLessThan(SILENCE_BOUND);
+
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		expect(await out.finished).toBeUndefined();
+	});
+
+	const customTools = new ToolTranslation();
+	customTools.add([{ type: "custom", name: "exec" }]);
+	const fragment =
+		'event: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"';
+
+	for (const { name, tools, prelude, filler } of [
+		{
+			name: "suppressed thinking and signature deltas",
+			tools: undefined,
+			prelude: [
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: { type: "thinking", thinking: "" },
+				}),
+			],
+			filler: (i: number) =>
+				`${sseEvent("content_block_delta", {
+					index: 0,
+					delta:
+						i % 2
+							? { type: "signature_delta", signature: "sig" }
+							: { type: "thinking_delta", thinking: "hmm " },
+				})}\n\n`,
+		},
+		{
+			name: "a custom tool call's unfinished input",
+			tools: customTools,
+			prelude: [
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: customTools.tools[0]?.name,
+						input: {},
+					},
+				}),
+			],
+			filler: (i: number) =>
+				`${sseEvent("content_block_delta", {
+					index: 0,
+					delta: {
+						type: "input_json_delta",
+						partial_json: i === 0 ? '{"input":"' : "x",
+					},
+				})}\n\n`,
+		},
+		{
+			name: "an SSE frame arriving in fragments",
+			tools: undefined,
+			prelude: [],
+			filler: (i: number) => fragment.charAt(i) || "a",
+		},
+	])
+		test(`keepalives stay on schedule through input that produces no output: ${name}`, async () => {
+			const upstream = liveUpstream();
+			const out = readTimed(translate(upstream.response, HEARTBEAT_MS, tools));
+			upstream.frame(MESSAGE_START);
+			for (const event of prelude) upstream.frame(event);
+			await until(() => out.text().includes("response.in_progress"));
+
+			const from = performance.now();
+			for (let i = 0; performance.now() - from < 300; i++) {
+				upstream.send(filler(i));
+				await Bun.sleep(10);
+			}
+			const to = performance.now();
+
+			const window = within(out.chunks, from, to);
+			expect(window.length).toBeGreaterThanOrEqual(3);
+			expect(window.every((chunk) => chunk.text === KEEPALIVE)).toBe(true);
+			expect(longestSilence(out.chunks, from, to)).toBeLessThan(
+				SILENCE_BOUND,
+			);
+
+			await out.reader.cancel();
+			await out.finished;
+		});
+
+	test("no keepalive while output flows faster than the interval", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response, 100));
+		upstream.frame(MESSAGE_START);
+		upstream.frame(TEXT_START);
+		const from = performance.now();
+		while (performance.now() - from < 300) {
+			upstream.frame(
+				sseEvent("content_block_delta", {
+					index: 0,
+					delta: { type: "text_delta", text: "a" },
+				}),
+			);
+			await Bun.sleep(10);
+		}
+		upstream.frame(sseEvent("content_block_stop", { index: 0 }));
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		await out.finished;
+
+		expect(out.text()).toContain("event: response.completed");
+		expect(out.text()).not.toContain(KEEPALIVE);
+	});
+
+	test("keepalives neither follow the terminal event nor consume sequence numbers", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response));
+		await Bun.sleep(100);
+		upstream.frame(MESSAGE_START);
+		await Bun.sleep(100);
+		upstream.frame(TEXT_START);
+		upstream.frame(
+			sseEvent("content_block_delta", {
+				index: 0,
+				delta: { type: "text_delta", text: "hi" },
+			}),
+		);
+		await Bun.sleep(100);
+		upstream.frame(sseEvent("content_block_stop", { index: 0 }));
+		upstream.frame(MESSAGE_STOP);
+		// The upstream stays open well past the terminal event.
+		await Bun.sleep(150);
+		upstream.close();
+		await out.finished;
+
+		const raw = out.text();
+		expect(raw.startsWith(KEEPALIVE)).toBe(true);
+		const terminalAt = raw.indexOf("event: response.completed");
+		expect(terminalAt).toBeGreaterThan(-1);
+		expect(keepalivesIn(raw.slice(0, terminalAt))).toBeGreaterThanOrEqual(3);
+		expect(raw.slice(terminalAt)).not.toContain(KEEPALIVE);
+
+		const sequence = (await collectSseEvents(new Response(raw))).map(
+			(event) => (event.data as { sequence_number: number }).sequence_number,
+		);
+		expect(sequence.length).toBeGreaterThan(4);
+		expect(sequence).toEqual(sequence.map((_, i) => i));
+	});
+
+	test("a paused reader gets at most one queued keepalive", async () => {
+		const upstream = liveUpstream();
+		const reader = (
+			translate(upstream.response, 30).body as ReadableStream<Uint8Array>
+		).getReader();
+		const decoder = new TextDecoder();
+		upstream.frame(MESSAGE_START);
+		let seen = "";
+		while (!seen.includes("response.in_progress")) {
+			const { value } = await reader.read();
+			seen += decoder.decode(value, { stream: true });
+		}
+
+		await Bun.sleep(300);
+
+		upstream.frame(TEXT_START);
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		let rest = "";
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			rest += decoder.decode(value, { stream: true });
+		}
+		expect(rest.slice(0, rest.indexOf("event: "))).toBe(KEEPALIVE);
+		expect(rest).toContain("event: response.output_item.added");
+	});
+
+	describe("stops its timer", () => {
+		// Long enough that no tick runs here: only the stop paths can clear it.
+		const IDLE_MS = 60_000;
+
+		test("after flush", async () => {
+			const intervals = watchIntervals();
+			try {
+				const raw = await translate(
+					makeAnthropicStream([MESSAGE_START]),
+					IDLE_MS,
+				).text();
+				expect(raw).toContain("event: response.failed");
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("at the terminal event, while the upstream is still open", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				upstream.frame(MESSAGE_STOP);
+				await until(() => out.text().includes("event: response.completed"));
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+				upstream.close();
+				await out.finished;
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("when the reader cancels", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				await until(() => out.text().includes("response.in_progress"));
+				expect(intervals.allCleared()).toBe(false);
+				await out.reader.cancel();
+				expect(await out.finished).toBeUndefined();
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("when an upstream error aborts the pipe while idle", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				await until(() => out.text().includes("response.in_progress"));
+				expect(intervals.allCleared()).toBe(false);
+				upstream.error(new Error("upstream reset"));
+				expect(await out.finished).toBeDefined();
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+	});
 });

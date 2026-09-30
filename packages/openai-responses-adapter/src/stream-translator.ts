@@ -51,9 +51,64 @@ interface State {
 	>;
 	searchByBlock: Map<number, string>;
 	citationsByBlock: Map<number, unknown[]>;
+	/** When the client was last written to, keepalives included. */
+	lastWrite: number;
+	heartbeat: Timer | undefined;
+	/** Nothing more may reach the client: the reply ended or the client is gone. */
+	closed: boolean;
 }
 
 const encoder = new TextEncoder();
+
+const DEFAULT_HEARTBEAT_MS = 15_000;
+
+/** A bare SSE comment: a conformant client discards it without dispatching anything. */
+function keepalive(): Uint8Array {
+	return encoder.encode(": keepalive\n\n");
+}
+
+/** The one path to the client, so a write that fails always ends the output. */
+function write(
+	controller: TransformStreamDefaultController,
+	state: State,
+	chunk: Uint8Array,
+): void {
+	if (state.closed) return;
+	try {
+		controller.enqueue(chunk);
+	} catch {
+		log.debug("Responses stream closed before its reply finished");
+		stopOutput(state);
+		return;
+	}
+	state.lastWrite = Date.now();
+}
+
+/** Ends all output to the client, heartbeat included. Idempotent. */
+function stopOutput(state: State): void {
+	state.closed = true;
+	if (state.heartbeat === undefined) return;
+	clearInterval(state.heartbeat);
+	state.heartbeat = undefined;
+}
+
+/**
+ * Keeps the client connection from idling out while the upstream works
+ * without producing output: suppressed blocks, withheld custom tool input, a
+ * partial frame, or plain silence. A hop that buffers, or that enforces an
+ * absolute rather than an idle deadline, is unaffected. Output still queued
+ * unread means the reader has stalled, and another comment would only queue
+ * behind it.
+ */
+function heartbeat(
+	controller: TransformStreamDefaultController,
+	state: State,
+	heartbeatMs: number,
+): void {
+	if (Date.now() - state.lastWrite < heartbeatMs) return;
+	if ((controller.desiredSize ?? 0) < 0) return;
+	write(controller, state, keepalive());
+}
 
 function emitSse(
 	controller: TransformStreamDefaultController,
@@ -65,7 +120,9 @@ function emitSse(
 		{ sequence_number: state.sequenceNumber++ },
 		data as object,
 	);
-	controller.enqueue(
+	write(
+		controller,
+		state,
 		encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(payload)}\n\n`),
 	);
 }
@@ -182,6 +239,10 @@ function emitTerminal(
 		},
 		state,
 	);
+	// A trailing comment is legal SSE but useless once the client has the
+	// terminal event, and holding a finished connection open is how a hung
+	// request stays hung.
+	stopOutput(state);
 }
 
 /** The terminal for a reply that reached `message_stop`. */
@@ -634,31 +695,18 @@ function processEvent(
 		return;
 	}
 
-	// Anthropic emits `ping` as a keepalive during long gaps between content —
-	// most visibly while an extended-thinking model reasons before its first
-	// token. Every other branch above translates an event into a Responses
-	// event; `ping` has no Responses counterpart, so before this it fell through
-	// and the stream simply went silent for the duration of the gap, long enough
-	// to trip a byte-idle timeout in Caddy, in the client, or in an intermediary
-	// and kill a request that is progressing normally upstream.
-	//
-	// Forward it as a bare SSE comment rather than a translated event. Per the
-	// SSE spec a conformant client discards a comment line without dispatching
-	// anything, while every hop that forwards it promptly sees fresh bytes. That
-	// is the limit of what this buys: a hop that buffers, or that enforces an
-	// ABSOLUTE rather than idle deadline, is unaffected.
-	//
-	// Deliberately NOT emitSse — that would consume a `sequence_number` and put
+	// Anthropic emits `ping` during long gaps between content, most visibly
+	// while an extended-thinking model reasons before its first token. `ping`
+	// has no Responses counterpart, so it is forwarded as a bare SSE comment.
+	// Deliberately NOT emitSse: that would consume a `sequence_number` and put
 	// a junk event in a stream whose numbering the client reads as contiguous.
 	//
-	// Suppressed once a terminal event has been emitted. A trailing comment is
-	// legal SSE but useless (the client already has the terminal event and can
-	// act on it) and actively unhelpful, since holding a finished connection
-	// open is how a hung request stays hung.
+	// Liveness does not depend on it: the heartbeat timer guarantees output
+	// whenever the client has seen nothing for `heartbeatMs`. That keeps the
+	// client connection open, not a stalled upstream; the proxy's upstream
+	// chunk and total deadlines still apply.
 	if (eventType === "ping") {
-		if (!state.doneSent) {
-			controller.enqueue(encoder.encode(": keepalive\n\n"));
-		}
+		write(controller, state, keepalive());
 		return;
 	}
 }
@@ -706,7 +754,12 @@ export function translateAnthropicStreamToResponses(
 	responseId: string,
 	model: string,
 	tools?: ToolTranslation,
-	options: { includeSources?: boolean; clientCappedOutput?: boolean } = {},
+	options: {
+		includeSources?: boolean;
+		clientCappedOutput?: boolean;
+		/** Longest silence the client sees while the stream is open. */
+		heartbeatMs?: number;
+	} = {},
 ): Response {
 	if (!anthropicResponse.body && !anthropicResponse.ok) {
 		return new Response(null, { status: anthropicResponse.status });
@@ -742,50 +795,76 @@ export function translateAnthropicStreamToResponses(
 		searches: new Map(),
 		searchByBlock: new Map(),
 		citationsByBlock: new Map(),
+		lastWrite: 0,
+		heartbeat: undefined,
+		closed: false,
+	};
+	const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+
+	// `cancel` is missing from the Transformer type, not from the runtime.
+	const transformer: Transformer<Uint8Array, Uint8Array> & {
+		cancel(reason: unknown): void;
+	} = {
+		start(controller) {
+			state.lastWrite = Date.now();
+			const timer = setInterval(
+				() => heartbeat(controller, state, heartbeatMs),
+				heartbeatMs / 3,
+			);
+			timer.unref();
+			state.heartbeat = timer;
+		},
+
+		transform(chunk, controller) {
+			try {
+				state.lineBuffer += decoder.decode(chunk, { stream: true });
+
+				// Keep partial delimiters, including a CR/LF split across chunks.
+				for (;;) {
+					const boundary = /\r?\n\r?\n/.exec(state.lineBuffer);
+					if (!boundary || boundary.index === undefined) break;
+					const end = boundary.index + boundary[0].length;
+					const complete = state.lineBuffer.slice(0, boundary.index);
+					state.lineBuffer = state.lineBuffer.slice(end);
+					parseAndProcessEvent(complete, controller, state);
+				}
+			} catch (err) {
+				log.warn(`Stream transform error: ${String(err)}`);
+			}
+		},
+
+		flush(controller) {
+			try {
+				// Flush remaining buffered UTF-8 bytes and release decoder's internal buffer
+				const remaining = decoder.decode();
+				if (remaining) state.lineBuffer += remaining;
+
+				// Process any remaining buffered content
+				if (state.lineBuffer.trim()) {
+					parseAndProcessEvent(state.lineBuffer, controller, state);
+					state.lineBuffer = "";
+				}
+				// Only message_stop completes a reply; a body that ends before it
+				// was cut off, even after a message_delta.
+				emitTerminal(controller, state, {
+					status: "failed",
+					error: STREAM_TRUNCATED,
+				});
+			} catch (err) {
+				log.warn(`Stream flush error: ${String(err)}`);
+			} finally {
+				stopOutput(state);
+			}
+		},
+
+		// The reader cancelled, or an upstream error aborted the pipe.
+		cancel() {
+			stopOutput(state);
+		},
 	};
 
 	const transformedBody = upstreamBody.pipeThrough(
-		new TransformStream<Uint8Array, Uint8Array>({
-			transform(chunk, controller) {
-				try {
-					state.lineBuffer += decoder.decode(chunk, { stream: true });
-
-					// Keep partial delimiters, including a CR/LF split across chunks.
-					for (;;) {
-						const boundary = /\r?\n\r?\n/.exec(state.lineBuffer);
-						if (!boundary || boundary.index === undefined) break;
-						const end = boundary.index + boundary[0].length;
-						const complete = state.lineBuffer.slice(0, boundary.index);
-						state.lineBuffer = state.lineBuffer.slice(end);
-						parseAndProcessEvent(complete, controller, state);
-					}
-				} catch (err) {
-					log.warn(`Stream transform error: ${String(err)}`);
-				}
-			},
-
-			flush(controller) {
-				try {
-					// Flush remaining buffered UTF-8 bytes and release decoder's internal buffer
-					const remaining = decoder.decode();
-					if (remaining) state.lineBuffer += remaining;
-
-					// Process any remaining buffered content
-					if (state.lineBuffer.trim()) {
-						parseAndProcessEvent(state.lineBuffer, controller, state);
-						state.lineBuffer = "";
-					}
-					// Only message_stop completes a reply; a body that ends before it
-					// was cut off, even after a message_delta.
-					emitTerminal(controller, state, {
-						status: "failed",
-						error: STREAM_TRUNCATED,
-					});
-				} catch (err) {
-					log.warn(`Stream flush error: ${String(err)}`);
-				}
-			},
-		}),
+		new TransformStream<Uint8Array, Uint8Array>(transformer),
 	);
 
 	return new Response(transformedBody, {

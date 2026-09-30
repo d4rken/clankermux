@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
 	getNativeResponsesRequestContext,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
@@ -605,6 +605,79 @@ describe("handleResponsesRequest", () => {
 		expect(rawBody).toContain("response.completed");
 	});
 
+	test("a client abort stops the translated stream's heartbeat", async () => {
+		const started = spyOn(globalThis, "setInterval");
+		const cleared = spyOn(globalThis, "clearInterval");
+		try {
+			const abort = new AbortController();
+			const mockHandleProxy: HandleProxyFn = async (forwarded) =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(
+								new TextEncoder().encode(
+									`event: message_start\ndata: ${JSON.stringify({
+										type: "message_start",
+										message: {
+											id: "msg_1",
+											usage: { input_tokens: 1, output_tokens: 0 },
+										},
+									})}\n\n`,
+								),
+							);
+							// What fetch does to a response body when its request aborts.
+							forwarded.signal.addEventListener(
+								"abort",
+								() => controller.error(forwarded.signal.reason),
+								{ once: true },
+							);
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "text/event-stream" } },
+				);
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: "Hi",
+					stream: true,
+				}),
+				headers: { "Content-Type": "application/json" },
+				signal: abort.signal,
+			});
+
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				mockHandleProxy,
+				{},
+			);
+			const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+			const first = await reader.read();
+			expect(new TextDecoder().decode(first.value)).toContain(
+				"response.created",
+			);
+
+			abort.abort();
+			const outcome = await (async () => {
+				try {
+					for (;;) if ((await reader.read()).done) return "ended";
+				} catch {
+					return "errored";
+				}
+			})();
+			expect(outcome).toBe("errored");
+
+			const timers = started.mock.results.map((result) => result.value);
+			expect(timers.length).toBeGreaterThan(0);
+			for (const timer of timers)
+				expect(cleared.mock.calls.some(([id]) => id === timer)).toBe(true);
+		} finally {
+			started.mockRestore();
+			cleared.mockRestore();
+		}
+	});
+
 	describe("native Responses passthrough (Stage B, response leg)", () => {
 		// The `response` envelope the backend's terminal event carries — what a
 		// non-streaming client must receive verbatim.
@@ -1009,7 +1082,14 @@ describe("handleResponsesRequest", () => {
 				}),
 				headers: { "Content-Type": "application/json" },
 			});
-			await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				mockHandleProxy,
+				{},
+			);
+			// A streamed reply nobody reads would keep its heartbeat running.
+			await resp.body?.cancel();
 			expect(capturedReq).not.toBeNull();
 			return getNativeResponsesRequestContext(
 				capturedReq as unknown as Request,
