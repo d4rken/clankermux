@@ -134,9 +134,9 @@ async function exchangeCodexDeviceCode(
 ): Promise<CodexTokenResponse> {
 	const body = new URLSearchParams({
 		grant_type: "authorization_code",
+		client_id: CODEX_CLIENT_ID,
 		code: authorizationCode,
 		redirect_uri: DEVICE_REDIRECT_URI,
-		client_id: CODEX_CLIENT_ID,
 		code_verifier: codeVerifier,
 	});
 
