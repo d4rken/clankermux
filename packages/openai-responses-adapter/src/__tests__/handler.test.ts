@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
 	getNativeResponsesRequestContext,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
@@ -605,6 +605,79 @@ describe("handleResponsesRequest", () => {
 		expect(rawBody).toContain("response.completed");
 	});
 
+	test("a client abort stops the translated stream's heartbeat", async () => {
+		const started = spyOn(globalThis, "setInterval");
+		const cleared = spyOn(globalThis, "clearInterval");
+		try {
+			const abort = new AbortController();
+			const mockHandleProxy: HandleProxyFn = async (forwarded) =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(
+								new TextEncoder().encode(
+									`event: message_start\ndata: ${JSON.stringify({
+										type: "message_start",
+										message: {
+											id: "msg_1",
+											usage: { input_tokens: 1, output_tokens: 0 },
+										},
+									})}\n\n`,
+								),
+							);
+							// What fetch does to a response body when its request aborts.
+							forwarded.signal.addEventListener(
+								"abort",
+								() => controller.error(forwarded.signal.reason),
+								{ once: true },
+							);
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "text/event-stream" } },
+				);
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "claude-haiku-4-5",
+					input: "Hi",
+					stream: true,
+				}),
+				headers: { "Content-Type": "application/json" },
+				signal: abort.signal,
+			});
+
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				mockHandleProxy,
+				{},
+			);
+			const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+			const first = await reader.read();
+			expect(new TextDecoder().decode(first.value)).toContain(
+				"response.created",
+			);
+
+			abort.abort();
+			const outcome = await (async () => {
+				try {
+					for (;;) if ((await reader.read()).done) return "ended";
+				} catch {
+					return "errored";
+				}
+			})();
+			expect(outcome).toBe("errored");
+
+			const timers = started.mock.results.map((result) => result.value);
+			expect(timers.length).toBeGreaterThan(0);
+			for (const timer of timers)
+				expect(cleared.mock.calls.some(([id]) => id === timer)).toBe(true);
+		} finally {
+			started.mockRestore();
+			cleared.mockRestore();
+		}
+	});
+
 	describe("native Responses passthrough (Stage B, response leg)", () => {
 		// The `response` envelope the backend's terminal event carries — what a
 		// non-streaming client must receive verbatim.
@@ -1009,7 +1082,14 @@ describe("handleResponsesRequest", () => {
 				}),
 				headers: { "Content-Type": "application/json" },
 			});
-			await handleResponsesRequest(req, new URL(req.url), mockHandleProxy, {});
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				mockHandleProxy,
+				{},
+			);
+			// A streamed reply nobody reads would keep its heartbeat running.
+			await resp.body?.cancel();
 			expect(capturedReq).not.toBeNull();
 			return getNativeResponsesRequestContext(
 				capturedReq as unknown as Request,
@@ -1104,6 +1184,92 @@ describe("handleResponsesRequest", () => {
 					role: "user",
 					content: [{ type: "input_text", text: "plain text" }],
 				},
+			]);
+		});
+
+		const USER_TURN = {
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "Read x" }],
+		};
+
+		test("leaves proxy-minted reasoning out of nativeBody and every other item as sent", async () => {
+			const minted = {
+				type: "reasoning",
+				id: "resp_0123456789abcdef01234567_rs_0",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Let me think." }],
+			};
+			const issued = {
+				type: "reasoning",
+				id: "rs_68a1b2c3d4e5f60718293a4b",
+				summary: [{ type: "summary_text", text: "Thought about x." }],
+				encrypted_content: "gAAAAABo-opaque==",
+			};
+			const encryptedLookalike = {
+				...minted,
+				id: "resp_0123456789abcdef01234567_rs_2",
+				encrypted_content: "gAAAAABo-opaque==",
+			};
+			const kept = [
+				USER_TURN,
+				issued,
+				encryptedLookalike,
+				{
+					type: "function_call",
+					call_id: "call_1",
+					name: "read",
+					arguments: '{"path":"x"}',
+				},
+				{ type: "function_call_output", call_id: "call_1", output: "ok" },
+				{
+					type: "message",
+					role: "assistant",
+					content: [{ type: "output_text", text: "Done." }],
+				},
+			];
+			const input = [kept[0], minted, ...kept.slice(1)];
+
+			const ctx = await captureContext({ input });
+
+			expect(ctx?.nativeBody).toBe(
+				JSON.stringify({ model: "gpt-5.5-codex", input: kept }),
+			);
+			expect(ctx?.nativeBody).toContain(JSON.stringify(issued));
+		});
+
+		test("recognizes the reasoning items its own replies carry", async () => {
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({ model: "glm-5", input: [USER_TURN] }),
+				headers: { "Content-Type": "application/json" },
+			});
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				async () =>
+					Response.json({
+						...JSON.parse(ANTHROPIC_MESSAGE_BODY),
+						content: [
+							{ type: "thinking", thinking: "Let me think.", signature: "s" },
+							{ type: "text", text: "Hello" },
+						],
+					}),
+				{},
+			);
+			const reply = (await resp.json()) as {
+				output: Array<Record<string, unknown>>;
+			};
+			const [reasoning, message] = reply.output;
+			expect(reasoning).toMatchObject({ type: "reasoning" });
+
+			const ctx = await captureContext({
+				input: [USER_TURN, reasoning, message],
+			});
+
+			expect(JSON.parse(ctx?.nativeBody ?? "{}").input).toEqual([
+				USER_TURN,
+				message,
 			]);
 		});
 	});

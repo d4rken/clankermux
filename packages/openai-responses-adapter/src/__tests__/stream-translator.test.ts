@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Logger } from "@clankermux/logger";
 import { translateAnthropicStreamToResponses } from "../stream-translator";
+import { ToolTranslation } from "../tool-translation";
 
 async function collectSseEvents(
 	response: Response,
@@ -612,22 +613,31 @@ describe("translateAnthropicStreamToResponses", () => {
 						}),
 						sseEvent("content_block_start", {
 							index: 0,
-							content_block: { type: "thinking", thinking: "" },
-						}),
-						sseEvent("content_block_delta", {
-							index: 0,
-							delta: { type: "thinking_delta", thinking: "internal" },
+							content_block: { type: "redacted_thinking", data: "opaque" },
 						}),
 						sseEvent("content_block_stop", { index: 0 }),
 						sseEvent("content_block_start", {
 							index: 1,
-							content_block: { type: "text", text: "" },
+							content_block: { type: "thinking", thinking: "" },
 						}),
 						sseEvent("content_block_delta", {
 							index: 1,
-							delta: { type: "text_delta", text: "visible" },
+							delta: { type: "thinking_delta", thinking: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 1,
+							delta: { type: "signature_delta", signature: "sig" },
 						}),
 						sseEvent("content_block_stop", { index: 1 }),
+						sseEvent("content_block_start", {
+							index: 2,
+							content_block: { type: "text", text: "" },
+						}),
+						sseEvent("content_block_delta", {
+							index: 2,
+							delta: { type: "text_delta", text: "visible" },
+						}),
+						sseEvent("content_block_stop", { index: 2 }),
 						sseEvent("message_stop", {}),
 					]),
 					"resp_thinking",
@@ -635,12 +645,10 @@ describe("translateAnthropicStreamToResponses", () => {
 				),
 			);
 
-			expect(warning).not.toHaveBeenCalledWith(
-				"content_block_delta for unknown block index 0",
-			);
-			expect(warning).not.toHaveBeenCalledWith(
-				"content_block_stop for unknown block index 0",
-			);
+			expect(warning).not.toHaveBeenCalled();
+			expect(
+				events.filter((event) => event.event.includes("reasoning")),
+			).toEqual([]);
 			expect(
 				events.find((event) => event.event === "response.output_text.delta")
 					?.data,
@@ -950,6 +958,392 @@ describe("translateAnthropicStreamToResponses", () => {
 	});
 });
 
+describe("reasoning items", () => {
+	type Event = { event: string; data: Record<string, unknown> };
+
+	const START = sseEvent("message_start", {
+		message: { id: "msg_rs", usage: { input_tokens: 3, output_tokens: 0 } },
+	});
+	const END = [
+		sseEvent("message_delta", {
+			delta: { stop_reason: "end_turn" },
+			usage: { output_tokens: 9 },
+		}),
+		sseEvent("message_stop", {}),
+	];
+
+	function thinkingStart(index: number, thinking: string): string {
+		return sseEvent("content_block_start", {
+			index,
+			content_block: { type: "thinking", thinking },
+		});
+	}
+	function thinkingDelta(index: number, thinking: string): string {
+		return sseEvent("content_block_delta", {
+			index,
+			delta: { type: "thinking_delta", thinking },
+		});
+	}
+	function signature(index: number): string {
+		return sseEvent("content_block_delta", {
+			index,
+			delta: { type: "signature_delta", signature: "EqQBCgIYAhIM" },
+		});
+	}
+	function stop(index: number): string {
+		return sseEvent("content_block_stop", { index });
+	}
+	function textBlock(index: number, text: string): string[] {
+		return [
+			sseEvent("content_block_start", {
+				index,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("content_block_delta", {
+				index,
+				delta: { type: "text_delta", text },
+			}),
+			stop(index),
+		];
+	}
+
+	async function translate(
+		blocks: string[],
+		tools?: ToolTranslation,
+	): Promise<Event[]> {
+		return (await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream([START, ...blocks]),
+				"resp_rs",
+				"test-model",
+				tools,
+			),
+		)) as Event[];
+	}
+
+	function reasoningEvents(events: Event[]): Event[] {
+		return events.filter(
+			(event) =>
+				event.event.includes("reasoning") ||
+				(event.data.item as { type?: string } | undefined)?.type ===
+					"reasoning" ||
+				(event.data.part as { type?: string } | undefined)?.type ===
+					"reasoning_text",
+		);
+	}
+
+	function terminalOutput(events: Event[]): Array<Record<string, unknown>> {
+		return (
+			events.at(-1)?.data.response as {
+				output: Array<Record<string, unknown>>;
+			}
+		).output;
+	}
+
+	const ITEM = {
+		type: "reasoning",
+		id: "resp_rs_rs_0",
+		summary: [],
+		content: [{ type: "reasoning_text", text: "Let me think." }],
+	};
+
+	test("thinking becomes a raw reasoning item with its own event sequence", async () => {
+		const events = await translate([
+			thinkingStart(0, ""),
+			thinkingDelta(0, "Let me "),
+			thinkingDelta(0, "think."),
+			signature(0),
+			stop(0),
+			...END,
+		]);
+
+		expect(events.map((event) => event.event)).toEqual([
+			"response.created",
+			"response.in_progress",
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.reasoning_text.delta",
+			"response.reasoning_text.delta",
+			"response.reasoning_text.done",
+			"response.content_part.done",
+			"response.output_item.done",
+			"response.completed",
+		]);
+		expect(events.slice(2, 9).map((event) => event.data)).toEqual([
+			{
+				sequence_number: 2,
+				type: "response.output_item.added",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "resp_rs_rs_0",
+					summary: [],
+					content: [],
+				},
+			},
+			{
+				sequence_number: 3,
+				type: "response.content_part.added",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				part: { type: "reasoning_text", text: "" },
+			},
+			{
+				sequence_number: 4,
+				type: "response.reasoning_text.delta",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				delta: "Let me ",
+			},
+			{
+				sequence_number: 5,
+				type: "response.reasoning_text.delta",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				delta: "think.",
+			},
+			{
+				sequence_number: 6,
+				type: "response.reasoning_text.done",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				text: "Let me think.",
+			},
+			{
+				sequence_number: 7,
+				type: "response.content_part.done",
+				item_id: "resp_rs_rs_0",
+				output_index: 0,
+				content_index: 0,
+				part: { type: "reasoning_text", text: "Let me think." },
+			},
+			{
+				sequence_number: 8,
+				type: "response.output_item.done",
+				output_index: 0,
+				item: ITEM,
+			},
+		]);
+		expect(terminalOutput(events)).toEqual([ITEM]);
+	});
+
+	test("text in the block start is the first fragment", async () => {
+		for (const [blocks, deltas] of [
+			[[thinkingStart(0, "Let me think.")], ["Let me think."]],
+			[
+				[thinkingStart(0, "Let me "), thinkingDelta(0, "think.")],
+				["Let me ", "think."],
+			],
+		] as const) {
+			const events = await translate([...blocks, stop(0), ...END]);
+			const reasoning = reasoningEvents(events);
+			expect(reasoning.map((event) => event.event)).toEqual([
+				"response.output_item.added",
+				"response.content_part.added",
+				...deltas.map(() => "response.reasoning_text.delta"),
+				"response.reasoning_text.done",
+				"response.content_part.done",
+				"response.output_item.done",
+			]);
+			expect(
+				reasoning
+					.filter((event) => event.event === "response.reasoning_text.delta")
+					.map((event) => event.data.delta),
+			).toEqual([...deltas]);
+			expect(terminalOutput(events)).toEqual([ITEM]);
+		}
+	});
+
+	test("output indices stay contiguous across every item kind, with sequence numbers unbroken", async () => {
+		const tools = new ToolTranslation();
+		tools.add([{ type: "custom", name: "exec" }]);
+		const events = await translate(
+			[
+				thinkingStart(0, ""),
+				thinkingDelta(0, "Let me think."),
+				signature(0),
+				stop(0),
+				...textBlock(1, "Reading."),
+				sseEvent("content_block_start", {
+					index: 2,
+					content_block: { type: "tool_use", id: "toolu_f", name: "read" },
+				}),
+				sseEvent("content_block_delta", {
+					index: 2,
+					delta: { type: "input_json_delta", partial_json: '{"p":"x"}' },
+				}),
+				stop(2),
+				sseEvent("content_block_start", {
+					index: 3,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: tools.tools[0]?.name,
+						input: {},
+					},
+				}),
+				sseEvent("content_block_delta", {
+					index: 3,
+					delta: { type: "input_json_delta", partial_json: '{"input":"ls"}' },
+				}),
+				stop(3),
+				sseEvent("content_block_start", {
+					index: 4,
+					content_block: {
+						type: "server_tool_use",
+						id: "srvtoolu_1",
+						name: "web_search",
+						input: { query: "bun" },
+					},
+				}),
+				stop(4),
+				sseEvent("content_block_start", {
+					index: 5,
+					content_block: {
+						type: "web_search_tool_result",
+						tool_use_id: "srvtoolu_1",
+						content: [{ type: "web_search_result", url: "https://bun.sh" }],
+					},
+				}),
+				stop(5),
+				...END,
+			],
+			tools,
+		);
+
+		expect(
+			events
+				.filter((event) => event.event === "response.output_item.added")
+				.map((event) => [
+					event.data.output_index,
+					(event.data.item as { type: string }).type,
+				]),
+		).toEqual([
+			[0, "reasoning"],
+			[1, "message"],
+			[2, "function_call"],
+			[3, "custom_tool_call"],
+			[4, "web_search_call"],
+		]);
+		expect(terminalOutput(events).map((item) => [item.type, item.id])).toEqual([
+			["reasoning", "resp_rs_rs_0"],
+			["message", "resp_rs_msg_1"],
+			["function_call", "resp_rs_fc_2"],
+			["custom_tool_call", "resp_rs_fc_3"],
+			["web_search_call", "resp_rs_ws_4"],
+		]);
+		expect(events.at(-1)?.event).toBe("response.completed");
+		expect(events.map((event) => event.data.sequence_number)).toEqual(
+			events.map((_, index) => index),
+		);
+	});
+
+	test("a thinking block without text claims no slot", async () => {
+		const events = await translate([
+			thinkingStart(0, ""),
+			thinkingDelta(0, ""),
+			signature(0),
+			stop(0),
+			...textBlock(1, "Answer."),
+			...END,
+		]);
+		expect(reasoningEvents(events)).toEqual([]);
+		expect(
+			events.find((event) => event.event === "response.output_item.added")
+				?.data,
+		).toMatchObject({ output_index: 0, item: { id: "resp_rs_msg_0" } });
+		expect(terminalOutput(events)).toEqual([
+			expect.objectContaining({ type: "message", id: "resp_rs_msg_0" }),
+		]);
+	});
+
+	test("signature deltas and redacted thinking emit nothing and warn nothing", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			const events = await translate([
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: { type: "redacted_thinking", data: "opaque" },
+				}),
+				stop(0),
+				thinkingStart(1, ""),
+				thinkingDelta(1, "Let me think."),
+				signature(1),
+				signature(1),
+				stop(1),
+				...textBlock(2, "Answer."),
+				...END,
+			]);
+			expect(warning).not.toHaveBeenCalled();
+			expect(
+				events.filter(
+					(event) => event.event === "response.reasoning_text.delta",
+				),
+			).toHaveLength(1);
+			expect(
+				terminalOutput(events).map((item) => [item.type, item.id]),
+			).toEqual([
+				["reasoning", "resp_rs_rs_0"],
+				["message", "resp_rs_msg_1"],
+			]);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("reasoning cut off by EOF is left out of the terminal output", async () => {
+		const events = await translate([
+			thinkingStart(0, "Let me think."),
+			stop(0),
+			thinkingStart(1, "Then "),
+			thinkingDelta(1, "again"),
+		]);
+		expect(events.at(-1)?.event).toBe("response.failed");
+		expect(
+			events
+				.filter((event) => event.event === "response.output_item.done")
+				.map((event) => event.data.output_index),
+		).toEqual([0]);
+		expect(terminalOutput(events)).toEqual([ITEM]);
+	});
+
+	test("a thinking block after a withheld custom tool call ends the response", async () => {
+		const tools = new ToolTranslation();
+		tools.add([{ type: "custom", name: "exec" }]);
+		const events = await translate(
+			[
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: tools.tools[0]?.name,
+						input: {},
+					},
+				}),
+				sseEvent("content_block_delta", {
+					index: 0,
+					delta: { type: "input_json_delta", partial_json: '{"input":"pri' },
+				}),
+				stop(0),
+				thinkingStart(1, "Let me think."),
+				stop(1),
+				...END,
+			],
+			tools,
+		);
+		expect(reasoningEvents(events)).toEqual([]);
+		expect(events.at(-1)?.event).toBe("response.failed");
+		expect(terminalOutput(events)).toEqual([]);
+	});
+});
+
 describe("terminal status", () => {
 	/**
 	 * A text block, then a tool_use block whose arguments were cut off at
@@ -1186,4 +1580,388 @@ describe("terminal status", () => {
 				}),
 			]);
 		});
+});
+
+describe("heartbeat", () => {
+	const HEARTBEAT_MS = 40;
+	// The guarantee is HEARTBEAT_MS plus one tick; the rest is scheduling slack.
+	const SILENCE_BOUND = HEARTBEAT_MS * 2.5;
+	const KEEPALIVE = ": keepalive\n\n";
+	const MESSAGE_START = sseEvent("message_start", {
+		type: "message_start",
+		message: { id: "msg_hb", usage: { input_tokens: 1, output_tokens: 0 } },
+	});
+	const MESSAGE_STOP = sseEvent("message_stop", { type: "message_stop" });
+	const TEXT_START = sseEvent("content_block_start", {
+		index: 0,
+		content_block: { type: "text", text: "" },
+	});
+
+	/** An upstream body the test writes as it goes. */
+	function liveUpstream() {
+		const encoder = new TextEncoder();
+		let controller!: ReadableStreamDefaultController<Uint8Array>;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				start: (c) => {
+					controller = c;
+				},
+			}),
+			{ headers: { "Content-Type": "text/event-stream" } },
+		);
+		return {
+			response,
+			send: (text: string) => controller.enqueue(encoder.encode(text)),
+			frame: (event: string) =>
+				controller.enqueue(encoder.encode(`${event}\n\n`)),
+			close: () => controller.close(),
+			error: (reason: unknown) => controller.error(reason),
+		};
+	}
+
+	type Chunk = { at: number; text: string };
+
+	/** Reads a response to its end, timestamping each chunk on arrival. */
+	function readTimed(response: Response) {
+		const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+		const chunks: Chunk[] = [];
+		/** The read error, or undefined at a clean end. */
+		const finished = (async (): Promise<unknown> => {
+			try {
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) return undefined;
+					chunks.push({
+						at: performance.now(),
+						text: decoder.decode(value, { stream: true }),
+					});
+				}
+			} catch (err) {
+				return err ?? new Error("read failed");
+			}
+		})();
+		return {
+			reader,
+			chunks,
+			finished,
+			text: () => chunks.map((chunk) => chunk.text).join(""),
+		};
+	}
+
+	function translate(
+		upstream: Response,
+		heartbeatMs = HEARTBEAT_MS,
+		tools?: ToolTranslation,
+	): Response {
+		return translateAnthropicStreamToResponses(
+			upstream,
+			"resp_hb",
+			"m",
+			tools,
+			{
+				heartbeatMs,
+			},
+		);
+	}
+
+	function within(chunks: Chunk[], from: number, to: number): Chunk[] {
+		return chunks.filter((chunk) => chunk.at >= from && chunk.at <= to);
+	}
+
+	/** The longest stretch of [from, to] in which nothing arrived. */
+	function longestSilence(chunks: Chunk[], from: number, to: number): number {
+		let last = from;
+		let longest = 0;
+		for (const { at } of within(chunks, from, to)) {
+			longest = Math.max(longest, at - last);
+			last = at;
+		}
+		return Math.max(longest, to - last);
+	}
+
+	function keepalivesIn(text: string): number {
+		return text.split(KEEPALIVE).length - 1;
+	}
+
+	/** Every interval started while watching, and whether each was cleared. */
+	function watchIntervals() {
+		const started = spyOn(globalThis, "setInterval");
+		const cleared = spyOn(globalThis, "clearInterval");
+		const timers = () => started.mock.results.map((result) => result.value);
+		return {
+			timers,
+			allCleared: () =>
+				timers().every((timer) =>
+					cleared.mock.calls.some(([id]) => id === timer),
+				),
+			restore: () => {
+				started.mockRestore();
+				cleared.mockRestore();
+			},
+		};
+	}
+
+	async function until(condition: () => boolean): Promise<void> {
+		const deadline = performance.now() + 2_000;
+		while (!condition()) {
+			if (performance.now() > deadline) throw new Error("condition not met");
+			await Bun.sleep(2);
+		}
+	}
+
+	test("a quiet upstream gets keepalives on schedule without any ping", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response));
+		upstream.frame(MESSAGE_START);
+		await until(() => out.text().includes("response.in_progress"));
+
+		const from = performance.now();
+		await Bun.sleep(300);
+		const to = performance.now();
+
+		const window = within(out.chunks, from, to);
+		expect(window.length).toBeGreaterThanOrEqual(3);
+		expect(window.every((chunk) => chunk.text === KEEPALIVE)).toBe(true);
+		expect(longestSilence(out.chunks, from, to)).toBeLessThan(SILENCE_BOUND);
+
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		expect(await out.finished).toBeUndefined();
+	});
+
+	const customTools = new ToolTranslation();
+	customTools.add([{ type: "custom", name: "exec" }]);
+	const fragment =
+		'event: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"';
+
+	for (const { name, tools, prelude, filler } of [
+		{
+			name: "a thinking block with no text yet",
+			tools: undefined,
+			prelude: [
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: { type: "thinking", thinking: "" },
+				}),
+			],
+			filler: (i: number) =>
+				`${sseEvent("content_block_delta", {
+					index: 0,
+					delta:
+						i % 2
+							? { type: "signature_delta", signature: "sig" }
+							: { type: "thinking_delta", thinking: "" },
+				})}\n\n`,
+		},
+		{
+			name: "a custom tool call's unfinished input",
+			tools: customTools,
+			prelude: [
+				sseEvent("content_block_start", {
+					index: 0,
+					content_block: {
+						type: "tool_use",
+						id: "toolu_c",
+						name: customTools.tools[0]?.name,
+						input: {},
+					},
+				}),
+			],
+			filler: (i: number) =>
+				`${sseEvent("content_block_delta", {
+					index: 0,
+					delta: {
+						type: "input_json_delta",
+						partial_json: i === 0 ? '{"input":"' : "x",
+					},
+				})}\n\n`,
+		},
+		{
+			name: "an SSE frame arriving in fragments",
+			tools: undefined,
+			prelude: [],
+			filler: (i: number) => fragment.charAt(i) || "a",
+		},
+	])
+		test(`keepalives stay on schedule through input that produces no output: ${name}`, async () => {
+			const upstream = liveUpstream();
+			const out = readTimed(translate(upstream.response, HEARTBEAT_MS, tools));
+			upstream.frame(MESSAGE_START);
+			for (const event of prelude) upstream.frame(event);
+			await until(() => out.text().includes("response.in_progress"));
+
+			const from = performance.now();
+			for (let i = 0; performance.now() - from < 300; i++) {
+				upstream.send(filler(i));
+				await Bun.sleep(10);
+			}
+			const to = performance.now();
+
+			const window = within(out.chunks, from, to);
+			expect(window.length).toBeGreaterThanOrEqual(3);
+			expect(window.every((chunk) => chunk.text === KEEPALIVE)).toBe(true);
+			expect(longestSilence(out.chunks, from, to)).toBeLessThan(SILENCE_BOUND);
+
+			await out.reader.cancel();
+			await out.finished;
+		});
+
+	test("no keepalive while output flows faster than the interval", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response, 100));
+		upstream.frame(MESSAGE_START);
+		upstream.frame(TEXT_START);
+		const from = performance.now();
+		while (performance.now() - from < 300) {
+			upstream.frame(
+				sseEvent("content_block_delta", {
+					index: 0,
+					delta: { type: "text_delta", text: "a" },
+				}),
+			);
+			await Bun.sleep(10);
+		}
+		upstream.frame(sseEvent("content_block_stop", { index: 0 }));
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		await out.finished;
+
+		expect(out.text()).toContain("event: response.completed");
+		expect(out.text()).not.toContain(KEEPALIVE);
+	});
+
+	test("keepalives neither follow the terminal event nor consume sequence numbers", async () => {
+		const upstream = liveUpstream();
+		const out = readTimed(translate(upstream.response));
+		await Bun.sleep(100);
+		upstream.frame(MESSAGE_START);
+		await Bun.sleep(100);
+		upstream.frame(TEXT_START);
+		upstream.frame(
+			sseEvent("content_block_delta", {
+				index: 0,
+				delta: { type: "text_delta", text: "hi" },
+			}),
+		);
+		await Bun.sleep(100);
+		upstream.frame(sseEvent("content_block_stop", { index: 0 }));
+		upstream.frame(MESSAGE_STOP);
+		// The upstream stays open well past the terminal event.
+		await Bun.sleep(150);
+		upstream.close();
+		await out.finished;
+
+		const raw = out.text();
+		expect(raw.startsWith(KEEPALIVE)).toBe(true);
+		const terminalAt = raw.indexOf("event: response.completed");
+		expect(terminalAt).toBeGreaterThan(-1);
+		expect(keepalivesIn(raw.slice(0, terminalAt))).toBeGreaterThanOrEqual(3);
+		expect(raw.slice(terminalAt)).not.toContain(KEEPALIVE);
+
+		const sequence = (await collectSseEvents(new Response(raw))).map(
+			(event) => (event.data as { sequence_number: number }).sequence_number,
+		);
+		expect(sequence.length).toBeGreaterThan(4);
+		expect(sequence).toEqual(sequence.map((_, i) => i));
+	});
+
+	test("a paused reader gets at most one queued keepalive", async () => {
+		const upstream = liveUpstream();
+		const reader = (
+			translate(upstream.response, 30).body as ReadableStream<Uint8Array>
+		).getReader();
+		const decoder = new TextDecoder();
+		upstream.frame(MESSAGE_START);
+		let seen = "";
+		while (!seen.includes("response.in_progress")) {
+			const { value } = await reader.read();
+			seen += decoder.decode(value, { stream: true });
+		}
+
+		await Bun.sleep(300);
+
+		upstream.frame(TEXT_START);
+		upstream.frame(MESSAGE_STOP);
+		upstream.close();
+		let rest = "";
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			rest += decoder.decode(value, { stream: true });
+		}
+		expect(rest.slice(0, rest.indexOf("event: "))).toBe(KEEPALIVE);
+		expect(rest).toContain("event: response.output_item.added");
+	});
+
+	describe("stops its timer", () => {
+		// Long enough that no tick runs here: only the stop paths can clear it.
+		const IDLE_MS = 60_000;
+
+		test("after flush", async () => {
+			const intervals = watchIntervals();
+			try {
+				const raw = await translate(
+					makeAnthropicStream([MESSAGE_START]),
+					IDLE_MS,
+				).text();
+				expect(raw).toContain("event: response.failed");
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("at the terminal event, while the upstream is still open", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				upstream.frame(MESSAGE_STOP);
+				await until(() => out.text().includes("event: response.completed"));
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+				upstream.close();
+				await out.finished;
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("when the reader cancels", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				await until(() => out.text().includes("response.in_progress"));
+				expect(intervals.allCleared()).toBe(false);
+				await out.reader.cancel();
+				expect(await out.finished).toBeUndefined();
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+
+		test("when an upstream error aborts the pipe while idle", async () => {
+			const intervals = watchIntervals();
+			try {
+				const upstream = liveUpstream();
+				const out = readTimed(translate(upstream.response, IDLE_MS));
+				upstream.frame(MESSAGE_START);
+				await until(() => out.text().includes("response.in_progress"));
+				expect(intervals.allCleared()).toBe(false);
+				upstream.error(new Error("upstream reset"));
+				expect(await out.finished).toBeDefined();
+				expect(intervals.timers()).toHaveLength(1);
+				expect(intervals.allCleared()).toBe(true);
+			} finally {
+				intervals.restore();
+			}
+		});
+	});
 });

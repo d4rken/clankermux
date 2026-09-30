@@ -4,6 +4,7 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
+import { reasoningItem, reasoningItemId } from "./reasoning-items";
 import {
 	responsesTerminalStatus,
 	stoppedMidOutput,
@@ -52,6 +53,12 @@ export function translateAnthropicResponseToResponses(
 				status: "completed",
 			};
 			output.push(msgItem);
+			outputIdx++;
+		} else if (block.type === "thinking") {
+			if (typeof block.thinking !== "string" || !block.thinking) continue;
+			output.push(
+				reasoningItem(reasoningItemId(responseId, outputIdx), block.thinking),
+			);
 			outputIdx++;
 		} else if (block.type === "server_tool_use") {
 			if (block.name !== "web_search") continue;
