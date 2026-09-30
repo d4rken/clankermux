@@ -16,6 +16,7 @@ import {
 	extractNativeTerminalResponse,
 	type NativeTerminalFailureReason,
 } from "./native-nonstream";
+import { isMintedReasoningItem } from "./reasoning-items";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import {
@@ -214,6 +215,20 @@ const CLIENT_REQUEST_ID_HEADER = "x-clankermux-request-id";
 const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
 /** The proxy's headers every leg copies onto the response it builds. */
 const CARRIED_HEADERS = [CLIENT_REQUEST_ID_HEADER, SDK_BRIDGE_HISTORY_HEADER];
+
+/**
+ * The body a native account receives. A replayed reasoning item this proxy
+ * minted from Anthropic thinking would reach OpenAI as one it never issued, so
+ * it is left out; every other input item passes unchanged.
+ */
+function nativeBodyOf(body: ResponsesRequest): string {
+	const input: unknown[] = Array.isArray(body.input) ? body.input : [];
+	if (!input.some(isMintedReasoningItem)) return JSON.stringify(body);
+	return JSON.stringify({
+		...body,
+		input: input.filter((item) => !isMintedReasoningItem(item)),
+	});
+}
 
 /**
  * One exit for every response this adapter produces, so the carried headers
@@ -423,13 +438,14 @@ async function respondToResponsesRequest(
 		signal: req.signal,
 	});
 	// Native Responses passthrough (Stage A): carry the original (normalized)
-	// Responses body alongside the translated request. When the proxy selects a
-	// codex account it forwards this body verbatim instead of double-translating
-	// — handleProxy re-keys it onto RequestMeta. The client's own stream intent
+	// Responses body, minus proxy-minted reasoning, alongside the translated
+	// request. When the proxy selects a codex account it forwards this body
+	// verbatim instead of double-translating — handleProxy re-keys it onto
+	// RequestMeta. The client's own stream intent
 	// is not part of that decision (see step 8): the upstream leg is SSE either
 	// way, so it stays a property of `body` here in the adapter.
 	const nativeContext: NativeResponsesContext = {
-		nativeBody: JSON.stringify(body),
+		nativeBody: nativeBodyOf(body),
 		// Captured from the ORIGINAL body before translation; the real effort
 		// vocabulary is wider than the narrow type in types.ts, so treat it as an
 		// arbitrary string.

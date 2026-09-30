@@ -1186,6 +1186,92 @@ describe("handleResponsesRequest", () => {
 				},
 			]);
 		});
+
+		const USER_TURN = {
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "Read x" }],
+		};
+
+		test("leaves proxy-minted reasoning out of nativeBody and every other item as sent", async () => {
+			const minted = {
+				type: "reasoning",
+				id: "resp_0123456789abcdef01234567_rs_0",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Let me think." }],
+			};
+			const issued = {
+				type: "reasoning",
+				id: "rs_68a1b2c3d4e5f60718293a4b",
+				summary: [{ type: "summary_text", text: "Thought about x." }],
+				encrypted_content: "gAAAAABo-opaque==",
+			};
+			const encryptedLookalike = {
+				...minted,
+				id: "resp_0123456789abcdef01234567_rs_2",
+				encrypted_content: "gAAAAABo-opaque==",
+			};
+			const kept = [
+				USER_TURN,
+				issued,
+				encryptedLookalike,
+				{
+					type: "function_call",
+					call_id: "call_1",
+					name: "read",
+					arguments: '{"path":"x"}',
+				},
+				{ type: "function_call_output", call_id: "call_1", output: "ok" },
+				{
+					type: "message",
+					role: "assistant",
+					content: [{ type: "output_text", text: "Done." }],
+				},
+			];
+			const input = [kept[0], minted, ...kept.slice(1)];
+
+			const ctx = await captureContext({ input });
+
+			expect(ctx?.nativeBody).toBe(
+				JSON.stringify({ model: "gpt-5.5-codex", input: kept }),
+			);
+			expect(ctx?.nativeBody).toContain(JSON.stringify(issued));
+		});
+
+		test("recognizes the reasoning items its own replies carry", async () => {
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({ model: "glm-5", input: [USER_TURN] }),
+				headers: { "Content-Type": "application/json" },
+			});
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				async () =>
+					Response.json({
+						...JSON.parse(ANTHROPIC_MESSAGE_BODY),
+						content: [
+							{ type: "thinking", thinking: "Let me think.", signature: "s" },
+							{ type: "text", text: "Hello" },
+						],
+					}),
+				{},
+			);
+			const reply = (await resp.json()) as {
+				output: Array<Record<string, unknown>>;
+			};
+			const [reasoning, message] = reply.output;
+			expect(reasoning).toMatchObject({ type: "reasoning" });
+
+			const ctx = await captureContext({
+				input: [USER_TURN, reasoning, message],
+			});
+
+			expect(JSON.parse(ctx?.nativeBody ?? "{}").input).toEqual([
+				USER_TURN,
+				message,
+			]);
+		});
 	});
 
 	describe("non-200 error translation (issue #5)", () => {
