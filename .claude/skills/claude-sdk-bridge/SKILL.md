@@ -498,22 +498,31 @@ the conversation claim, so it supersedes no parked turn and leaves a
   appended whole.
 
 It strips rather than selects because pi's extensions append to the
-prompt: claude-context returns pi's prompt plus raw guidance after `<cwd>`,
-pi-subagents appends `<advertised_subagents>`, both as forced prompts. The
-head is the only part that draws the subscription 400. pi's stock
-construction renders it first; a collapsed custom→stock session and the herdr
-child path do not, and are refused.
+prompt: claude-context appends its fixed guidance block after `<cwd>` (a
+forced prompt on runs it forces, a trailing `claude-context` section on
+the others), pi-subagents appends `<advertised_subagents>` as a forced
+prompt, and a herdr child's boundary text, agent tag and persona follow
+pi's prompt. Removing the head removes pi's stock harness text; what
+remains still goes through the trigger checks below. pi's stock
+construction renders the head first; a collapsed custom→stock session does
+not, and is refused.
 
 pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 `SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
-(`HEADS` in `pi-prompt.ts`); releases with a byte-identical head share an
-entry. A version is supported only while it has fixtures under
+(`HEADS` in `pi-prompt.ts`): releases with the same stock preamble and the
+same head sections in the same order share an entry, whatever the sections
+hold. 0.99 shares 0.87's; the `<docs>` "When asked about" list gained an
+MCP servers entry. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
 prompt. Regenerate and review the fixtures when a pi release changes the
 head, pi-ai's system-message collapse, or the rendering of the extensions
-above. Discovery lists the versions at
+above. For a pi release newer than `~/.pi`'s, never install it: unpack its
+pi-coding-agent and pi-ai tarballs, and the few packages their prompt
+modules import, with `npm pack --ignore-scripts` into a scratch
+`node_modules`, link the scratch home's `packages` and `agent` to `~/.pi`'s,
+and pass it as `--pi-home`. Discovery lists the versions at
 `clankermux.piPromptVersions` in the OpenAI-shape
 `/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
 is refused.
@@ -535,9 +544,11 @@ session whose replaced preamble goes back to stock comes out as the stock
 preamble with `tools`, `rules` and `docs` after everything else; that is
 refused as `incomplete_head`, as agreed with the pi side (none of its
 extensions does it). If pi ever sends mid-conversation system messages to
-ClankerMux, that comes with a new `x-clankermux-pi-prompt` value. A
-pi-subagents child placed through herdr today puts its boundary text before
-pi's head and is refused by the trigger check until the pi side moves it.
+ClankerMux, that comes with a new `x-clankermux-pi-prompt` value. Child
+boundary text placed before pi's head is refused by the trigger check;
+pi-subagents places it after. An append-mode child whose persona has its
+own `<rules>` block closes `rules` twice and is refused as
+`duplicate_closing_tag`.
 
 Continuations never run the policy: the live query keeps its prompt. A
 resume or rebuild runs it again, and `snapshot: false` makes Claude Code

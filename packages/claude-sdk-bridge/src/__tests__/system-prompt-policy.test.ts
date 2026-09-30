@@ -11,6 +11,7 @@ import {
 	selectSystemPromptPolicy,
 } from "../system-prompt-policy";
 import {
+	expectedAppend,
 	loadPiPromptFixture,
 	loadPiPromptFixtures,
 	PI_PROMPT_FIXTURES,
@@ -160,9 +161,17 @@ describe("pi 0.87 head strip", () => {
 	});
 
 	it("forwards what extensions append after pi's prompt", () => {
-		const context = appendOf(decide(fixture("forced-claude-context").system));
-		expect(context).toContain("\n\n## Claude supplemental guidance\n");
-		expect(context).toContain("Keep the public API stable.");
+		const block =
+			fixture("claude-context-section").sections?.["claude-context"] ?? "";
+		expect(block).toStartWith(
+			"## Claude supplemental guidance (claude-context)\n",
+		);
+		expect(appendOf(decide(fixture("forced-claude-context").system))).toEndWith(
+			`</cwd>\n\n${block}`,
+		);
+		expect(
+			appendOf(decide(fixture("claude-context-section").system)),
+		).toEndWith(`</todo_list>\n\n${block}`);
 		const agents = appendOf(decide(fixture("forced-advertised-agents").system));
 		expect(agents).toEndWith("</advertised_subagents>");
 		const outcome = decide(fixture("stock-extension-section").system);
@@ -195,12 +204,33 @@ describe("pi 0.87 head strip", () => {
 		});
 	});
 
-	it("refuses a herdr child, whose boundary text comes before pi's head", () => {
-		const f = fixture("herdr-child-refused");
-		expect(f.system).not.toStartWith("You are an expert coding assistant");
-		expect(refusalOf(decide(f.system)).detail).toMatchObject({
+	it("strips the head of a herdr child, whose boundary text follows pi's prompt", () => {
+		const f = fixture("herdr-child");
+		expect(f.system).toStartWith("You are an expert coding assistant");
+		const append = appendOf(decide(f.system)) ?? "";
+		expect(append).toContain(
+			"\n\nYou are a child subagent, not the parent orchestrator.\n",
+		);
+		expect(append).toEndWith(
+			'<active_agent name="reviewer"/>\n\nYou are the reviewer agent.',
+		);
+	});
+
+	it("refuses child boundary text placed before pi's head", () => {
+		const system = `You are a child subagent, not the parent orchestrator.\n\n${fixture("stock").system}`;
+		expect(refusalOf(decide(system)).detail).toMatchObject({
 			code: "sdk_bridge_prompt_refused",
 			reason: "trigger_preamble",
+		});
+	});
+
+	it("refuses a subagent persona appended after the head that closes a head section again", () => {
+		const f = fixture("subagent-append-closes-rules");
+		expect(f.system).toStartWith("You are an expert coding assistant");
+		expect(refusalOf(decide(f.system)).detail).toMatchObject({
+			code: "sdk_bridge_prompt_malformed",
+			reason: "duplicate_closing_tag",
+			section: "rules",
 		});
 	});
 
@@ -238,13 +268,26 @@ describe("pi 0.87 head strip", () => {
 	});
 
 	it("never records or echoes the prompt text", () => {
-		for (const f of loadPiPromptFixtures("0.87")) {
-			if (f.expect.outcome !== "refused") continue;
-			const refused = refusalOf(decide(f.system));
-			const recorded = JSON.stringify(refused.detail) + refused.error.message;
-			for (const line of f.system.split("\n"))
-				if (line.length > 24) expect(recorded).not.toContain(line);
-		}
+		for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
+			for (const f of loadPiPromptFixtures(version)) {
+				if (f.expect.outcome !== "refused") continue;
+				const refused = refusalOf(decide(f.system, version));
+				const recorded = JSON.stringify(refused.detail) + refused.error.message;
+				for (const line of f.system.split("\n"))
+					if (line.length > 24) expect(recorded).not.toContain(line);
+			}
+	});
+});
+
+describe("pi 0.99 head strip", () => {
+	it("strips a docs section that lists MCP servers", () => {
+		const f = loadPiPromptFixture("0.99", "stock-all");
+		expect(f.system).toContain("MCP servers (docs/mcp.md)");
+		const append = appendOf(decide(f.system, "0.99")) ?? "";
+		expect(append).not.toContain("docs/mcp.md");
+		expect(append).toBe(
+			expectedAppend(loadPiPromptFixture("0.87", "stock-all")) as string,
+		);
 	});
 });
 

@@ -2188,7 +2188,9 @@ describe("client service integration", () => {
 				expect(JSON.stringify(enriched)).not.toContain(forbidden);
 			}
 			delete enriched.data[0].clankermux;
-			expect(enriched.clankermux).toEqual({ piPromptVersions: ["0.87"] });
+			expect(enriched.clankermux).toEqual({
+				piPromptVersions: ["0.87", "0.99"],
+			});
 			delete enriched.clankermux;
 			expect(enriched).toEqual(plain);
 			expect(await dbOps.clients.getProfile(id)).toEqual(before);

@@ -49,23 +49,36 @@ interface TranscriptModule {
 	collapseSystemMessages(context: { messages: unknown[] }): {
 		messages: Array<{ sections?: Sections }>;
 	};
+	getCurrentSystemMessage(
+		messages: unknown[],
+	): { sections?: Sections } | undefined;
 }
 
-interface ClaudeContextModule {
-	composeSystemPromptSupplement(result: {
-		catalog: unknown[];
-		alwaysOn: unknown[];
-	}): string;
+interface ClaudeContextCoreModule {
+	SYSTEM_BLOCK: string;
+}
+
+interface ClaudeContextAdapterModule {
+	SUPPLEMENT_SECTION: string;
 }
 
 interface SubagentPromptModule {
-	rewriteSubagentPrompt(
+	childPromptPreamble(options: {
+		fanoutChild?: boolean;
+		structuredOutput?: boolean;
+	}): string;
+}
+
+interface HerdrBridgeModule {
+	composeHerdrChildPrompt(
 		prompt: string,
-		options: {
+		policy: {
+			agent: string;
 			inheritProjectContext: boolean;
 			inheritGlobalContext: boolean;
 			inheritSkills: boolean;
 		},
+		persona: string,
 	): string;
 }
 
@@ -113,6 +126,8 @@ interface Case {
 	next?: Record<string, unknown>;
 	/** An extension's `before_agent_start` rewrite, which pi sends as a forced prompt. */
 	force?: (rendered: string) => string;
+	/** An extension's `context_with_system` rewrite of the folded system message's sections. */
+	withSystem?: (sections: Sections) => Sections;
 	expect: Expected;
 }
 
@@ -131,6 +146,10 @@ const piRoot = join(piHome, "node_modules/@earendil-works");
 const agentDir = join(piRoot, "pi-coding-agent");
 const aiDir = join(piRoot, "pi-ai");
 const CLAUDE_CONTEXT = join(piHome, "packages/claude-context/core.mjs");
+const CLAUDE_CONTEXT_ADAPTER = join(
+	piHome,
+	"packages/claude-context/install.mjs",
+);
 const PI_SUBAGENTS = join(piHome, "agent/git/github.com/d4rken/pi-subagents");
 const ADVERTISED_AGENTS = join(
 	PI_SUBAGENTS,
@@ -140,6 +159,18 @@ const SUBAGENT_PROMPT = join(
 	PI_SUBAGENTS,
 	"src/runs/shared/subagent-prompt-runtime.ts",
 );
+const HERDR_BRIDGE = join(PI_SUBAGENTS, "src/extension/herdr-pi-bridge.ts");
+/** Not imported: {@link childPrompt} reproduces its composition. */
+const CHILD_LAUNCH = join(PI_SUBAGENTS, "src/runs/shared/child-launch.ts");
+/** The extension files that shape fixture text, keyed as the manifest records them. */
+const EXTENSION_FILES: Record<string, string> = {
+	"pi-subagents/src/runs/shared/child-launch.ts": CHILD_LAUNCH,
+	"packages/claude-context/core.mjs": CLAUDE_CONTEXT,
+	"packages/claude-context/install.mjs": CLAUDE_CONTEXT_ADAPTER,
+	"pi-subagents/src/agents/advertised-agent-prompt.ts": ADVERTISED_AGENTS,
+	"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts": SUBAGENT_PROMPT,
+	"pi-subagents/src/extension/herdr-pi-bridge.ts": HERDR_BRIDGE,
+};
 
 const packageVersion = (dir: string): string =>
 	(
@@ -176,11 +207,15 @@ const text = (await import(join(aiDir, "dist/utils/text.js"))) as TextModule;
 const transcript = (await import(
 	join(aiDir, "dist/utils/transcript.js")
 )) as TranscriptModule;
-const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextModule;
+const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextCoreModule;
+const claudeContextAdapter = (await import(
+	CLAUDE_CONTEXT_ADAPTER
+)) as ClaudeContextAdapterModule;
 const advertisedAgents = (await import(
 	ADVERTISED_AGENTS
 )) as AdvertisedAgentsModule;
 const subagentPrompt = (await import(SUBAGENT_PROMPT)) as SubagentPromptModule;
+const herdrBridge = (await import(HERDR_BRIDGE)) as HerdrBridgeModule;
 
 const CWD = "/home/user/projects/widget";
 const TOOL_SNIPPETS = {
@@ -223,10 +258,8 @@ const DEPLOY_SKILL = {
 	baseDir: "/home/user/.pi/agent/skills/deploy",
 	disableModelInvocation: false,
 };
-/** pi-subagents' replace-mode prompt shape (child-launch.ts): the agent tag, then its persona. */
-const PERSONA = `<active_agent name="reviewer"/>
-
-You are the reviewer agent. Review the diff you are given and report defects.
+/** A persona carrying its own <rules> and <example> blocks. */
+const PERSONA = `You are the reviewer agent. Review the diff you are given and report defects.
 
 <rules>
 - Report only defects you can point at in the diff.
@@ -237,30 +270,28 @@ You are the reviewer agent. Review the diff you are given and report defects.
 Finding: off-by-one in \`slice(0, n - 1)\`.
 </example>`;
 
-/** What claude-context's `before_agent_start` returns (install.mjs): pi's prompt plus its supplement. */
+/**
+ * The child prompt pi-subagents hands pi (child-launch.ts): the child
+ * boundary, then the agent tag and its persona. Replace mode sends it as the
+ * custom prompt, append mode as the addendum.
+ */
+function childPrompt(persona: string): string {
+	return `${subagentPrompt.childPromptPreamble({})}\n\n<active_agent name="reviewer"/>\n\n${persona}`;
+}
+
+/** What claude-context's `before_agent_start` returns (install.mjs): pi's prompt plus its fixed block. */
 function withClaudeContext(rendered: string): string {
-	const supplement = claudeContext.composeSystemPromptSupplement({
-		catalog: [
-			{
-				path: `${CWD}/.claude/rules/api.md`,
-				ownerDir: CWD,
-				scope: "project",
-				paths: ["src/api/**"],
-				hash: "a".repeat(64),
-			},
-		],
-		alwaysOn: [
-			{
-				path: `${CWD}/CLAUDE.md`,
-				ownerDir: CWD,
-				scope: "project",
-				hash: "b".repeat(64),
-				content:
-					"# Widget for Claude\n\n<important>\nKeep the public API stable.\n</important>",
-			},
-		],
-	});
-	return `${rendered}\n\n${supplement}`;
+	return `${rendered}\n\n${claudeContext.SYSTEM_BLOCK}`;
+}
+
+/** What claude-context's `context_with_system` makes of pi's sections (install.mjs): its block as the last section. */
+function withClaudeContextSection(sections: Sections): Sections {
+	const { [claudeContextAdapter.SUPPLEMENT_SECTION]: _previous, ...rest } =
+		sections;
+	return {
+		...rest,
+		[claudeContextAdapter.SUPPLEMENT_SECTION]: claudeContext.SYSTEM_BLOCK,
+	};
 }
 
 /** What pi-subagents' `before_agent_start` returns while the subagent tool is active (extension/index.ts). */
@@ -284,17 +315,18 @@ function withAdvertisedAgents(rendered: string): string {
 	);
 }
 
-/**
- * What pi-subagents' herdr child bridge returns (extension/herdr-pi-bridge.ts
- * `before_agent_start`): its boundary instructions first, then pi's prompt,
- * the agent tag and the persona.
- */
+/** What pi-subagents' herdr child bridge returns (extension/herdr-pi-bridge.ts `before_agent_start`). */
 function asHerdrChild(rendered: string): string {
-	return `${subagentPrompt.rewriteSubagentPrompt(rendered, {
-		inheritProjectContext: true,
-		inheritGlobalContext: true,
-		inheritSkills: true,
-	})}\n\n<active_agent name=${JSON.stringify("reviewer")}/>\n\nYou are the reviewer agent.`;
+	return herdrBridge.composeHerdrChildPrompt(
+		rendered,
+		{
+			agent: "reviewer",
+			inheritProjectContext: true,
+			inheritGlobalContext: true,
+			inheritSkills: true,
+		},
+		"You are the reviewer agent.",
+	);
 }
 
 const forwarded: Expected = { outcome: "forwarded" };
@@ -466,9 +498,35 @@ const CASES: Case[] = [
 	{
 		name: "subagent-persona",
 		description:
-			"A pi-subagents replace-mode persona carrying its own <rules> and <example> blocks.",
-		input: { ...BASE, customPrompt: PERSONA, contextFiles: [AGENTS_MD] },
+			"A pi-subagents replace-mode child: boundary, agent tag and a persona carrying its own <rules> and <example> blocks replace the preamble.",
+		input: {
+			...BASE,
+			customPrompt: childPrompt(PERSONA),
+			contextFiles: [AGENTS_MD],
+		},
 		expect: forwarded,
+	},
+	{
+		name: "subagent-append",
+		description:
+			"A pi-subagents append-mode child: boundary, agent tag and persona as the addendum after pi's head.",
+		input: {
+			...BASE,
+			appendSystemPrompt: childPrompt("You are the reviewer agent."),
+			contextFiles: [AGENTS_MD],
+		},
+		expect: forwarded,
+	},
+	{
+		name: "subagent-append-closes-rules",
+		description:
+			"An append-mode child whose persona has its own <rules> block: a second </rules> after pi's head, which could move its end.",
+		input: { ...BASE, appendSystemPrompt: childPrompt(PERSONA) },
+		expect: refused(
+			"sdk_bridge_prompt_malformed",
+			"duplicate_closing_tag",
+			"rules",
+		),
 	},
 	{
 		name: "forced-prompt",
@@ -483,7 +541,7 @@ const CASES: Case[] = [
 	{
 		name: "forced-claude-context",
 		description:
-			"claude-context's rewrite: pi's prompt plus raw supplemental guidance after <cwd>, sent as a forced prompt.",
+			"claude-context's rewrite: pi's prompt plus its fixed guidance block after <cwd>, sent as a forced prompt.",
 		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
 		force: withClaudeContext,
 		expect: forwarded,
@@ -502,6 +560,20 @@ const CASES: Case[] = [
 			"Both rewrites in pi's handler order: claude-context first, then pi-subagents on its result.",
 		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
 		force: (rendered) => withAdvertisedAgents(withClaudeContext(rendered)),
+		expect: forwarded,
+	},
+	{
+		name: "claude-context-section",
+		description:
+			"claude-context on a run it did not force, after skills changed and an extension section arrived mid-session: its guidance block stays the last section of pi's leading message.",
+		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
+		next: {
+			...BASE,
+			contextFiles: [AGENTS_MD],
+			skills: [...SKILLS, DEPLOY_SKILL],
+			sections: { todo_list: "- [ ] deploy" },
+		},
+		withSystem: withClaudeContextSection,
 		expect: forwarded,
 	},
 	{
@@ -554,12 +626,12 @@ const CASES: Case[] = [
 		expect: refused("sdk_bridge_prompt_malformed", "incomplete_head"),
 	},
 	{
-		name: "herdr-child-refused",
+		name: "herdr-child",
 		description:
-			"A pi-subagents child placed through herdr today: boundary instructions before pi's stock prompt, so the head is not at the start and the forwarded text carries pi's preamble line. Refused until the pi side moves the boundary after the head.",
+			"A pi-subagents child placed through herdr: pi's prompt first, then the boundary instructions, agent tag and persona, sent as a forced prompt.",
 		input: { ...BASE, contextFiles: [AGENTS_MD] },
 		force: asHerdrChild,
-		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
+		expect: forwarded,
 	},
 	{
 		name: "trigger-preamble-in-context",
@@ -655,18 +727,31 @@ function render(c: Case) {
 	const updateMessage = patch
 		? { role: "system", content: "", sections: patch, timestamp: 2 }
 		: null;
+	const context: Array<{ role: string } & Record<string, unknown>> = [
+		{ role: "system", content: "", sections: leading, timestamp: 0 },
+		{ role: "user", content: "hello", timestamp: 1 },
+		...(updateMessage
+			? [updateMessage, { role: "user", content: "again", timestamp: 3 }]
+			: []),
+	];
+	// A `context_with_system` handler sees pi's messages before the provider
+	// does, and replaces their system messages with one head folded by pi-ai.
+	const messages = c.withSystem
+		? (() => {
+				const current = transcript.getCurrentSystemMessage(context);
+				return [
+					{
+						...current,
+						sections: c.withSystem(current?.sections ?? {}),
+					},
+					...context.filter((message) => message.role !== "system"),
+				];
+			})()
+		: context;
 	// What pi's clankermux provider sends: pi-ai's resolveTranscript without
 	// mid-conversation system messages replays every system message into one
 	// leading message, patching sections in place and appending new ones.
-	const [collapsed] = transcript.collapseSystemMessages({
-		messages: [
-			{ role: "system", content: "", sections: leading, timestamp: 0 },
-			{ role: "user", content: "hello", timestamp: 1 },
-			...(updateMessage
-				? [updateMessage, { role: "user", content: "again", timestamp: 3 }]
-				: []),
-		],
-	}).messages;
+	const [collapsed] = transcript.collapseSystemMessages({ messages }).messages;
 	const sections = collapsed?.sections ?? {};
 	const system = text.getSystemMessageText({ ...collapsed });
 	const names = Object.keys(sections);
@@ -707,6 +792,34 @@ function fixture(c: Case) {
 	};
 }
 
+const json = (value: unknown) => `${JSON.stringify(value, null, "\t")}\n`;
+// Everything is rendered before the directory is touched, so a case that
+// throws leaves the committed fixtures as they were.
+const files = new Map<string, string>(
+	CASES.map((c) => [`${c.name}.json`, json(fixture(c))]),
+);
+files.set(
+	"manifest.json",
+	json({
+		layout,
+		piCodingAgentVersion: piVersion,
+		piAiVersion: packageVersion(aiDir),
+		packageSha256: createHash("sha256")
+			.update(Object.values(fileHashes).join("\n"))
+			.digest("hex"),
+		files: fileHashes,
+		extensionFiles: Object.fromEntries(
+			Object.entries(EXTENSION_FILES).map(([name, path]) => [
+				name,
+				sha256(path),
+			]),
+		),
+		docsRoot: DOCS_ROOT,
+		generator:
+			"packages/claude-sdk-bridge/scripts/generate-pi-prompt-fixtures.ts",
+		cases: CASES.map((c) => c.name),
+	}),
+);
 const outDir = join(
 	import.meta.dir,
 	"../src/__tests__/fixtures/pi-prompts",
@@ -715,38 +828,7 @@ const outDir = join(
 mkdirSync(outDir, { recursive: true });
 for (const file of readdirSync(outDir))
 	if (file.endsWith(".json")) rmSync(join(outDir, file));
-for (const c of CASES)
-	writeFileSync(
-		join(outDir, `${c.name}.json`),
-		`${JSON.stringify(fixture(c), null, "\t")}\n`,
-	);
-writeFileSync(
-	join(outDir, "manifest.json"),
-	`${JSON.stringify(
-		{
-			layout,
-			piCodingAgentVersion: piVersion,
-			piAiVersion: packageVersion(aiDir),
-			packageSha256: createHash("sha256")
-				.update(Object.values(fileHashes).join("\n"))
-				.digest("hex"),
-			files: fileHashes,
-			extensionFiles: {
-				"packages/claude-context/core.mjs": sha256(CLAUDE_CONTEXT),
-				"pi-subagents/src/agents/advertised-agent-prompt.ts":
-					sha256(ADVERTISED_AGENTS),
-				"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts":
-					sha256(SUBAGENT_PROMPT),
-			},
-			docsRoot: DOCS_ROOT,
-			generator:
-				"packages/claude-sdk-bridge/scripts/generate-pi-prompt-fixtures.ts",
-			cases: CASES.map((c) => c.name),
-		},
-		null,
-		"\t",
-	)}\n`,
-);
+for (const [file, content] of files) writeFileSync(join(outDir, file), content);
 // In the repository's own JSON style, so `bun run lint` leaves them as written.
 const formatted = Bun.spawnSync(
 	["bunx", "biome", "format", "--write", outDir],
