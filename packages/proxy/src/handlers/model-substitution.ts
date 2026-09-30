@@ -105,11 +105,20 @@ function stripRouteVariant(model: string): string {
  * Membership is an equivalence, not a direction. Both spellings are the same
  * model, so either may be sent and either may come back; the pair is written
  * request-first only because that is the order it was observed in.
+ * Grok 4.7's build name was also observed on subscription responses (2026-09-30).
  */
 const VERIFIED_SERVED_MODEL_PAIRS: ReadonlyMap<
 	string,
 	readonly (readonly [string, string])[]
-> = new Map([["grok-subscription", [["grok-4.6", "grok-4.6-build"]] as const]]);
+> = new Map([
+	[
+		"grok-subscription",
+		[
+			["grok-4.6", "grok-4.6-build"],
+			["grok-4.7", "grok-4.7-build"],
+		] as const,
+	],
+]);
 
 /** The counterpart ids `provider` is known to use for any of `ids`. */
 function pairedIds(

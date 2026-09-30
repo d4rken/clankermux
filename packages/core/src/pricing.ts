@@ -567,6 +567,17 @@ BUNDLED_PRICING.xai = {
 				cache_read: 0.5,
 			},
 		},
+		// SuperGrok's served name for grok-4.7. Base-tier rates verified at
+		// https://docs.x.ai/developers/models/grok-4.7 on 2026-09-30.
+		"grok-4.7-build": {
+			id: "grok-4.7-build",
+			name: "Grok 4.7",
+			cost: {
+				input: 2,
+				output: 6,
+				cache_read: 0.5,
+			},
+		},
 		"grok-4.6": {
 			id: "grok-4.6",
 			name: "Grok 4.6",
