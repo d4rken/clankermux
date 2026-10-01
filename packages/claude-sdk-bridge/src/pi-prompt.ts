@@ -35,7 +35,7 @@ interface PiPromptHead {
 
 const HEADS: ReadonlyArray<{ versions: string[]; head: PiPromptHead }> = [
 	{
-		versions: ["0.87", "0.99"],
+		versions: ["0.87", "0.99", "1.0"],
 		head: {
 			stockPreamble:
 				"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",

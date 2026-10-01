@@ -511,8 +511,8 @@ pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 `SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
 (`HEADS` in `pi-prompt.ts`): releases with the same stock preamble and the
 same head sections in the same order share an entry, whatever the sections
-hold. 0.99 shares 0.87's; the `<docs>` "When asked about" list gained an
-MCP servers entry. A version is supported only while it has fixtures under
+hold. 0.99 and 1.0 share 0.87's; the `<docs>` "When asked about" list
+gained an MCP servers entry in 0.99 and a codemode entry in 1.0. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
@@ -522,7 +522,13 @@ above. For a pi release newer than `~/.pi`'s, never install it: unpack its
 pi-coding-agent and pi-ai tarballs, and the few packages their prompt
 modules import, with `npm pack --ignore-scripts` into a scratch
 `node_modules`, link the scratch home's `packages` and `agent` to `~/.pi`'s,
-and pass it as `--pi-home`. Discovery lists the versions at
+and pass it as `--pi-home`. pi-subagents imports `pi-tui` and
+`pi-agent-core` as peers, which nothing under its real path in `~/.pi`
+resolves, so the generator also needs `NODE_PATH` set to the scratch
+`node_modules` (then `~/.pi`'s nested
+`pi-coding-agent/node_modules` for third-party packages); without it the
+run fails on `Cannot find module '@earendil-works/pi-tui'`, `~/.pi`
+included. Discovery lists the versions at
 `clankermux.piPromptVersions` in the OpenAI-shape
 `/v1/models?clankermux_metadata=1` response, so pi can warn before a turn
 is refused.
