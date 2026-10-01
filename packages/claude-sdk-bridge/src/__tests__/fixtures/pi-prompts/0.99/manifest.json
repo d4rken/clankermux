@@ -1,20 +1,20 @@
 {
 	"layout": "0.99",
-	"piCodingAgentVersion": "0.99.1",
-	"piAiVersion": "0.99.1",
-	"packageSha256": "fd7a5e05bcbebc85dd93b2b2f95f55847dd29f7a7882f4e1e11d9569801d107f",
+	"piCodingAgentVersion": "0.99.2",
+	"piAiVersion": "0.99.2",
+	"packageSha256": "d92404df7df575a79a6c38d6decc01fd33b91cf3c4625ef1002dfa1a5a641da9",
 	"files": {
-		"pi-coding-agent/package.json": "c701ddbf28b5170deb478b8586ee713f9372027c04736946a4ffe82168ece5ba",
+		"pi-coding-agent/package.json": "066850c1badb43cf107c26e5b95262dbde84e3514c75348f363009d5ba9ce42d",
 		"pi-coding-agent/dist/core/system-prompt.js": "0f22e4dfe8c90b70b12c1cfd50bcdd4b49d59bd97adac90c2e9345cf711839fa",
 		"pi-coding-agent/dist/core/skills.js": "3b7cc3997c630553eb88931de978e0db623ce51fbf7356e0ab922183885e208c",
-		"pi-ai/package.json": "86a8ccb86ce00af196fc7d48417f82e99c6da40c68d8d138ace2a4f0fda4090d",
+		"pi-ai/package.json": "10c7ad47ba1997f02622587fb7df593d1c9a7dc332298de670d79e068643be27",
 		"pi-ai/dist/utils/text.js": "95037d5b787075ffb951cdeaf3b93aeb89735d10b31b82e19d2921f505ac2b04",
 		"pi-ai/dist/utils/transcript.js": "cd63514661b4036c3bcdda11a108f6be853f790a01216bf30fa80121e4fd320f"
 	},
 	"extensionFiles": {
 		"pi-subagents/src/runs/shared/child-launch.ts": "cd900f55da14ee944283cfa9dd10f9125d3c52c913c1b7114fdea89e7a5cfe43",
 		"packages/claude-context/core.mjs": "3802b8a12656fa2af7820f5b48e09390ea37d301dc67a841c64ce73a64540bbf",
-		"packages/claude-context/install.mjs": "c802ce8e3c8d5719e8ee4e2821e94a334d41685dc89d939ad717b5f3f9b45724",
+		"packages/claude-context/install.mjs": "096651326f15fcad7ae3c2b31b3a037cacf7ad48c3ca6d47addfdc2821dfa3e6",
 		"pi-subagents/src/agents/advertised-agent-prompt.ts": "7c6ad623f39f42d843b0094ff25589e2a13c42c7d9489120567e31fce8627fd6",
 		"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts": "075d2d9c1fbce98b13aefb2c396c1e61f71ab4d31a48632fb2e7253835054397",
 		"pi-subagents/src/extension/herdr-pi-bridge.ts": "4c884607c523225797a6e8ea51b58b31b74d7953a5767498de8d2a92cc62fcb4"
