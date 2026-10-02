@@ -761,6 +761,11 @@ export interface AccountResponse {
 	identitySubscriptionGraceEndsAt: number | null;
 	/** ms of the last subscription-capture ATTEMPT, success or failure. */
 	identitySubscriptionCheckedAt: number | null;
+	/**
+	 * The end of a subscription that will not renew, which weekly usage pacing
+	 * paces against instead of the window reset. Null or absent otherwise.
+	 */
+	subscriptionBudgetEndMs?: number | null;
 	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
 	openRouterMetadata?: OpenRouterAccountMetadata | null;
 	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch

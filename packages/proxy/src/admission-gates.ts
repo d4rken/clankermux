@@ -2,6 +2,7 @@ import {
 	getModelFamily,
 	isAccountAvailable,
 	isProtectedFamily,
+	nonRenewingSubscriptionEnd,
 	PROTECTED_FAMILY,
 	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
@@ -322,6 +323,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				settings,
 				now,
 				account.provider,
+				nonRenewingSubscriptionEnd(account, now),
 			);
 			if (throttleUntil && throttleUntil > now) {
 				throttled.push(account);
@@ -552,7 +554,8 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	//    of the shared window for the protected family (Fable).
 	//  - Pool liveness: an account inside the weekly-quota tail its TIER reserves,
 	//    while some peer can still absorb the traffic and the binding weekly reset
-	//    is still beyond the (burn-aware) release horizon — keeping it alive as
+	//    (or a non-renewing subscription's end, if sooner) is still beyond the
+	//    (burn-aware) release horizon — keeping it alive as
 	//    failover capacity instead of draining it to a multi-day weekly wall. The
 	//    tier is per-request: traffic this account would serve as the protected
 	//    family (Fable) may spend down to
@@ -673,6 +676,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 						accountCapacity,
 						now,
 					),
+					subscriptionEndMs: nonRenewingSubscriptionEnd(account, now),
 				},
 			);
 		};

@@ -1,4 +1,5 @@
 import type { Config } from "@clankermux/config";
+import { nonRenewingSubscriptionEnd } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	getFreshRoutingCapacity,
@@ -140,6 +141,7 @@ function activeGateExclusions(
 			settings,
 			now,
 			account.provider,
+			nonRenewingSubscriptionEnd(account, now),
 		);
 		if (tu && tu > now) {
 			gates.push({
@@ -338,6 +340,7 @@ export function evaluateDefaultCandidates(
 					accountCapacity,
 					now,
 				),
+				subscriptionEndMs: nonRenewingSubscriptionEnd(account, now),
 			})
 		) {
 			skippedLivenessReserved.push(account.id);

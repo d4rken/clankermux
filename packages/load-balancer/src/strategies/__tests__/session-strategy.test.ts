@@ -3481,3 +3481,121 @@ describe("SessionStrategy — per-model pins", () => {
 		expect(main.routing?.decision).toBe("affinity_miss");
 	});
 });
+
+describe("SessionStrategy — a non-renewing subscription's end as the HARVEST deadline", () => {
+	const NOW = Date.now();
+	const HOUR = 60 * 60_000;
+	const DAY = 24 * HOUR;
+	let strategy: SessionStrategy;
+	let mockStore: MockStrategyStore;
+
+	function meta(): RequestMeta {
+		return {
+			id: "sub-end-request",
+			headers: new Headers(),
+			path: "/v1/messages",
+			method: "POST",
+			timestamp: NOW,
+		};
+	}
+
+	function capacity(
+		weeklyResetMs: number | null,
+		minHeadroom = 40,
+	): CapacitySignal {
+		return {
+			minHeadroom,
+			sessionHeadroom: minHeadroom,
+			soonestResetMs: NOW + HOUR,
+			bindingUtilization: 100 - minHeadroom,
+			weeklyResetMs,
+			bindingWeeklyResetMs: weeklyResetMs,
+			weeklyHeadroom: minHeadroom,
+			sessionResetMs: null,
+			extraUsageUtilization: null,
+		};
+	}
+
+	function account(
+		id: string,
+		provider: string,
+		overrides: Partial<Account> = {},
+	): Account {
+		return makeAccount({ id, name: id, provider, ...overrides });
+	}
+
+	beforeEach(() => {
+		strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		mockStore = new MockStrategyStore();
+		strategy.initialize(mockStore);
+	});
+
+	/** `expiring` resets weekly after `steady`, but its subscription may end first. */
+	function rank(
+		expiringOverrides: Partial<Account>,
+		opts: { provider?: string; expiringHeadroom?: number } = {},
+	): string[] {
+		const provider = opts.provider ?? "codex";
+		const steady = account("steady", provider);
+		const expiring = account("expiring", provider, expiringOverrides);
+		mockStore.setCapacity(steady.id, capacity(NOW + 2 * DAY));
+		mockStore.setCapacity(
+			expiring.id,
+			capacity(NOW + 5 * DAY, opts.expiringHeadroom),
+		);
+		return strategy.select([steady, expiring], meta()).map((a) => a.id);
+	}
+
+	const ENDS_TOMORROW: Partial<Account> = {
+		identity_subscription_will_renew: 0,
+		identity_subscription_ends_at: NOW + DAY,
+	};
+
+	it("puts a Codex account first when its non-renewing subscription ends before the other's weekly reset", () => {
+		expect(rank(ENDS_TOMORROW)).toEqual(["expiring", "steady"]);
+	});
+
+	it("keeps weekly-reset order when the subscription renews or renewal is unknown", () => {
+		for (const willRenew of [1, null]) {
+			expect(
+				rank({ ...ENDS_TOMORROW, identity_subscription_will_renew: willRenew }),
+			).toEqual(["steady", "expiring"]);
+		}
+	});
+
+	it("ignores an end that has passed, is now, or is not a finite number", () => {
+		for (const end of [NOW - HOUR, NOW, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(
+				rank({ ...ENDS_TOMORROW, identity_subscription_ends_at: end }),
+			).toEqual(["steady", "expiring"]);
+		}
+	});
+
+	it("keeps the weekly reset when the subscription ends after it", () => {
+		// The expiring account's own weekly reset (5 days) comes before its end.
+		expect(
+			rank({ ...ENDS_TOMORROW, identity_subscription_ends_at: NOW + 10 * DAY }),
+		).toEqual(["steady", "expiring"]);
+	});
+
+	it("leaves other providers on the weekly reset", () => {
+		expect(rank(ENDS_TOMORROW, { provider: "openrouter" })).toEqual([
+			"steady",
+			"expiring",
+		]);
+	});
+
+	it("keeps a near-limit account behind HARVEST accounts", () => {
+		expect(rank(ENDS_TOMORROW, { expiringHeadroom: 2 })).toEqual([
+			"steady",
+			"expiring",
+		]);
+	});
+
+	it("does not outrank a lower priority number", () => {
+		expect(rank({ ...ENDS_TOMORROW, priority: 10 })).toEqual([
+			"steady",
+			"expiring",
+		]);
+	});
+});

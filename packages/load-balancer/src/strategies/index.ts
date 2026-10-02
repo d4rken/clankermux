@@ -1,6 +1,7 @@
 import {
 	hashRoutingAffinityKey,
 	isAccountAvailable,
+	nonRenewingSubscriptionEnd,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
 import { Logger, LogLevel } from "@clankermux/logger";
@@ -68,8 +69,13 @@ const CAPACITY_BUCKET_LABEL: Record<number, string> = {
 /** Per-account capacity metric snapshot used by the comparator and the log. */
 interface CapacityMetric {
 	bucket: number;
-	/** Weekly-window reset (ms) — the HARVEST ranking deadline (FEFO). */
+	/**
+	 * The HARVEST ranking deadline (FEFO): the weekly-window reset, or the end
+	 * of a subscription that will not renew when that comes first.
+	 */
 	harvestDeadline: number;
+	/** Which of the two set {@link CapacityMetric.harvestDeadline}. */
+	harvestDeadlineSource: "weekly_reset" | "subscription_end";
 	/** min(100 - util) over weekly windows — the HARVEST tie-break. */
 	weeklyHeadroom: number;
 	/** soonest reset over ALL hard windows (incl. 5h) — kept for the debug log only. */
@@ -659,7 +665,8 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			minHeadroom = s.minHeadroom;
 			binding = s.bindingUtilization;
 			weeklyHeadroom = s.weeklyHeadroom;
-			// The HARVEST deadline is the WEEKLY reset, never the always-sooner 5h.
+			// The HARVEST deadline starts as the WEEKLY reset, never the always-sooner
+			// 5h; below it may move earlier to a non-renewing subscription's end.
 			// No 5h fallback: an account without a weekly window is not harvestable.
 			harvestDeadline = s.weeklyResetMs ?? Number.POSITIVE_INFINITY;
 			// soonest is kept for the debug line only (5h context), not for ranking.
@@ -700,9 +707,19 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				bucket = CAPACITY_BUCKET.HARVEST;
 			}
 		}
+		let harvestDeadlineSource: CapacityMetric["harvestDeadlineSource"] =
+			"weekly_reset";
+		if (bucket === CAPACITY_BUCKET.HARVEST) {
+			const end = nonRenewingSubscriptionEnd(account, now);
+			if (end !== null && end < harvestDeadline) {
+				harvestDeadline = end;
+				harvestDeadlineSource = "subscription_end";
+			}
+		}
 		return {
 			bucket,
 			harvestDeadline,
+			harvestDeadlineSource,
 			weeklyHeadroom,
 			soonest,
 			minHeadroom,
@@ -732,6 +749,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			info.get(id) ?? {
 				bucket: CAPACITY_BUCKET.UNKNOWN,
 				harvestDeadline: Number.POSITIVE_INFINITY,
+				harvestDeadlineSource: "weekly_reset",
 				weeklyHeadroom: 100,
 				soonest: Number.POSITIVE_INFINITY,
 				minHeadroom: 0,
@@ -746,11 +764,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			const y = metricsFor(b.id);
 			if (x.bucket !== y.bucket) return x.bucket - y.bucket;
 			if (x.bucket === CAPACITY_BUCKET.HARVEST) {
-				// FEFO on the WEEKLY window: serve the account whose weekly quota
-				// expires soonest first (that's where unused budget is truly lost).
+				// FEFO on harvestDeadline: serve the account whose quota expires
+				// soonest first (that's where unused budget is truly lost).
 				if (x.harvestDeadline !== y.harvestDeadline)
 					return x.harvestDeadline - y.harvestDeadline;
-				// Tie on weekly reset → more weekly headroom to harvest wins.
+				// Tie on the deadline → more weekly headroom to harvest wins.
 				if (x.weeklyHeadroom !== y.weeklyHeadroom)
 					return y.weeklyHeadroom - x.weeklyHeadroom;
 				return x.seq - y.seq; // least-recently-picked
@@ -799,12 +817,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		const parts = shown.map((a) => {
 			const m = this.capacityMetricFor(a, now);
 			const bucketLabel = CAPACITY_BUCKET_LABEL[m.bucket] ?? "UNKNOWN";
-			// reset= reflects the weekly deadline that actually drives HARVEST
-			// ranking; the parenthesized 5h reset is shown for context only.
+			// reset= reflects the deadline that actually drives HARVEST ranking,
+			// marked when it is a subscription end rather than the weekly reset;
+			// the parenthesized 5h reset is shown for context only.
 			const reset =
 				m.harvestDeadline === Number.POSITIVE_INFINITY
 					? "none"
-					: `${Math.round((m.harvestDeadline - now) / 60000)}m`;
+					: `${Math.round((m.harvestDeadline - now) / 60000)}m${
+							m.harvestDeadlineSource === "subscription_end" ? "(sub-end)" : ""
+						}`;
 			const fiveHour =
 				m.soonest === Number.POSITIVE_INFINITY
 					? "none"

@@ -534,6 +534,68 @@ describe("getUsageThrottleUntil — MiniMax", () => {
 	});
 });
 
+describe("getUsageThrottleStatus — budget end", () => {
+	const HOUR_MS = 60 * 60 * 1000;
+	const DAY_MS = 24 * HOUR_MS;
+	const now = Date.UTC(2026, 9, 2, 12, 0, 0);
+	const settings = { fiveHourEnabled: true, weeklyEnabled: true };
+	const codexUsage = (
+		fiveHour: { utilization: number; resetMs: number },
+		sevenDay: { utilization: number; resetMs: number },
+	) => ({
+		five_hour: {
+			utilization: fiveHour.utilization,
+			resets_at: new Date(fiveHour.resetMs).toISOString(),
+		},
+		seven_day: {
+			utilization: sevenDay.utilization,
+			resets_at: new Date(sevenDay.resetMs).toISOString(),
+		},
+	});
+
+	it("paces the seven_day window to an earlier budget end", () => {
+		// Opened 2 days ago, resets in 5 days, 90% used, budget ends in 12 h.
+		const data = codexUsage(
+			{ utilization: 0, resetMs: now + HOUR_MS },
+			{ utilization: 90, resetMs: now + 5 * DAY_MS },
+		);
+		const paced = getUsageThrottleStatus(
+			data,
+			settings,
+			now,
+			"codex",
+			now + 12 * HOUR_MS,
+		);
+		expect(paced.throttledWindows).toEqual(["seven_day"]);
+		expect(paced.throttleUntil).toBeCloseTo(now + 6 * HOUR_MS, 0);
+
+		const unpaced = getUsageThrottleUntil(data, settings, now, "codex");
+		expect(unpaced).toBeCloseTo(now - 2 * DAY_MS + 0.9 * 7 * DAY_MS, 0);
+	});
+
+	it("leaves the five_hour window paced to its own reset", () => {
+		// 60% used 2 h into the 5h window (40%), so it resumes 3 h in; seven_day
+		// is behind pace.
+		const fiveHourReset = now + 3 * HOUR_MS;
+		const data = codexUsage(
+			{ utilization: 60, resetMs: fiveHourReset },
+			{ utilization: 1, resetMs: now + 5 * DAY_MS },
+		);
+		const withEnd = getUsageThrottleStatus(
+			data,
+			settings,
+			now,
+			"codex",
+			now + 30 * 60 * 1000,
+		);
+		expect(withEnd.throttledWindows).toEqual(["five_hour"]);
+		expect(withEnd.throttleUntil).toBe(
+			getUsageThrottleUntil(data, settings, now, "codex"),
+		);
+		expect(withEnd.throttleUntil).toBe(now + HOUR_MS);
+	});
+});
+
 describe("createUsageThrottledResponse", () => {
 	it("returns HTTP 529 with Retry-After and an Anthropic-style overload body", async () => {
 		const response = createUsageThrottledResponse([

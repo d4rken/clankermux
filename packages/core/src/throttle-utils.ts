@@ -122,23 +122,73 @@ export function computeWindowStartMs(
 }
 
 /**
+ * The long budget windows paced under the WEEKLY usage-throttling setting;
+ * every other window is paced under the 5h setting.
+ */
+const WEEKLY_PACED_WINDOWS: ReadonlySet<string> = new Set([
+	"tokens_limit_weekly",
+	"seven_day",
+	"weekly",
+	"monthly",
+]);
+
+/** See {@link WEEKLY_PACED_WINDOWS}. */
+export function isWeeklyPacedWindow(
+	window: string | null | undefined,
+): boolean {
+	return window != null && WEEKLY_PACED_WINDOWS.has(window);
+}
+
+/**
+ * Where the pace line reaches 100%: normally the window's reset, but a
+ * weekly-paced window whose budget ends sooner (`budgetEndMs`, a subscription
+ * that will not renew) is paced to that end instead, keeping the window start.
+ * E.g. a 7-day window that opened 2 days ago and resets in 5 days, with the
+ * budget ending in 12 h, paces over 2.5 days instead of 7.
+ */
+function resolvePaceEndMs(
+	resetMs: number,
+	window: SupportedWindow | string,
+	startMs: number,
+	now: number,
+	budgetEndMs: number | null | undefined,
+): number {
+	if (
+		typeof budgetEndMs === "number" &&
+		Number.isFinite(budgetEndMs) &&
+		budgetEndMs > now &&
+		budgetEndMs < resetMs &&
+		budgetEndMs - startMs > 0 &&
+		isWeeklyPacedWindow(window)
+	) {
+		return budgetEndMs;
+	}
+	return resetMs;
+}
+
+/**
  * Where a window's utilization would sit (0-100) if it were burned perfectly
  * evenly — pure clock arithmetic, no forecasting. This positions the pace tick
  * on dashboard usage bars and is the pace baseline the proactive usage
  * throttle compares real utilization against, so both must share this one
  * definition. Null when the reset is not a finite timestamp or the window name
  * has no known duration.
+ *
+ * `budgetEndMs` moves the 100% point earlier for weekly-paced windows; see
+ * {@link resolvePaceEndMs}.
  */
 export function computeExpectedPct(
 	resetMs: number,
 	window: SupportedWindow | string,
 	now: number,
 	windowDurationMs?: number,
+	budgetEndMs?: number | null,
 ): number | null {
 	if (!Number.isFinite(resetMs)) return null;
 	const startMs = computeWindowStartMs(resetMs, window, windowDurationMs);
 	if (startMs === null) return null;
-	const durationMs = resetMs - startMs;
+	const endMs = resolvePaceEndMs(resetMs, window, startMs, now, budgetEndMs);
+	const durationMs = endMs - startMs;
 	if (durationMs <= 0) return null;
 	const elapsedMs = now - startMs;
 	return Math.min(100, Math.max(0, (elapsedMs / durationMs) * 100));
@@ -154,7 +204,9 @@ export function computeExpectedPct(
  * function so the UI can never disagree with the behaviour it explains.
  *
  * `windowDurationMs` is the data-derived window length for providers that
- * report one per reading; see {@link computeWindowStartMs}.
+ * report one per reading; see {@link computeWindowStartMs}. `budgetEndMs`
+ * paces a weekly-paced window to an earlier budget end, and then caps the
+ * resume at that end rather than the reset; see {@link resolvePaceEndMs}.
  */
 export function computeThrottleResumeAt(
 	resetMs: number,
@@ -162,6 +214,7 @@ export function computeThrottleResumeAt(
 	utilizationPct: number,
 	now: number,
 	windowDurationMs?: number,
+	budgetEndMs?: number | null,
 ): number | null {
 	if (!Number.isFinite(resetMs) || resetMs <= now) return null;
 	const startMs = computeWindowStartMs(resetMs, window, windowDurationMs);
@@ -173,13 +226,15 @@ export function computeThrottleResumeAt(
 		window,
 		now,
 		windowDurationMs,
+		budgetEndMs,
 	);
 	if (expectedPct === null || utilizationPct <= expectedPct) return null;
 
-	const durationMs = resetMs - startMs;
+	const endMs = resolvePaceEndMs(resetMs, window, startMs, now, budgetEndMs);
+	const durationMs = endMs - startMs;
 	const resumeAt = Math.min(
 		startMs + (utilizationPct / 100) * durationMs,
-		resetMs,
+		endMs,
 	);
 	return resumeAt > now ? resumeAt : null;
 }

@@ -49,10 +49,12 @@ const opts = (
 	overrides: {
 		reserveThresholdPct?: number;
 		weeklySlopePctPerHour?: number | null;
+		subscriptionEndMs?: number | null;
 	} = {},
 ) => ({
 	reserveThresholdPct: NON_PROTECTED,
 	weeklySlopePctPerHour: null,
+	subscriptionEndMs: null,
 	...overrides,
 });
 
@@ -80,6 +82,58 @@ describe("resolvePoolLivenessDemotion", () => {
 		expect(
 			resolvePoolLivenessDemotion(reservedCapacity(), 1, NOW, opts()),
 		).toBe(true);
+	});
+
+	// Rule 6 against a subscription end: the tail is lost there too.
+	it("releases a reserved tail before a non-renewing subscription ends", () => {
+		const endsSoon = NOW + LIVENESS_RELEASE_HORIZON_MIN_MS;
+		expect(
+			resolvePoolLivenessDemotion(
+				reservedCapacity(),
+				1,
+				NOW,
+				opts({ subscriptionEndMs: endsSoon }),
+			),
+		).toBe(false);
+		// An end beyond the weekly reset changes nothing: the reset comes first.
+		expect(
+			resolvePoolLivenessDemotion(
+				reservedCapacity(),
+				1,
+				NOW,
+				opts({ subscriptionEndMs: farWeeklyReset + 7 * 24 * HOUR }),
+			),
+		).toBe(true);
+	});
+
+	it("still releases on a near weekly reset when the subscription ends later", () => {
+		expect(
+			resolvePoolLivenessDemotion(
+				capacity({
+					weeklyHeadroom: 5,
+					bindingWeeklyResetMs: NOW + LIVENESS_RELEASE_HORIZON_MIN_MS,
+				}),
+				1,
+				NOW,
+				opts({ subscriptionEndMs: farWeeklyReset + 7 * 24 * HOUR }),
+			),
+		).toBe(false);
+	});
+
+	it("measures a subscription end against the same static horizon as a reset", () => {
+		const staticHorizonMs =
+			(NON_PROTECTED / LIVENESS_DESIGN_SLOPE_PCT_PER_HOUR) * HOUR;
+		const endAt = (offsetMs: number) =>
+			resolvePoolLivenessDemotion(
+				reservedCapacity(),
+				1,
+				NOW,
+				opts({
+					subscriptionEndMs: Math.round(NOW + staticHorizonMs + offsetMs),
+				}),
+			);
+		expect(endAt(HOUR)).toBe(true);
+		expect(endAt(-HOUR)).toBe(false);
 	});
 
 	// Rule 1 — capacity must exist.
@@ -306,7 +360,11 @@ describe("burn-aware release horizon", () => {
 			capacity({ weeklyHeadroom, bindingWeeklyResetMs: NOW + resetInMs }),
 			1,
 			NOW,
-			{ reserveThresholdPct: threshold, weeklySlopePctPerHour: slope },
+			{
+				reserveThresholdPct: threshold,
+				weeklySlopePctPerHour: slope,
+				subscriptionEndMs: null,
+			},
 		);
 
 	it("sizes the horizon on the observed slope (a ~20% tail at 1.13 %/h ⇒ ~17.6h)", () => {

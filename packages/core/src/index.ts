@@ -338,6 +338,7 @@ export {
 	type SessionCacheEstimateState,
 } from "./session-cache-estimate";
 export * from "./strategy";
+export * from "./subscription-end";
 export {
 	isCodexSubscriptionLapse,
 	isDevinSubscriptionLapse,
@@ -348,6 +349,7 @@ export {
 	computeThrottleResumeAt,
 	computeWindowStartMs,
 	FIXED_WINDOW_DURATION_MS,
+	isWeeklyPacedWindow,
 	type SupportedWindow,
 } from "./throttle-utils";
 export {

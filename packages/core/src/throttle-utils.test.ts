@@ -3,6 +3,7 @@ import {
 	computeExpectedPct,
 	computeThrottleResumeAt,
 	computeWindowStartMs,
+	isWeeklyPacedWindow,
 } from "./throttle-utils";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -147,5 +148,117 @@ describe("computeThrottleResumeAt", () => {
 		expect(computeThrottleResumeAt(monthlyReset, "monthly", 50, now)).toBe(
 			monthlyStart + 15.5 * DAY_MS,
 		);
+	});
+});
+
+describe("pacing against an earlier budget end", () => {
+	const DAY_MS = 24 * HOUR_MS;
+	const now = Date.UTC(2026, 9, 2, 12, 0, 0, 0);
+	// A 7-day window that opened 2 days ago and resets in 5 days.
+	const resetMs = now + 5 * DAY_MS;
+	const startMs = now - 2 * DAY_MS;
+	const budgetEndMs = now + 12 * HOUR_MS;
+
+	it("classifies only the long budget windows as weekly-paced", () => {
+		for (const window of [
+			"seven_day",
+			"weekly",
+			"monthly",
+			"tokens_limit_weekly",
+		]) {
+			expect(isWeeklyPacedWindow(window)).toBe(true);
+		}
+		for (const window of ["five_hour", "daily", "tokens_limit", null]) {
+			expect(isWeeklyPacedWindow(window)).toBe(false);
+		}
+	});
+
+	it("resumes where the line from the window start to the budget end meets utilization", () => {
+		// start + 0.9 x (end - start) = start + 0.9 x 2.5 d = now + 6 h.
+		const resumeAt = computeThrottleResumeAt(
+			resetMs,
+			"seven_day",
+			90,
+			now,
+			undefined,
+			budgetEndMs,
+		);
+		expect(resumeAt).toBeCloseTo(now + 6 * HOUR_MS, 0);
+		// Paced to the reset instead, the same reading would wait ~4.3 days.
+		expect(computeThrottleResumeAt(resetMs, "seven_day", 90, now)).toBeCloseTo(
+			startMs + 0.9 * 7 * DAY_MS,
+			0,
+		);
+	});
+
+	it("moves the pace marker to the shortened line", () => {
+		// 2 of 2.5 days elapsed.
+		expect(
+			computeExpectedPct(resetMs, "seven_day", now, undefined, budgetEndMs),
+		).toBeCloseTo(80, 6);
+	});
+
+	it("releases a reading ahead of the reset pace but behind the shortened pace", () => {
+		// 50% is ahead of the 7-day line (~28.6%) but behind the 2.5-day one (80%).
+		expect(computeThrottleResumeAt(resetMs, "seven_day", 50, now)).not.toBe(
+			null,
+		);
+		expect(
+			computeThrottleResumeAt(
+				resetMs,
+				"seven_day",
+				50,
+				now,
+				undefined,
+				budgetEndMs,
+			),
+		).toBe(null);
+	});
+
+	it("caps an over-100% reading at the budget end, not the reset", () => {
+		expect(
+			computeThrottleResumeAt(
+				resetMs,
+				"seven_day",
+				130,
+				now,
+				undefined,
+				budgetEndMs,
+			),
+		).toBe(budgetEndMs);
+	});
+
+	it("ignores a null, past, non-finite or after-reset budget end", () => {
+		const unchanged = computeThrottleResumeAt(resetMs, "seven_day", 90, now);
+		for (const end of [
+			null,
+			undefined,
+			now,
+			now - HOUR_MS,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			resetMs,
+			resetMs + DAY_MS,
+		]) {
+			expect(
+				computeThrottleResumeAt(resetMs, "seven_day", 90, now, undefined, end),
+			).toBe(unchanged);
+			expect(
+				computeExpectedPct(resetMs, "seven_day", now, undefined, end),
+			).toBe(computeExpectedPct(resetMs, "seven_day", now));
+		}
+	});
+
+	it("never changes a 5h-class window", () => {
+		const fiveHourReset = now + 2 * HOUR_MS;
+		const end = now + HOUR_MS;
+		for (const window of ["five_hour", "tokens_limit"]) {
+			expect(
+				computeThrottleResumeAt(fiveHourReset, window, 90, now, undefined, end),
+			).toBe(computeThrottleResumeAt(fiveHourReset, window, 90, now));
+			expect(
+				computeExpectedPct(fiveHourReset, window, now, undefined, end),
+			).toBe(computeExpectedPct(fiveHourReset, window, now));
+		}
 	});
 });
