@@ -5,7 +5,8 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
-import { reasoningItem, reasoningItemId } from "./reasoning-items";
+import { mintedItemId } from "./minted-items";
+import { reasoningItem } from "./reasoning-items";
 import {
 	type ResponsesTerminalStatus,
 	responsesTerminalStatus,
@@ -147,7 +148,7 @@ function finishedItems(
 }
 
 function searchItemId(state: State, outputIdx: number): string {
-	return `${state.responseId}_ws_${outputIdx}`;
+	return mintedItemId(state.responseId, "ws", outputIdx);
 }
 
 /** Fill a search's reserved slot and close its item. */
@@ -207,7 +208,7 @@ function emitToolCallAdded(
 			output_index: outputIdx,
 			item: {
 				type: identity.type === "custom" ? "custom_tool_call" : "function_call",
-				id: `${state.responseId}_fc_${outputIdx}`,
+				id: mintedItemId(state.responseId, "fc", outputIdx),
 				call_id: callId,
 				name: identity.name,
 				...(identity.namespace ? { namespace: identity.namespace } : {}),
@@ -233,7 +234,7 @@ function appendReasoning(
 		outputIdx = state.outputIndex++;
 		reasoning.outputIdx = outputIdx;
 	}
-	const id = reasoningItemId(state.responseId, outputIdx);
+	const id = mintedItemId(state.responseId, "rs", outputIdx);
 	if (opening) {
 		emitSse(
 			controller,
@@ -280,7 +281,7 @@ function finishReasoning(
 ): void {
 	const outputIdx = reasoning.outputIdx;
 	if (outputIdx === undefined) return;
-	const id = reasoningItemId(state.responseId, outputIdx);
+	const id = mintedItemId(state.responseId, "rs", outputIdx);
 	const { text } = reasoning;
 	emitSse(
 		controller,
@@ -514,7 +515,7 @@ function processEvent(
 					output_index: outputIdx,
 					item: {
 						type: "message",
-						id: `${state.responseId}_msg_${outputIdx}`,
+						id: mintedItemId(state.responseId, "msg", outputIdx),
 						role: "assistant",
 						content: [],
 						status: "in_progress",
@@ -527,7 +528,7 @@ function processEvent(
 				"response.content_part.added",
 				{
 					type: "response.content_part.added",
-					item_id: `${state.responseId}_msg_${outputIdx}`,
+					item_id: mintedItemId(state.responseId, "msg", outputIdx),
 					output_index: outputIdx,
 					content_index: 0,
 					part: { type: "output_text", text: "" },
@@ -601,7 +602,7 @@ function processEvent(
 				"response.output_text.delta",
 				{
 					type: "response.output_text.delta",
-					item_id: `${state.responseId}_msg_${outputIdx}`,
+					item_id: mintedItemId(state.responseId, "msg", outputIdx),
 					output_index: outputIdx,
 					content_index: 0,
 					delta: text,
@@ -619,7 +620,7 @@ function processEvent(
 					"response.function_call_arguments.delta",
 					{
 						type: "response.function_call_arguments.delta",
-						item_id: `${state.responseId}_fc_${outputIdx}`,
+						item_id: mintedItemId(state.responseId, "fc", outputIdx),
 						output_index: outputIdx,
 						call_id: tool.callId,
 						delta: partial,
@@ -685,7 +686,7 @@ function processEvent(
 				"response.output_text.done",
 				{
 					type: "response.output_text.done",
-					item_id: `${state.responseId}_msg_${outputIdx}`,
+					item_id: mintedItemId(state.responseId, "msg", outputIdx),
 					output_index: outputIdx,
 					content_index: 0,
 					text: fullText,
@@ -697,7 +698,7 @@ function processEvent(
 				"response.content_part.done",
 				{
 					type: "response.content_part.done",
-					item_id: `${state.responseId}_msg_${outputIdx}`,
+					item_id: mintedItemId(state.responseId, "msg", outputIdx),
 					output_index: outputIdx,
 					content_index: 0,
 					part,
@@ -706,7 +707,7 @@ function processEvent(
 			);
 			const doneItem: Record<string, unknown> = {
 				type: "message",
-				id: `${state.responseId}_msg_${outputIdx}`,
+				id: mintedItemId(state.responseId, "msg", outputIdx),
 				role: "assistant",
 				content: [part],
 				status: "completed",
@@ -743,7 +744,7 @@ function processEvent(
 					"response.custom_tool_call_input.delta",
 					{
 						type: "response.custom_tool_call_input.delta",
-						item_id: `${state.responseId}_fc_${outputIdx}`,
+						item_id: mintedItemId(state.responseId, "fc", outputIdx),
 						output_index: outputIdx,
 						delta: input,
 					},
@@ -759,7 +760,7 @@ function processEvent(
 				eventType,
 				{
 					type: eventType,
-					item_id: `${state.responseId}_fc_${outputIdx}`,
+					item_id: mintedItemId(state.responseId, "fc", outputIdx),
 					output_index: outputIdx,
 					call_id: tool.callId,
 					name: identity.name,
@@ -772,7 +773,7 @@ function processEvent(
 			);
 			const doneItem: Record<string, unknown> = {
 				type: identity.type === "custom" ? "custom_tool_call" : "function_call",
-				id: `${state.responseId}_fc_${outputIdx}`,
+				id: mintedItemId(state.responseId, "fc", outputIdx),
 				call_id: tool.callId,
 				name: identity.name,
 				...(identity.namespace ? { namespace: identity.namespace } : {}),
