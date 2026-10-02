@@ -788,9 +788,9 @@ export interface PublicRequestOpenedDto {
 
 /**
  * A request that will never produce a completion — rejected at admission, a
- * forced-account failure, a pinned-target refusal, or a probe. A device holding
- * it as pending must DISCARD it rather than render it as an error: nothing else
- * in the system has a row for it either.
+ * pinned-target refusal, or a probe. A device holding it as pending must DISCARD
+ * it rather than render it as an error: nothing else in the system has a row
+ * for it either.
  */
 export interface PublicRequestDroppedDto {
 	type: "request.dropped";

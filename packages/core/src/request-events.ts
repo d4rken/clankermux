@@ -25,8 +25,8 @@ export type RequestIngressEvt = {
 
 /**
  * Terminal for a request that never reached `forwardToClient` and so will never
- * produce a `summary`: an admission rejection, a forced-account failure, a
- * pinned-target refusal, or a probe the recorder filters out.
+ * produce a `summary`: an admission rejection, a pinned-target refusal, or a
+ * probe the recorder filters out.
  *
  * A consumer that sees this for a request still in its `pending` phase should
  * DISCARD it rather than render it as an error — these requests are not

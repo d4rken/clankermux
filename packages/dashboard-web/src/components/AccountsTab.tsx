@@ -1,10 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Crosshair, Plus } from "lucide-react";
+import { AlertCircle, Plus } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { type Account, api } from "../api";
 import {
 	useAccounts,
-	useForcedAccount,
 	useModelSubstitutions,
 	useRenameAccount,
 } from "../hooks/queries";
@@ -63,40 +62,11 @@ export function AccountsTab() {
 		error,
 		refetch: loadAccountsQuery,
 	} = useAccounts(true);
-	const { data: forcedAccountData } = useForcedAccount();
-	const forcedAccountId = forcedAccountData?.accountId ?? null;
 	const renameAccount = useRenameAccount();
 
-	// Reload accounts AND refetch the global force-account state together, so the
-	// per-account toggle + banner can't go stale after any account-mutating
-	// action or background refresh (R7). The refresh-usage / force-reset / reload
-	// paths all land here, and every one of them can move the served runway, so
-	// this routes through the shared capacity invalidation rather than refetching
-	// the accounts query alone.
 	const loadAccounts = async () => {
-		await Promise.all([
-			loadAccountsQuery(),
-			queryClient.invalidateQueries({ queryKey: queryKeys.forcedAccount() }),
-		]);
+		await loadAccountsQuery();
 		invalidateCapacityQueries(queryClient);
-	};
-
-	const refetchForcedAccount = () =>
-		queryClient.invalidateQueries({ queryKey: queryKeys.forcedAccount() });
-
-	const handleForceAccount = async (account: Account) => {
-		try {
-			if (account.id === forcedAccountId) {
-				await api.clearForcedAccount();
-			} else {
-				await api.setForcedAccount(account.id);
-			}
-			await refetchForcedAccount();
-			await loadAccountsQuery();
-			setActionError(null);
-		} catch (err) {
-			setActionError(formatError(err));
-		}
 	};
 
 	const [adding, setAdding] = useState(false);
@@ -839,11 +809,6 @@ export function AccountsTab() {
 
 	const displayError = error ? formatError(error) : actionError;
 
-	const forcedAccount = forcedAccountId
-		? accounts?.find((a) => a.id === forcedAccountId)
-		: undefined;
-	const forcedAccountLabel = forcedAccount?.name ?? forcedAccountId;
-
 	// A sort control over the empty state or a single row is a dead affordance.
 	const showSortControl = (accounts?.length ?? 0) > 1;
 
@@ -855,23 +820,6 @@ export function AccountsTab() {
 						<div className="flex items-center gap-item">
 							<AlertCircle className="h-4 w-4 text-destructive-strong" />
 							<p className="text-destructive-strong">{displayError}</p>
-						</div>
-					</CardContent>
-				</Card>
-			)}
-
-			{forcedAccountId && (
-				<Card className="border-destructive bg-destructive/10">
-					<CardContent className="p-group">
-						<div className="flex items-start gap-item">
-							<Crosshair className="h-5 w-5 shrink-0 text-destructive-strong" />
-							<p className="text-sm text-destructive-strong">
-								<span className="font-semibold">Force mode:</span> Requests are
-								restricted to{" "}
-								<span className="font-semibold">{forcedAccountLabel}</span> —
-								API key destinations, routing rules, and model permissions still
-								apply. Click the force button again to release.
-							</p>
 						</div>
 					</CardContent>
 				</Card>
@@ -963,8 +911,6 @@ export function AccountsTab() {
 						accounts={accounts}
 						sortMode={sortMode}
 						degradedByAccount={degradedByAccount}
-						forcedAccountId={forcedAccountId}
-						onForceAccount={handleForceAccount}
 						onPauseToggle={handlePauseToggle}
 						onDisabledToggle={handleDisabledToggle}
 						onForceResetRateLimit={handleForceResetRateLimit}

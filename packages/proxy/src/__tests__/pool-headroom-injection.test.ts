@@ -270,8 +270,8 @@ describe("pool headroom header injection", () => {
 	});
 
 	it("leaves headers untouched when no candidate list was stashed", async () => {
-		// The forced-account and unauthenticated paths never run selection, so they
-		// never stash one. Omission is what makes them inert.
+		// A path that never ran selection cannot speak for the pool.
+		// Omission is what makes it inert.
 		seedWeekly("serving", 90);
 
 		const { response } = await forward({ poolCandidates: undefined });

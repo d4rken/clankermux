@@ -62,10 +62,9 @@ const WEEKLY_WINDOW_MINUTES = 10_080;
  * cannot outlive the request, and adds no field to a type that a dozen call
  * sites construct.
  *
- * Absence is meaningful and is the safe default. The forced-account and
- * unauthenticated paths never run selection, so they never stash anything, and
- * a response whose request has no entry is forwarded with its headers exactly
- * as they arrived.
+ * Absence is meaningful and is the safe default. Paths that never run selection
+ * never stash anything: a response whose request has no entry is forwarded with
+ * its headers exactly as they arrived.
  */
 const candidatesByRequest = new WeakMap<RequestMeta, readonly Account[]>();
 

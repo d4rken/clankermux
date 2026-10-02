@@ -7,7 +7,6 @@ import {
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import { routingAttempts } from "./fixtures/routing-harness";
 
 /**
@@ -210,12 +209,10 @@ describe("reasoning-effort adaptation capture", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
-		setForcedAccount(null);
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
-		setForcedAccount(null);
 	});
 
 	/** Captures the body of every upstream call and answers with Codex SSE. */
@@ -451,31 +448,6 @@ describe("reasoning-effort adaptation capture", () => {
 
 		// Nothing adapted this request, and nothing the client sent says otherwise.
 		expect(routingAttempts(ctx)[0]).toMatchObject({
-			reasoning_effort_requested: null,
-			reasoning_effort_effective: null,
-			reasoning_effort_reason: null,
-		});
-		expect(
-			captured.headersByUrl
-				.get("upstream.local")
-				?.get(REASONING_EFFORT_ADAPTATION_HEADER),
-		).toBeNull();
-	});
-
-	it("ignores a client-supplied adaptation header on a forced dispatch", async () => {
-		// The forced path builds its own request and records its own attempt row,
-		// so it scrubs the inbound header for itself or not at all.
-		const account = makePlainAccount();
-		const captured = captureUpstream(() => plainReply());
-		const ctx = makeContext([account]);
-		setForcedAccount(account.id);
-		const req = plainRequest();
-
-		const res = await callHandleProxy(req, new URL(req.url), ctx);
-		expect(res.status).toBe(200);
-
-		expect(routingAttempts(ctx)[0]).toMatchObject({
-			account_id: account.id,
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,

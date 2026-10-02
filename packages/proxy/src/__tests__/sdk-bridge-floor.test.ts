@@ -19,7 +19,6 @@ import {
 	wasHostedWebSearchServed,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
-import { setForcedAccount } from "../handlers";
 import * as rateLimitCooldown from "../handlers/rate-limit-cooldown";
 import {
 	markCapacityRestoredProbePending,
@@ -72,7 +71,6 @@ let harness: BridgeHarness | null = null;
 afterEach(() => {
 	harness?.restore();
 	harness = null;
-	setForcedAccount(null);
 	clearAliasAffinity();
 	for (const spy of spies.splice(0)) spy.mockRestore();
 });
@@ -359,21 +357,6 @@ describe("SDK bridge floor with a bridge", () => {
 			]);
 		});
 
-		it("answers a forced official account with the 529 directly", async () => {
-			const bridge = atCapacity();
-			harness = await makeBridgeHarness([claudeA(), other()], { bridge });
-			setForcedAccount("claude-a");
-
-			const { response } = await run(flooredRequest(), harness.ctx);
-
-			expect(response.status).toBe(529);
-			expect(response.headers.get("retry-after")).toBe("10");
-			expect(response.headers.get("x-clankermux-forced-account")).toBe(
-				"claude-a",
-			);
-			expect(harness.upstreamKeys).toEqual([]);
-		});
-
 		it("answers its 529 after the last alias stage, not the alias 503", async () => {
 			const bridge = atCapacity();
 			const a = claudeA();
@@ -446,34 +429,6 @@ describe("SDK bridge floor with a bridge", () => {
 			{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
 		]);
 		expect(JSON.parse(plan.routeSnapshot ?? "{}").alias.targetIndex).toBe(1);
-	});
-
-	it("serves a globally forced official account through the bridge", async () => {
-		const bridge = makeFakeBridge();
-		harness = await makeBridgeHarness([claudeA(), other()], { bridge });
-		setForcedAccount("claude-a");
-
-		const { response } = await run(flooredRequest(), harness.ctx);
-
-		expect(response.status).toBe(200);
-		expect(harness.upstreamKeys).toEqual([]);
-		expect(bridge.starts[0].plan.candidates.map((c) => c.accountId)).toEqual([
-			"claude-a",
-		]);
-	});
-
-	it("answers 503 for a forced official account the bridge cannot serve", async () => {
-		const bridge = makeFakeBridge(() => {
-			throw new SdkBridgeUnavailableError("shutting down");
-		});
-		harness = await makeBridgeHarness([claudeA(), other()], { bridge });
-		setForcedAccount("claude-a");
-
-		const { response, text } = await run(flooredRequest(), harness.ctx);
-
-		expect(response.status).toBe(503);
-		expect(JSON.parse(text).error.type).toBe("sdk_bridge_unavailable");
-		expect(harness.upstreamKeys).toEqual([]);
 	});
 
 	it("does not bridge an unfloored request, whatever headers it sends", async () => {

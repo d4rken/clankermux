@@ -17,7 +17,6 @@ import {
 	setSdkBridgeInnerRequestContext,
 } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import {
 	hashCreditToken,
 	refusalFallbackRegistry,
@@ -92,7 +91,6 @@ function urlFor(path: string): URL {
 }
 
 function resetSingletons(): void {
-	setForcedAccount(null);
 	refusalFallbackRegistry.reset();
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();

@@ -7,7 +7,6 @@ import {
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import { routingAttempts } from "./fixtures/routing-harness";
 
 /**
@@ -196,12 +195,10 @@ describe("service-tier adaptation capture", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
-		setForcedAccount(null);
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
-		setForcedAccount(null);
 	});
 
 	/** Every upstream call in order, answered by `respond`. */
@@ -392,26 +389,23 @@ describe("service-tier adaptation capture", () => {
 		);
 	}
 
-	for (const forcedDispatch of [false, true]) {
-		it(`ignores a client-supplied tier header${forcedDispatch ? " on a forced dispatch" : ""}`, async () => {
-			const account = makeCodexAccount({
-				id: "plain-1",
-				provider: "test-provider",
-			});
-			const calls = captureUpstream(() => plainReply());
-			const ctx = makeContext([account]);
-			if (forcedDispatch) setForcedAccount(account.id);
-			const req = plainRequest();
-
-			const res = await callHandleProxy(req, new URL(req.url), ctx);
-			expect(res.status).toBe(200);
-
-			expect(routingAttempts(ctx)[0]).toMatchObject({
-				service_tier_requested: null,
-				service_tier_sent: null,
-				service_tier_reason: null,
-			});
-			expect(calls[0]?.headers.get(SERVICE_TIER_ADAPTATION_HEADER)).toBeNull();
+	it("ignores a client-supplied tier header", async () => {
+		const account = makeCodexAccount({
+			id: "plain-1",
+			provider: "test-provider",
 		});
-	}
+		const calls = captureUpstream(() => plainReply());
+		const ctx = makeContext([account]);
+		const req = plainRequest();
+
+		const res = await callHandleProxy(req, new URL(req.url), ctx);
+		expect(res.status).toBe(200);
+
+		expect(routingAttempts(ctx)[0]).toMatchObject({
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
+		});
+		expect(calls[0]?.headers.get(SERVICE_TIER_ADAPTATION_HEADER)).toBeNull();
+	});
 });

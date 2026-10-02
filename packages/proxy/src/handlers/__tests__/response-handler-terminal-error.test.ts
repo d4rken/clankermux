@@ -78,7 +78,6 @@ describe("Codex transient stream health", () => {
 
 	for (const opts of [
 		{ accountProvider: "anthropic" },
-		{ accountProvider: "codex", disableCooldown: true },
 		{ accountProvider: "codex", internal: true },
 	]) {
 		it(`leaves health unchanged for ${JSON.stringify(opts)}`, async () => {
@@ -335,7 +334,6 @@ function forward(
 		retryAttempt?: number;
 		overloadProbeToken?: unknown;
 		accountProvider?: string;
-		disableCooldown?: boolean;
 		timestamp?: number;
 	},
 ) {
@@ -356,7 +354,6 @@ function forward(
 			requestBody: enc.encode("{}").buffer as ArrayBuffer,
 			response: new Response(body, { status: 200, headers }),
 			timestamp: opts.timestamp ?? Date.now(),
-			disableCooldown: opts.disableCooldown,
 			internal: opts.internal,
 			retryAttempt: opts.retryAttempt ?? 0,
 			failoverAttempts: 0,
@@ -933,7 +930,6 @@ describe("stream-cut reason reaches the recorder", () => {
 		await drain(
 			await forward(streamFrom(chunks, { error: readError() }), ctx, {
 				requestId: "cut-overloaded",
-				disableCooldown: true,
 			}),
 		);
 		expect(calls.finishTransport[0]?.outcome).toBe("error");

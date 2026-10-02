@@ -22,7 +22,6 @@ import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { resetOverloadHoldSlots } from "../overload-hold";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
@@ -205,7 +204,6 @@ describe("streaming byte path", () => {
 	});
 
 	const reset = () => {
-		setForcedAccount(null);
 		cacheBodyStore.setEnabled(false);
 		sessionPromotionTracker.setMode("off");
 		sessionPromotionTracker.clear();

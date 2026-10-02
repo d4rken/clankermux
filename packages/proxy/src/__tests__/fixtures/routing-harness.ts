@@ -16,10 +16,7 @@ import {
 } from "@clankermux/types";
 import { modelPermissionScope } from "../../account-model-permissions";
 import { selectAccountsForRequest as runSelection } from "../../handlers/account-selector";
-import {
-	proxyWithAccount as runAccount,
-	proxyForcedAccount as runForced,
-} from "../../handlers/proxy-operations";
+import { proxyWithAccount as runAccount } from "../../handlers/proxy-operations";
 import type { ProxyContext } from "../../handlers/proxy-types";
 import { handleProxy as runProxy } from "../../proxy";
 import { getResolvedRoute } from "../../resolved-route";
@@ -195,7 +192,7 @@ async function authorize(
 		meta.headers ??= new Headers();
 		meta.headers.set("x-clankermux-account-id", accounts[0].id);
 	}
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 }
 export async function proxyWithAccount(...args: Parameters<typeof runAccount>) {
 	const model =
@@ -206,18 +203,6 @@ export async function proxyWithAccount(...args: Parameters<typeof runAccount>) {
 	args[3].headers = new Headers(args[0].headers);
 	await authorize(args[3], args[7], model, [args[2]]);
 	return runAccount(...args);
-}
-export async function proxyForcedAccount(
-	...args: Parameters<typeof runForced>
-) {
-	const model =
-		args[3].requestedModel ??
-		(args[4]
-			? JSON.parse(new TextDecoder().decode(args[4])).model
-			: "claude-sonnet-4-5");
-	args[3].headers = new Headers(args[0].headers);
-	await authorize(args[3], args[5], model, [args[2]]);
-	return runForced(...args);
 }
 export async function selectAccountsForRequest(
 	...args: Parameters<typeof runSelection>

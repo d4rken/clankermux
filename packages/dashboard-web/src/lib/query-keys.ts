@@ -14,7 +14,6 @@ export const queryKeys = {
 	// serves, so it goes stale on exactly the same events and is invalidated
 	// beside it.
 	pacing: () => [...queryKeys.all, "pacing"] as const,
-	forcedAccount: () => [...queryKeys.all, "forced-account"] as const,
 	stats: (errorsSinceHours?: number) =>
 		errorsSinceHours !== undefined
 			? ([...queryKeys.all, "stats", { errorsSinceHours }] as const)

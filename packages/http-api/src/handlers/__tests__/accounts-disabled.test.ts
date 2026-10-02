@@ -6,10 +6,8 @@ import {
 	type DatabaseOperations,
 	ensureSchema,
 } from "@clankermux/database";
-import { getForcedAccount, setForcedAccount } from "@clankermux/proxy";
 import {
 	createAccountDisabledHandler,
-	createAccountForceHandler,
 	createAccountRefreshUsageHandler,
 } from "../accounts";
 
@@ -37,19 +35,13 @@ beforeEach(() => {
 });
 afterEach(() => {
 	db.close();
-	setForcedAccount(null);
 });
 
-it("disables by id, clears force, rejects upstream actions, and explicitly enables without erasing health", async () => {
-	setForcedAccount("saved");
+it("disables by id, rejects upstream actions, and explicitly enables without erasing health", async () => {
 	expect(
 		(await createAccountDisabledHandler(dbOps, true)(req(), "saved")).status,
 	).toBe(200);
-	expect(getForcedAccount()).toBeNull();
 	expect(await repo.findAll()).toEqual([]);
-	expect((await createAccountForceHandler(dbOps)(req(), "saved")).status).toBe(
-		400,
-	);
 	expect(
 		(await createAccountRefreshUsageHandler(dbOps)(req(), "saved")).status,
 	).toBe(400);

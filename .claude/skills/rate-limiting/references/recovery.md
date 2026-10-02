@@ -41,9 +41,7 @@ like this:
    the causal boundary in ONE `UPDATE`.
 4. A released account is selectable again with streak 0 and no deadline, so a
    dedicated **capacity-restored marker** admits exactly one probe. It is never
-   time-expired and is retained on `cooldown_reapplied` / `abandoned`. The
-   global force-account override in `proxy.ts` bypasses account selection
-   entirely, so the one-probe guarantee explicitly excludes it.
+   time-expired and is retained on `cooldown_reapplied` / `abandoned`.
 
 Level-triggering heals a REFUSED or MISSED clear — not an incorrect one.
 Correlating `capacity_restored_clear` with a subsequent 429 on the same account

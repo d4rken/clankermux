@@ -59,6 +59,9 @@ describe("router: routes removed for having no caller", () => {
 		["GET", "/api/strategies"],
 		["GET", "/api/token-health/reauth-needed"],
 		["POST", "/api/accounts/acct-1/reload"],
+		["GET", "/api/accounts/force"],
+		["POST", "/api/accounts/force/clear"],
+		["POST", "/api/accounts/acct-1/force"],
 	])("does not serve %s %s", async (method, path) => {
 		expect(await dispatch(method, path)).toBeNull();
 	});

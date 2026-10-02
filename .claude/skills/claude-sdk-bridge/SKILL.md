@@ -26,7 +26,7 @@ pipeline. The client keeps executing its own tools.
   own parse). Then they are excluded, and a route left empty by that alone
   answers the bridge's 400 naming the field.
 - **Outer bridged attempt** (`handlers/sdk-bridge-attempt.ts`, branched in
-  `proxyWithAccount` / `proxyForcedAccount` before cache staging and token
+  `proxyWithAccount` before cache staging and token
   resolution). It runs none of the account machinery: no cooldowns, no
   401/429/529 classification, no probes, no holds, no `forwardToClient` row.
   Its response is final. Only `SdkBridgeUnavailableError` (bridge
@@ -39,7 +39,7 @@ pipeline. The client keeps executing its own tools.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
-  calls install their route from it and never re-resolve pin, rules, force or
+  calls install their route from it and never re-resolve pin, rules, account header or
   alias (`initializeSdkBridgeInnerRoute`).
 - **Inner calls.** The bridge's private `Bun.serve` on `127.0.0.1:0` takes a
   per-turn token, attaches the trusted `SdkBridgeInnerContext` by WeakMap and

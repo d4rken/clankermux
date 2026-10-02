@@ -15,7 +15,6 @@ import {
 	modelPermissionScope,
 } from "../account-model-permissions";
 import { cacheBodyStore } from "../cache-body-store";
-import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	markAnthropicBurstThrottle,
@@ -662,23 +661,6 @@ describe("reasoning effort on alias attempts", () => {
 		};
 		expect((await run(ctx, request(undefined, high))).status).toBe(200);
 		expect(sent[0]?.body).toMatchObject(high);
-	});
-	it("drops it on the global force-account path too", async () => {
-		const { ctx, accounts } = await setup([
-			"anthropic-compatible",
-			"anthropic-compatible",
-			"anthropic",
-		]);
-		const sent = capture((model) => success(model));
-		setForcedAccount(accounts[0].id);
-		try {
-			expect((await run(ctx, request(undefined, effort))).status).toBe(200);
-		} finally {
-			setForcedAccount(null);
-		}
-		expect(sent).toHaveLength(1);
-		expect(sent[0]?.body.thinking).toEqual(effort.thinking);
-		expect(sent[0]?.body.output_config).toBeUndefined();
 	});
 	it("leaves a request that did not name an alias as the client sent it", async () => {
 		const { ctx } = await setup([

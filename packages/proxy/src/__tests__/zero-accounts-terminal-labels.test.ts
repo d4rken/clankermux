@@ -40,7 +40,6 @@ import {
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	markAnthropicBurstThrottle,
@@ -393,7 +392,6 @@ function seedFamilyUsage(accountId: string, fableExhausted: boolean): void {
 }
 
 function resetSingletons(): void {
-	setForcedAccount(null);
 	cacheBodyStore.setEnabled(false);
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();

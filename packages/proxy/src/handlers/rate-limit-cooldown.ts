@@ -389,10 +389,6 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
  *     which wrap the proxy call in try/finally).
  *   - "suppressed": another request is already probing this account; the caller
  *     must skip it and try the next candidate.
- *
- * NOTE: the global force-account override in `proxy.ts` bypasses account
- * selection entirely, so the "exactly one upstream probe" guarantee explicitly
- * excludes that operator override.
  */
 export function getRateLimitProbeAdmission(
 	account: Account,

@@ -80,14 +80,14 @@ it("leaves an account suppressed for the bare id out of a [1m] route", async () 
 		"test",
 	);
 	const meta = bridgedMeta("one-m-suppressed");
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	expect(getResolvedRoute(meta).accountIds()).toEqual(["kept"]);
 });
 
 it("drops an account suppressed for the bare id after the route was built", async () => {
 	const { ctx, routing, suppressed } = await setup();
 	const meta = bridgedMeta("one-m-suppressed-later");
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	expect(getResolvedRoute(meta).accountIds().sort()).toEqual([
 		"kept",
 		"suppressed",
@@ -107,7 +107,7 @@ it("drops an account suppressed for the bare id after the route was built", asyn
 it("refuses the bridged send once the bare id is suppressed", async () => {
 	const { ctx, routing, suppressed } = await setup();
 	const meta = bridgedMeta("one-m-suppressed-at-dispatch");
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	await routing.suppressModel(
 		suppressed.id,
 		modelPermissionScope(suppressed),

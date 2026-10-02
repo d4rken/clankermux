@@ -128,7 +128,6 @@ export interface BuildRouteInput {
 	 * completely differently to a client, and only one of them is retryable.
 	 */
 	substitutedPairs?: ReadonlySet<string>;
-	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
 	/**
 	 * Why official Anthropic accounts cannot be destinations of this request
@@ -206,7 +205,6 @@ export class ResolvedRoute {
 				: {}),
 			rule,
 			pin: input.pin,
-			forcedAccountId: input.forcedAccountId ?? null,
 			headerAccountId: input.headerAccountId ?? null,
 			officialAnthropicExclusion: input.officialAnthropicExclusion ?? null,
 			...(input.bridgesOfficialAnthropic && input.sdkBridgeRefusal
@@ -258,7 +256,6 @@ export class ResolvedRoute {
 export type DestinationRestrictions = Pick<
 	BuildRouteInput,
 	| "pin"
-	| "forcedAccountId"
 	| "headerAccountId"
 	| "officialAnthropicExclusion"
 	| "bridgesOfficialAnthropic"
@@ -284,8 +281,6 @@ export function destinationExclusionReason(
 		isOfficialAnthropicProvider(account.provider)
 	)
 		return input.officialAnthropicExclusion;
-	if (input.forcedAccountId && input.forcedAccountId !== account.id)
-		return "another account was forced for this request";
 	if (input.headerAccountId && input.headerAccountId !== account.id)
 		return "another account was named by request header";
 	if (input.maintenance && input.maintenance.accountId !== account.id)
@@ -451,7 +446,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 									`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
 								)
 							: new RoutingPolicyError(
-									`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
+									`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
 										[...(input.priorExclusions?.values() ?? []), ...exclusions],
 									)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
 								);
