@@ -337,7 +337,10 @@ describe("SDK bridge floor with a bridge", () => {
 			expect(harness.upstreamKeys).toEqual([]);
 			const recorded = harness.ctx.requestRecorder
 				.recordSynthetic as ReturnType<typeof spyOn>;
+			expect(recorded).toHaveBeenCalledTimes(1);
 			expect(recorded.mock.calls[0]?.[2]).toBe("sdk_bridge_capacity");
+			// Nothing ran, so nothing may claim a served tier.
+			expect(recorded.mock.calls[0]?.[0].servedServiceTier).toBeNull();
 		});
 
 		it("answers its 529 when it was the last candidate to fail", async () => {

@@ -1,3 +1,4 @@
+import type { ServiceTierGroup } from "@clankermux/types";
 import { BarChart3 } from "lucide-react";
 import {
 	Card,
@@ -14,6 +15,7 @@ import {
 interface ModelAnalyticsProps {
 	modelPerformance: Array<{
 		model: string;
+		serviceTier: ServiceTierGroup;
 		avgResponseTime: number;
 		p95ResponseTime: number;
 		errorRate: number;
@@ -62,6 +64,8 @@ export function ModelAnalytics({
 		sum.totalTokens += entry.totalTokens ?? 0;
 		costByModelName.set(entry.model, sum);
 	}
+	// Both tier rows use the model-wide observed cost per 1K; efficiency
+	// divides each tier's median speed by that shared cost.
 	const rows: ModelPerformanceRow[] = modelPerformance.map((perf) => {
 		const cost = costByModelName.get(perf.model);
 		const totalCost = cost?.costUsd ?? 0;
@@ -77,6 +81,7 @@ export function ModelAnalytics({
 				: null;
 		return {
 			model: perf.model,
+			serviceTier: perf.serviceTier,
 			medianTps: perf.medianTokensPerSecond,
 			p95Tps: perf.p95TokensPerSecond,
 			speedSampleCount: perf.speedSampleCount,
@@ -98,7 +103,9 @@ export function ModelAnalytics({
 				<CardDescription>
 					Speed (median/p95), latency, reliability and cost per model. Bars are
 					normalized per column, so a fast provider can't squash the others —
-					click any column header to sort.
+					click any column header to sort. A model served at both service tiers
+					has a standard and a priority row; cost per 1K is model-wide and
+					shared by both, and efficiency uses that shared cost.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>

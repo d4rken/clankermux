@@ -9,6 +9,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+	ATTEMPT_STREAM_FAILED,
+	ATTEMPT_TRANSPORT_FAILED,
+	CLIENT_CLOSED_REQUEST,
+} from "@clankermux/types";
 import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { runOneShotBackfills } from "../backfills";
 import { ensureSchema } from "../migrations";
@@ -227,6 +233,114 @@ describe("unrated request model backfill", () => {
 			expect(plan.join("\n")).toContain(
 				"USING INDEX idx_requests_success_timestamp (success=?)",
 			);
+		} finally {
+			db.close();
+		}
+	});
+});
+
+describe("served service tier backfill", () => {
+	const MARKER = "backfill:served-service-tier";
+
+	function insertRequest(db: Database, id: string): void {
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model)
+			 VALUES (?, 1, 'POST', '/v1/responses', 200, 1, 'gpt-6-astra')`,
+			[id],
+		);
+	}
+
+	function insertAttempt(
+		db: Database,
+		id: string,
+		requestId: string,
+		tier: string | null,
+		startedAt: number,
+		end: { status?: number | null; error?: string | null } = {},
+	): void {
+		db.run(
+			`INSERT INTO routing_attempts (id, request_id, route_snapshot_id, requested_model, kind, started_at, service_tier_sent, status, error)
+			 VALUES (?, ?, 'snap', 'gpt-6-astra', 'upstream_send', ?, ?, ?, ?)`,
+			[
+				id,
+				requestId,
+				startedAt,
+				tier,
+				end.status === undefined ? 200 : end.status,
+				end.error ?? null,
+			],
+		);
+	}
+
+	function tier(db: Database, id: string): string | null {
+		return (
+			db.prepare(`SELECT service_tier FROM requests WHERE id = ?`).get(id) as {
+				service_tier: string | null;
+			}
+		).service_tier;
+	}
+
+	it("fills the tier from the latest upstream attempt, once", () => {
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			insertRequest(db, "fast");
+			insertAttempt(db, "a1", "fast", "priority", 10);
+			insertRequest(db, "failover");
+			insertAttempt(db, "a2", "failover", "priority", 10);
+			insertAttempt(db, "a3", "failover", null, 20);
+			insertRequest(db, "tie");
+			insertAttempt(db, "a4", "tie", null, 30);
+			insertAttempt(db, "a5", "tie", "priority", 30);
+			insertRequest(db, "untiered");
+			insertAttempt(db, "a6", "untiered", null, 40);
+			// A bridge refusal ran nothing, so the earlier send still decides.
+			insertRequest(db, "refused");
+			insertAttempt(db, "a8", "refused", "priority", 10);
+			insertAttempt(db, "a9", "refused", null, 20, {
+				status: 529,
+				error: `${ATTEMPT_SDK_BRIDGE_AT_CAPACITY}full`,
+			});
+			// Whether a failed fetch or a client-closed send went out is unknown.
+			insertRequest(db, "transport");
+			insertAttempt(db, "a10", "transport", "priority", 10);
+			insertAttempt(db, "a11", "transport", null, 20, {
+				status: 502,
+				error: ATTEMPT_TRANSPORT_FAILED,
+			});
+			insertRequest(db, "closed");
+			insertAttempt(db, "a12", "closed", "priority", 10, {
+				status: 499,
+				error: CLIENT_CLOSED_REQUEST,
+			});
+			// A stream that failed after the answer started did go out.
+			insertRequest(db, "stream");
+			insertAttempt(db, "a13", "stream", "priority", 10, {
+				status: 200,
+				error: ATTEMPT_STREAM_FAILED,
+			});
+
+			runOneShotBackfills(db);
+
+			expect(tier(db, "fast")).toBe("priority");
+			expect(tier(db, "failover")).toBe("standard");
+			expect(tier(db, "tie")).toBe("priority");
+			// No tiered attempt: left NULL, which already reads as standard.
+			expect(tier(db, "untiered")).toBeNull();
+			expect(tier(db, "refused")).toBe("priority");
+			expect(tier(db, "transport")).toBeNull();
+			expect(tier(db, "closed")).toBeNull();
+			expect(tier(db, "stream")).toBe("priority");
+			const config = db
+				.prepare(`SELECT config FROM strategies WHERE name = ?`)
+				.get(MARKER) as { config: string };
+			expect(JSON.parse(config.config).requestsFilled).toBe(5);
+
+			// Rows after the pass belong to the recorder, not the backfill.
+			insertRequest(db, "later");
+			insertAttempt(db, "a7", "later", "priority", 50);
+			runOneShotBackfills(db);
+			expect(tier(db, "later")).toBeNull();
 		} finally {
 			db.close();
 		}

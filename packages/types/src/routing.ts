@@ -61,6 +61,12 @@ export interface ResolvedRoutingTarget {
 export const ATTEMPT_TRANSPORT_FAILED = "Upstream transport failed";
 export const ATTEMPT_STREAM_FAILED = "Upstream response stream failed";
 export const ATTEMPT_CONSUMPTION_CANCELED = "Response consumption canceled";
+/**
+ * Error prefixes of a bridged attempt the SDK bridge refused before running
+ * anything: the attempt is recorded as an upstream send, but nothing ran.
+ */
+export const ATTEMPT_SDK_BRIDGE_AT_CAPACITY = "SDK bridge at capacity: ";
+export const ATTEMPT_SDK_BRIDGE_UNAVAILABLE = "SDK bridge unavailable: ";
 export const ATTEMPT_TRANSPORT_ENDINGS: readonly string[] = [
 	ATTEMPT_TRANSPORT_FAILED,
 	ATTEMPT_STREAM_FAILED,

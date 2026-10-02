@@ -27,6 +27,7 @@ import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 	type ProjectAttributionSource,
 	type RequestRoutingMeta,
+	type ServiceTierGroup,
 	type ToolCallStat,
 	type UnifiedClaimObservationRow,
 	type UnifiedClaimObservationSource,
@@ -593,6 +594,8 @@ export interface ResponseHandlerOptions {
 	clientHarness?: string | null;
 	/** See RequestMeta.sdkBridgeTurnId. */
 	sdkBridgeTurnId?: string | null;
+	/** See RequestMeta.servedServiceTier. */
+	servedServiceTier?: ServiceTierGroup;
 	/** Called once the request's row has begun (`requestRecorder.begin`). */
 	onRecordBegun?: () => void;
 	/** Claude Code device of the request (see RequestMeta.claudeDeviceId). */
@@ -803,6 +806,7 @@ async function forwardToClientInner(
 		clientUserAgent,
 		clientHarness,
 		sdkBridgeTurnId,
+		servedServiceTier,
 		claudeDeviceId,
 		response: responseRaw,
 		timestamp,
@@ -966,6 +970,7 @@ async function forwardToClientInner(
 			clientUserAgent: clientUserAgent ?? null,
 			clientHarness: clientHarness ?? null,
 			sdkBridgeTurnId: sdkBridgeTurnId ?? null,
+			servedServiceTier: servedServiceTier ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:

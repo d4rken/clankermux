@@ -284,6 +284,7 @@
 	"modelPerformance": [
 		{
 			"model": "claude-opus-4-8",
+			"serviceTier": "standard",
 			"avgResponseTime": 1350,
 			"p95ResponseTime": 2400,
 			"errorRate": 16.666666666666668,
@@ -293,6 +294,7 @@
 		},
 		{
 			"model": "claude-sonnet-5",
+			"serviceTier": "standard",
 			"avgResponseTime": 833.3333333333334,
 			"p95ResponseTime": 1200,
 			"errorRate": 33.333333333333336,
@@ -302,6 +304,7 @@
 		},
 		{
 			"model": "gpt-5-codex",
+			"serviceTier": "standard",
 			"avgResponseTime": 475,
 			"p95ResponseTime": 500,
 			"errorRate": 0,

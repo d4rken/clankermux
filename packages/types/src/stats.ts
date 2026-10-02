@@ -170,8 +170,17 @@ export interface TokenBreakdown {
 	outputTokens: number;
 }
 
+/**
+ * The service tier a request was served at, for statistics: `priority` when
+ * the attempt that decided it went upstream with `service_tier: "priority"`
+ * (fast mode or the client's own choice), `standard` for everything else.
+ */
+export type ServiceTierGroup = "standard" | "priority";
+
 export interface ModelPerformance {
 	model: string;
+	/** One row per model and tier, so a model served both ways has two. */
+	serviceTier: ServiceTierGroup;
 	avgResponseTime: number;
 	p95ResponseTime: number;
 	errorRate: number;

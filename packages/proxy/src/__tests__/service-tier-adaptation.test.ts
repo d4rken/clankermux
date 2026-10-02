@@ -178,6 +178,14 @@ function makeTranslatedRequest(): Request {
 	});
 }
 
+/** The served tier the request row is recorded with. */
+function recordedTier(ctx: ProxyContext): unknown {
+	const begin = ctx.requestRecorder.begin as unknown as {
+		mock: { calls: Array<[{ servedServiceTier?: unknown }]> };
+	};
+	return begin.mock.calls.at(-1)?.[0].servedServiceTier;
+}
+
 function tierOf(bodyText: string | undefined): unknown {
 	return (JSON.parse(bodyText ?? "{}") as { service_tier?: unknown })
 		.service_tier;
@@ -235,6 +243,29 @@ describe("service-tier adaptation capture", () => {
 		});
 		// The carrier never reaches the backend.
 		expect(calls[0]?.headers.get(SERVICE_TIER_ADAPTATION_HEADER)).toBeNull();
+		expect(recordedTier(ctx)).toBe("priority");
+	});
+
+	it("records an untouched request as served standard", async () => {
+		captureUpstream();
+		const ctx = makeContext([makeCodexAccount()]);
+		const req = makeNativeRequest();
+
+		const res = await callHandleProxy(req, new URL(req.url), ctx);
+		expect(res.status).toBe(200);
+
+		expect(recordedTier(ctx)).toBe("standard");
+	});
+
+	it("records a client's own priority as served priority", async () => {
+		captureUpstream();
+		const ctx = makeContext([makeCodexAccount()]);
+		const req = makeNativeRequest("priority");
+
+		const res = await callHandleProxy(req, new URL(req.url), ctx);
+		expect(res.status).toBe(200);
+
+		expect(recordedTier(ctx)).toBe("priority");
 	});
 
 	it("translated path: fast mode sends priority with no client tier recorded", async () => {
@@ -292,6 +323,8 @@ describe("service-tier adaptation capture", () => {
 			service_tier_sent: null,
 			service_tier_reason: null,
 		});
+		// The attempt that served the request decides, not the first one.
+		expect(recordedTier(ctx)).toBe("standard");
 	});
 
 	it("the cache_control retry resends priority and records it again", async () => {

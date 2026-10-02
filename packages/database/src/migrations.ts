@@ -232,7 +232,11 @@ export function ensureSchema(db: Database): void {
 			-- The Claude Agent SDK bridge turn (sdk_bridge_turns.id) this row
 			-- is an inner model call of. Deliberately NOT a foreign key: turns
 			-- and requests are pruned independently, so either may go first.
-			sdk_bridge_turn_id TEXT
+			sdk_bridge_turn_id TEXT,
+			-- 'standard' | 'priority': the tier the latest upstream attempt
+			-- went out at. NULL when nothing reached upstream, and on rows
+			-- recorded before the column.
+			service_tier TEXT
 		)
 	`);
 
@@ -2121,6 +2125,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "routing_attempts",
 		column: "service_tier_reason",
 		ddl: "ALTER TABLE routing_attempts ADD COLUMN service_tier_reason TEXT",
+	},
+	// The tier a request was served at, for statistics that split by it
+	// without reading routing_attempts per request.
+	{
+		table: "requests",
+		column: "service_tier",
+		ddl: "ALTER TABLE requests ADD COLUMN service_tier TEXT",
 	},
 ];
 

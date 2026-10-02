@@ -5,12 +5,16 @@ import {
 } from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
+	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+	ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
 	ATTEMPT_TRANSPORT_FAILED,
+	FAST_MODE_SERVICE_TIER,
 	getChatContext,
 	readReasoningEffortAdaptation,
 	readServiceTierAdaptation,
 	SdkBridgeCapacityError,
 	SdkBridgeUnavailableError,
+	type ServiceTierGroup,
 } from "@clankermux/types";
 import { AccountIdentityChangedError } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
@@ -294,6 +298,14 @@ export async function sendAuthorizedRequest(
 			!account.custom_endpoint
 		)
 			endQuotaUse = usageCache.beginQuotaUse(account.id);
+		// The request's served tier is claimed only by a send known to have run:
+		// a direct send from its dispatch callback, a bridged one once the
+		// bridge answered OK (it answers its own refusals as responses too). Any
+		// other attempt leaves the previous send's tier in place.
+		const servedServiceTier: ServiceTierGroup =
+			attempt.service_tier_sent === FAST_MODE_SERVICE_TIER
+				? "priority"
+				: "standard";
 		if (transport) noteBridgedDispatch(meta);
 		head = transport
 			? await transport(request)
@@ -304,14 +316,18 @@ export async function sendAuthorizedRequest(
 					undefined,
 					undefined,
 					signal,
-					() =>
+					() => {
+						meta.servedServiceTier = servedServiceTier;
 						noteUpstreamDispatch(meta, {
 							attemptId: attempt.id,
 							account,
 							providerName: (getProvider(account.provider) ?? ctx.provider)
 								.name,
-						}),
+							servedServiceTier,
+						});
+					},
 				);
+		if (transport && head.ok) meta.servedServiceTier = servedServiceTier;
 		// An error status is the upstream's answer, even with its body unread,
 		// and even if preparing the response then fails.
 		if (!head.ok) noteUpstreamSettled(meta, attempt.id);
@@ -338,9 +354,9 @@ export async function sendAuthorizedRequest(
 			: error instanceof RoutingPolicyError
 				? error.message
 				: error instanceof SdkBridgeCapacityError
-					? `SDK bridge at capacity: ${error.message}`
+					? `${ATTEMPT_SDK_BRIDGE_AT_CAPACITY}${error.message}`
 					: error instanceof SdkBridgeUnavailableError
-						? `SDK bridge unavailable: ${error.message}`
+						? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
 						: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
