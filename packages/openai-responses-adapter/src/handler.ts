@@ -12,11 +12,11 @@ import {
 	includesWebSearchSources,
 	planHostedWebSearch,
 } from "./hosted-web-search";
+import { nativeInputItem } from "./minted-items";
 import {
 	extractNativeTerminalResponse,
 	type NativeTerminalFailureReason,
 } from "./native-nonstream";
-import { isMintedReasoningItem } from "./reasoning-items";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import {
@@ -217,17 +217,18 @@ const SDK_BRIDGE_HISTORY_HEADER = "x-clankermux-sdk-bridge-history";
 const CARRIED_HEADERS = [CLIENT_REQUEST_ID_HEADER, SDK_BRIDGE_HISTORY_HEADER];
 
 /**
- * The body a native account receives. A replayed reasoning item this proxy
- * minted from Anthropic thinking would reach OpenAI as one it never issued, so
- * it is left out; every other input item passes unchanged.
+ * The body a native account receives: the client's, with each replayed item
+ * this proxy minted put in a form OpenAI accepts (see {@link nativeInputItem}).
  */
 function nativeBodyOf(body: ResponsesRequest): string {
 	const input: unknown[] = Array.isArray(body.input) ? body.input : [];
-	if (!input.some(isMintedReasoningItem)) return JSON.stringify(body);
-	return JSON.stringify({
-		...body,
-		input: input.filter((item) => !isMintedReasoningItem(item)),
-	});
+	const native = input.map(nativeInputItem).filter((item) => item !== null);
+	if (
+		native.length === input.length &&
+		native.every((item, i) => item === input[i])
+	)
+		return JSON.stringify(body);
+	return JSON.stringify({ ...body, input: native });
 }
 
 /**
@@ -438,8 +439,8 @@ async function respondToResponsesRequest(
 		signal: req.signal,
 	});
 	// Native Responses passthrough (Stage A): carry the original (normalized)
-	// Responses body, minus proxy-minted reasoning, alongside the translated
-	// request. When the proxy selects a codex account it forwards this body
+	// Responses body, with replayed proxy-minted items made native-safe
+	// (nativeBodyOf), alongside the translated request. When the proxy selects a codex account it forwards this body
 	// verbatim instead of double-translating — handleProxy re-keys it onto
 	// RequestMeta. The client's own stream intent
 	// is not part of that decision (see step 8): the upstream leg is SSE either

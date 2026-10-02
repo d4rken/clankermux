@@ -1193,7 +1193,7 @@ describe("handleResponsesRequest", () => {
 			content: [{ type: "input_text", text: "Read x" }],
 		};
 
-		test("leaves proxy-minted reasoning out of nativeBody and every other item as sent", async () => {
+		test("nativeBody drops minted reasoning and searches, strips minted message and call ids, and keeps the rest as sent", async () => {
 			const minted = {
 				type: "reasoning",
 				id: "resp_0123456789abcdef01234567_rs_0",
@@ -1211,34 +1211,99 @@ describe("handleResponsesRequest", () => {
 				id: "resp_0123456789abcdef01234567_rs_2",
 				encrypted_content: "gAAAAABo-opaque==",
 			};
-			const kept = [
+			const issuedMessage = {
+				type: "message",
+				id: "msg_68a1b2c3d4e5f60718293a4c",
+				role: "assistant",
+				content: [{ type: "output_text", text: "Reading." }],
+			};
+			const call = {
+				type: "function_call",
+				call_id: "call_1",
+				name: "read",
+				arguments: '{"path":"x"}',
+			};
+			const customCall = {
+				type: "custom_tool_call",
+				call_id: "call_2",
+				name: "apply_patch",
+				input: "*** Begin Patch",
+			};
+			const message = {
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "Done." }],
+			};
+			const callOutput = {
+				type: "function_call_output",
+				call_id: "call_1",
+				output: "ok",
+			};
+			const customOutput = {
+				type: "custom_tool_call_output",
+				call_id: "call_2",
+				output: "ok",
+			};
+			const input = [
 				USER_TURN,
+				minted,
 				issued,
 				encryptedLookalike,
+				issuedMessage,
+				{ ...call, id: "resp_0123456789abcdef01234567_fc_3" },
+				callOutput,
+				{ ...customCall, id: "resp_0123456789abcdef01234567_fc_4" },
+				customOutput,
 				{
-					type: "function_call",
-					call_id: "call_1",
-					name: "read",
-					arguments: '{"path":"x"}',
+					type: "web_search_call",
+					id: "resp_0123456789abcdef01234567_ws_5",
+					status: "completed",
+					action: { type: "search", query: "x" },
 				},
-				{ type: "function_call_output", call_id: "call_1", output: "ok" },
 				{
-					type: "message",
-					role: "assistant",
-					content: [{ type: "output_text", text: "Done." }],
+					...message,
+					id: "resp_0123456789abcdef01234567_msg_6",
+					status: "completed",
 				},
 			];
-			const input = [kept[0], minted, ...kept.slice(1)];
 
 			const ctx = await captureContext({ input });
 
 			expect(ctx?.nativeBody).toBe(
-				JSON.stringify({ model: "gpt-5.5-codex", input: kept }),
+				JSON.stringify({
+					model: "gpt-5.5-codex",
+					input: [
+						USER_TURN,
+						issued,
+						encryptedLookalike,
+						issuedMessage,
+						call,
+						callOutput,
+						customCall,
+						customOutput,
+						message,
+					],
+				}),
 			);
-			expect(ctx?.nativeBody).toContain(JSON.stringify(issued));
 		});
 
-		test("recognizes the reasoning items its own replies carry", async () => {
+		test("nativeBody is the body as sent when nothing in it was minted", async () => {
+			const input = [
+				USER_TURN,
+				{
+					type: "message",
+					id: "msg_68a1b2c3d4e5f60718293a4c",
+					role: "assistant",
+					content: [{ type: "output_text", text: "Hi." }],
+				},
+			];
+			const ctx = await captureContext({ input });
+			expect(ctx?.nativeBody).toBe(
+				JSON.stringify({ model: "gpt-5.5-codex", input }),
+			);
+		});
+
+		test("recognizes the items its own replies carry", async () => {
 			const req = new Request("http://localhost/v1/responses", {
 				method: "POST",
 				body: JSON.stringify({ model: "glm-5", input: [USER_TURN] }),
@@ -1253,23 +1318,123 @@ describe("handleResponsesRequest", () => {
 						content: [
 							{ type: "thinking", thinking: "Let me think.", signature: "s" },
 							{ type: "text", text: "Hello" },
+							{
+								type: "tool_use",
+								id: "toolu_1",
+								name: "read",
+								input: { path: "x" },
+							},
 						],
+						stop_reason: "tool_use",
 					}),
 				{},
 			);
 			const reply = (await resp.json()) as {
 				output: Array<Record<string, unknown>>;
 			};
-			const [reasoning, message] = reply.output;
+			const [reasoning, message, call] = reply.output;
 			expect(reasoning).toMatchObject({ type: "reasoning" });
+			expect(call).toMatchObject({ type: "function_call" });
 
 			const ctx = await captureContext({
-				input: [USER_TURN, reasoning, message],
+				input: [USER_TURN, reasoning, message, call],
 			});
 
+			const { id: _messageId, status: _status, ...sentMessage } = message;
+			const { id: _callId, ...sentCall } = call;
 			expect(JSON.parse(ctx?.nativeBody ?? "{}").input).toEqual([
 				USER_TURN,
-				message,
+				sentMessage,
+				sentCall,
+			]);
+		});
+
+		test("recognizes the items its own streamed replies carry", async () => {
+			const event = (data: Record<string, unknown>) =>
+				`event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`;
+			const block = (
+				index: number,
+				content_block: Record<string, unknown>,
+				delta: Record<string, unknown>,
+			) =>
+				event({ type: "content_block_start", index, content_block }) +
+				event({ type: "content_block_delta", index, delta }) +
+				event({ type: "content_block_stop", index });
+			const sse =
+				event({
+					type: "message_start",
+					message: {
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						model: "glm-5",
+						content: [],
+						stop_reason: null,
+						stop_sequence: null,
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}) +
+				block(
+					0,
+					{ type: "thinking", thinking: "" },
+					{ type: "thinking_delta", thinking: "Let me think." },
+				) +
+				block(
+					1,
+					{ type: "text", text: "" },
+					{ type: "text_delta", text: "Hello" },
+				) +
+				block(
+					2,
+					{ type: "tool_use", id: "toolu_1", name: "read", input: {} },
+					{ type: "input_json_delta", partial_json: '{"path":"x"}' },
+				) +
+				event({
+					type: "message_delta",
+					delta: { stop_reason: "tool_use", stop_sequence: null },
+					usage: { output_tokens: 5 },
+				}) +
+				event({ type: "message_stop" });
+			const req = new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "glm-5",
+					input: [USER_TURN],
+					stream: true,
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+			const resp = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				async () =>
+					new Response(sse, {
+						status: 200,
+						headers: { "Content-Type": "text/event-stream" },
+					}),
+				{},
+			);
+			const items = (await resp.text())
+				.split("\n")
+				.filter((line) => line.startsWith("data: "))
+				.map((line) => JSON.parse(line.slice(6)))
+				.filter((data) => data.type === "response.output_item.done")
+				.map((data) => data.item as Record<string, unknown>);
+			const [reasoning, message, call] = items;
+			expect(reasoning).toMatchObject({ type: "reasoning" });
+			expect(message).toMatchObject({ type: "message" });
+			expect(call).toMatchObject({ type: "function_call" });
+
+			const ctx = await captureContext({
+				input: [USER_TURN, reasoning, message, call],
+			});
+
+			const { id: _messageId, status: _status, ...sentMessage } = message;
+			const { id: _callId, ...sentCall } = call;
+			expect(JSON.parse(ctx?.nativeBody ?? "{}").input).toEqual([
+				USER_TURN,
+				sentMessage,
+				sentCall,
 			]);
 		});
 	});

@@ -4,7 +4,8 @@ import {
 	webSearchQueryOf,
 	webSearchResultOf,
 } from "./hosted-web-search";
-import { reasoningItem, reasoningItemId } from "./reasoning-items";
+import { mintedItemId } from "./minted-items";
+import { reasoningItem } from "./reasoning-items";
 import {
 	responsesTerminalStatus,
 	stoppedMidOutput,
@@ -41,7 +42,7 @@ export function translateAnthropicResponseToResponses(
 			);
 			const msgItem: OutputMessageItem = {
 				type: "message",
-				id: `${responseId}_msg_${outputIdx}`,
+				id: mintedItemId(responseId, "msg", outputIdx),
 				role: "assistant",
 				content: [
 					{
@@ -57,7 +58,10 @@ export function translateAnthropicResponseToResponses(
 		} else if (block.type === "thinking") {
 			if (typeof block.thinking !== "string" || !block.thinking) continue;
 			output.push(
-				reasoningItem(reasoningItemId(responseId, outputIdx), block.thinking),
+				reasoningItem(
+					mintedItemId(responseId, "rs", outputIdx),
+					block.thinking,
+				),
 			);
 			outputIdx++;
 		} else if (block.type === "server_tool_use") {
@@ -66,7 +70,7 @@ export function translateAnthropicResponseToResponses(
 			searches.set(block.id, { index: output.length, query });
 			output.push(
 				webSearchCallItem({
-					id: `${responseId}_ws_${outputIdx}`,
+					id: mintedItemId(responseId, "ws", outputIdx),
 					query,
 					status: "failed",
 					sources: [],
@@ -105,7 +109,7 @@ export function translateAnthropicResponseToResponses(
 				}
 				output.push({
 					type: "custom_tool_call",
-					id: `${responseId}_fc_${outputIdx}`,
+					id: mintedItemId(responseId, "fc", outputIdx),
 					call_id: block.id,
 					name: identity.name,
 					...(identity.namespace ? { namespace: identity.namespace } : {}),
@@ -117,7 +121,7 @@ export function translateAnthropicResponseToResponses(
 			}
 			const fcItem: OutputFunctionCallItem = {
 				type: "function_call",
-				id: `${responseId}_fc_${outputIdx}`,
+				id: mintedItemId(responseId, "fc", outputIdx),
 				call_id: block.id,
 				name: identity.name,
 				...(identity.namespace ? { namespace: identity.namespace } : {}),
