@@ -291,6 +291,18 @@ describe("pi 0.99 head strip", () => {
 	});
 });
 
+describe("pi 1.0 head strip", () => {
+	it("strips a docs section that points at codemode", () => {
+		const f = loadPiPromptFixture("1.0", "stock-all");
+		expect(f.system).toContain("(docs/codemode.md)");
+		const append = appendOf(decide(f.system, "1.0")) ?? "";
+		expect(append).not.toContain("docs/codemode.md");
+		expect(append).toBe(
+			expectedAppend(loadPiPromptFixture("0.87", "stock-all")) as string,
+		);
+	});
+});
+
 describe("pi 0.87 malformed heads", () => {
 	const stock = fixture("stock").system;
 	const cut = (text: string, from: string, to: string) =>

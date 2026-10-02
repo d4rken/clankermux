@@ -1,13 +1,13 @@
 {
-	"layout": "0.99",
-	"piCodingAgentVersion": "0.99.2",
-	"piAiVersion": "0.99.2",
-	"packageSha256": "d92404df7df575a79a6c38d6decc01fd33b91cf3c4625ef1002dfa1a5a641da9",
+	"layout": "1.0",
+	"piCodingAgentVersion": "1.0.0",
+	"piAiVersion": "1.0.0",
+	"packageSha256": "0222223ac244c08c89140448b486de704d84a469b244b6444c94a242fe2de9db",
 	"files": {
-		"pi-coding-agent/package.json": "066850c1badb43cf107c26e5b95262dbde84e3514c75348f363009d5ba9ce42d",
-		"pi-coding-agent/dist/core/system-prompt.js": "0f22e4dfe8c90b70b12c1cfd50bcdd4b49d59bd97adac90c2e9345cf711839fa",
+		"pi-coding-agent/package.json": "81ac04bbcbc8d80bdb28bcb88cabe8345ffabc6b4c9389fd74c85fab76a0aac6",
+		"pi-coding-agent/dist/core/system-prompt.js": "83aa42fae07830d5a73431935af3390ec397d8333269d75cfe49c1afbc55369c",
 		"pi-coding-agent/dist/core/skills.js": "3b7cc3997c630553eb88931de978e0db623ce51fbf7356e0ab922183885e208c",
-		"pi-ai/package.json": "10c7ad47ba1997f02622587fb7df593d1c9a7dc332298de670d79e068643be27",
+		"pi-ai/package.json": "62c8159c939f1f9fae53a9b003e7bd9136979bcceeca61bd1f2cf41082763736",
 		"pi-ai/dist/utils/text.js": "95037d5b787075ffb951cdeaf3b93aeb89735d10b31b82e19d2921f505ac2b04",
 		"pi-ai/dist/utils/transcript.js": "cd63514661b4036c3bcdda11a108f6be853f790a01216bf30fa80121e4fd320f"
 	},

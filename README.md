@@ -121,7 +121,7 @@ What differs from a direct request:
   `APPEND_SYSTEM.md`, the working directory, extension sections and text
   extensions add) reaches the model unchanged. A replaced prompt
   (`SYSTEM.md`, a subagent persona) is sent whole. pi must declare its
-  prompt layout with `x-clankermux-pi-prompt` (`0.87` or `0.99`); the
+  prompt layout with `x-clankermux-pi-prompt` (`0.87`, `0.99` or `1.0`); the
   layouts ClankerMux serves are listed at `clankermux.piPromptVersions` in the
   `/wire/openai/v1/models?clankermux_metadata=1` response. A pi turn is
   refused with a 400 rather than sent without your instructions when the

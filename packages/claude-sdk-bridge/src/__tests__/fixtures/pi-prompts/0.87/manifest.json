@@ -14,7 +14,7 @@
 	"extensionFiles": {
 		"pi-subagents/src/runs/shared/child-launch.ts": "cd900f55da14ee944283cfa9dd10f9125d3c52c913c1b7114fdea89e7a5cfe43",
 		"packages/claude-context/core.mjs": "3802b8a12656fa2af7820f5b48e09390ea37d301dc67a841c64ce73a64540bbf",
-		"packages/claude-context/install.mjs": "c802ce8e3c8d5719e8ee4e2821e94a334d41685dc89d939ad717b5f3f9b45724",
+		"packages/claude-context/install.mjs": "096651326f15fcad7ae3c2b31b3a037cacf7ad48c3ca6d47addfdc2821dfa3e6",
 		"pi-subagents/src/agents/advertised-agent-prompt.ts": "7c6ad623f39f42d843b0094ff25589e2a13c42c7d9489120567e31fce8627fd6",
 		"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts": "075d2d9c1fbce98b13aefb2c396c1e61f71ab4d31a48632fb2e7253835054397",
 		"pi-subagents/src/extension/herdr-pi-bridge.ts": "4c884607c523225797a6e8ea51b58b31b74d7953a5767498de8d2a92cc62fcb4"
