@@ -789,6 +789,7 @@ export function AccountListItem({
 							usageRateLimitedUntil={account.usageRateLimitedUntil}
 							usageThrottledUntil={account.usageThrottledUntil}
 							usageThrottledWindows={account.usageThrottledWindows}
+							subscriptionBudgetEndMs={account.subscriptionBudgetEndMs}
 							provider={account.provider}
 							showWeekly={providerShowsWeeklyUsage(account.provider)}
 							prediction={account.prediction}

@@ -159,6 +159,13 @@ Rule 6 asks "how long would this tail actually take to drain?". With a usable
 weekly burn slope (see below) the horizon is `weeklyHeadroom / slope`, clamped to
 [12 h, 36 h]; without one it is the tier-scaled static fallback above.
 
+Rule 6 measures that horizon against
+`Math.min(bindingWeeklyResetMs, subscriptionEndMs ?? Infinity)`, where
+`subscriptionEndMs` comes from `nonRenewingSubscriptionEnd`, so a non-renewing
+subscription that ends first releases the tail before it is lost. The fail-open
+on an unknown binding weekly reset (rule 5) still comes first, so an account
+whose binding reset is unknown keeps its place whatever its subscription end.
+
 > **Self-suppression is expected and bounded.** A well-reserved account stops
 > receiving traffic, so its own slope collapses and `headroom / slope` pegs at the
 > 36 h max clamp — bounded EARLY release, chosen deliberately because a complete
@@ -223,6 +230,18 @@ reverted **twice**:
 Both failures share one root: treating the 5h window as a budget to be harvested
 or scheduled. It is a rate limit. If a design's value depends on when a 5h window
 opens or closes, re-read this section before writing code.
+
+Besides the weekly window, quota expires with the account itself: a Codex
+subscription reported as not renewing (`identity_subscription_will_renew = 0`)
+loses its quota at `identity_subscription_ends_at`. `nonRenewingSubscriptionEnd`
+(`@clankermux/core`) returns that end while it is still ahead, and three places
+use it when it comes before the weekly reset: the HARVEST deadline, the
+reserve's release deadline (rule 6), and weekly usage pacing, whose pace line
+keeps the window's start but reaches 100% at the subscription end instead of
+the reset (`computeThrottleResumeAt` / `computeExpectedPct` with
+`budgetEndMs`, weekly-class windows only; the dashboard's countdown and pace
+marker take the same `subscriptionBudgetEndMs`). The displayed reset stays the
+provider's.
 
 A related trap sits one layer down. `accounts.rate_limit_reset` holds the reset
 of whichever limit is BINDING (`response-processor` writes it from

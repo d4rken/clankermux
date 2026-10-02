@@ -45,6 +45,12 @@ export interface PoolLivenessOptions {
 	 * is no usable evidence.
 	 */
 	weeklySlopePctPerHour: number | null;
+	/**
+	 * When the account's subscription ends without renewing
+	 * (`nonRenewingSubscriptionEnd`), or `null`. Its tail is lost then, so the
+	 * reserve releases against whichever comes first, this or the weekly reset.
+	 */
+	subscriptionEndMs: number | null;
 }
 
 /**
@@ -115,11 +121,12 @@ export function isAbsorbablePeer(
  *
  * ## Why the reserve exists
  *
- * The session strategy ranks accounts FEFO on the WEEKLY reset — deliberately
- * draining the soonest-expiring account first so unused weekly budget is not
- * lost. That is right for budget and wrong for liveness: it drives accounts to
- * weekly 100% one after another, and an account at weekly 100% is dead until its
- * weekly reset, up to seven days away. Holding back the tail keeps an account
+ * The session strategy ranks accounts FEFO on the earliest quota-loss deadline
+ * (the weekly reset, or a non-renewing subscription's end when that is sooner)
+ * — deliberately draining the soonest-expiring account first so unused budget
+ * is not lost. That is right for budget and wrong for liveness: it drives
+ * accounts to weekly 100% one after another, and an account at weekly 100% is
+ * dead until its weekly reset, up to seven days away. Holding back the tail keeps an account
  * alive to cover a peer whose (short, self-healing) 5h window is cooling.
  *
  * ## Two tiers, not one band
@@ -141,9 +148,10 @@ export function isAbsorbablePeer(
  *    account can actually absorb the traffic. With no absorbable peer the
  *    account is needed NOW and keeps its place. This also makes the gate
  *    self-disabling on degraded paths, where by construction no peer is healthy.
- *  - **Released before the weekly reset (rule 6).** Quota held past its reset is
- *    quota destroyed, so the reserve yields once the BINDING weekly reset comes
- *    inside the release horizon and the tail gets harvested.
+ *  - **Released before the quota is lost (rule 6).** The reserve yields once
+ *    the BINDING weekly reset, or a non-renewing subscription's end if sooner,
+ *    comes inside the release horizon, and the tail gets harvested: quota held
+ *    past either is quota destroyed.
  *  - **Soft only.** Like the family-reservation gate, this reorders and never
  *    excludes; it cannot empty the pool.
  *
@@ -209,11 +217,16 @@ export function resolvePoolLivenessDemotion(
 	//    Unknown / non-finite fails OPEN.
 	if (!Number.isFinite(capacity.bindingWeeklyResetMs as number)) return false;
 
-	// 6. Release before the weekly reset so the reserved tail is still spent:
-	//    quota held past its reset is quota destroyed. The horizon is the time
-	//    this tail would actually need to drain.
+	// 6. Release before the weekly reset, or the end of a subscription that
+	//    will not renew if that comes first, so the reserved tail is still
+	//    spent: quota held past either is quota destroyed. The horizon is the
+	//    time this tail would actually need to drain.
 	const horizonMs = resolveReleaseHorizonMs(capacity.weeklyHeadroom, opts);
-	if ((capacity.bindingWeeklyResetMs as number) - now <= horizonMs) {
+	const lostAt = Math.min(
+		capacity.bindingWeeklyResetMs as number,
+		opts.subscriptionEndMs ?? Number.POSITIVE_INFINITY,
+	);
+	if (lostAt - now <= horizonMs) {
 		return false;
 	}
 
@@ -221,9 +234,9 @@ export function resolvePoolLivenessDemotion(
 }
 
 /**
- * How long before the BINDING weekly reset the reserve releases: the observed
- * drain time (clamped) when a usable slope exists, else the tier-scaled static
- * estimate. Not exported — `resolvePoolLivenessDemotion` is the only consumer,
+ * How long before the BINDING weekly reset (or a non-renewing subscription's
+ * end, if sooner) the reserve releases: the observed drain time (clamped) when
+ * a usable slope exists, else the tier-scaled static estimate. Not exported — `resolvePoolLivenessDemotion` is the only consumer,
  * and the constants above document the resulting values.
  */
 function resolveReleaseHorizonMs(

@@ -7,6 +7,7 @@ import {
 	extractSevenDay,
 	isAnthropicUsageShape,
 	isIndependentBlock,
+	nonRenewingSubscriptionEnd,
 	PAUSE_REASON_NEEDS_REAUTH,
 	patterns,
 	providerStatusToCause,
@@ -451,6 +452,31 @@ function headerFedWindowAsOf(
 }
 
 /**
+ * The fields `nonRenewingSubscriptionEnd` reads, from a raw list row: a
+ * missing provider becomes "", and `will_renew` is 1/0/null with any reported
+ * value other than 1 read as 0.
+ */
+function subscriptionEndFields(row: {
+	provider: string | null;
+	identity_subscription_will_renew: number | null;
+	identity_subscription_ends_at: number | null;
+}): Pick<
+	Account,
+	| "provider"
+	| "identity_subscription_will_renew"
+	| "identity_subscription_ends_at"
+> {
+	const willRenew = row.identity_subscription_will_renew;
+	const endsAt = row.identity_subscription_ends_at;
+	return {
+		provider: row.provider ?? "",
+		identity_subscription_will_renew:
+			willRenew == null ? null : Number(willRenew) === 1 ? 1 : 0,
+		identity_subscription_ends_at: endsAt == null ? null : Number(endsAt),
+	};
+}
+
+/**
  * Build the account list `GET /api/accounts` serves.
  *
  * Extracted from the handler so a SECOND surface can consume the same array:
@@ -645,8 +671,11 @@ export async function listAccountResponses(
 		const primaryCandidates = accounts.map(
 			(a) =>
 				({
+					// provider and the two subscription fields, which
+					// nonRenewingSubscriptionEnd reads for the liveness and
+					// usage-throttle gates.
+					...subscriptionEndFields(a),
 					id: a.id,
-					provider: a.provider ?? "",
 					paused: !!a.paused,
 					disabled: !!a.disabled,
 					// pause_reason and rate_limit_reset feed wouldAutoUnpause —
@@ -891,6 +920,10 @@ export async function listAccountResponses(
 		const response: AccountResponse[] = await Promise.all(
 			accounts.map(async (account) => {
 				const provider = account.provider || "anthropic";
+				const subscriptionBudgetEndMs = nonRenewingSubscriptionEnd(
+					subscriptionEndFields(account),
+					now,
+				);
 				const providerOverloadedUntil = getProviderOverloadUntil(provider, now);
 				const providerOverloadKey = providerOverloadedUntil
 					? getProviderOverloadKey(provider)
@@ -1262,6 +1295,7 @@ export async function listAccountResponses(
 						// The account row projection types provider as nullable; an
 						// unknown provider takes no provider-specific branch.
 						account.provider ?? "",
+						subscriptionBudgetEndMs,
 					);
 					usageThrottledUntil = usageThrottleStatus.throttleUntil;
 					usageThrottledWindows = usageThrottleStatus.throttledWindows;
@@ -1476,6 +1510,7 @@ export async function listAccountResponses(
 						account.identity_subscription_checked_at != null
 							? Number(account.identity_subscription_checked_at)
 							: null,
+					subscriptionBudgetEndMs,
 					identityCapturedAt:
 						devinIdentity && liveUsageEntry?.observedAtMs != null
 							? liveUsageEntry.observedAtMs

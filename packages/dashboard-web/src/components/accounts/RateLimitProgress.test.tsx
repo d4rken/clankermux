@@ -1077,6 +1077,59 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain("Less than 1 minute");
 	});
 
+	describe("a non-renewing subscription's end", () => {
+		const HOUR = 60 * 60 * 1000;
+		const DAY = 24 * HOUR;
+		const now = Date.now();
+		// A weekly window that opened 2 days ago and resets in 5, 90% used.
+		const resetMs = now + 5 * DAY;
+		const startMs = resetMs - 7 * DAY;
+		const budgetEndMs = now + 12 * HOUR;
+		const render = (subscriptionBudgetEndMs: number | null) =>
+			renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={new Date(resetMs).toISOString()}
+					usageUtilization={90}
+					usageWindow="seven_day"
+					usageData={{
+						five_hour: undefined,
+						seven_day: {
+							utilization: 90,
+							resets_at: new Date(resetMs).toISOString(),
+						},
+					}}
+					usageThrottledUntil={resetMs}
+					usageThrottledWindows={["seven_day"]}
+					subscriptionBudgetEndMs={subscriptionBudgetEndMs}
+					provider="codex"
+					showWeekly
+				/>,
+			);
+		const untilLabel = (ms: number) =>
+			`Until ${new Date(Math.ceil(ms / 60000) * 60000).toLocaleTimeString(
+				undefined,
+				{ hour: "2-digit", minute: "2-digit", hour12: false },
+			)}`;
+
+		it("counts the throttle down to the line ending at the subscription end", () => {
+			// start + 0.9 x (end - start) = now + 6 h, not ~4.3 days out.
+			const html = render(budgetEndMs);
+			expect(html).toContain(
+				untilLabel(startMs + (90 / 100) * (budgetEndMs - startMs)),
+			);
+			// 2 of the 2.5 paced days have elapsed.
+			expect(html).toMatch(/left:80(\.\d+)?%/);
+			// The shown reset is still the window's.
+			expect(html).toContain("(4d 23h)");
+		});
+
+		it("keeps the reset-paced countdown without one", () => {
+			const html = render(null);
+			expect(html).toContain(untilLabel(startMs + (90 / 100) * 7 * DAY));
+			expect(html).toMatch(/left:28\.\d+%/);
+		});
+	});
+
 	describe("fallback rate-limit window reset label", () => {
 		it("includes the date when the reset is days away (window unknown)", () => {
 			const reset = new Date(Date.now() + 4 * 24 * 60 * 60 * 1000);

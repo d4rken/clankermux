@@ -53,6 +53,9 @@ interface RateLimitProgressProps {
 	usageRateLimitedUntil?: number | null; // Timestamp (ms) until usage API 429 clears
 	usageThrottledUntil?: number | null; // Timestamp (ms) until proactive usage throttling clears
 	usageThrottledWindows?: string[]; // Exact usage windows currently being throttled
+	// End of a subscription that will not renew: weekly-paced windows pace to it
+	// for the throttle countdown and pace tick. The shown reset stays the window's.
+	subscriptionBudgetEndMs?: number | null;
 	provider: string;
 	className?: string;
 	showWeekly?: boolean; // Whether to show weekly usage as well
@@ -140,9 +143,16 @@ function computeExpectedPct(
 	resetTime: string | null,
 	window: string | null,
 	now: number,
+	budgetEndMs: number | null,
 ): number | null {
 	if (!resetTime || !window) return null;
-	return computeExpectedPctForReset(new Date(resetTime).getTime(), window, now);
+	return computeExpectedPctForReset(
+		new Date(resetTime).getTime(),
+		window,
+		now,
+		undefined,
+		budgetEndMs,
+	);
 }
 
 /**
@@ -170,6 +180,7 @@ function computeWindowThrottleUntil(
 	window: string | null,
 	percentage: number | null,
 	now: number,
+	budgetEndMs: number | null,
 ): number | null {
 	if (!resetTime || !window || percentage === null) return null;
 	return computeThrottleResumeAt(
@@ -177,6 +188,8 @@ function computeWindowThrottleUntil(
 		window,
 		percentage,
 		now,
+		undefined,
+		budgetEndMs,
 	);
 }
 
@@ -468,6 +481,7 @@ export function RateLimitProgress({
 	usageRateLimitedUntil,
 	usageThrottledUntil,
 	usageThrottledWindows = [],
+	subscriptionBudgetEndMs = null,
 	provider,
 	className,
 	showWeekly = false,
@@ -745,6 +759,7 @@ export function RateLimitProgress({
 					usage.resetTime,
 					usage.window,
 					now,
+					subscriptionBudgetEndMs,
 				);
 				const isWindowThrottled = usage.window
 					? throttledWindowSet.has(usage.window)
@@ -755,6 +770,7 @@ export function RateLimitProgress({
 							usage.window,
 							percentage ?? null,
 							now,
+							subscriptionBudgetEndMs,
 						)
 					: null;
 				const throttleDisplayUntil = windowThrottleUntil ?? usageThrottledUntil;

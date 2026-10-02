@@ -1,6 +1,7 @@
 import {
 	computeThrottleResumeAt,
 	isAnthropicUsageShape,
+	isWeeklyPacedWindow,
 	normalizeAnthropicUsage,
 	type SupportedWindow,
 } from "@clankermux/core";
@@ -215,17 +216,9 @@ function isWindowThrottlingEnabled(
 	window: SupportedWindow,
 	settings: UsageThrottleSettings,
 ): boolean {
-	switch (window) {
-		case "five_hour":
-		case "daily":
-		case "tokens_limit":
-			return settings.fiveHourEnabled;
-		case "tokens_limit_weekly":
-		case "seven_day":
-		case "weekly":
-		case "monthly":
-			return settings.weeklyEnabled;
-	}
+	return isWeeklyPacedWindow(window)
+		? settings.weeklyEnabled
+		: settings.fiveHourEnabled;
 }
 
 /**
@@ -234,12 +227,17 @@ function isWindowThrottlingEnabled(
  * field names inside), so structural detection alone silently reads the wrong
  * provider's payload. Making it required means the type checker, not a
  * production incident, catches a caller that forgets it.
+ *
+ * `budgetEndMs` is when the account's quota is lost before its windows reset
+ * (`nonRenewingSubscriptionEnd`); weekly-paced windows pace to it instead of
+ * their reset.
  */
 export function getUsageThrottleStatus(
 	data: AnyUsageData | null,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
 	provider: string,
+	budgetEndMs: number | null = null,
 ): UsageThrottleStatus {
 	const windows = collectWindows(data, now, provider);
 	let throttleUntil: number | null = null;
@@ -253,6 +251,7 @@ export function getUsageThrottleStatus(
 			window.utilization,
 			now,
 			window.durationMs,
+			budgetEndMs,
 		);
 		if (resumeAt === null) continue;
 		throttledWindows.push(window.window);
@@ -269,8 +268,10 @@ export function getUsageThrottleUntil(
 	settings: UsageThrottleSettings,
 	now = Date.now(),
 	provider: string,
+	budgetEndMs: number | null = null,
 ): number | null {
-	return getUsageThrottleStatus(data, settings, now, provider).throttleUntil;
+	return getUsageThrottleStatus(data, settings, now, provider, budgetEndMs)
+		.throttleUntil;
 }
 
 export function createUsageThrottledResponse(accounts: Account[]): Response {
