@@ -3482,6 +3482,73 @@ describe("SessionStrategy — per-model pins", () => {
 	});
 });
 
+describe("SessionStrategy — selection log reset windows", () => {
+	it.each([
+		["weekly only", null, 1440, "none"],
+		["weekly resets first", 300, 60, "300m"],
+		["session resets first", 60, 1440, "60m"],
+		["session only", 60, null, "60m"],
+		["unknown capacity", null, null, "none"],
+	] as const)("reports the actual session reset for %s", (_, sessionMinutes, weeklyMinutes, expected) => {
+		const now = Date.now();
+		const previousLevel = process.env.LOG_LEVEL;
+		let strategy: SessionStrategy;
+		try {
+			process.env.LOG_LEVEL = "DEBUG";
+			strategy = new SessionStrategy(5 * 60 * 60 * 1000);
+		} finally {
+			if (previousLevel === undefined) delete process.env.LOG_LEVEL;
+			else process.env.LOG_LEVEL = previousLevel;
+		}
+		const store = new MockStrategyStore();
+		strategy.initialize(store);
+		const account = makeAccount({
+			id: "codex-log",
+			name: "Codex",
+			provider: "codex",
+		});
+		const sessionResetMs =
+			sessionMinutes === null ? null : now + sessionMinutes * 60_000;
+		const weeklyResetMs =
+			weeklyMinutes === null ? null : now + weeklyMinutes * 60_000;
+		if (sessionResetMs !== null || weeklyResetMs !== null) {
+			store.setCapacity(account.id, {
+				minHeadroom: 80,
+				sessionHeadroom: sessionResetMs === null ? 100 : 80,
+				soonestResetMs: Math.min(
+					sessionResetMs ?? Infinity,
+					weeklyResetMs ?? Infinity,
+				),
+				bindingUtilization: 20,
+				weeklyResetMs,
+				bindingWeeklyResetMs: weeklyResetMs,
+				weeklyHeadroom: 80,
+				sessionResetMs,
+				extraUsageUtilization: null,
+			});
+		}
+		const messages = captureLogs(() => {
+			expect(
+				strategy.select([account], {
+					id: "log-request",
+					headers: new Headers(),
+					path: "/v1/responses",
+					method: "POST",
+					timestamp: now,
+				})[0],
+			).toBe(account);
+		});
+		const selection = messages.find((message) =>
+			message.startsWith("Selection ["),
+		);
+		expect(selection).toBeDefined();
+		expect(selection).toContain(`(5h=${expected})`);
+		expect(selection).toContain(
+			`reset=${weeklyMinutes === null ? "none" : `${weeklyMinutes}m`}(5h=`,
+		);
+	});
+});
+
 describe("SessionStrategy — a non-renewing subscription's end as the HARVEST deadline", () => {
 	const NOW = Date.now();
 	const HOUR = 60 * 60_000;
