@@ -81,7 +81,7 @@ function labelsOf(html: string): string[] {
 }
 
 describe("AccountPolicyChips — enabled flags only", () => {
-	it("renders every codex flag when all five are on", () => {
+	it("renders every codex flag when all six are on", () => {
 		expect(
 			labelsOf(
 				render(
@@ -92,6 +92,8 @@ describe("AccountPolicyChips — enabled flags only", () => {
 						autoPauseOnOverageEnabled: false,
 						autoApplyResetCreditsEnabled: true,
 						autoApplyResetOnWeeklyLimitEnabled: true,
+						fastModeEnabled: true,
+						fastModeAvailable: true,
 					}),
 				),
 			),
@@ -101,6 +103,7 @@ describe("AccountPolicyChips — enabled flags only", () => {
 			"Credit spend",
 			"Apply: expiry",
 			"Apply: weekly",
+			"Fast mode",
 		]);
 	});
 

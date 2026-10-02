@@ -8,6 +8,7 @@ import {
 	ATTEMPT_TRANSPORT_FAILED,
 	getChatContext,
 	readReasoningEffortAdaptation,
+	readServiceTierAdaptation,
 	SdkBridgeCapacityError,
 	SdkBridgeUnavailableError,
 } from "@clankermux/types";
@@ -90,6 +91,9 @@ export async function recordLocalRoutingOutcome(
 		reasoning_effort_requested: null,
 		reasoning_effort_effective: null,
 		reasoning_effort_reason: null,
+		service_tier_requested: null,
+		service_tier_sent: null,
+		service_tier_reason: null,
 	});
 	audit.id = id;
 }
@@ -122,6 +126,7 @@ export async function sendAuthorizedRequest(
 	// vocabularies, and a carried-over value would file one attempt's adaptation
 	// under another.
 	const reasoning = readReasoningEffortAdaptation(request.headers);
+	const tier = readServiceTierAdaptation(request.headers);
 	const attempt: RoutingAttempt & { route_snapshot: string } = {
 		id: crypto.randomUUID(),
 		request_id: meta.id,
@@ -141,6 +146,9 @@ export async function sendAuthorizedRequest(
 		reasoning_effort_requested: reasoning?.requested ?? null,
 		reasoning_effort_effective: reasoning?.effective ?? null,
 		reasoning_effort_reason: reasoning?.reason ?? null,
+		service_tier_requested: tier?.requested ?? null,
+		service_tier_sent: tier?.sent ?? null,
+		service_tier_reason: tier?.reason ?? null,
 	};
 	let response: Response;
 	// The upstream's own status line, once a head has arrived.

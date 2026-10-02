@@ -93,4 +93,12 @@ export interface RoutingAttempt {
 	reasoning_effort_requested: string | null;
 	reasoning_effort_effective: string | null;
 	reasoning_effort_reason: string | null;
+	/**
+	 * {@link ServiceTierAdaptation} for this attempt. `sent` is what was
+	 * serialized, not what upstream honoured. NULL when no tier was involved,
+	 * and on every row written before the columns existed.
+	 */
+	service_tier_requested: string | null;
+	service_tier_sent: string | null;
+	service_tier_reason: string | null;
 }

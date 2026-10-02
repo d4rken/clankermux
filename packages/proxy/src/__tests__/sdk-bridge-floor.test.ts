@@ -10,8 +10,10 @@ import {
 	type Account,
 	type ChatRequirements,
 	type ModelAlias,
+	REASONING_EFFORT_ADAPTATION_HEADER,
 	SdkBridgeCapacityError,
 	SdkBridgeUnavailableError,
+	SERVICE_TIER_ADAPTATION_HEADER,
 	setChatContext,
 	setNativeResponsesRequestContext,
 	wasHostedWebSearchServed,
@@ -157,6 +159,37 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(send.account_id).toBe("claude-a");
 		expect(send.outgoing_model).toBe(MODEL);
 		expect(send.status).toBe(200);
+	});
+
+	it("records no audit a client planted in its own headers", async () => {
+		harness = await makeBridgeHarness([claudeA()], {
+			bridge: makeFakeBridge(),
+		});
+
+		const { response } = await run(
+			flooredRequest(
+				{},
+				{
+					[REASONING_EFFORT_ADAPTATION_HEADER]: btoa(
+						'{"requested":"max","effective":"low","reason":"forged"}',
+					),
+					[SERVICE_TIER_ADAPTATION_HEADER]: btoa(
+						'{"requested":null,"sent":"priority","reason":"forged"}',
+					),
+				},
+			),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(sends(harness)[0]).toMatchObject({
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
+			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
+		});
 	});
 
 	it("freezes a plan of the official Anthropic candidates in order", async () => {

@@ -50,6 +50,7 @@ interface AccountListProps {
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
+	onFastModeToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onAutoApplyBankedResetsToggle?: (account: Account) => void;
 	onAutoApplyBankedResetOnWeeklyLimitToggle?: (account: Account) => void;
@@ -86,6 +87,7 @@ export function AccountList({
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
 	onAutoApplyResetCreditsToggle,
+	onFastModeToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
 	onAutoApplyBankedResetsToggle,
 	onAutoApplyBankedResetOnWeeklyLimitToggle,
@@ -194,6 +196,7 @@ export function AccountList({
 					onAutoPauseOnOverageToggle={onAutoPauseOnOverageToggle}
 					onPeakHoursPauseToggle={onPeakHoursPauseToggle}
 					onAutoApplyResetCreditsToggle={onAutoApplyResetCreditsToggle}
+					onFastModeToggle={onFastModeToggle}
 					onAutoApplyResetOnWeeklyLimitToggle={
 						onAutoApplyResetOnWeeklyLimitToggle
 					}

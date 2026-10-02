@@ -25,6 +25,12 @@
  * `gpt-5` profile — exactly the value the backend rejects.
  */
 
+import {
+	FAST_MODE_SERVICE_TIER,
+	SERVICE_TIER_ACCOUNT_FAST_MODE,
+	type ServiceTierAdaptation,
+} from "@clankermux/types";
+
 /**
  * Reasoning efforts the ChatGPT/Codex backend accepts for the GPT-5.x models,
  * ascending. Verified live against gpt-5.6-sol: `minimal` and `max` 400.
@@ -282,4 +288,36 @@ export function sanitizeChatGptBackendBody(
 	}
 
 	return { droppedParams };
+}
+
+/**
+ * Apply the account's fast-mode policy to an outgoing Responses body and say
+ * what happened to `service_tier`, for the attempt row.
+ *
+ * The backend accepts `priority` and `default` and rejects `fast`, `flex` and
+ * junk (`Unsupported service_tier: <value>`). The completed response reports
+ * `service_tier: "default"` either way, so the audit records what was sent,
+ * never an upstream echo.
+ *
+ * `chatGptBackend` gates it: a non-ChatGPT endpoint may have a different tier
+ * vocabulary and pricing, which this policy knows nothing about.
+ */
+export function applyFastModeServiceTier(
+	body: Record<string, unknown>,
+	fastModeEnabled: boolean,
+	chatGptBackend: boolean,
+): ServiceTierAdaptation | null {
+	const requested =
+		typeof body.service_tier === "string" ? body.service_tier : null;
+	if (fastModeEnabled && chatGptBackend) {
+		body.service_tier = FAST_MODE_SERVICE_TIER;
+		return {
+			requested,
+			sent: FAST_MODE_SERVICE_TIER,
+			reason: SERVICE_TIER_ACCOUNT_FAST_MODE,
+		};
+	}
+	return requested === null
+		? null
+		: { requested, sent: requested, reason: null };
 }

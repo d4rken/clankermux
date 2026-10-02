@@ -60,6 +60,7 @@ import {
 	type RateLimitReason,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
+	SERVICE_TIER_ADAPTATION_HEADER,
 	transferChatContext,
 } from "@clankermux/types";
 import { bindAnthropicAccountUuid } from "../anthropic-account-uuid";
@@ -1576,9 +1577,10 @@ export async function proxyWithAccount(
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
 		// Same reason: only the provider that serialized the body may say what
-		// happened to the reasoning effort, so a client cannot plant an
-		// adaptation on its own attempt row.
+		// happened to the reasoning effort or service tier, so a client cannot
+		// plant an adaptation on its own attempt row.
 		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
+		headers.delete(SERVICE_TIER_ADAPTATION_HEADER);
 		applyConversationId(provider, headers, requestMeta);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
@@ -3769,9 +3771,10 @@ export async function proxyForcedAccount(
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
 		// Same reason: only the provider that serialized the body may say what
-		// happened to the reasoning effort, so a client cannot plant an
-		// adaptation on its own attempt row.
+		// happened to the reasoning effort or service tier, so a client cannot
+		// plant an adaptation on its own attempt row.
 		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
+		headers.delete(SERVICE_TIER_ADAPTATION_HEADER);
 		applyConversationId(provider, headers, requestMeta);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 

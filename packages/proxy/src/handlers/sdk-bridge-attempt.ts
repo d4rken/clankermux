@@ -3,6 +3,7 @@ import {
 	type Account,
 	getNativeResponsesMetaContext,
 	markHostedWebSearchServed,
+	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	SDK_BRIDGE_PI_PROMPT_HEADER,
 	SdkBridgeCapacityError,
@@ -10,6 +11,7 @@ import {
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	SERVICE_TIER_ADAPTATION_HEADER,
 	sdkBridgeHeaderToken,
 	sdkBridgeSideRequestMode,
 } from "@clankermux/types";
@@ -53,6 +55,10 @@ const STRIPPED_HEADERS = [
 	"x-clankermux-synthetic-status",
 	"x-clankermux-retry-after",
 	"x-clankermux-upstream-model",
+	// The attempt row reads these off the bridged request, so a client copy
+	// would land on it as the proxy's own record.
+	REASONING_EFFORT_ADAPTATION_HEADER,
+	SERVICE_TIER_ADAPTATION_HEADER,
 ];
 
 /**

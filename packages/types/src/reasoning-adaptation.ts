@@ -1,3 +1,5 @@
+import { decodeAuditRecord, encodeAuditRecord } from "./attempt-audit-codec";
+
 /**
  * What one dispatch did to the client's reasoning effort, carried from the
  * provider that serialized the upstream body to the attempt row that records it.
@@ -53,71 +55,23 @@ export const REASONING_EFFORT_REASON_SEPARATOR = "+";
 export const REASONING_EFFORT_ADAPTATION_HEADER =
 	"x-clankermux-reasoning-effort";
 
-/**
- * Cap on a single recorded effort. Efforts are vocabulary words; anything
- * longer is a client sending something that is not one, and it must not become
- * an unbounded header value (header validation would reject it and fail a
- * request over a field we merely wanted to record) or an unbounded column. The
- * ellipsis keeps a truncated record self-evidently truncated.
- */
-const MAX_EFFORT_CHARS = 64;
-
-function cap(value: string | null): string | null {
-	if (value === null || value.length <= MAX_EFFORT_CHARS) return value;
-	return `${value.slice(0, MAX_EFFORT_CHARS)}…`;
-}
-
-function field(value: unknown): string | null {
-	return typeof value === "string" ? cap(value) : null;
-}
+const KEYS = ["requested", "effective", "reason"] as const;
 
 /**
  * Encode for the header, or null when there is nothing to record (no effort
  * requested, none sent, nothing adapted) and the header should stay absent.
- *
- * Base64 over UTF-8 bytes: `requested` and `effective` carry client-supplied
- * strings verbatim (an effort we do not recognise is deliberately forwarded
- * untouched), and a raw one can hold control characters that header validation
- * rejects or non-Latin-1 characters that a Headers round-trip mangles.
  */
 export function encodeReasoningEffortAdaptation(
 	adaptation: ReasoningEffortAdaptation,
 ): string | null {
-	const requested = field(adaptation.requested);
-	const effective = field(adaptation.effective);
-	const reason = field(adaptation.reason);
-	if (requested === null && effective === null && reason === null) return null;
-	const json = JSON.stringify({ requested, effective, reason });
-	let binary = "";
-	for (const byte of new TextEncoder().encode(json))
-		binary += String.fromCharCode(byte);
-	return btoa(binary);
+	return encodeAuditRecord(KEYS, adaptation);
 }
 
 /** Inverse of {@link encodeReasoningEffortAdaptation}; null on anything unreadable. */
 export function decodeReasoningEffortAdaptation(
 	value: string | null | undefined,
 ): ReasoningEffortAdaptation | null {
-	if (!value) return null;
-	try {
-		const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-		const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
-		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-			return null;
-		const record = parsed as Record<string, unknown>;
-		const adaptation: ReasoningEffortAdaptation = {
-			requested: field(record.requested),
-			effective: field(record.effective),
-			reason: field(record.reason),
-		};
-		return adaptation.requested === null &&
-			adaptation.effective === null &&
-			adaptation.reason === null
-			? null
-			: adaptation;
-	} catch {
-		return null;
-	}
+	return decodeAuditRecord(KEYS, value);
 }
 
 /** Read the adaptation a provider attached to an outgoing request. */

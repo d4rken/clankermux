@@ -95,6 +95,7 @@ interface AccountListItemProps {
 	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onPeakHoursPauseToggle?: (account: Account) => void;
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
+	onFastModeToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onAutoApplyBankedResetsToggle?: (account: Account) => void;
 	onAutoApplyBankedResetOnWeeklyLimitToggle?: (account: Account) => void;
@@ -151,6 +152,7 @@ export function AccountListItem({
 	onAutoPauseOnOverageToggle,
 	onPeakHoursPauseToggle,
 	onAutoApplyResetCreditsToggle,
+	onFastModeToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
 	onAutoApplyBankedResetsToggle,
 	onAutoApplyBankedResetOnWeeklyLimitToggle,
@@ -229,6 +231,12 @@ export function AccountListItem({
 	const hasBankedResets =
 		account.provider === "anthropic" && account.hasRefreshToken;
 
+	// Off an endpoint where it takes effect, the toggle stays only while the
+	// flag is still on, so it can be cleared.
+	const showFastModeToggle =
+		account.provider === "codex" &&
+		(account.fastModeAvailable === true || account.fastModeEnabled === true);
+
 	// Whether the overflow menu should show the "Automation" toggle group.
 	const hasAutomationToggles =
 		providerSupportsAutoFallback(account.provider) ||
@@ -241,6 +249,7 @@ export function AccountListItem({
 		(account.provider === "codex" &&
 			(!!onAutoApplyResetCreditsToggle ||
 				!!onAutoApplyResetOnWeeklyLimitToggle)) ||
+		(showFastModeToggle && !!onFastModeToggle) ||
 		(hasBankedResets &&
 			(!!onAutoApplyBankedResetsToggle ||
 				!!onAutoApplyBankedResetOnWeeklyLimitToggle));
@@ -455,6 +464,18 @@ export function AccountListItem({
 												{policyCopy("autoApplyWeekly").menuLabel}
 											</DropdownMenuCheckboxItem>
 										)}
+									{showFastModeToggle && onFastModeToggle && (
+										<DropdownMenuCheckboxItem
+											checked={account.fastModeEnabled ?? false}
+											onCheckedChange={() => onFastModeToggle(account)}
+											onSelect={(e) => e.preventDefault()}
+											title={policyCopy("fastMode").description}
+										>
+											{account.fastModeAvailable === true
+												? policyCopy("fastMode").menuLabel
+												: "Fast mode — inactive on this endpoint"}
+										</DropdownMenuCheckboxItem>
+									)}
 									{hasBankedResets && onAutoApplyBankedResetsToggle && (
 										<DropdownMenuCheckboxItem
 											checked={account.autoApplyBankedResetsEnabled ?? false}

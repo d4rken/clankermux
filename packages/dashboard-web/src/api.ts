@@ -2498,6 +2498,22 @@ class API extends HttpClient {
 		}
 	}
 
+	async updateAccountFastMode(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const url = `/api/accounts/${accountId}/fast-mode`;
+		this.logger.debug(`→ POST ${url}`, { enabled });
+		try {
+			await this.post(url, { enabled: enabled ? 1 : 0 });
+			this.logger.debug(`← POST ${url} - 200`);
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
 	async updateAccountAutoApplyResetOnWeeklyLimit(
 		accountId: string,
 		enabled: boolean,

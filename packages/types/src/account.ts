@@ -409,6 +409,7 @@ export interface AccountRow {
 	peak_hours_pause_enabled?: boolean | number | null;
 	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
 	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
+	codex_fast_mode_enabled?: boolean | number | null;
 	anthropic_auto_apply_banked_resets_enabled?: boolean | number | null;
 	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled?:
 		| boolean
@@ -474,6 +475,7 @@ export interface Account {
 	peak_hours_pause_enabled: boolean;
 	codex_auto_apply_reset_credits_enabled: boolean;
 	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
+	codex_fast_mode_enabled: boolean;
 	anthropic_auto_apply_banked_resets_enabled: boolean;
 	anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
@@ -598,6 +600,10 @@ export interface AccountResponse {
 	autoApplyResetCreditsEnabled?: boolean;
 	/** Codex-only: auto-consume at the weekly limit with no usable Codex alternative; respects account pins and manual pauses (opt-in). */
 	autoApplyResetOnWeeklyLimitEnabled?: boolean;
+	/** Codex-only: send every request served by this account with `service_tier: "priority"`, overriding the client's tier (opt-in). */
+	fastModeEnabled?: boolean;
+	/** Codex-only: whether fast mode takes effect on this account's endpoint (the ChatGPT backend), whether or not it is enabled. Omitted where not computed. */
+	fastModeAvailable?: boolean;
 	/** Anthropic-OAuth-only: claim a banked reset grant before it expires unused (opt-in). */
 	autoApplyBankedResetsEnabled?: boolean;
 	/** Anthropic-OAuth-only: claim a banked reset grant when the account hits a weekly limit it clears (opt-in). */
@@ -1239,6 +1245,7 @@ export function toAccount(row: AccountRow): Account {
 			!!row.codex_auto_apply_reset_credits_enabled,
 		codex_auto_apply_reset_on_weekly_limit_enabled:
 			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
+		codex_fast_mode_enabled: !!row.codex_fast_mode_enabled,
 		anthropic_auto_apply_banked_resets_enabled:
 			!!row.anthropic_auto_apply_banked_resets_enabled,
 		anthropic_auto_apply_banked_reset_on_weekly_limit_enabled:
@@ -1340,6 +1347,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 			account.codex_auto_apply_reset_credits_enabled,
 		autoApplyResetOnWeeklyLimitEnabled:
 			account.codex_auto_apply_reset_on_weekly_limit_enabled,
+		fastModeEnabled: account.codex_fast_mode_enabled,
 		autoApplyBankedResetsEnabled:
 			account.anthropic_auto_apply_banked_resets_enabled,
 		autoApplyBankedResetOnWeeklyLimitEnabled:

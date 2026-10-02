@@ -547,7 +547,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				"INSERT OR IGNORE INTO routing_snapshots(id,content) VALUES(?,?)",
 			).run(snapshotId, a.route_snapshot);
 			db.query(
-				`INSERT INTO routing_attempts(id,request_id,rule_id,route_snapshot_id,account_id,provider,requested_model,resolved_model,outgoing_model,reported_model,kind,started_at,finished_at,status,error,reasoning_effort_requested,reasoning_effort_effective,reasoning_effort_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				`INSERT INTO routing_attempts(id,request_id,rule_id,route_snapshot_id,account_id,provider,requested_model,resolved_model,outgoing_model,reported_model,kind,started_at,finished_at,status,error,reasoning_effort_requested,reasoning_effort_effective,reasoning_effort_reason,service_tier_requested,service_tier_sent,service_tier_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			).run(
 				a.id,
 				a.request_id,
@@ -567,6 +567,9 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				a.reasoning_effort_requested,
 				a.reasoning_effort_effective,
 				a.reasoning_effort_reason,
+				a.service_tier_requested,
+				a.service_tier_sent,
+				a.service_tier_reason,
 			);
 		});
 	}

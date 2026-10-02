@@ -12,6 +12,7 @@ import { resolveReasoningEffort } from "@clankermux/openai-formats";
 import {
 	type Account,
 	applyReasoningEffortAdaptation,
+	applyServiceTierAdaptation,
 	getChatContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
@@ -21,12 +22,14 @@ import {
 	REASONING_EFFORT_REASON_SEPARATOR,
 	REASONING_EFFORT_TARGET_MODEL_PROFILE,
 	type ReasoningEffortAdaptation,
+	SERVICE_TIER_ADAPTATION_HEADER,
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import { localTokenCountUrl } from "../../local-token-count";
 import { buildSyntheticCountTokensRequest } from "../../synthetic-count-tokens";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import {
+	applyFastModeServiceTier,
 	clampChatGptBackendReasoningEffort,
 	sanitizeChatGptBackendBody,
 } from "./backend-params";
@@ -245,6 +248,7 @@ interface CodexRequest {
 	instructions?: string;
 	tools?: CodexTool[];
 	prompt_cache_key?: string;
+	service_tier?: string;
 	tool_choice?:
 		| "auto"
 		| "required"
@@ -636,6 +640,11 @@ export class CodexProvider extends BaseProvider {
 				body,
 				account,
 			);
+			const tierAdaptation = applyFastModeServiceTier(
+				codexBody as unknown as Record<string, unknown>,
+				account?.codex_fast_mode_enabled === true,
+				targetsChatGptCodexBackend(account),
+			);
 
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
@@ -650,6 +659,7 @@ export class CodexProvider extends BaseProvider {
 				targetsChatGptCodexBackend(account),
 			);
 			applyReasoningEffortAdaptation(newHeaders, reasoningAdaptation);
+			applyServiceTierAdaptation(newHeaders, tierAdaptation);
 
 			return new Request(request.url, {
 				method: request.method,
@@ -661,6 +671,8 @@ export class CodexProvider extends BaseProvider {
 				throw error;
 			}
 			log.error("Failed to transform request body to Codex format:", error);
+			// The body goes out as it arrived, so no tier may be claimed for it.
+			request.headers.delete(SERVICE_TIER_ADAPTATION_HEADER);
 			applyChatGptAccountId(
 				request.headers,
 				targetsChatGptCodexBackend(account),
@@ -745,6 +757,12 @@ export class CodexProvider extends BaseProvider {
 				}
 			}
 
+			const tierAdaptation = applyFastModeServiceTier(
+				body,
+				account?.codex_fast_mode_enabled === true,
+				chatGptBackend,
+			);
+
 			const requestId = request.headers.get("x-clankermux-request-id");
 			if (requestId) {
 				// `stream: true` records the UPSTREAM transport, which native mode
@@ -772,6 +790,7 @@ export class CodexProvider extends BaseProvider {
 				effective: nativeReasoningEffort(body),
 				reason: effortClamped ? REASONING_EFFORT_BACKEND_CLAMP : null,
 			});
+			applyServiceTierAdaptation(newHeaders, tierAdaptation);
 
 			// The native flag stays on the returned Request: the proxy reads it
 			// off the transformed request to tag the response, then strips it
@@ -792,6 +811,7 @@ export class CodexProvider extends BaseProvider {
 			// Nothing was adapted on a body we never rewrote, and this one is
 			// forwarded as it arrived — so no adaptation may be claimed for it.
 			fallbackHeaders.delete(REASONING_EFFORT_ADAPTATION_HEADER);
+			fallbackHeaders.delete(SERVICE_TIER_ADAPTATION_HEADER);
 			fallbackHeaders.delete("content-length");
 			return new Request(request.url, {
 				method: request.method,
