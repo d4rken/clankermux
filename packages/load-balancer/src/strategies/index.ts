@@ -78,8 +78,8 @@ interface CapacityMetric {
 	harvestDeadlineSource: "weekly_reset" | "subscription_end";
 	/** min(100 - util) over weekly windows — the HARVEST tie-break. */
 	weeklyHeadroom: number;
-	/** soonest reset over ALL hard windows (incl. 5h) — kept for the debug log only. */
-	soonest: number;
+	/** Session-window reset (ms), for the debug log only. */
+	sessionReset: number;
 	minHeadroom: number;
 	binding: number;
 	util: number;
@@ -657,7 +657,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		let bucket: number = CAPACITY_BUCKET.UNKNOWN;
 		let harvestDeadline = Number.POSITIVE_INFINITY;
 		let weeklyHeadroom = 100;
-		let soonest = Number.POSITIVE_INFINITY;
+		let sessionReset = Number.POSITIVE_INFINITY;
 		let minHeadroom = 0;
 		let binding = 0;
 		let recoveryDeadline = Number.POSITIVE_INFINITY;
@@ -669,8 +669,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			// 5h; below it may move earlier to a non-renewing subscription's end.
 			// No 5h fallback: an account without a weekly window is not harvestable.
 			harvestDeadline = s.weeklyResetMs ?? Number.POSITIVE_INFINITY;
-			// soonest is kept for the debug line only (5h context), not for ranking.
-			soonest = s.soonestResetMs ?? Number.POSITIVE_INFINITY;
+			sessionReset = s.sessionResetMs ?? Number.POSITIVE_INFINITY;
 			if (
 				s.minHeadroom <= HEADROOM_EPS ||
 				s.bindingUtilization > 100 - HEADROOM_EPS
@@ -721,7 +720,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			harvestDeadline,
 			harvestDeadlineSource,
 			weeklyHeadroom,
-			soonest,
+			sessionReset,
 			minHeadroom,
 			binding,
 			util,
@@ -751,7 +750,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 				harvestDeadline: Number.POSITIVE_INFINITY,
 				harvestDeadlineSource: "weekly_reset",
 				weeklyHeadroom: 100,
-				soonest: Number.POSITIVE_INFINITY,
+				sessionReset: Number.POSITIVE_INFINITY,
 				minHeadroom: 0,
 				binding: 0,
 				util: 0,
@@ -827,9 +826,9 @@ export class SessionStrategy implements LoadBalancingStrategy {
 							m.harvestDeadlineSource === "subscription_end" ? "(sub-end)" : ""
 						}`;
 			const fiveHour =
-				m.soonest === Number.POSITIVE_INFINITY
+				m.sessionReset === Number.POSITIVE_INFINITY
 					? "none"
-					: `${Math.round((m.soonest - now) / 60000)}m`;
+					: `${Math.round((m.sessionReset - now) / 60000)}m`;
 			// NEAR_LIMIT rows are ranked by the genuine recovery deadline, so show it
 			// — otherwise the logged order would look unexplained for that bucket.
 			const recovery =
