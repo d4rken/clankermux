@@ -58,6 +58,7 @@ export function ensureSchema(db: Database): void {
 			peak_hours_pause_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_credits_enabled INTEGER NOT NULL DEFAULT 0,
 			codex_auto_apply_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
+			codex_fast_mode_enabled INTEGER NOT NULL DEFAULT 0,
 			anthropic_auto_apply_banked_resets_enabled INTEGER NOT NULL DEFAULT 0,
 			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled INTEGER NOT NULL DEFAULT 0,
 			pause_reason TEXT,
@@ -1260,7 +1261,8 @@ export function ensureSchema(db: Database): void {
 		outgoing_model TEXT, reported_model TEXT,
 		kind TEXT NOT NULL CHECK(kind IN ('upstream_send','local_reject','local_success')),
 		started_at INTEGER NOT NULL, finished_at INTEGER, status INTEGER, error TEXT,
-		reasoning_effort_requested TEXT, reasoning_effort_effective TEXT, reasoning_effort_reason TEXT
+		reasoning_effort_requested TEXT, reasoning_effort_effective TEXT, reasoning_effort_reason TEXT,
+		service_tier_requested TEXT, service_tier_sent TEXT, service_tier_reason TEXT
 	)`);
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_request ON routing_attempts(request_id, started_at)`,
@@ -2094,6 +2096,31 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "gateway_hint_prompt_id",
 		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_prompt_id TEXT",
+	},
+	// Opt-in per-account toggle: send every request this Codex account serves
+	// with `service_tier: "priority"`. Default OFF.
+	{
+		table: "accounts",
+		column: "codex_fast_mode_enabled",
+		ddl: "ALTER TABLE accounts ADD COLUMN codex_fast_mode_enabled INTEGER NOT NULL DEFAULT 0",
+	},
+	// The `service_tier` of one attempt, beside the reasoning-effort trio.
+	// requested: the client's tier where the path captures it; sent: what was
+	// serialized upstream; reason: why they differ (or why policy applied).
+	{
+		table: "routing_attempts",
+		column: "service_tier_requested",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN service_tier_requested TEXT",
+	},
+	{
+		table: "routing_attempts",
+		column: "service_tier_sent",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN service_tier_sent TEXT",
+	},
+	{
+		table: "routing_attempts",
+		column: "service_tier_reason",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN service_tier_reason TEXT",
 	},
 ];
 

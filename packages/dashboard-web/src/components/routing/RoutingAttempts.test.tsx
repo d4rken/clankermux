@@ -26,6 +26,9 @@ it("distinguishes requested, sent and unreported model identities", () => {
 					reasoning_effort_requested: null,
 					reasoning_effort_effective: null,
 					reasoning_effort_reason: null,
+					service_tier_requested: null,
+					service_tier_sent: null,
+					service_tier_reason: null,
 				},
 			]}
 		/>,
@@ -63,6 +66,9 @@ for (const [snapshot, expected] of [
 						reasoning_effort_requested: null,
 						reasoning_effort_effective: null,
 						reasoning_effort_reason: null,
+						service_tier_requested: null,
+						service_tier_sent: null,
+						service_tier_reason: null,
 					},
 				]}
 			/>,
@@ -92,6 +98,9 @@ const attempt = (overrides: Partial<RoutingAttempt> = {}): RoutingAttempt => ({
 	reasoning_effort_requested: null,
 	reasoning_effort_effective: null,
 	reasoning_effort_reason: null,
+	service_tier_requested: null,
+	service_tier_sent: null,
+	service_tier_reason: null,
 	...overrides,
 });
 
@@ -194,3 +203,41 @@ for (const snapshot of ["null", "[]", '{"alias":{"id":{},"targetIndex":1}}']) {
 		expect(html).toContain("Sent upstream");
 	});
 }
+
+it("shows the outgoing tier fast mode set, with the client's own ask", () => {
+	const html = renderToStaticMarkup(
+		<RoutingAttemptList
+			attempts={[
+				attempt({
+					service_tier_requested: "default",
+					service_tier_sent: "priority",
+					service_tier_reason: "account_fast_mode",
+				}),
+			]}
+		/>,
+	);
+	expect(html).toContain(
+		"Outgoing service tier: priority — account fast mode (client asked for default)",
+	);
+});
+
+it("shows a client's own tier as passed through", () => {
+	const html = renderToStaticMarkup(
+		<RoutingAttemptList
+			attempts={[
+				attempt({
+					service_tier_requested: "priority",
+					service_tier_sent: "priority",
+				}),
+			]}
+		/>,
+	);
+	expect(html).toContain("Outgoing service tier: priority — from the client");
+});
+
+it("says nothing about the tier when none was sent", () => {
+	const html = renderToStaticMarkup(
+		<RoutingAttemptList attempts={[attempt()]} />,
+	);
+	expect(html).not.toContain("service tier");
+});

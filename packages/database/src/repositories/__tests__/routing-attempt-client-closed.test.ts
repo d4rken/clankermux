@@ -34,6 +34,9 @@ describe("client-closed attempt stamp", () => {
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 	};
 
@@ -155,6 +158,9 @@ describe("client-closed attempt stamp", () => {
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 		expect(await repo.finishAttemptClientClosed("local", 50)).toBe(false);
 		expect(row("local")).toMatchObject({ status: null, error: null });

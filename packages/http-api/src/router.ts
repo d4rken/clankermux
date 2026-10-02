@@ -10,6 +10,7 @@ import {
 	createAccountConsumeRateLimitResetCreditHandler,
 	createAccountCustomEndpointUpdateHandler,
 	createAccountDisabledHandler,
+	createAccountFastModeHandler,
 	createAccountForceClearHandler,
 	createAccountForceGetHandler,
 	createAccountForceHandler,
@@ -1006,6 +1007,17 @@ export class APIRouter {
 				return await this.wrapHandler((req) =>
 					autoPauseOnOverageHandler(req, accountId),
 				)(req, url);
+			}
+
+			// Account fast-mode toggle (Codex accounts only)
+			if (path.endsWith("/fast-mode") && method === "POST") {
+				const fastModeHandler = createAccountFastModeHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) => fastModeHandler(req, accountId))(
+					req,
+					url,
+				);
 			}
 
 			// Account peak-hours-pause toggle (Zai accounts only)

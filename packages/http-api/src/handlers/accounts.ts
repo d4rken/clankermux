@@ -59,6 +59,7 @@ import {
 	type UsageView,
 	usageCache,
 } from "@clankermux/providers";
+import { targetsChatGptCodexBackend } from "@clankermux/providers/codex";
 import {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
@@ -519,6 +520,7 @@ export async function listAccountResponses(
 			peak_hours_pause_enabled: 0 | 1;
 			codex_auto_apply_reset_credits_enabled: 0 | 1;
 			codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
+			codex_fast_mode_enabled: 0 | 1;
 			anthropic_auto_apply_banked_resets_enabled: 0 | 1;
 			anthropic_auto_apply_banked_reset_on_weekly_limit_enabled: 0 | 1;
 			custom_endpoint: string | null;
@@ -578,6 +580,7 @@ export async function listAccountResponses(
 					COALESCE(peak_hours_pause_enabled, 0) as peak_hours_pause_enabled,
 					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
 					COALESCE(codex_auto_apply_reset_on_weekly_limit_enabled, 0) as codex_auto_apply_reset_on_weekly_limit_enabled,
+					COALESCE(codex_fast_mode_enabled, 0) as codex_fast_mode_enabled,
 					COALESCE(anthropic_auto_apply_banked_resets_enabled, 0) as anthropic_auto_apply_banked_resets_enabled,
 					COALESCE(anthropic_auto_apply_banked_reset_on_weekly_limit_enabled, 0) as anthropic_auto_apply_banked_reset_on_weekly_limit_enabled,
 
@@ -1352,6 +1355,9 @@ export async function listAccountResponses(
 						account.codex_auto_apply_reset_credits_enabled === 1,
 					autoApplyResetOnWeeklyLimitEnabled:
 						account.codex_auto_apply_reset_on_weekly_limit_enabled === 1,
+					fastModeEnabled: account.codex_fast_mode_enabled === 1,
+					fastModeAvailable:
+						account.provider === "codex" && targetsChatGptCodexBackend(account),
 					autoApplyBankedResetsEnabled:
 						account.anthropic_auto_apply_banked_resets_enabled === 1,
 					autoApplyBankedResetOnWeeklyLimitEnabled:
@@ -3354,6 +3360,76 @@ export function createAccountAutoApplyResetOnWeeklyLimitHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to toggle auto-apply-reset-on-weekly-limit"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account fast-mode toggle handler (Codex accounts only). Opt-in:
+ * when enabled, every request this account serves goes upstream with
+ * `service_tier: "priority"`, replacing whatever tier the client sent.
+ * Disabling restores pass-through; it does not forbid a client's own
+ * `priority`.
+ */
+export function createAccountFastModeHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{
+				name: string;
+				provider: string;
+				custom_endpoint: string | null;
+			}>("SELECT name, provider, custom_endpoint FROM accounts WHERE id = ?", [
+				accountId,
+			]);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider !== "codex") {
+				return errorResponse(
+					BadRequest("Fast mode is only available for Codex accounts"),
+				);
+			}
+
+			// Turning it off stays allowed everywhere, so a flag left on after an
+			// endpoint change can still be cleared.
+			if (enabled === 1 && !targetsChatGptCodexBackend(account)) {
+				return errorResponse(
+					BadRequest(
+						"Fast mode requires an endpoint targeting the ChatGPT backend",
+					),
+				);
+			}
+
+			await dbOps.setCodexFastModeEnabled(accountId, enabled === 1);
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Fast mode ${action} for account '${account.name}'`,
+				fastModeEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error("Account fast-mode toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle fast mode"),
 			);
 		}
 	};

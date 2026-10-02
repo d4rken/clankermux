@@ -3,6 +3,7 @@ import {
 	Banknote,
 	CornerUpLeft,
 	CreditCard,
+	FastForward,
 	Flame,
 	Gauge,
 	Hourglass,
@@ -30,6 +31,7 @@ const POLICY_ICONS: Record<AccountPolicyKey, LucideIcon> = {
 	extraSpend: Banknote,
 	autoApplyExpiry: Hourglass,
 	autoApplyWeekly: Gauge,
+	fastMode: FastForward,
 	peakHoursPause: Sunrise,
 	planBilling: CreditCard,
 };

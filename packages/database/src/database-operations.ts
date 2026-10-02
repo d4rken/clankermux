@@ -1816,6 +1816,16 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async setCodexFastModeEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.adapter.run(
+			"UPDATE accounts SET codex_fast_mode_enabled = ? WHERE id = ?",
+			[enabled ? 1 : 0, accountId],
+		);
+	}
+
 	async setAnthropicAutoApplyBankedResetsEnabled(
 		accountId: string,
 		enabled: boolean,

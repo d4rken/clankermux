@@ -762,6 +762,15 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleFastModeToggle = async (account: Account) => {
+		try {
+			await api.updateAccountFastMode(account.id, !account.fastModeEnabled);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleAutoApplyResetOnWeeklyLimitToggle = async (account: Account) => {
 		try {
 			await api.updateAccountAutoApplyResetOnWeeklyLimit(
@@ -973,6 +982,7 @@ export function AccountsTab() {
 						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onPeakHoursPauseToggle={handlePeakHoursPauseToggle}
 						onAutoApplyResetCreditsToggle={handleAutoApplyResetCreditsToggle}
+						onFastModeToggle={handleFastModeToggle}
 						onAutoApplyResetOnWeeklyLimitToggle={
 							handleAutoApplyResetOnWeeklyLimitToggle
 						}

@@ -389,6 +389,9 @@ export async function handleProxy(
 					reasoning_effort_requested: null,
 					reasoning_effort_effective: null,
 					reasoning_effort_reason: null,
+					service_tier_requested: null,
+					service_tier_sent: null,
+					service_tier_reason: null,
 				});
 			retractIfNeverStarted(error.statusCode);
 			const response = Response.json(

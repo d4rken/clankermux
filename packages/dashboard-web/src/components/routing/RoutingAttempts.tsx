@@ -4,6 +4,7 @@ import {
 	REASONING_EFFORT_PROXY_DEFAULT,
 	REASONING_EFFORT_REASON_SEPARATOR,
 	REASONING_EFFORT_TARGET_MODEL_PROFILE,
+	SERVICE_TIER_ACCOUNT_FAST_MODE,
 } from "@clankermux/types";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api";
@@ -55,6 +56,35 @@ function ReasoningEffortAdaptationLine({
 				? `none requested, sent ${effective}`
 				: `asked for ${requested}, sent ${effective}`}{" "}
 			— {formatReason(reason)}
+		</p>
+	);
+}
+
+/**
+ * The tier serialized for this attempt — not proof upstream honoured it, so it
+ * reads "outgoing". Shown whenever one was set, so a fast-mode account that
+ * never fires is visible by the line's absence.
+ *
+ *   sent "priority", reason account_fast_mode, client "default"
+ *     → "Outgoing service tier: priority — account fast mode (client asked for default)"
+ */
+function ServiceTierLine({ attempt }: { attempt: RoutingAttempt }) {
+	const sent = attempt.service_tier_sent;
+	if (sent === null) return null;
+	const requested = attempt.service_tier_requested;
+	const reason = attempt.service_tier_reason;
+	let source: string;
+	if (reason === SERVICE_TIER_ACCOUNT_FAST_MODE) {
+		source =
+			requested !== null && requested !== sent
+				? `account fast mode (client asked for ${requested})`
+				: "account fast mode";
+	} else {
+		source = reason ?? "from the client";
+	}
+	return (
+		<p>
+			Outgoing service tier: {sent} — {source}
 		</p>
 	);
 }
@@ -143,6 +173,7 @@ export function RoutingAttemptList({
 					</dl>
 					<AliasDecisionLine snapshot={attempt.route_snapshot} />
 					<ReasoningEffortAdaptationLine attempt={attempt} />
+					<ServiceTierLine attempt={attempt} />
 					{attempt.error && <p>{attempt.error}</p>}
 					<details>
 						<summary className="cursor-pointer">Routing decision</summary>

@@ -172,6 +172,9 @@ describe("routing storage", () => {
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 		expect(await repo.listAttempts("request")).toHaveLength(1);
 		expect(
@@ -214,6 +217,9 @@ describe("routing storage", () => {
 				reasoning_effort_requested: null,
 				reasoning_effort_effective: null,
 				reasoning_effort_reason: null,
+				service_tier_requested: null,
+				service_tier_sent: null,
+				service_tier_reason: null,
 			});
 		}
 		expect(
@@ -248,6 +254,9 @@ describe("routing storage", () => {
 			reasoning_effort_requested: "minimal",
 			reasoning_effort_effective: "low",
 			reasoning_effort_reason: "chatgpt_backend_clamp",
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -256,6 +265,9 @@ describe("routing storage", () => {
 			reasoning_effort_requested: "high",
 			reasoning_effort_effective: "high",
 			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -264,6 +276,9 @@ describe("routing storage", () => {
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: "medium",
 			reasoning_effort_reason: "proxy_default",
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -272,6 +287,9 @@ describe("routing storage", () => {
 			reasoning_effort_requested: null,
 			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
 		});
 
 		expect(

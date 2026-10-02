@@ -58,14 +58,32 @@ function policyOf(account: AccountResponse, key: AccountPolicyKey) {
 }
 
 describe("deriveAccountPolicies — provider inventory", () => {
-	it("gives a codex account all five of its flags, in table order", () => {
-		expect(keysFor("codex")).toEqual([
+	it("gives a codex account all six of its flags, in table order", () => {
+		expect(
+			deriveAccountPolicies(
+				makeAccount({ provider: "codex", fastModeAvailable: true }),
+			).map((p) => p.key),
+		).toEqual([
 			"autoFallback",
 			"autoRefresh",
 			"extraSpend",
 			"autoApplyExpiry",
 			"autoApplyWeekly",
+			"fastMode",
 		]);
+	});
+
+	it("omits fastMode where it cannot take effect, even when enabled", () => {
+		for (const fastModeAvailable of [false, undefined]) {
+			const keys = deriveAccountPolicies(
+				makeAccount({
+					provider: "codex",
+					fastModeEnabled: true,
+					fastModeAvailable,
+				}),
+			).map((p) => p.key);
+			expect(keys).not.toContain("fastMode");
+		}
 	});
 
 	it("gives an anthropic account three flags, in table order", () => {
@@ -134,17 +152,21 @@ describe("deriveAccountPolicies — flag polarity", () => {
 			autoRefreshEnabled: true,
 			autoApplyResetCreditsEnabled: true,
 			autoApplyResetOnWeeklyLimitEnabled: true,
+			fastModeEnabled: true,
+			fastModeAvailable: true,
 		});
 		expect(policyOf(on, "autoFallback").enabled).toBe(true);
+		expect(policyOf(on, "fastMode").enabled).toBe(true);
 		expect(policyOf(on, "autoRefresh").enabled).toBe(true);
 		expect(policyOf(on, "autoApplyExpiry").enabled).toBe(true);
 		expect(policyOf(on, "autoApplyWeekly").enabled).toBe(true);
 
-		const off = makeAccount({ provider: "codex" });
+		const off = makeAccount({ provider: "codex", fastModeAvailable: true });
 		expect(policyOf(off, "autoFallback").enabled).toBe(false);
 		expect(policyOf(off, "autoRefresh").enabled).toBe(false);
 		expect(policyOf(off, "autoApplyExpiry").enabled).toBe(false);
 		expect(policyOf(off, "autoApplyWeekly").enabled).toBe(false);
+		expect(policyOf(off, "fastMode").enabled).toBe(false);
 	});
 
 	it("enables peakHoursPause only when the zai flag is set", () => {

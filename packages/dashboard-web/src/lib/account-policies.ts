@@ -16,6 +16,7 @@ export type AccountPolicyKey =
 	| "extraSpend"
 	| "autoApplyExpiry"
 	| "autoApplyWeekly"
+	| "fastMode"
 	| "peakHoursPause"
 	| "planBilling";
 
@@ -134,6 +135,13 @@ const PROVIDER_INDEPENDENT_DESCRIPTORS: Record<
 		description:
 			"Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing.",
 	},
+	fastMode: {
+		key: "fastMode",
+		chipLabel: "Fast mode",
+		menuLabel: "Fast mode (priority tier)",
+		description:
+			"Send every request this account serves with OpenAI's priority service tier, replacing the tier the client asked for. Faster responses, and the account's usage limits are likely used up faster. When OFF (default), the client's own tier passes through unchanged. Applies only when this account targets the ChatGPT backend.",
+	},
 	peakHoursPause: {
 		key: "peakHoursPause",
 		chipLabel: "Peak pause",
@@ -240,6 +248,10 @@ export function deriveAccountPolicies(
 	if (provider === PROVIDER_NAMES.CODEX) {
 		add("autoApplyExpiry", account.autoApplyResetCreditsEnabled === true);
 		add("autoApplyWeekly", account.autoApplyResetOnWeeklyLimitEnabled === true);
+		// No chip where the policy cannot take effect: an ON chip there would
+		// read as active.
+		if (account.fastModeAvailable === true)
+			add("fastMode", account.fastModeEnabled === true);
 	}
 	// Banked resets are claimed with the account's OAuth token; an API-key
 	// Anthropic account has none.

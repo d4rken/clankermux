@@ -101,6 +101,7 @@ async function mountAccountItem(
 			onPeakHoursPauseToggle={noop}
 			onAutoApplyResetCreditsToggle={noop}
 			onAutoApplyResetOnWeeklyLimitToggle={noop}
+			onFastModeToggle={noop}
 			onAutoApplyBankedResetsToggle={noop}
 			onAutoApplyBankedResetOnWeeklyLimitToggle={noop}
 			{...handlers}
@@ -264,6 +265,60 @@ describe("AccountListItem — automation menu copy", () => {
 		await act(async () => checkboxes[3]?.click());
 		await act(async () => checkboxes[4]?.click());
 		expect(toggled).toEqual(["expiry", "weekly"]);
+	});
+
+	it("offers fast mode where it takes effect, and toggles it", async () => {
+		const toggled: string[] = [];
+		await openAutomationMenu(
+			makeAccount({ provider: "codex", fastModeAvailable: true }),
+			{ onFastModeToggle: () => toggled.push("fast") },
+		);
+
+		const items = automationItems();
+		expect(items.at(-1)).toEqual({
+			label: "Fast mode (priority tier)",
+			title:
+				"Send every request this account serves with OpenAI's priority service tier, replacing the tier the client asked for. Faster responses, and the account's usage limits are likely used up faster. When OFF (default), the client's own tier passes through unchanged. Applies only when this account targets the ChatGPT backend.",
+			checked: false,
+		});
+		const checkboxes = Array.from(
+			document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+		);
+		await act(async () => checkboxes.at(-1)?.click());
+		expect(toggled).toEqual(["fast"]);
+	});
+
+	it("keeps a stranded fast-mode flag visible as inactive so it can be cleared", async () => {
+		const toggled: string[] = [];
+		await openAutomationMenu(
+			makeAccount({
+				provider: "codex",
+				fastModeAvailable: false,
+				fastModeEnabled: true,
+			}),
+			{ onFastModeToggle: () => toggled.push("fast") },
+		);
+
+		const last = automationItems().at(-1);
+		expect(last?.label).toBe("Fast mode — inactive on this endpoint");
+		expect(last?.checked).toBe(true);
+		const checkboxes = Array.from(
+			document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+		);
+		await act(async () => checkboxes.at(-1)?.click());
+		expect(toggled).toEqual(["fast"]);
+	});
+
+	it("hides fast mode where it cannot take effect and is off", async () => {
+		await openAutomationMenu(
+			makeAccount({ provider: "codex", fastModeAvailable: false }),
+		);
+		expect(automationItems().map((item) => item.label)).not.toContain(
+			"Fast mode (priority tier)",
+		);
+		expect(
+			automationItems().some((item) => item.label.startsWith("Fast mode")),
+		).toBe(false);
 	});
 
 	it("labels and explains the zai peak-hours item", async () => {
