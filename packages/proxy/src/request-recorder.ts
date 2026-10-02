@@ -16,6 +16,7 @@ import {
 	parseUpstreamError,
 	type RequestResponse,
 	resolveCostSource,
+	type ServiceTierGroup,
 	type ToolCallStat,
 	type UsageSource,
 } from "@clankermux/types";
@@ -145,6 +146,8 @@ export interface RecordMeta {
 	clientHarness?: string | null;
 	/** See RequestMeta.sdkBridgeTurnId. Optional: absent stays NULL. */
 	sdkBridgeTurnId?: string | null;
+	/** See RequestMeta.servedServiceTier. Optional: absent stays NULL. */
+	servedServiceTier?: ServiceTierGroup | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -314,6 +317,7 @@ interface SaveRequestData extends GatewayHintMetadata {
 	billingType?: string;
 	comboName?: string | null;
 	reasoningEffort?: string | null;
+	servedServiceTier?: ServiceTierGroup | null;
 	contextComposition?: ContextComposition | null;
 	requestedModel?: string | null;
 	/**
@@ -1250,6 +1254,7 @@ export class RequestRecorder {
 			billingType: record.billingType,
 			comboName: meta.comboName ?? null,
 			reasoningEffort: meta.reasoningEffort ?? null,
+			servedServiceTier: meta.servedServiceTier ?? null,
 			contextComposition: meta.contextComposition ?? null,
 			requestedModel: meta.requestedModel ?? null,
 			usageFinalizedAt,

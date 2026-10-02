@@ -5,6 +5,7 @@ import type {
 	ContextComposition,
 	GatewayHintMetadata,
 	ProjectAttributionSource,
+	ServiceTierGroup,
 	ToolCallStat,
 	UsageSource,
 } from "@clankermux/types";
@@ -167,6 +168,12 @@ export interface RequestData extends GatewayHintMetadata {
 	 * foreign key: the turn may already be gone when a late write lands.
 	 */
 	sdkBridgeTurnId?: string | null;
+	/**
+	 * 'standard' | 'priority' from the request's latest upstream attempt; NULL
+	 * when nothing reached upstream. Absent on the usage-patch re-upsert, so it
+	 * COALESCEs EXCLUDED first.
+	 */
+	servedServiceTier?: ServiceTierGroup | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -293,9 +300,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
 					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted, gateway_hint_prompt_id,
 					correlation_tag, usage_source, cache_creation_1h_input_tokens,
-					sdk_bridge_turn_id
+					sdk_bridge_turn_id, service_tier
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -362,6 +369,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_prompt_id = COALESCE(EXCLUDED.gateway_hint_prompt_id, requests.gateway_hint_prompt_id),
 				correlation_tag = COALESCE(EXCLUDED.correlation_tag, requests.correlation_tag),
 				sdk_bridge_turn_id = COALESCE(EXCLUDED.sdk_bridge_turn_id, requests.sdk_bridge_turn_id),
+				service_tier = COALESCE(EXCLUDED.service_tier, requests.service_tier),
 				-- Stored value FIRST, unlike the token columns above: a non-NULL
 				-- usage_source is a promise that accounting for this row is
 				-- finished, so nothing may overwrite one.
@@ -440,6 +448,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.usageSource ?? null,
 				usage?.cacheCreation1hInputTokens ?? null,
 				data.sdkBridgeTurnId ?? null,
+				data.servedServiceTier ?? null,
 			],
 		);
 	}

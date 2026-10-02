@@ -15,6 +15,7 @@ import { ModelAnalytics } from "./ModelAnalytics";
 const PERFORMANCE = [
 	{
 		model: "gpt-5.6-luna",
+		serviceTier: "standard" as const,
 		avgResponseTime: 1000,
 		p95ResponseTime: 2000,
 		errorRate: 0,
@@ -84,5 +85,50 @@ describe("ModelAnalytics cost join", () => {
 
 		// $2 over 2M tokens is $0.0010 per 1K. A missed row renders an em dash.
 		expect(html).toContain("$0.0010");
+	});
+});
+
+describe("ModelAnalytics service tiers", () => {
+	const tiered = [
+		{ ...PERFORMANCE[0], serviceTier: "standard" as const },
+		{
+			...PERFORMANCE[0],
+			serviceTier: "priority" as const,
+			avgResponseTime: 400,
+		},
+	];
+	const cost = [
+		{
+			model: "gpt-5.6-luna",
+			costUsd: 1,
+			requests: 100,
+			totalTokens: 1_000_000,
+		},
+	];
+
+	it("labels the priority row and keeps both rows of one model", () => {
+		const html = renderToStaticMarkup(
+			<ModelAnalytics modelPerformance={tiered} costByModel={cost} />,
+		);
+		expect(html.match(/· priority/g)).toHaveLength(1);
+		expect(html).toContain("400 ms");
+		expect(html).toContain("1000 ms");
+	});
+
+	it("gives both tier rows the model's cost, and each its own efficiency", () => {
+		const html = renderToStaticMarkup(
+			<ModelAnalytics
+				modelPerformance={[
+					{ ...tiered[0], medianTokensPerSecond: 40 },
+					{ ...tiered[1], medianTokensPerSecond: 80 },
+				]}
+				costByModel={cost}
+			/>,
+		);
+		// $1 over 1M tokens is $0.0010 per 1K, on both rows.
+		expect(html.match(/\$0\.0010/g)).toHaveLength(2);
+		// 40 and 80 tok/s over $0.001 per 1K.
+		expect(html).toContain("40,000 tok/s/$");
+		expect(html).toContain("80,000 tok/s/$");
 	});
 });

@@ -12,7 +12,11 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { isModelSubstitution } from "@clankermux/proxy";
-import { type AnalyticsSection, NO_ACCOUNT_ID } from "@clankermux/types";
+import {
+	type AnalyticsSection,
+	NO_ACCOUNT_ID,
+	type ServiceTierGroup,
+} from "@clankermux/types";
 import type {
 	ActiveSessionsAnalytics,
 	ActiveSessionsTimePoint,
@@ -294,6 +298,13 @@ const SUBSTITUTION_ORIGIN_MODEL = `(
 							LIMIT 1
 						) answered
 					)`;
+
+/**
+ * The tier a request was served at, as `filtered` groups it: the stored
+ * `requests.service_tier`, with NULL (nothing reached upstream, or recorded
+ * before the column) read as standard.
+ */
+const SERVED_SERVICE_TIER = `CASE WHEN r.service_tier = 'priority' THEN 'priority' ELSE 'standard' END`;
 
 /**
  * Split {@link SUBSTITUTION_ORIGIN_MODEL} back into the model that was sent and
@@ -1147,11 +1158,12 @@ export function createAnalyticsHandler(context: APIContext) {
 			// computed over a separately-filtered row set (plausible speeds only)
 			// from the response-time percentiles, so artifact rows and rows
 			// missing a speed sample never pollute each other's PERCENT_RANK
-			// windows. The two aggregates are joined back per model.
+			// windows. The two aggregates are joined back per model and tier.
 			const modelPerfData =
 				(await runPhase("model_performance", want("modelPerformance"), () =>
 					db.query<{
 						model: string;
+						service_tier: ServiceTierGroup;
 						avg_response_time: number;
 						max_response_time: number;
 						total_requests: number;
@@ -1168,6 +1180,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				WITH filtered AS MATERIALIZED (
 					SELECT
 						model,
+						${SERVED_SERVICE_TIER} AS service_tier,
 						response_time_ms,
 						output_tokens_per_second,
 						success
@@ -1176,13 +1189,23 @@ export function createAnalyticsHandler(context: APIContext) {
 						AND model IS NOT NULL
 						AND response_time_ms IS NOT NULL
 				),
+				-- Rank MODELS, then keep every tier of each: a LIMIT over tier
+				-- rows would let one model's priority row push another model out.
+				top_models AS (
+					SELECT model, COUNT(*) AS model_requests
+					FROM filtered
+					GROUP BY model
+					ORDER BY model_requests DESC
+					LIMIT 10
+				),
 				resp_ranked AS (
 					SELECT
 						model,
+						service_tier,
 						response_time_ms,
 						success,
 						PERCENT_RANK() OVER (
-							PARTITION BY model
+							PARTITION BY model, service_tier
 							ORDER BY response_time_ms
 						) AS pr_resp
 					FROM filtered
@@ -1190,9 +1213,10 @@ export function createAnalyticsHandler(context: APIContext) {
 				speed_ranked AS (
 					SELECT
 						model,
+						service_tier,
 						output_tokens_per_second,
 						PERCENT_RANK() OVER (
-							PARTITION BY model
+							PARTITION BY model, service_tier
 							ORDER BY output_tokens_per_second
 						) AS pr_speed
 					FROM filtered
@@ -1201,6 +1225,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				resp_agg AS (
 					SELECT
 						model,
+						service_tier,
 						AVG(response_time_ms) as avg_response_time,
 						MAX(response_time_ms) as max_response_time,
 						COUNT(*) as total_requests,
@@ -1208,11 +1233,12 @@ export function createAnalyticsHandler(context: APIContext) {
 						SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as error_rate,
 						MIN(CASE WHEN pr_resp >= 0.95 THEN response_time_ms END) as p95_response_time
 					FROM resp_ranked
-					GROUP BY model
+					GROUP BY model, service_tier
 				),
 				speed_agg AS (
 					SELECT
 						model,
+						service_tier,
 						COUNT(*) as speed_sample_count,
 						-- PERCENT_RANK is 0 for a single-row partition, so the
 						-- pr>=0.5 / pr>=0.95 selectors return NULL with <2 samples.
@@ -1222,10 +1248,11 @@ export function createAnalyticsHandler(context: APIContext) {
 						COALESCE(MIN(CASE WHEN pr_speed >= 0.5 THEN output_tokens_per_second END), MIN(output_tokens_per_second)) as median_tokens_per_second,
 						COALESCE(MIN(CASE WHEN pr_speed >= 0.95 THEN output_tokens_per_second END), MAX(output_tokens_per_second)) as p95_tokens_per_second
 					FROM speed_ranked
-					GROUP BY model
+					GROUP BY model, service_tier
 				)
 				SELECT
 					ra.model,
+					ra.service_tier,
 					ra.avg_response_time,
 					ra.max_response_time,
 					ra.total_requests,
@@ -1236,9 +1263,11 @@ export function createAnalyticsHandler(context: APIContext) {
 					sa.median_tokens_per_second,
 					sa.p95_tokens_per_second
 				FROM resp_agg ra
-				LEFT JOIN speed_agg sa ON sa.model = ra.model
-				ORDER BY ra.total_requests DESC
-				LIMIT 10
+				JOIN top_models tm ON tm.model = ra.model
+				LEFT JOIN speed_agg sa
+					ON sa.model = ra.model AND sa.service_tier = ra.service_tier
+				ORDER BY tm.model_requests DESC, ra.model,
+					CASE ra.service_tier WHEN 'standard' THEN 0 ELSE 1 END
 			`,
 						queryParams,
 					),
@@ -1248,6 +1277,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				? undefined
 				: modelPerfData.map((modelData) => ({
 						model: modelData.model,
+						serviceTier: modelData.service_tier,
 						avgResponseTime: Number(modelData.avg_response_time) || 0,
 						p95ResponseTime:
 							Number(modelData.p95_response_time) ||

@@ -6,6 +6,7 @@ import type {
 	ToolCallStat,
 } from "./request";
 import type { SdkBridgeRefusedField } from "./sdk-bridge-field-policy";
+import type { ServiceTierGroup } from "./stats";
 
 export interface RequestMeta {
 	id: string;
@@ -142,6 +143,11 @@ export interface RequestMeta {
 	 * the in-process inner context, never from a header.
 	 */
 	sdkBridgeTurnId?: string | null;
+	/**
+	 * The tier the request's latest upstream attempt went out at, set by each
+	 * send so a failover overwrites it. Absent when nothing reached upstream.
+	 */
+	servedServiceTier?: ServiceTierGroup;
 }
 
 export type RequestAffinityScope =

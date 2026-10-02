@@ -221,10 +221,14 @@ describe("pre-head client abort tracking", () => {
 			},
 		}) as unknown as RequestMeta;
 	const account = canonicalAccount({ name: "A", provider: "codex" });
-	const send = (attemptId: string) => ({
+	const send = (
+		attemptId: string,
+		servedServiceTier: "standard" | "priority" = "standard",
+	) => ({
 		attemptId,
 		account,
 		providerName: "codex",
+		servedServiceTier,
 	});
 
 	it("keeps the routing that applied to the send", () => {
@@ -265,6 +269,21 @@ describe("pre-head client abort tracking", () => {
 		client.abort();
 		expect(wasInFlightAtAbort(m, "a1")).toBe(false);
 		expect(preHeadAbortDispatch(m)?.dispatch.attemptId).toBe("a1");
+	});
+
+	it("keeps the tier of the send the client abandoned, not a later one that never went out", () => {
+		const m = meta();
+		const client = new AbortController();
+		trackPreHeadClientAbort(m, client.signal);
+		noteUpstreamDispatch(m, send("a1", "priority"));
+		noteUpstreamSettled(m, "a1");
+		client.abort();
+		// A failover to a standard account reaches dispatch after the abort.
+		noteUpstreamDispatch(m, send("a2", "standard"));
+		expect(preHeadAbortDispatch(m)?.dispatch).toMatchObject({
+			attemptId: "a1",
+			servedServiceTier: "priority",
+		});
 	});
 
 	it("ignores a send that starts after the client left", () => {
@@ -322,6 +341,7 @@ describe("recording gate", () => {
 			attemptId: "a1",
 			account,
 			providerName: "codex",
+			servedServiceTier: "standard",
 		});
 		client.abort();
 		return { ctx, req, m };

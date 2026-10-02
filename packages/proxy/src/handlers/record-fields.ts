@@ -27,6 +27,7 @@ export type RecordFieldsFromMeta = Pick<
 	| "comboName"
 	| "routing"
 	| "sdkBridgeTurnId"
+	| "servedServiceTier"
 	| "onRecordBegun"
 >;
 
@@ -58,6 +59,7 @@ export function recordFieldsFromMeta(
 		comboName: requestMeta.comboName,
 		routing: requestMeta.routing ?? null,
 		sdkBridgeTurnId: requestMeta.sdkBridgeTurnId,
+		servedServiceTier: requestMeta.servedServiceTier,
 		onRecordBegun: getSdkBridgeInnerMetaContext(requestMeta)
 			? () => noteSdkBridgeInnerRequestStarted(requestMeta)
 			: undefined,

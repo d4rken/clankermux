@@ -1,6 +1,12 @@
 import type { Database } from "bun:sqlite";
 import { getAppVersionSync } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import {
+	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+	ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
+	ATTEMPT_TRANSPORT_FAILED,
+	CLIENT_CLOSED_REQUEST,
+} from "@clankermux/types";
 
 const log = new Logger("DatabaseBackfills");
 
@@ -25,6 +31,7 @@ export function runOneShotBackfills(db: Database): void {
 	backfillAutoPauseOverageDefault(db);
 	seedAccountTierHistory(db);
 	clearUnratedRequestModels(db);
+	backfillServedServiceTier(db);
 }
 
 const AUTO_PAUSE_OVERAGE_MARKER = "backfill:auto-pause-overage-default";
@@ -200,5 +207,91 @@ function clearUnratedRequestModels(db: Database): void {
 
 	log.info(
 		`Backfill ${UNRATED_REQUEST_MODEL_MARKER}: cleared the model on ${cleared} request(s) without an outcome`,
+	);
+}
+
+const SERVED_SERVICE_TIER_MARKER = "backfill:served-service-tier";
+
+/**
+ * Fill `requests.service_tier` on rows recorded after attempts started
+ * carrying a tier but before the request column existed, from the request's
+ * latest upstream attempt that may have run (rowid breaks a millisecond tie).
+ * Bridge refusals ran nothing and are skipped. When the deciding attempt is
+ * ambiguous (the fetch failed, or the client-closed stamp), the request is
+ * left NULL rather than guessed. Requests with no tiered attempt are not
+ * touched: their NULL already reads as standard.
+ *
+ *   priority 200                         -> 'priority'
+ *   priority 401, then none 200          -> 'standard'
+ *   priority 200, then bridge refusal    -> 'priority'
+ *   priority 200, then transport failed  -> NULL
+ */
+function backfillServedServiceTier(db: Database): void {
+	let claimed = false;
+	let filled = 0;
+	const tx = db.transaction(() => {
+		// Marker first, inside the transaction: see the rationale on
+		// backfillAutoPauseOverageDefault.
+		claimed =
+			db
+				.prepare(
+					`INSERT OR IGNORE INTO strategies (name, config, updated_at)
+					 VALUES (?, ?, ?)`,
+				)
+				.run(SERVED_SERVICE_TIER_MARKER, "{}", Date.now()).changes > 0;
+		if (!claimed) return;
+
+		filled = db
+			.prepare(
+				`WITH ranked AS (
+					SELECT ra.request_id, ra.service_tier_sent, ra.status, ra.error,
+						ROW_NUMBER() OVER (
+							PARTITION BY ra.request_id
+							ORDER BY ra.started_at DESC, ra.rowid DESC
+						) AS rn
+					FROM routing_attempts ra
+					WHERE ra.kind = 'upstream_send'
+					  AND ra.request_id IN (
+						SELECT request_id FROM routing_attempts
+						WHERE service_tier_sent IS NOT NULL AND kind = 'upstream_send'
+					  )
+					  AND substr(COALESCE(ra.error, ''), 1, length(?1)) <> ?1
+					  AND substr(COALESCE(ra.error, ''), 1, length(?2)) <> ?2
+				),
+				decided AS (
+					SELECT request_id,
+						CASE WHEN service_tier_sent = 'priority' THEN 'priority' ELSE 'standard' END AS tier
+					FROM ranked
+					WHERE rn = 1
+					  AND COALESCE(error, '') <> ?3
+					  AND NOT (COALESCE(status, 0) = 499 AND COALESCE(error, '') = ?4)
+				)
+				UPDATE requests
+				SET service_tier = (SELECT tier FROM decided WHERE decided.request_id = requests.id)
+				WHERE service_tier IS NULL
+				  AND id IN (SELECT request_id FROM decided)`,
+			)
+			.run(
+				ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+				ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
+				ATTEMPT_TRANSPORT_FAILED,
+				CLIENT_CLOSED_REQUEST,
+			).changes;
+
+		const now = Date.now();
+		db.prepare(
+			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,
+		).run(
+			JSON.stringify({ requestsFilled: filled, appliedAt: now }),
+			now,
+			SERVED_SERVICE_TIER_MARKER,
+		);
+	});
+	tx();
+
+	if (!claimed) return;
+
+	log.info(
+		`Backfill ${SERVED_SERVICE_TIER_MARKER}: set the served tier on ${filled} request(s)`,
 	);
 }

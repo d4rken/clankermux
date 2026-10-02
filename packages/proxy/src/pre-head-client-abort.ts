@@ -3,6 +3,7 @@ import type {
 	Account,
 	RequestMeta,
 	RequestRoutingMeta,
+	ServiceTierGroup,
 } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 
@@ -32,6 +33,8 @@ export interface UpstreamDispatch {
 	/** The attempt's failover count, as `forwardToClient` would have recorded it. */
 	readonly failoverAttempts: number;
 	readonly startedAt: number;
+	/** The tier this send went out at. */
+	readonly servedServiceTier: ServiceTierGroup;
 }
 
 interface Tracking {
@@ -96,7 +99,10 @@ export function notePreHeadAttempt(
  */
 export function noteUpstreamDispatch(
 	meta: RequestMeta,
-	send: Pick<UpstreamDispatch, "attemptId" | "account" | "providerName">,
+	send: Pick<
+		UpstreamDispatch,
+		"attemptId" | "account" | "providerName" | "servedServiceTier"
+	>,
 ): void {
 	const state = tracked.get(meta);
 	if (!state || state.clientSignal.aborted) return;
@@ -115,6 +121,7 @@ export function noteUpstreamDispatch(
 		routing: meta.routing ? Object.freeze({ ...meta.routing }) : null,
 		failoverAttempts: state.failoverAttempts,
 		startedAt: Date.now(),
+		servedServiceTier: send.servedServiceTier,
 	});
 	state.lastInFlight = true;
 	state.sends++;

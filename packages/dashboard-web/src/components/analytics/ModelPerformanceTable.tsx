@@ -1,4 +1,5 @@
 import { getModelShortName } from "@clankermux/core";
+import type { ServiceTierGroup } from "@clankermux/types";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
 import { Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -15,9 +16,10 @@ import {
 } from "../ui/table";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
-/** One model's row in the performance table. */
+/** One model's row in the performance table, per service tier. */
 export interface ModelPerformanceRow {
 	model: string;
+	serviceTier: ServiceTierGroup;
 	medianTps: number | null;
 	p95Tps: number | null;
 	speedSampleCount: number;
@@ -40,7 +42,7 @@ const LOW_SAMPLE_THRESHOLD = 5;
 
 type MetricKey = Exclude<
 	keyof ModelPerformanceRow,
-	"model" | "speedSampleCount"
+	"model" | "serviceTier" | "speedSampleCount"
 >;
 
 interface MetricColumn {
@@ -126,7 +128,9 @@ export function ModelPerformanceTable({
 		const copy = [...rows];
 		copy.sort((a, b) => {
 			if (sortKey === "model") {
-				const cmp = a.model.localeCompare(b.model);
+				const cmp =
+					a.model.localeCompare(b.model) ||
+					a.serviceTier.localeCompare(b.serviceTier);
 				return sortDir === "asc" ? cmp : -cmp;
 			}
 			const av = a[sortKey];
@@ -202,10 +206,21 @@ export function ModelPerformanceTable({
 					{sortedRows.map((row) => {
 						const lowSample = row.speedSampleCount < LOW_SAMPLE_THRESHOLD;
 						return (
-							<TableRow key={row.model} className="hover:bg-muted/40">
+							<TableRow
+								key={`${row.model}:${row.serviceTier}`}
+								className="hover:bg-muted/40"
+							>
 								<TableCell className="align-top">
 									<div className="font-medium">
 										{getModelShortName(row.model)}
+										{row.serviceTier === "priority" && (
+											<span
+												className="ml-tight text-xs font-normal text-muted-foreground"
+												title="Served with OpenAI's priority service tier"
+											>
+												· priority
+											</span>
+										)}
 									</div>
 									<div className="text-xs text-muted-foreground">
 										n={row.speedSampleCount.toLocaleString()}
