@@ -38,7 +38,7 @@ import {
 } from "./routing-service";
 import { noteSdkBridgeInnerSend } from "./sdk-bridge-inner-outcome";
 
-/** Owned by one proxyWithAccount/proxyForcedAccount invocation, never shared across accounts. */
+/** Owned by one proxyWithAccount invocation, never shared across accounts. */
 export interface RoutingAttemptAudit {
 	id: string | null;
 	/**

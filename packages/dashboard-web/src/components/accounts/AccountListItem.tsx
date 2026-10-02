@@ -6,7 +6,6 @@ import {
 } from "@clankermux/types";
 import {
 	CalendarClock,
-	Crosshair,
 	Edit2,
 	Globe,
 	Hash,
@@ -62,7 +61,6 @@ import { RateLimitProgress } from "./RateLimitProgress";
 
 interface AccountListItemProps {
 	account: Account;
-	isForced?: boolean;
 	/**
 	 * This account's substitution entry, when a provider is currently answering
 	 * it with a different model. Threaded from the list so one query serves
@@ -77,7 +75,6 @@ interface AccountListItemProps {
 	// forwarded to the rate-limit card, which renders any of them this account
 	// has not used this week as a labelled row instead of omitting it.
 	poolScopedFamilies?: readonly LiveScopedFamily[];
-	onForceAccount?: (account: Account) => void;
 	onDisabledToggle?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
@@ -129,12 +126,10 @@ const RENEWAL_SOURCE_TITLE: Record<"manual" | "derived" | "provider", string> =
 
 export function AccountListItem({
 	account,
-	isForced = false,
 	degraded,
 	earliestResets,
 	latestResets,
 	poolScopedFamilies,
-	onForceAccount,
 	onPauseToggle,
 	onDisabledToggle,
 	onForceResetRateLimit,
@@ -336,24 +331,6 @@ export function AccountListItem({
 							<Pause className="h-4 w-4" />
 						)}
 					</Button>
-					{onForceAccount && (
-						<Button
-							variant="ghost"
-							size="sm"
-							className={
-								isForced ? "text-destructive-strong bg-destructive/10" : ""
-							}
-							disabled={account.disabled}
-							onClick={() => onForceAccount(account)}
-							title={
-								isForced
-									? "Restricting requests to this destination — click to release"
-									: "Restrict requests to this account"
-							}
-						>
-							<Crosshair className="h-4 w-4" />
-						</Button>
-					)}
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<Button variant="ghost" size="sm" title="More actions">

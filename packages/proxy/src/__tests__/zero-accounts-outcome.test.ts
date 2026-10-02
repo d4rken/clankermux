@@ -26,7 +26,6 @@ import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type { AdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
-import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	resetHoldSlots,
@@ -301,7 +300,6 @@ function cacheableBody(): ArrayBuffer {
 }
 
 function resetSingletons(): void {
-	setForcedAccount(null);
 	cacheBodyStore.setEnabled(false);
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();

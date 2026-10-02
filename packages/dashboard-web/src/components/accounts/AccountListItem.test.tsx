@@ -51,6 +51,13 @@ function makeAccount(overrides: Partial<AccountResponse> = {}): Account {
 
 const noop = () => {};
 
+it("does not offer the retired global account restriction", () => {
+	const html = render(makeAccount());
+	expect(html).not.toContain("Restrict requests to this account");
+	expect(html).not.toContain("lucide-crosshair");
+	expect(html).toContain("Pause account");
+});
+
 describe("AccountListItem — Anthropic access diagnosis", () => {
 	it("shows expiry and its recovery action directly on the Accounts card", () => {
 		const html = render(

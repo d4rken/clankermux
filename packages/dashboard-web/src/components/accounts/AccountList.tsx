@@ -31,8 +31,6 @@ interface AccountListProps {
 	 * also re-run the scan for every mount of it.
 	 */
 	degradedByAccount?: ReadonlyMap<string, DegradedAccount>;
-	forcedAccountId?: string | null;
-	onForceAccount?: (account: Account) => void;
 	onDisabledToggle?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
@@ -68,8 +66,6 @@ export function AccountList({
 	accounts,
 	sortMode,
 	degradedByAccount,
-	forcedAccountId,
-	onForceAccount,
 	onPauseToggle,
 	onDisabledToggle,
 	onForceResetRateLimit,
@@ -170,7 +166,6 @@ export function AccountList({
 				<AccountListItem
 					key={account.name}
 					account={account}
-					isForced={account.id === forcedAccountId}
 					degraded={degradedByAccount?.get(account.id)}
 					earliestResets={resetExtremes.earliest}
 					latestResets={resetExtremes.latest}
@@ -178,7 +173,6 @@ export function AccountList({
 						familiesByClass.get(servableClassFor(account.provider).classId) ??
 						[]
 					}
-					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
 					onDisabledToggle={onDisabledToggle}
 					onForceResetRateLimit={onForceResetRateLimit}

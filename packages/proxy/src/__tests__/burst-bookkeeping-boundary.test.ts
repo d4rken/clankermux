@@ -33,7 +33,6 @@ import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	markAnthropicBurstThrottle,
@@ -280,7 +279,6 @@ function upstreamOnlyFetch(
 }
 
 function resetSingletons(): void {
-	setForcedAccount(null);
 	cacheBodyStore.setEnabled(false);
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();

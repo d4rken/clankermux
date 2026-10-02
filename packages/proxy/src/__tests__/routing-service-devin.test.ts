@@ -53,7 +53,7 @@ it("freezes the requested Devin model without any provider metadata fetch", asyn
 		new Error("must not fetch"),
 	);
 	const { account, ctx, meta, suppression, refresh } = setup();
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	expect(getResolvedRoute(meta).target(account)?.upstreamModel).toBe(
 		"swe-2-high",
 	);
@@ -65,14 +65,14 @@ it("rejects a Claude model on a Devin account that does not permit it", async ()
 	// The old provider-default map turned this into "swe-2" and then into a
 	// concrete variant. Without a rule there is now no destination at all.
 	const { ctx, meta, refresh } = setup("claude-sonnet-4-5", ["swe-2-high"]);
-	await expect(initializeRequestRoute(meta, ctx, null, null)).rejects.toThrow(
+	await expect(initializeRequestRoute(meta, ctx, null)).rejects.toThrow(
 		'does not permit model "claude-sonnet-4-5"',
 	);
 	expect(refresh).toHaveBeenCalledTimes(1);
 });
 it("rejects the bare SWE-2 alias when only a concrete variant is permitted", async () => {
 	const { ctx, meta } = setup("swe-2", ["swe-2-high"]);
-	await expect(initializeRequestRoute(meta, ctx, null, null)).rejects.toThrow(
+	await expect(initializeRequestRoute(meta, ctx, null)).rejects.toThrow(
 		'does not permit model "swe-2"',
 	);
 });
@@ -104,9 +104,7 @@ it.each([
 		requirements: { fields: ["max_tokens"] },
 		defaultMaxTokens: 8192,
 	});
-	await expect(
-		initializeRequestRoute(meta, ctx, null, null),
-	).rejects.toMatchObject(
+	await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
 		includeCodex
 			? {
 					statusCode: 400,
@@ -214,7 +212,7 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 			effort,
 			discoveredBeforeRefresh,
 		);
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		expect(lookup).not.toHaveBeenCalled();
 		const [devinStage, codexStage] = getAliasRoutes(meta) ?? [];
 		return {

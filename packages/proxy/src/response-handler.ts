@@ -615,10 +615,9 @@ export interface ResponseHandlerOptions {
 	 * pool's BEST headroom (see `applyPoolHeadroomHeaders`). ABSENT ⇒ every
 	 * upstream header is forwarded exactly as it arrived.
 	 *
-	 * Absence is the safe default and is what the forced-account and
-	 * unauthenticated paths rely on: neither ran account selection, so neither
-	 * has a pool it can speak for. Omission rather than a flag is deliberate —
-	 * a new call site that forgets this field degrades to passthrough.
+	 * Absence is the safe default for paths that did not run account selection:
+	 * they have no pool they can speak for. Omission rather than a flag is
+	 * deliberate — a new call site that forgets this field degrades to passthrough.
 	 */
 	poolCandidates?: readonly Account[] | null;
 	/**
@@ -652,14 +651,6 @@ export interface ResponseHandlerOptions {
 	 * Completion is idempotent, so overlapping paths are safe.
 	 */
 	overloadProbeToken?: OverloadProbeToken | null;
-	/**
-	 * When true, the mid-stream rate-limit cooldown sniffer is disabled: a
-	 * streamed 429/529 error is still streamed and recorded, but does NOT mutate
-	 * the account's rate-limit/provider-overload cooldown state. Used by the
-	 * force-account path, which returns the forced account's response (errors
-	 * included) as-is without touching cooldown state.
-	 */
-	disableCooldown?: boolean;
 	/**
 	 * Best-effort re-arm of the client connection's Bun idle timer, threaded into
 	 * the streaming passthrough so long quiet gaps between chunks don't reap the
@@ -816,7 +807,6 @@ async function forwardToClientInner(
 		apiKeyName,
 		comboName,
 		routing,
-		disableCooldown,
 		overloadProbeToken,
 		usageHeaderEpoch = null,
 	} = options;
@@ -897,7 +887,7 @@ async function forwardToClientInner(
 	// `claude-console-api` have no provider registered under that name and fall
 	// back to the default `anthropic` provider, so `ctx.provider.name` would
 	// mislabel them. Used by the mid-stream rate-limit sniffer and by
-	// pricing-gap attribution; falls back to the handler for anonymous/forced
+	// pricing-gap attribution; falls back to the handler for anonymous
 	// requests that have no account.
 	const accountProvider = account?.provider ?? ctx.provider.name;
 
@@ -1022,7 +1012,6 @@ async function forwardToClientInner(
 			if (
 				codexHealthObserved ||
 				account?.provider !== "codex" ||
-				disableCooldown ||
 				internalDispatch ||
 				!usageState
 			)
@@ -1048,9 +1037,9 @@ async function forwardToClientInner(
 				clearCodexTransientFailure(account.id, timestamp);
 			}
 		};
-		// Detection is independent of cooldown mutation: even anonymous/forced
+		// Detection is independent of cooldown mutation: even anonymous
 		// requests must be recorded as failures when a nominal HTTP 200 stream ends
-		// in an SSE error frame. `disableCooldown` only suppresses account state.
+		// in an SSE error frame.
 		const rateLimitSniffer = createSseRateLimitSniffer({
 			provider: accountProvider,
 		});
@@ -1170,9 +1159,9 @@ async function forwardToClientInner(
 				}
 
 				// Mid-stream rate-limit detection. The sniffer fires exactly once;
-				// after that feed() is a no-op. Detection still runs when cooldown
-				// mutation is disabled so Request History gets the correct outcome.
-				if (rateLimitSniffer.feed(value) && account && !disableCooldown) {
+				// after that feed() is a no-op. Detection also runs without an account
+				// so Request History gets the correct outcome.
+				if (rateLimitSniffer.feed(value) && account) {
 					if (rateLimitSniffer.firedReason === "overloaded_error") {
 						// Mid-stream `overloaded_error` (SSE 529 shape) is a
 						// provider/family incident, not an account-level limit: trip the

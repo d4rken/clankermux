@@ -36,7 +36,6 @@ import {
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
-import { setForcedAccount } from "../handlers";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { resetOverloadHoldSlots } from "../overload-hold";
 import {
@@ -260,7 +259,6 @@ function jsonRequest(
 }
 
 function resetSingletons(): void {
-	setForcedAccount(null);
 	cacheBodyStore.setEnabled(false);
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();

@@ -46,14 +46,14 @@ const build = (patch: Partial<Parameters<typeof buildResolvedRoute>[0]> = {}) =>
 		...patch,
 	});
 describe("resolved route authority", () => {
-	it("provider exclusions constrain explicit routing rules and forced accounts", () => {
+	it("provider exclusions constrain explicit routing rules and account headers", () => {
 		const pin = {
 			accountId: null,
 			providers: null,
 			excludedProviders: ["codex"],
 		};
 		expect(() => build({ pin })).toThrow();
-		expect(() => build({ pin, forcedAccountId: c.id })).toThrow();
+		expect(() => build({ pin, headerAccountId: c.id })).toThrow();
 		expect(() => build({ pin: { ...pin, accountId: c.id } })).toThrow(
 			"Invalid API key destinations",
 		);
@@ -62,10 +62,8 @@ describe("resolved route authority", () => {
 	it("intersects every destination restriction before admission", () => {
 		const route = build();
 		expect(route.accountIds()).toEqual(["c"]);
-		expect(() => build({ forcedAccountId: "a" })).toThrow();
-		expect(() =>
-			build({ forcedAccountId: "c", headerAccountId: "o" }),
-		).toThrow();
+		expect(() => build({ headerAccountId: "a" })).toThrow();
+		expect(() => build({ headerAccountId: "o" })).toThrow();
 		expect(() => build({ pin: { accountId: "o", providers: null } })).toThrow();
 		expect(() =>
 			build({
@@ -472,14 +470,13 @@ describe("a [1m] id", () => {
 		);
 	});
 
-	it("is refused on a direct send to a forced account too", () => {
-		for (const forced of [{ forcedAccountId: "a" }, { headerAccountId: "a" }])
-			expect(() => oneM(forced)).toThrow(
-				expect.objectContaining({
-					statusCode: 400,
-					code: "model_suffix_requires_claude_code",
-				}),
-			);
+	it("is refused on a direct send with an account header too", () => {
+		expect(() => oneM({ headerAccountId: "a" })).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "model_suffix_requires_claude_code",
+			}),
+		);
 	});
 
 	it("is a literal no other provider permits", () => {
@@ -502,11 +499,10 @@ describe("a [1m] id", () => {
 	});
 });
 
-it("disabled accounts cannot be forced by header, global override, pin, or maintenance", () => {
+it("disabled accounts cannot be forced by header, pin, or maintenance", () => {
 	const disabled = { ...c, disabled: true };
 	for (const restriction of [
 		{},
-		{ forcedAccountId: "c" },
 		{ headerAccountId: "c" },
 		{ pin: { accountId: "c", providers: null } },
 		{ maintenance: { accountId: "c", purpose: "keepalive" as const } },

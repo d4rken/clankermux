@@ -16,11 +16,7 @@ import {
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import {
-	type Account,
-	getSdkBridgeInnerMetaContext,
-	type RequestMeta,
-} from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -35,20 +31,16 @@ import { attachRequestId } from "./error-request-id";
 import { isFamilyWeeklyMemoExhausted } from "./family-weekly-memo";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
-	createPinnedTargetUnavailableResponse,
 	ERROR_MESSAGES,
-	getForcedAccount,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	isRefreshTokenLikelyExpired,
 	isTrustedSyntheticProbe,
 	type ProxyAttemptOutcome,
 	type ProxyContext,
-	proxyForcedAccount,
 	proxyWithAccount,
 	resolveFamilyWeeklyExclusion,
 	selectAccountsForRequest,
-	setForcedAccount,
 	validateProviderPath,
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
@@ -142,7 +134,7 @@ type GatedAttempt = {
 };
 
 /**
- * THE single chokepoint for every non-forced upstream attempt in this file.
+ * THE single chokepoint for every upstream attempt in this file.
  *
  * It owns the recovery-probe gate end to end: admission before the attempt, and
  * the lease for the WHOLE attempt (including `proxyWithAccount`'s internal
@@ -159,12 +151,8 @@ type GatedAttempt = {
  * ever taken, a success on those paths hit `completeRateLimitProbe`'s no-lease
  * no-op and could not clear the capacity-restored marker either.
  *
- * Deliberately NOT routed through here:
- *  - the global force-account override (`proxyForcedAccount`), an operator
- *    escape hatch that bypasses account selection entirely — so the "exactly one
- *    upstream probe" guarantee explicitly excludes it;
- *  - the local count_tokens synthesis attempt, which is a synthetic request that
- *    must not consume an account's single recovery probe.
+ * The local count_tokens synthesis attempt is deliberately not routed through
+ * here: it must not consume an account's single recovery probe.
  */
 async function attemptThroughProbeGate(
 	requestMeta: RequestMeta,
@@ -277,8 +265,7 @@ export async function handleProxy(
 	/**
 	 * Retract the announcement for a request that never reached
 	 * `forwardToClient` and so will never be summarized: an admission
-	 * rejection, a forced-account failure, a pinned-target refusal, a probe the
-	 * recorder filters out.
+	 * rejection, a pinned-target refusal, or a probe the recorder filters out.
 	 *
 	 * The `hasRequestStarted` guard is load-bearing. This runs when the Response
 	 * OBJECT is returned, which for a streaming response is long before its body
@@ -333,7 +320,6 @@ export async function handleProxy(
 			ctx,
 			apiKeyId,
 			apiKeyName,
-			isInternal,
 			burstHoldTimingOverride,
 		);
 		// A disconnect after an upstream send went out is recorded as a request
@@ -445,7 +431,6 @@ async function handleIngestedProxy(
 	ctx: ProxyContext,
 	apiKeyId: string | null | undefined,
 	apiKeyName: string | null | undefined,
-	isInternal: boolean,
 	burstHoldTimingOverride?: {
 		maxHoldMs?: number;
 		now?: () => number;
@@ -463,12 +448,6 @@ async function handleIngestedProxy(
 		canRearmIdleTimeout,
 	} = ingressContext;
 
-	// A bridge inner call's destinations were fixed when the outer request was
-	// routed, under whatever force applied then; force is not consulted again.
-	const forcedId =
-		isInternal || getSdkBridgeInnerMetaContext(requestMeta)
-			? null
-			: getForcedAccount();
 	// Tool results for a parked bridge turn go back to that turn, unrouted.
 	const continued = await continueParkedSdkBridgeTurn({
 		req,
@@ -482,104 +461,7 @@ async function handleIngestedProxy(
 		bumpIdleTimeout,
 	});
 	if (continued) return continued;
-	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null, forcedId);
-
-	// 4b. Global force-account override (Feature 3). When a forced account is
-	// set, EVERY non-internal client request goes straight to that account:
-	// account selection, ALL gates (provider-overload / usage-throttle /
-	// context-window), and ALL failover/retry are skipped entirely. The forced
-	// account's response — including errors (429/529/5xx) — is returned as-is.
-	// Internal auto-refresh/probe requests bypass force so other accounts keep
-	// their tokens/usage warm (Q1).
-	if (forcedId && !isInternal) {
-		const forcedAccount = await ctx.dbOps.getAccount(forcedId);
-		if (!forcedAccount) {
-			// Defensive: a forced account deleted mid-flight must not brick all
-			// traffic. Clear the force so subsequent requests route normally, but
-			// return an explicit 503 for THIS request rather than silently falling
-			// back — that would violate the absolute-force contract (R2).
-			//
-			// NOTE: this rarest case (forced account deleted between selection and
-			// dispatch) is intentionally left UNRECORDED. recordSyntheticErrorResponse
-			// is defined further below; relocating this early-return past it would
-			// require splitting the forced block (the success path returns above,
-			// before that definition) and reordering it past account selection / the
-			// gate logic — an ordering hazard not worth taking for a case that fires
-			// only when an operator deletes the forced account in the request window.
-			// The high-value forced-mode local errors (dead-token throw, outer catch)
-			// ARE recorded under the forced account via forwardToClient in
-			// proxyForcedAccount.
-			log.error(
-				`Forced account ${forcedId} not found — clearing force and returning 503`,
-			);
-			setForcedAccount(null);
-			return new Response(
-				JSON.stringify({
-					type: "error",
-					error: {
-						type: "forced_account_missing",
-						message: `The forced account (${forcedId}) no longer exists. Force has been cleared; retry the request.`,
-					},
-				}),
-				{
-					status: 503,
-					headers: { "Content-Type": "application/json" },
-				},
-			);
-		}
-
-		// The floor for non-Claude-Code clients overrides the global force: with
-		// the SDK bridge unavailable, such a request must NEVER reach an official
-		// Claude account, even under an operator force-route (ban risk). Fail
-		// closed. With the bridge available the forced account serves it through
-		// the bridge. Left UNRECORDED for the same ordering reason as the
-		// forced-missing case above (recordSyntheticErrorResponse isn't defined
-		// this early).
-		if (
-			requestMeta.officialAnthropicExcluded &&
-			isOfficialAnthropicProvider(forcedAccount.provider)
-		) {
-			log.warn(
-				`Force-account ${forcedAccount.name} is an official Anthropic account; refusing a request from a non-Claude-Code client: ${requestMeta.officialAnthropicExcluded}`,
-			);
-			return createPinnedTargetUnavailableResponse(
-				{
-					code: "anthropic_excluded_no_account",
-					message:
-						"This client reaches a Claude/Anthropic account only through the SDK bridge, which is unavailable; the globally forced account is a Claude account.",
-				},
-				retryAfterFromDeadlines([forcedAccount.rate_limited_until], Date.now()),
-			);
-		}
-
-		requestMeta.routing = {
-			strategy: "forced",
-			decision: "force_account_global",
-			selectedAccountId: forcedAccount.id,
-			candidatesCount: 1,
-			affinityScope: null,
-			affinityKey: null,
-			previousAccountId: null,
-			failoverReason: null,
-		};
-
-		log.info(
-			`Force-account override active: routing to ${forcedAccount.name} (${forcedAccount.provider}) — bypassing selection, gates, and failover`,
-		);
-
-		return await proxyForcedAccount(
-			req,
-			url,
-			forcedAccount,
-			requestMeta,
-			finalBodyBuffer,
-			ctx,
-			getAttemptTarget(requestMeta, forcedAccount).upstreamModel,
-			apiKeyId,
-			apiKeyName,
-			requestBodyContext,
-		);
-	}
+	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null);
 
 	if (getAliasRoutes(requestMeta)) {
 		return handleAliasProxy(

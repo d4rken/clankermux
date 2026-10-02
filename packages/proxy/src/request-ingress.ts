@@ -28,7 +28,6 @@ import { extractClaudeCliDeviceId } from "./claude-device-registry";
 import { computeContextAndToolStats } from "./context-composition";
 import {
 	createRequestMetadata,
-	getForcedAccount,
 	isTrustedSyntheticProbe,
 	type ProxyContext,
 	prepareRequestBody,
@@ -280,23 +279,7 @@ export async function ingestProxyRequest(
 	// auto-refresh probes lose their affinity above, so affinity.key is null →
 	// naturally excluded. Gated on the cache-warming feature (same switch the
 	// keepalive scheduler uses).
-	//
-	// SKIP entirely when a GLOBAL forced account is active (getForcedAccount() set,
-	// non-internal request — the exact condition that routes to proxyForcedAccount
-	// at §4b below). That path forwards the injected body upstream — paying the 2x
-	// 1h-write premium — but never calls cacheBodyStore.stageRequest(), so no warm
-	// slot is created and there is zero keepalive/bridging benefit to offset the
-	// premium. We don't even observe the session: the forced path can't bridge it,
-	// so promotion bookkeeping for it is pointless. The HEADER force-route
-	// (x-clankermux-account-id) is unaffected — it goes through proxyWithAccount,
-	// which DOES stage, so injection + staging still happen for it.
-	const globalForcedActive =
-		!isInternal && !sdkBridgeInner && getForcedAccount() !== null;
-	if (
-		ctx.config.getCacheWarmingEnabled() &&
-		affinity.key &&
-		!globalForcedActive
-	) {
+	if (ctx.config.getCacheWarmingEnabled() && affinity.key) {
 		if (
 			sessionPromotionTracker.observeAndShouldInject(
 				affinity.key,

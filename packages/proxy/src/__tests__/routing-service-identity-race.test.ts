@@ -118,7 +118,7 @@ it("names the stale-snapshot condition with its own error type", async () => {
 
 it("routes the request without an account whose identity changed mid-request", async () => {
 	const { established, justAdded, refreshMisses, ctx, meta } = setup();
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	const route = getResolvedRoute(meta);
 	expect(route.target(established)?.upstreamModel).toBe(MODEL);
 	expect(route.target(justAdded)).toBeNull();
@@ -141,7 +141,7 @@ it("leaves an account out of eligibility when its identity changes after routing
 	// Consistent at routing time, so the route admits both accounts.
 	rows.set(justAdded.id, permitted(justAdded));
 	setListing([established, justAdded]);
-	await initializeRequestRoute(meta, ctx, null, null);
+	await initializeRequestRoute(meta, ctx, null);
 	expect(getResolvedRoute(meta).target(justAdded)?.upstreamModel).toBe(MODEL);
 	// The identity write lands, and another request re-scopes the row, between
 	// the failover path's account read and its permission read.

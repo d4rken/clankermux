@@ -13,7 +13,6 @@ import {
 	AccountModelPermissionService,
 	modelPermissionScope,
 } from "../account-model-permissions";
-import { setForcedAccount } from "../handlers";
 import { selectAccountsForRequest } from "../handlers/account-selector";
 import { proxyWithAccount } from "../handlers/proxy-operations";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
@@ -31,7 +30,6 @@ const dbs: Database[] = [];
 const headroomAccounts: string[] = [];
 afterEach(() => {
 	globalThis.fetch = originalFetch;
-	setForcedAccount(null);
 	for (const id of headroomAccounts.splice(0)) usageCache.delete(id);
 	clearProviderOverloadCooldown();
 	for (const db of dbs.splice(0)) db.close();
@@ -135,10 +133,7 @@ function codexResponse(model?: string) {
 	);
 }
 describe("routing table through the real proxy", () => {
-	it.each([
-		false,
-		true,
-	])("answers OpenRouter token counts locally (forced=%s)", async (forced) => {
+	it("answers OpenRouter token counts locally", async () => {
 		const account = makeAccount({
 			id: "local-count",
 			provider: "openrouter",
@@ -165,7 +160,6 @@ describe("routing table through the real proxy", () => {
 			);
 		});
 		globalThis.fetch = mockFetch(fetchMock);
-		if (forced) setForcedAccount(account.id);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
 			headers: {
@@ -198,10 +192,7 @@ describe("routing table through the real proxy", () => {
 		});
 		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
 	});
-	it.each([
-		false,
-		true,
-	])("preserves upstream OpenRouter custom-endpoint counts (forced=%s)", async (forced) => {
+	it("preserves upstream OpenRouter custom-endpoint counts", async () => {
 		const account = makeAccount({
 			id: "custom-count",
 			provider: "openrouter",
@@ -232,7 +223,6 @@ describe("routing table through the real proxy", () => {
 			return Response.json({ input_tokens: 777 });
 		});
 		globalThis.fetch = mockFetch(fetchMock);
-		if (forced) setForcedAccount(account.id);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -398,7 +388,7 @@ describe("routing table through the real proxy", () => {
 			timestamp: Date.now(),
 			requestedModel: requested,
 		};
-		await initializeRequestRoute(meta, ctx, "test-key", null);
+		await initializeRequestRoute(meta, ctx, "test-key");
 		if (reason === "revoked")
 			await routing.setManualModels(account.id, scope, [], true);
 		else
@@ -566,7 +556,6 @@ describe("routing table through the real proxy", () => {
 		"provider pin",
 		"account pin",
 		"permitted peer",
-		"global force",
 	])("pools quota headers only over authorized destinations: %s", async (boundary) => {
 		const accounts = ["serving", "peer"].map((name) =>
 			makeAccount({
@@ -580,7 +569,6 @@ describe("routing table through the real proxy", () => {
 			}),
 		);
 		const [serving, peer] = accounts;
-		if (boundary === "global force") setForcedAccount(serving.id);
 		const { ctx, routing } = await setup(accounts, [
 			rule({
 				pool_kind: boundary === "rule" ? "accounts" : "inherit",
@@ -656,11 +644,6 @@ describe("routing table through the real proxy", () => {
 		expect(Number(response.headers.get("x-codex-primary-used-percent"))).toBe(
 			boundary === "permitted peer" ? 20 : 90,
 		);
-		if (boundary === "global force") {
-			expect(response.headers.get("x-codex-primary-reset-after-seconds")).toBe(
-				"777",
-			);
-		}
 	});
 	it("translates Claude Code Fable to Codex Astra and audits raw model separately", async () => {
 		const official = makeAccount({ id: "official", provider: "anthropic" }),
@@ -964,7 +947,7 @@ describe("routing table through the real proxy", () => {
 			requestedModel: "gpt-6-astra",
 			headers: req.headers,
 		};
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				Response.json(
@@ -1022,7 +1005,7 @@ describe("routing table through the real proxy", () => {
 			requestedModel: requested,
 			headers: req.headers,
 		};
-		await initializeRequestRoute(meta, ctx, "experiment", account.id);
+		await initializeRequestRoute(meta, ctx, "experiment");
 		await routing.setManualModels(
 			account.id,
 			modelPermissionScope(account),
@@ -1068,14 +1051,11 @@ describe("routing table through the real proxy", () => {
 			requestedModel: "gpt-6-astra",
 			headers,
 		};
-		await expect(
-			initializeRequestRoute(base, ctx, null, null),
-		).rejects.toThrow();
+		await expect(initializeRequestRoute(base, ctx, null)).rejects.toThrow();
 		await expect(
 			initializeRequestRoute(
 				{ ...base, id: "trusted-probe", internal: true },
 				ctx,
-				null,
 				null,
 			),
 		).resolves.toBeUndefined();
@@ -1088,7 +1068,6 @@ describe("routing table through the real proxy", () => {
 					headers: new Headers({ "x-clankermux-keepalive": "true" }),
 				},
 				ctx,
-				null,
 				null,
 			),
 		).rejects.toThrow("name its destination");
@@ -1112,7 +1091,7 @@ describe("routing table through the real proxy", () => {
 			requestedModel: requested,
 			headers: new Headers(),
 		};
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		globalThis.fetch = mockFetch(
 			mock(async () => Response.json(payload, { status: 403 })),
 		);
@@ -1174,7 +1153,7 @@ describe("routing table through the real proxy", () => {
 			requestedModel: requested,
 			headers: new Headers(),
 		};
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		globalThis.fetch = mockFetch(
 			mock(
 				async () =>
@@ -1209,8 +1188,7 @@ describe("routing table through the real proxy", () => {
  * A definitive model rejection that arrives as an HTTP ERROR envelope is
  * account-scoped evidence, so it fails over. Every boundary that decision must
  * not cross gets a test here: HTTP 200 stream envelopes (too late to restart),
- * OpenRouter routing restrictions (provider policy, not the model) and
- * forced-account requests (which name their destination).
+ * and OpenRouter routing restrictions (provider policy, not the model).
  */
 describe("definitive model rejection failover", () => {
 	const scopeOf = modelPermissionScope;
@@ -1392,7 +1370,7 @@ describe("definitive model rejection failover", () => {
 			requestedModel: requested,
 			headers: new Headers(),
 		};
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		expect((await eligibleRouteAccounts(meta, ctx)).map((a) => a.id)).toEqual([
 			"denied-local",
 			"sibling-local",
@@ -1503,7 +1481,7 @@ describe("definitive model rejection failover", () => {
 			requestedModel: requested,
 			headers: new Headers(),
 		};
-		await initializeRequestRoute(meta, ctx, null, null);
+		await initializeRequestRoute(meta, ctx, null);
 		const body = new TextEncoder().encode(
 			JSON.stringify({
 				model: requested,
@@ -1582,23 +1560,6 @@ describe("definitive model rejection failover", () => {
 			expect(
 				await routing.isModelSuppressed(a.id, scopeOf(a), model, Date.now()),
 			).toBe(false);
-	});
-
-	it("forwards the rejection on a forced-account request instead of failing over", async () => {
-		const { accounts, ctx } = await codexPool(["forced-403", "spare-403"]);
-		setForcedAccount(accounts[0].id);
-		const fetcher = mock(async () => accessDenied());
-		globalThis.fetch = mockFetch(fetcher);
-		const req = request();
-		const response = await handleProxy(
-			req,
-			new URL(req.url),
-			ctx,
-			"experiment",
-		);
-		expect(response.status).toBe(403);
-		expect((await response.json()).error.code).toBe("model_access_denied");
-		expect(fetcher).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps a mid-stream HTTP200 rejection to audit and suppression", async () => {
@@ -1724,147 +1685,143 @@ describe("definitive model rejection failover", () => {
 
 describe("Chat ingress through real route and provider conversion", () => {
 	for (const provider of ["codex", "openrouter"])
-		for (const forced of [false, true])
-			for (const stream of [false, true])
-				it(`${provider}, forced=${forced}, stream=${stream}: one authorized send, truthful model fallback and one usage finalization`, async () => {
-					const account = makeAccount({
-						provider,
-						id: `chat-${provider}-${forced}`,
-						access_token: provider === "codex" ? "test" : null,
-						refresh_token: "",
-						api_key: provider === "openrouter" ? "test" : null,
-						expires_at: Date.now() + 3600000,
-					});
-					const official = makeAccount({
-						provider: "anthropic",
-						id: `denied-${provider}-${forced}`,
-					});
-					const { ctx, routing } = await setup(
-						[official, account],
-						[
-							rule({
-								pool_provider: provider,
-								target_kind: "literal",
-								target_model: "gpt-6-astra",
-							}),
-						],
-					);
-					await routing.setManualModels(
-						account.id,
-						modelPermissionScope(account),
-						["gpt-6-astra"],
-					);
-					if (forced) setForcedAccount(account.id);
-					const sent: Request[] = [];
-					globalThis.fetch = mockFetch(
-						mock(async (input: Request | string | URL) => {
-							const outgoing =
-								input instanceof Request ? input : new Request(input);
-							if (
-								!outgoing.url.includes(
-									provider === "codex" ? "chatgpt.com" : "openrouter.ai",
-								)
-							)
-								throw new Error("Denied destination reached");
-							sent.push(outgoing.clone());
-							if (provider === "codex") return codexResponse();
-							const events = [
-								{
-									type: "message_start",
-									message: {
-										id: "msg",
-										type: "message",
-										role: "assistant",
-										content: [],
-										usage: { input_tokens: 3, output_tokens: 0 },
-									},
-								},
-								{
-									type: "content_block_start",
-									index: 0,
-									content_block: { type: "text", text: "" },
-								},
-								{
-									type: "content_block_delta",
-									index: 0,
-									delta: { type: "text_delta", text: "hello" },
-								},
-								{ type: "content_block_stop", index: 0 },
-								{
-									type: "message_delta",
-									delta: { stop_reason: "end_turn" },
-									usage: { output_tokens: 2 },
-								},
-								{ type: "message_stop" },
-							];
-							return new Response(
-								events
-									.map(
-										(e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`,
-									)
-									.join(""),
-								{ headers: { "content-type": "text/event-stream" } },
-							);
-						}),
-					);
-					const req = new Request(
-						"http://proxy/wire/openai/v1/chat/completions",
-						{
-							method: "POST",
-							headers: { "content-type": "application/json" },
-							body: JSON.stringify({
-								model: requested,
-								stream,
-								messages: [{ role: "user", content: "hello" }],
-							}),
-						},
-					);
-					const response = await handleChatCompletionsRequest(
-						req,
-						new URL(req.url),
-						handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
-						ctx,
-						"chat-key",
-						undefined,
-						7777,
-					);
-					if (response.status !== 200) throw new Error(await response.text());
-					expect(response.status).toBe(200);
-					if (stream) {
-						const result = await response.text();
-						expect(result).toContain("[DONE]");
-						expect(result).toContain('"content":"hello"');
-						expect(result).toContain('"model":"gpt-6-astra"');
-					} else {
-						const result = await response.json();
-						expect(result.model).toBe("gpt-6-astra");
-						expect(result.choices[0].message.content).toBe("hello");
-					}
-					expect(sent).toHaveLength(1);
-					const outgoing = await sent[0].json();
-					expect(outgoing.model).toBe("gpt-6-astra");
-					expect(outgoing.stream).toBe(true);
-					if (provider === "openrouter") expect(outgoing.max_tokens).toBe(7777);
-					else expect(outgoing.max_tokens).toBeUndefined();
-					await new Promise((r) => setTimeout(r, 10));
-					const attempts = dbs
-						.at(-1)
-						?.query("SELECT * FROM routing_attempts")
-						.all();
-					if (!attempts) throw new Error("no database was opened");
-					expect(attempts).toHaveLength(1);
-					expect(attempts[0]).toMatchObject({
-						kind: "upstream_send",
-						requested_model: requested,
-						resolved_model: "gpt-6-astra",
-						outgoing_model: "gpt-6-astra",
-						reported_model: null,
-						status: 200,
-						error: null,
-					});
-					expect(ctx.recorder.finishTransport).toHaveBeenCalledTimes(1);
-					expect(ctx.recorder.attachUsageSummary.mock.calls.length).toBe(1);
+		for (const stream of [false, true])
+			it(`${provider}, stream=${stream}: one authorized send, truthful model fallback and one usage finalization`, async () => {
+				const account = makeAccount({
+					provider,
+					id: `chat-${provider}`,
+					access_token: provider === "codex" ? "test" : null,
+					refresh_token: "",
+					api_key: provider === "openrouter" ? "test" : null,
+					expires_at: Date.now() + 3600000,
 				});
+				const official = makeAccount({
+					provider: "anthropic",
+					id: `denied-${provider}`,
+				});
+				const { ctx, routing } = await setup(
+					[official, account],
+					[
+						rule({
+							pool_provider: provider,
+							target_kind: "literal",
+							target_model: "gpt-6-astra",
+						}),
+					],
+				);
+				await routing.setManualModels(
+					account.id,
+					modelPermissionScope(account),
+					["gpt-6-astra"],
+				);
+				const sent: Request[] = [];
+				globalThis.fetch = mockFetch(
+					mock(async (input: Request | string | URL) => {
+						const outgoing =
+							input instanceof Request ? input : new Request(input);
+						if (
+							!outgoing.url.includes(
+								provider === "codex" ? "chatgpt.com" : "openrouter.ai",
+							)
+						)
+							throw new Error("Denied destination reached");
+						sent.push(outgoing.clone());
+						if (provider === "codex") return codexResponse();
+						const events = [
+							{
+								type: "message_start",
+								message: {
+									id: "msg",
+									type: "message",
+									role: "assistant",
+									content: [],
+									usage: { input_tokens: 3, output_tokens: 0 },
+								},
+							},
+							{
+								type: "content_block_start",
+								index: 0,
+								content_block: { type: "text", text: "" },
+							},
+							{
+								type: "content_block_delta",
+								index: 0,
+								delta: { type: "text_delta", text: "hello" },
+							},
+							{ type: "content_block_stop", index: 0 },
+							{
+								type: "message_delta",
+								delta: { stop_reason: "end_turn" },
+								usage: { output_tokens: 2 },
+							},
+							{ type: "message_stop" },
+						];
+						return new Response(
+							events
+								.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+								.join(""),
+							{ headers: { "content-type": "text/event-stream" } },
+						);
+					}),
+				);
+				const req = new Request(
+					"http://proxy/wire/openai/v1/chat/completions",
+					{
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							model: requested,
+							stream,
+							messages: [{ role: "user", content: "hello" }],
+						}),
+					},
+				);
+				const response = await handleChatCompletionsRequest(
+					req,
+					new URL(req.url),
+					handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+					ctx,
+					"chat-key",
+					undefined,
+					7777,
+				);
+				if (response.status !== 200) throw new Error(await response.text());
+				expect(response.status).toBe(200);
+				if (stream) {
+					const result = await response.text();
+					expect(result).toContain("[DONE]");
+					expect(result).toContain('"content":"hello"');
+					expect(result).toContain('"model":"gpt-6-astra"');
+				} else {
+					const result = await response.json();
+					expect(result.model).toBe("gpt-6-astra");
+					expect(result.choices[0].message.content).toBe("hello");
+				}
+				expect(sent).toHaveLength(1);
+				const outgoing = await sent[0].json();
+				expect(outgoing.model).toBe("gpt-6-astra");
+				expect(outgoing.stream).toBe(true);
+				if (provider === "openrouter") expect(outgoing.max_tokens).toBe(7777);
+				else expect(outgoing.max_tokens).toBeUndefined();
+				await new Promise((r) => setTimeout(r, 10));
+				const attempts = dbs
+					.at(-1)
+					?.query("SELECT * FROM routing_attempts")
+					.all();
+				if (!attempts) throw new Error("no database was opened");
+				expect(attempts).toHaveLength(1);
+				expect(attempts[0]).toMatchObject({
+					kind: "upstream_send",
+					requested_model: requested,
+					resolved_model: "gpt-6-astra",
+					outgoing_model: "gpt-6-astra",
+					reported_model: null,
+					status: 200,
+					error: null,
+				});
+				expect(ctx.recorder.finishTransport).toHaveBeenCalledTimes(1);
+				expect(ctx.recorder.attachUsageSummary.mock.calls.length).toBe(1);
+			});
 	it("rejects explicit Codex output caps locally with 400 and a single local audit", async () => {
 		const account = makeAccount({
 			provider: "codex",

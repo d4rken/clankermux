@@ -1,7 +1,7 @@
 /**
  * Bridge inner calls: Claude Code's own model calls, dispatched back into the
  * proxy with an in-process SdkBridgeInnerContext. Their destinations are the
- * frozen plan's, whatever the key's pin, the routing rules, a global force or
+ * frozen plan's, whatever the key's pin, the routing rules or
  * an account header would say, and they are ordinary direct requests otherwise.
  */
 import { afterEach, describe, expect, it, mock } from "bun:test";
@@ -13,7 +13,6 @@ import type {
 } from "@clankermux/types";
 import { setSdkBridgeInnerRequestContext } from "@clankermux/types";
 import { dispatchProxyRequest } from "../dispatch";
-import { setForcedAccount } from "../handlers";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { routingAttempts } from "./fixtures/routing-harness";
 import {
@@ -100,18 +99,16 @@ let harness: BridgeHarness | null = null;
 afterEach(() => {
 	harness?.restore();
 	harness = null;
-	setForcedAccount(null);
 	clearProviderOverloadCooldown();
 });
 
 describe("SDK bridge inner calls", () => {
-	it("route to the plan's candidates, preferring the outer account, and ignore pin, rules, force and the account header", async () => {
+	it("route to the plan's candidates, preferring the outer account, and ignore pin, rules and the account header", async () => {
 		harness = await makeBridgeHarness([a, b, c], {
 			bridge: makeFakeBridge(),
 			pin: { pinnedAccountId: c.id, pinnedProviders: null },
 		});
 		harness.ctx.dbOps.routing.listRules = mock(async () => [cRule]);
-		setForcedAccount(c.id);
 
 		const res = await dispatchProxyRequest(
 			innerRequest(innerContext(), {}, { "x-clankermux-account-id": c.id }),

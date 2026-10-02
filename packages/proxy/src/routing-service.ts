@@ -240,7 +240,6 @@ export async function initializeRequestRoute(
 	meta: RequestMeta,
 	ctx: ProxyContext,
 	apiKeyId: string | null,
-	forcedAccountId: string | null,
 ): Promise<void> {
 	const model = meta.requestedModel;
 	if (!model)
@@ -297,7 +296,6 @@ export async function initializeRequestRoute(
 			: null;
 	const restrictions = {
 		pin: meta.pin ?? null,
-		forcedAccountId,
 		headerAccountId,
 		officialAnthropicExclusion: meta.officialAnthropicExcluded,
 		bridgesOfficialAnthropic:
@@ -549,8 +547,8 @@ function sdkBridgeExclusionReason(ctx: ProxyContext): string | null {
 
 /**
  * The route of a bridge inner call: exactly the frozen plan's candidates for
- * the model Claude Code asked for. The key's pin, routing rules, forced
- * accounts and the account header were all applied when the outer request
+ * the model Claude Code asked for. The key's pin, routing rules and the
+ * account header were all applied when the outer request
  * built the plan, and none of them is consulted again here.
  *
  * The literal rule mirrors an alias stage's: it pools the planned accounts and
@@ -578,7 +576,6 @@ async function initializeSdkBridgeInnerRoute(
 	const priorExclusions = new Map<string, string>();
 	const restrictions: DestinationRestrictions = {
 		pin: null,
-		forcedAccountId: null,
 		headerAccountId: null,
 		officialAnthropicExclusion: null,
 	};

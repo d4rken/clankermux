@@ -97,7 +97,7 @@ function setup({
 }
 async function route(model: string, ctx: ProxyContext) {
 	const meta = { requestedModel: model, headers: new Headers() } as RequestMeta;
-	await initializeRequestRoute(meta, ctx, "key-1", null);
+	await initializeRequestRoute(meta, ctx, "key-1");
 	return meta;
 }
 const upstream = (meta: RequestMeta, a: Account) =>

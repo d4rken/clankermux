@@ -19,7 +19,6 @@ export {
 	type TransientlyCooledFamilySibling,
 	type TransientSiblingCooldown,
 } from "./family-weekly-gate";
-export { getForcedAccount, setForcedAccount } from "./forced-account";
 export {
 	clearAllPendingRotationsForTests,
 	clearPendingRotation,
@@ -47,7 +46,6 @@ export {
 	isTrustedSyntheticProbe,
 	type ProxyAttemptOptions,
 	type ProxyAttemptOutcome,
-	proxyForcedAccount,
 	proxyWithAccount,
 } from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
