@@ -148,6 +148,15 @@ usable. Learning reasons are `no_usage`, `unstarted` and `short_history`.
 automatic readiness promise. Stale, missing and reset-elapsed evidence cannot
 produce a reassuring forecast. See [idle session with weekly evidence](examples/accounts.partial-learning.json).
 
+Paused accounts remain in the account inventory with their observed quota,
+observation times and resets intact. Every window forecast is withheld while
+paused: `outcome: unknown`, `quality: unavailable`, `reason: other`, and null
+`exhaustsAt` and `reassessAt`. Read `availability` for the pause reason. Even a
+measured 100% window has an unknown forecast while paused; its utilization still
+reports the spent quota. After resume, forecasts are recomputed from usable
+evidence on the next snapshot refresh. Paused accounts do not contribute to
+pooled runway or weekly forecasts. Historical statistics are unchanged.
+
 ## Recorded request outcomes
 
 `/stops` reports explicit proxy refusals in `blockedRequests` and its `causes`

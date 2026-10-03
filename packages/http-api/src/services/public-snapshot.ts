@@ -413,13 +413,14 @@ function parseResetMs(resetsAt: string | null | undefined): number | null {
 	return Number.isFinite(ms) ? ms : null;
 }
 
-/** Attach estimates only to the exact, fresh observation displayed to clients. */
+/** Attach estimates only to active accounts' exact, fresh displayed observations. */
 export function attachWindowForecasts(
 	windows: PublicWindowSnapshot[],
 	source: RunwayAccountSource,
 	now: number,
 ): void {
 	for (const window of windows) window.forecast = null;
+	if (source.paused) return;
 	const observedAt = source.usageObservedAtMs;
 	if (observedAt == null || !Number.isFinite(observedAt)) return;
 	const inputs = toRunwayAccountInput(source).windows;
@@ -1083,7 +1084,7 @@ export function createPublicSnapshotReader(
 				// window so a future source that resolves them separately can say so
 				// without a shape change.
 				entry?.observedAtMs ?? null,
-				predictions.get(row.id) ?? null,
+				row.paused === 1 ? null : (predictions.get(row.id) ?? null),
 				now,
 			);
 			if (fresh && measurementState === "fresh") {
@@ -1093,6 +1094,7 @@ export function createPublicSnapshotReader(
 						id: row.id,
 						name: row.name,
 						provider,
+						paused: row.paused === 1,
 						usageData: fresh,
 						usageObservedAtMs: entry?.observedAtMs ?? null,
 						prediction: predictions.get(row.id) ?? null,

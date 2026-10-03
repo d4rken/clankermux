@@ -1617,6 +1617,117 @@ describe("earliestPoolRecoveryMs", () => {
 });
 
 describe("per-window forecasts", () => {
+	it("suppresses paused forecasts without losing observations, and recomputes on resume", async () => {
+		insertAccount({ id: "active", name: "active" });
+		insertAccount({
+			id: "paused",
+			name: "paused",
+			paused: 1,
+			pause_reason: "manual",
+		});
+		const now = Date.now();
+		const shortReset = now + 3_600_000;
+		const weeklyReset = now + 5 * 86_400_000;
+		const usage = anthropicUsage(60, 60, {
+			five_hour: {
+				utilization: 60,
+				resets_at: new Date(shortReset).toISOString(),
+			},
+			seven_day: {
+				utilization: 60,
+				resets_at: new Date(weeklyReset).toISOString(),
+			},
+			seven_day_oauth_apps: {
+				utilization: 20,
+				resets_at: new Date(weeklyReset).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "7d",
+					percent: 60,
+					resets_at: new Date(weeklyReset).toISOString(),
+					scope: { model: { id: "fable", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		});
+		for (const id of ["active", "paused"]) usageCache.set(id, usage);
+		const dbOps = fakeDbOps();
+		dbOps.getRecentUsageSnapshotsForAccounts = async () =>
+			["active", "paused"].flatMap((accountId) =>
+				Array.from({ length: 5 }, (_, i) => ({
+					accountId,
+					provider: "anthropic",
+					observedAt: now - (5 - i) * 30 * 60_000,
+					planTier: null,
+					rateLimitTier: null,
+					sampledAt: now - (5 - i) * 30 * 60_000,
+					fiveHourPct: 60 - (5 - i) * 7.5,
+					fiveHourReset: shortReset,
+					sevenDayPct: 60,
+					sevenDayReset: weeklyReset,
+				})),
+			);
+		const reader = createPublicSnapshotReader(dbOps, fakeConfig, fakeStrategy);
+		const snapshot = await reader(now);
+		const active = snapshot.accounts[0];
+		const paused = snapshot.accounts[1];
+		expect(snapshot.accounts.map((a) => a.id)).toEqual(["active", "paused"]);
+		expect(snapshot.pool.paused).toBe(1);
+		expect(paused?.paused).toBe(true);
+		expect(paused?.measurementState).toBe("fresh");
+		expect(paused?.windows).toHaveLength(4);
+		expect(active?.windows[0]?.prediction).not.toBeNull();
+		for (const kind of ["five_hour", "seven_day", "weekly_scoped"])
+			expect(
+				active?.windows.find((w) => w.kind === kind)?.forecast,
+			).toMatchObject({
+				state: "projected",
+				exhaustsAtMs: expect.any(Number),
+			});
+		expect(
+			paused?.windows.every(
+				(w) => w.forecast === null && w.prediction === null,
+			),
+		).toBe(true);
+		const observations = (windows: PublicWindowSnapshot[] = []) =>
+			windows.map(({ forecast, prediction, observedAtMs, ...w }) => w);
+		expect(observations(paused?.windows)).toEqual(
+			observations(active?.windows),
+		);
+		expect(
+			paused?.windows.every((w) => w.observedAtMs === paused.usageObservedAtMs),
+		).toBe(true);
+		const dto = toPublicAccountsDto(snapshot);
+		expect(dto.accounts[1]?.availability.state).toBe("paused");
+		for (const w of dto.accounts[1]?.windows ?? [])
+			expect(w.forecast).toEqual({
+				outcome: "unknown",
+				quality: "unavailable",
+				reason: "other",
+				exhaustsAt: null,
+				reassessAt: null,
+			});
+
+		db.run("UPDATE accounts SET paused = 0, pause_reason = NULL WHERE id = ?", [
+			"paused",
+		]);
+		const resumed = (await reader(now)).accounts[1];
+		expect(resumed?.paused).toBe(false);
+		expect(observations(resumed?.windows)).toEqual(
+			observations(paused?.windows),
+		);
+		expect(resumed?.windows[0]?.prediction).not.toBeNull();
+		for (const kind of ["five_hour", "seven_day", "weekly_scoped"])
+			expect(
+				resumed?.windows.find((w) => w.kind === kind)?.forecast,
+			).toMatchObject({
+				state: "projected",
+				exhaustsAtMs: expect.any(Number),
+			});
+	});
+
 	it("keeps weekly lifetime evidence when the five-hour window is idle", async () => {
 		insertAccount();
 		const now = Date.now();
@@ -1689,6 +1800,16 @@ describe("per-window forecasts", () => {
 		provider: "anthropic",
 		usageData: anthropicUsage(0, 60),
 		usageObservedAtMs: NOW,
+	});
+
+	it("clears existing window forecasts when their source is paused", () => {
+		const windows = [weeklyWindow()];
+		attachWindowForecasts(windows, source(), NOW);
+		expect(windows[0]?.forecast?.state).toBe("projected");
+		attachWindowForecasts(windows, { ...source(), paused: true }, NOW);
+		expect(windows[0]?.forecast).toBeNull();
+		attachWindowForecasts(windows, { ...source(), paused: false }, NOW);
+		expect(windows[0]?.forecast?.state).toBe("projected");
 	});
 
 	it.each([
