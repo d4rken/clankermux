@@ -147,6 +147,58 @@ describe("replacement public contract", () => {
 			reason === "short-history" ? new Date(NOW + 3600000).toISOString() : null,
 		);
 	});
+	it.each([
+		window(),
+		window({ utilizationPct: 100 }),
+		window({
+			forecast: {
+				state: "projected",
+				exhaustsAtMs: null,
+				lowConfidence: true,
+			},
+		}),
+		window({
+			forecast: {
+				state: "learning",
+				reason: "short-history",
+				readyAtMs: NOW + 3600000,
+			},
+		}),
+		window({ resetsAtMs: NOW }),
+	])("withholds all forecast advice for a paused account: %j", (w) => {
+		const a = account({ paused: true, pauseReason: "manual", windows: [w] });
+		const dto = toPublicAccountsDto(snapshot(a));
+		const detail = dto.accounts[0];
+		expect(detail?.availability).toEqual({
+			state: "paused",
+			reason: "manual",
+			availableAt: null,
+		});
+		expect(detail?.measurementState).toBe("fresh");
+		expect(detail?.usageObservedAt).toBe(new Date(NOW).toISOString());
+		expect(detail?.windows[0]).toEqual({
+			kind: "seven_day",
+			scopeId: w.scopeId,
+			label: w.label,
+			utilizationPct: w.utilizationPct,
+			observedAt: new Date(NOW).toISOString(),
+			resetsAt: new Date(w.resetsAtMs as number).toISOString(),
+			forecast: {
+				outcome: "unknown",
+				quality: "unavailable",
+				reason: "other",
+				exhaustsAt: null,
+				reassessAt: null,
+			},
+		});
+		assertPublicSchema("accounts", dto);
+		// Serialization must not destroy evidence needed after resuming.
+		expect(w.forecast).not.toBeNull();
+		expect(
+			toPublicAccountsDto(snapshot({ ...a, paused: false })).accounts[0]
+				?.windows[0]?.forecast,
+		).toEqual(toPublicWindowForecastDto(w, NOW));
+	});
 	it("marks stale window forecasts unavailable", () => {
 		expect(
 			toPublicAccountsDto(snapshot(account({ measurementState: "stale" })))

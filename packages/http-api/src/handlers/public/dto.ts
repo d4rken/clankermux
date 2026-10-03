@@ -386,9 +386,19 @@ function toPublicWindowDto(
 	window: PublicWindowSnapshot,
 	now: number,
 	stale: boolean,
+	paused: boolean,
 ): PublicWindowDto {
-	const forecast = toPublicWindowForecastDto(window, now);
-	if (stale) {
+	// A pause has no scheduled end, so neither exhaustion nor reassessment is actionable.
+	const forecast: PublicWindowForecastDto = paused
+		? {
+				outcome: "unknown",
+				quality: "unavailable",
+				reason: "other",
+				exhaustsAt: null,
+				reassessAt: null,
+			}
+		: toPublicWindowForecastDto(window, now);
+	if (stale && !paused) {
 		forecast.outcome = "unknown";
 		forecast.quality = "unavailable";
 		forecast.reason = "stale";
@@ -487,7 +497,12 @@ export function toPublicAccountDto(
 		measurementState: toPublicMeasurementState(account.measurementState),
 		usageObservedAt: instant(account.usageObservedAtMs),
 		windows: account.windows.map((w) =>
-			toPublicWindowDto(w, now, account.measurementState === "stale"),
+			toPublicWindowDto(
+				w,
+				now,
+				account.measurementState === "stale",
+				account.paused,
+			),
 		),
 	};
 }
