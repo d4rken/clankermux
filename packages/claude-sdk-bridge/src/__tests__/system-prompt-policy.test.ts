@@ -301,6 +301,22 @@ describe("pi 1.0 head strip", () => {
 			expectedAppend(loadPiPromptFixture("0.87", "stock-all")) as string,
 		);
 	});
+
+	it("strips a head whose tools are all hidden", () => {
+		const f = loadPiPromptFixture("1.0", "stock-all-tools-hidden");
+		expect(f.system).toContain("<tools>\n(none)\n\nIn addition");
+		const append = appendOf(decide(f.system, "1.0"));
+		expect(append).toBe(expectedAppend(f));
+		expect(append).not.toContain("<tools>");
+	});
+
+	it("forwards the tool-less skills hint of a hidden reader", () => {
+		const f = loadPiPromptFixture("1.0", "stock-skills-hidden-reader");
+		const append = appendOf(decide(f.system, "1.0")) ?? "";
+		expect(append).toStartWith(
+			"<skills>\nThe following skills provide specialized instructions for specific tasks.\nLoad a skill's file when the task matches its description.\n",
+		);
+	});
 });
 
 describe("pi 0.87 malformed heads", () => {

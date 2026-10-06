@@ -226,6 +226,10 @@ const TOOL_SNIPPETS = {
 };
 const BASE = { cwd: CWD, toolSnippets: TOOL_SNIPPETS };
 const STOCK_PREAMBLE = prompt.buildSystemPromptSections(BASE).preamble ?? "";
+/** Releases before `hiddenTools` ignore it, which would turn its cases into mislabelled copies of `stock`. */
+const HIDES_TOOLS =
+	prompt.buildSystemPromptSections({ ...BASE, hiddenTools: ["read"] }).tools !==
+	prompt.buildSystemPromptSections(BASE).tools;
 const AGENTS_MD = {
 	path: `${CWD}/AGENTS.md`,
 	content:
@@ -338,7 +342,7 @@ function refused(
 	return { outcome: "refused", code, reason, section };
 }
 
-const CASES: Case[] = [
+const ALL_CASES: Case[] = [
 	{
 		name: "stock",
 		description:
@@ -377,6 +381,37 @@ const CASES: Case[] = [
 			toolGuidelines: { bash: ["Prefer rg over grep"] },
 			promptGuidelines: ["Keep answers short"],
 		},
+		expect: forwarded,
+	},
+	{
+		name: "stock-hidden-tools",
+		description:
+			"A tool hidden by the loadout: left out of the tools list and of the rules, with its guidelines.",
+		input: {
+			...BASE,
+			hiddenTools: ["bash"],
+			contextFiles: [AGENTS_MD],
+			skills: SKILLS,
+			toolGuidelines: { bash: ["Prefer rg over grep"] },
+		},
+		expect: forwarded,
+	},
+	{
+		name: "stock-all-tools-hidden",
+		description:
+			"Every selected tool hidden: the tools section renders (none) before its closing line.",
+		input: {
+			...BASE,
+			hiddenTools: ["read", "bash", "edit", "write"],
+			contextFiles: [AGENTS_MD],
+		},
+		expect: forwarded,
+	},
+	{
+		name: "stock-skills-hidden-reader",
+		description:
+			"Both file readers hidden: skills stay, with a hint that names no tool.",
+		input: { ...BASE, hiddenTools: ["read", "bash"], skills: SKILLS },
 		expect: forwarded,
 	},
 	{
@@ -672,6 +707,9 @@ const CASES: Case[] = [
 		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
 	},
 ];
+const CASES = ALL_CASES.filter(
+	(c) => HIDES_TOOLS || c.input.hiddenTools === undefined,
+);
 
 const portable = (value: string): string =>
 	value.replaceAll(agentDir, DOCS_ROOT);

@@ -1,20 +1,20 @@
 {
 	"layout": "1.0",
-	"piCodingAgentVersion": "1.0.0",
-	"piAiVersion": "1.0.0",
-	"packageSha256": "0222223ac244c08c89140448b486de704d84a469b244b6444c94a242fe2de9db",
+	"piCodingAgentVersion": "1.0.4",
+	"piAiVersion": "1.0.4",
+	"packageSha256": "74424271d91cfc8be2e429ee731471893ff6d1cf095c4ec1b2d23955b147436e",
 	"files": {
-		"pi-coding-agent/package.json": "81ac04bbcbc8d80bdb28bcb88cabe8345ffabc6b4c9389fd74c85fab76a0aac6",
-		"pi-coding-agent/dist/core/system-prompt.js": "83aa42fae07830d5a73431935af3390ec397d8333269d75cfe49c1afbc55369c",
-		"pi-coding-agent/dist/core/skills.js": "3b7cc3997c630553eb88931de978e0db623ce51fbf7356e0ab922183885e208c",
-		"pi-ai/package.json": "62c8159c939f1f9fae53a9b003e7bd9136979bcceeca61bd1f2cf41082763736",
+		"pi-coding-agent/package.json": "248decde30021109984def7ddc8f7bf4caf21ef04910a1303ab19604206c1bd5",
+		"pi-coding-agent/dist/core/system-prompt.js": "ab02924fa078eef81addcf39bc0e43d3663f06d627cb42ead403662a004a9e5c",
+		"pi-coding-agent/dist/core/skills.js": "0e20ec500ed9783d5b01b5399e6600134fc3fdd10e6dc46c9113bc01565c9aa5",
+		"pi-ai/package.json": "c4e921309a8d3a91ffce9bef0bd151463ad31f0f151a8534e39ae3528cc27834",
 		"pi-ai/dist/utils/text.js": "95037d5b787075ffb951cdeaf3b93aeb89735d10b31b82e19d2921f505ac2b04",
-		"pi-ai/dist/utils/transcript.js": "cd63514661b4036c3bcdda11a108f6be853f790a01216bf30fa80121e4fd320f"
+		"pi-ai/dist/utils/transcript.js": "4c772c6691be0c5b4c308a09e3eeaa4d965b59e39652442b3aef0600ffb5fccb"
 	},
 	"extensionFiles": {
 		"pi-subagents/src/runs/shared/child-launch.ts": "cd900f55da14ee944283cfa9dd10f9125d3c52c913c1b7114fdea89e7a5cfe43",
 		"packages/claude-context/core.mjs": "3802b8a12656fa2af7820f5b48e09390ea37d301dc67a841c64ce73a64540bbf",
-		"packages/claude-context/install.mjs": "096651326f15fcad7ae3c2b31b3a037cacf7ad48c3ca6d47addfdc2821dfa3e6",
+		"packages/claude-context/install.mjs": "dd90de4cf616e7c88a9449a75a65e03642899bbca676876c7e505ba7af41134f",
 		"pi-subagents/src/agents/advertised-agent-prompt.ts": "7c6ad623f39f42d843b0094ff25589e2a13c42c7d9489120567e31fce8627fd6",
 		"pi-subagents/src/runs/shared/subagent-prompt-runtime.ts": "075d2d9c1fbce98b13aefb2c396c1e61f71ab4d31a48632fb2e7253835054397",
 		"pi-subagents/src/extension/herdr-pi-bridge.ts": "4c884607c523225797a6e8ea51b58b31b74d7953a5767498de8d2a92cc62fcb4"
@@ -27,6 +27,9 @@
 		"stock-project-context",
 		"stock-skills",
 		"stock-all",
+		"stock-hidden-tools",
+		"stock-all-tools-hidden",
+		"stock-skills-hidden-reader",
 		"stock-extension-section",
 		"context-verbatim",
 		"context-closes-tail-sections",
