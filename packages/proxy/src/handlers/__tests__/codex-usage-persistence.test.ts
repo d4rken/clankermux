@@ -18,11 +18,18 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ensureSchema } from "@clankermux/database";
-import { type RateLimitInfo, usageCache } from "@clankermux/providers";
+import {
+	isCodexOnCredits,
+	parseCodexUsageStatus,
+	type RateLimitInfo,
+	type UsageData,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import {
 	type ApplyCodexObservationOptions,
 	applyCodexObservation,
+	applyCodexUsageStatus,
 	clearCodexUsagePersistMemo,
 } from "../codex-observation";
 import type { ProxyContext } from "../proxy-types";
@@ -319,6 +326,180 @@ describe("Codex usage snapshot persistence", () => {
 		// …and the previously-learned credits survived.
 		expect(after.codexCredits?.hasCredits).toBe(true);
 		expect(after.codexCredits?.balance).toBe(7.25);
+	});
+});
+
+describe("Codex credit weekly freshness", () => {
+	function seedCredits(
+		id: string,
+		ctx: ReturnType<typeof makeDbCtx>["ctx"],
+		weeklyUsedPct = 100,
+	) {
+		seedAccountRow(db, id);
+		const account = makeCodexAccount({ id });
+		const result = applyCodexObservation(
+			account,
+			new Response(null, {
+				headers: {
+					"x-codex-secondary-window-minutes": "10080",
+					"x-codex-secondary-used-percent": String(weeklyUsedPct),
+					"x-codex-credits-has-credits": "true",
+					"x-codex-credits-balance": "7.25",
+				},
+			}),
+			ctx,
+			baseOpts(),
+		);
+		if (!result.effectiveCredits) throw new Error("Expected seeded credits");
+		return { account, credits: result.effectiveCredits };
+	}
+
+	for (const cold of [false, true]) {
+		for (const source of ["headers", "json"] as const) {
+			it.each([
+				0,
+				42,
+				100,
+				null,
+			])(`refreshes only observed weekly usage (${source}, cold=${cold}, pct=%s)`, (weekly) => {
+				const id = track(`credit-fresh-${source}-${cold}-${weekly}`);
+				const { ctx } = makeDbCtx(db);
+				const previousWeekly = weekly === 100 ? 42 : 100;
+				const { account, credits } = seedCredits(id, ctx, previousWeekly);
+				if (cold) usageCache.delete(id);
+				const result =
+					source === "headers"
+						? applyCodexObservation(
+								account,
+								new Response(null, {
+									headers: {
+										"x-codex-primary-window-minutes": "300",
+										"x-codex-primary-used-percent": "12",
+										...(weekly === null
+											? {}
+											: {
+													"x-codex-secondary-window-minutes": "10080",
+													"x-codex-secondary-used-percent": String(weekly),
+												}),
+									},
+								}),
+								ctx,
+								baseOpts(),
+							)
+						: applyCodexUsageStatus(
+								account,
+								parseCodexUsageStatus(
+									{
+										rate_limit: {
+											primary_window: {
+												used_percent: 12,
+												limit_window_seconds: 18000,
+											},
+											...(weekly === null
+												? {}
+												: {
+														secondary_window: {
+															used_percent: weekly,
+															limit_window_seconds: 604800,
+														},
+													}),
+										},
+									},
+									200,
+									Date.now(),
+								),
+								ctx,
+								{ requestAccounting: "none" },
+							);
+				const expected = { ...credits, weeklyUsedPct: weekly ?? 100 };
+				const stored = JSON.parse(
+					readUsageColumns(db, id).codex_usage_json as string,
+				) as UsageData;
+				expect(stored.codexCredits).toEqual(expected);
+				expect(isCodexOnCredits(stored.codexCredits ?? null)).toBe(
+					(weekly ?? 100) >= 100,
+				);
+				expect(result.effectiveCredits).toEqual(cold ? null : expected);
+				expect(credits.weeklyUsedPct).toBe(previousWeekly);
+			});
+		}
+
+		it(`ignores inferred 429 percentages and malformed weekly readings (cold=${cold})`, () => {
+			const id = track(`credit-unknown-${cold}`);
+			const { ctx } = makeDbCtx(db);
+			const { account, credits } = seedCredits(id, ctx, 42);
+			for (const percent of ["", "bad"]) {
+				if (cold) usageCache.delete(id);
+				const result = applyCodexObservation(
+					account,
+					new Response(null, {
+						status: 429,
+						headers: {
+							"x-codex-primary-window-minutes": "10080",
+							"x-codex-primary-used-percent": percent,
+						},
+					}),
+					ctx,
+					baseOpts(),
+				);
+				expect(result.usage?.seven_day.utilization).toBe(100);
+				const stored = JSON.parse(
+					readUsageColumns(db, id).codex_usage_json as string,
+				) as UsageData;
+				expect(stored.codexCredits).toEqual(credits);
+			}
+		});
+	}
+
+	it("does not dedupe genuine weekly zero against a byte-identical placeholder", () => {
+		const id = track("credit-zero-dedup");
+		const { ctx, persistWrites } = makeDbCtx(db);
+		const { account } = seedCredits(id, ctx);
+		usageCache.delete(id);
+		const reset = Date.now() + 3600_000;
+		const placeholder = applyCodexObservation(
+			account,
+			codexResponse(reset, 12),
+			ctx,
+			baseOpts(),
+		);
+		expect(persistWrites()).toBe(2);
+		usageCache.delete(id);
+		const fresh = applyCodexObservation(
+			account,
+			codexResponse(reset, 12, {
+				"x-codex-secondary-window-minutes": "10080",
+				"x-codex-secondary-used-percent": "0",
+			}),
+			ctx,
+			baseOpts(),
+		);
+		expect(JSON.stringify(fresh.usage)).toBe(JSON.stringify(placeholder.usage));
+		expect(persistWrites()).toBe(3);
+		const stored = JSON.parse(
+			readUsageColumns(db, id).codex_usage_json as string,
+		) as UsageData;
+		expect(stored.codexCredits?.weeklyUsedPct).toBe(0);
+	});
+
+	it("keeps fresh credits authoritative, including false and unknown weekly usage", () => {
+		const id = track("credit-explicit-false");
+		const { ctx } = makeDbCtx(db);
+		const { account } = seedCredits(id, ctx);
+		const result = applyCodexObservation(
+			account,
+			codexResponse(Date.now() + 3600_000, 12, {
+				"x-codex-credits-has-credits": "false",
+			}),
+			ctx,
+			baseOpts(),
+		);
+		expect(result.effectiveCredits?.hasCredits).toBe(false);
+		expect(result.effectiveCredits?.weeklyUsedPct).toBeNull();
+		const stored = JSON.parse(
+			readUsageColumns(db, id).codex_usage_json as string,
+		) as UsageData;
+		expect(stored.codexCredits).toEqual(result.effectiveCredits);
 	});
 });
 

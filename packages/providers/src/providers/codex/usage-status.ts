@@ -46,6 +46,8 @@ export interface FetchCodexUsageStatusArgs {
 export interface CodexUsageStatus {
 	/** `{ five_hour, seven_day, codexCredits? }`; `null` when no usable windows. */
 	usage: UsageData | null;
+	/** Observed weekly utilization, not the synthetic fallback in `usage.seven_day`. */
+	weeklyUsedPct: number | null;
 	/** Root `rate_limit.allowed`; `null` when absent/unparseable. */
 	allowed: boolean | null;
 	/** Root `rate_limit.limit_reached`; `null` when absent/unparseable. */
@@ -93,6 +95,7 @@ function toIsoString(timestampMs: number): string | null {
 function failedStatus(status: number | null): CodexUsageStatus {
 	return {
 		usage: null,
+		weeklyUsedPct: null,
 		allowed: null,
 		limitReached: null,
 		rateLimitReachedType: null,
@@ -132,7 +135,7 @@ function parseWindow(
 
 /**
  * Map the top-level `credits` (`CreditStatusDetails`) + `plan_type` + the weekly
- * (secondary) window's utilization onto our existing `CodexCreditsInfo` shape.
+ * duration-slotted window's utilization onto our existing `CodexCreditsInfo` shape.
  * Returns `null` when `credits` is absent, matching the header parser (which
  * treats a missing `x-codex-credits-has-credits` as a non-credits response).
  */
@@ -203,9 +206,9 @@ export function parseCodexUsageStatus(
 		(primary.slot === "seven_day" ? primary.data : null) ??
 		(secondary.slot === "seven_day" ? secondary.data : null);
 
+	const weeklyUsedPct = sevenDay ? sevenDay.utilization : null;
 	let usage: UsageData | null = null;
 	if (fiveHour || sevenDay) {
-		const weeklyUsedPct = sevenDay ? sevenDay.utilization : null;
 		const codexCredits = parseCredits(root, weeklyUsedPct);
 		usage = {
 			// Codex retired its rolling 5-hour window. Emit `fiveHour` verbatim
@@ -221,6 +224,7 @@ export function parseCodexUsageStatus(
 
 	return {
 		usage,
+		weeklyUsedPct,
 		allowed,
 		limitReached,
 		rateLimitReachedType,

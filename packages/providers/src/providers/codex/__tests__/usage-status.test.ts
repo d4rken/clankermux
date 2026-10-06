@@ -50,6 +50,35 @@ const stubFetch = (response: Response): typeof fetch =>
 	(async () => response) as unknown as typeof fetch;
 
 describe("parseCodexUsageStatus", () => {
+	it.each([
+		null,
+		0,
+		42,
+		100,
+	])("retains the observed weekly percentage (%s), distinct from a placeholder", (weekly) => {
+		const status = parseCodexUsageStatus(
+			{
+				rate_limit: {
+					primary_window: { used_percent: 12, limit_window_seconds: 18000 },
+					...(weekly === null
+						? {}
+						: {
+								secondary_window: {
+									used_percent: weekly,
+									limit_window_seconds: 604800,
+								},
+							}),
+				},
+			},
+			200,
+			NOW_MS,
+		);
+		expect(status.weeklyUsedPct).toBe(weekly);
+		expect(status.usage?.seven_day.utilization).toBe(weekly ?? 0);
+		expect(status.usage?.seven_day.resets_at).toBeNull();
+		expect(status.usage?.codexCredits).toBeUndefined();
+	});
+
 	it("parses both windows, flags, and credits on the happy path", () => {
 		const status = parseCodexUsageStatus(fullBody(), 200, NOW_MS);
 
@@ -151,6 +180,7 @@ describe("parseCodexUsageStatus", () => {
 		expect(status.usage).not.toBeNull();
 		expect(status.usage?.five_hour).toBeNull();
 		expect(status.usage?.seven_day.utilization).toBe(73);
+		expect(status.weeklyUsedPct).toBe(73);
 	});
 
 	it("returns usage null but ok:true for empty/placeholder windows", () => {
@@ -243,6 +273,7 @@ describe("parseCodexUsageStatus", () => {
 		expect(status.ok).toBe(false);
 		expect(status.status).toBe(200);
 		expect(status.usage).toBeNull();
+		expect(status.weeklyUsedPct).toBeNull();
 	});
 });
 

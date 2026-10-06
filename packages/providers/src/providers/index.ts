@@ -79,6 +79,7 @@ export {
 	parseCodexSubscription,
 	parseCodexUsageHeaders,
 	parseCodexUsageStatus,
+	parseCodexWeeklyUsedPct,
 	readChatgptAccountId,
 	renewalCadenceFromBillingPeriod,
 	sendCodexNativePing,

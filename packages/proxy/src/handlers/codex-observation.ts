@@ -5,6 +5,7 @@ import {
 	isGenuineWindowRoll,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
+	parseCodexWeeklyUsedPct,
 	type RateLimitInfo,
 	toEpochMs,
 	type UsageData,
@@ -25,7 +26,7 @@ import {
 const log = new Logger("CodexObservation");
 
 /**
- * Last snapshot JSON persisted per account, so an unchanged observation does not
+ * Last snapshot and observed weekly utilization per account, so an unchanged observation does not
  * re-enqueue an identical UPDATE. Purely a write-amplification guard: it is
  * cleared for an account whenever the enqueue was REFUSED, whenever the write
  * itself was VOIDED by the credential CAS (both leave the columns without the
@@ -53,8 +54,8 @@ export function clearCodexUsagePersistMemo(accountId?: string): void {
  * The carry-forward has to happen in SQL: the in-memory equivalent in
  * {@link applyCodexUsageBookkeeping} reads the usage CACHE, which is empty right
  * after a restart — exactly when the column is the only surviving record that
- * the account is on credits. `?1` (the new JSON) is referenced three times, so
- * the statement uses numbered parameters.
+ * the account is on credits. `?1` is the new JSON; `?5` is the observed weekly
+ * utilization, or NULL when absent (never an inferred default).
  *
  * `?4` is a compare-and-swap on the credential generation the snapshot was
  * observed under: re-authentication rotates the refresh token and NULLs these
@@ -67,7 +68,10 @@ const PERSIST_CODEX_USAGE_SQL = `UPDATE accounts
 	       WHEN json_extract(?1,'$.codexCredits') IS NULL
 	            AND codex_usage_json IS NOT NULL
 	            AND json_extract(codex_usage_json,'$.codexCredits') IS NOT NULL
-	       THEN json_set(?1,'$.codexCredits', json(json_extract(codex_usage_json,'$.codexCredits')))
+	       THEN json_set(?1,'$.codexCredits', json(CASE
+	              WHEN ?5 IS NULL THEN json_extract(codex_usage_json,'$.codexCredits')
+	              ELSE json_set(json_extract(codex_usage_json,'$.codexCredits'),'$.weeklyUsedPct',?5)
+	            END))
 	       ELSE ?1
 	     END,
 	     codex_usage_observed_at = ?2
@@ -77,10 +81,13 @@ function persistCodexUsageSnapshot(
 	account: Account,
 	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
 	codexUsage: UsageData,
+	weeklyUsedPct: number | null,
 ): void {
 	const json = JSON.stringify(codexUsage);
-	if (codexUsagePersistMemo.get(account.id) === json) return;
-	codexUsagePersistMemo.set(account.id, json);
+	// A placeholder and a genuine weekly zero can serialize to the same JSON.
+	const memoKey = `${json}|${weeklyUsedPct}`;
+	if (codexUsagePersistMemo.get(account.id) === memoKey) return;
+	codexUsagePersistMemo.set(account.id, memoKey);
 
 	const observedAt = Date.now();
 	const refreshTokenAtEnqueue = account.refresh_token ?? null;
@@ -98,6 +105,7 @@ function persistCodexUsageSnapshot(
 					observedAt,
 					account.id,
 					refreshTokenAtEnqueue,
+					weeklyUsedPct,
 				]).changes;
 		});
 		if (changed !== 0) return;
@@ -105,7 +113,7 @@ function persistCodexUsageSnapshot(
 		// memo so the NEXT observation persists instead of being deduped against
 		// a snapshot that never landed — but only while it still describes THIS job,
 		// so a newer snapshot enqueued in the meantime keeps its own dedup entry.
-		if (codexUsagePersistMemo.get(account.id) === json) {
+		if (codexUsagePersistMemo.get(account.id) === memoKey) {
 			codexUsagePersistMemo.delete(account.id);
 		}
 		log.debug(
@@ -283,6 +291,7 @@ function applyCodexUsageBookkeeping(
 	ctx: Pick<ProxyContext, "asyncWriter" | "dbOps">,
 	codexUsage: UsageData,
 	freshCredits: CodexCreditsInfo | null,
+	weeklyUsedPct: number | null,
 ): {
 	usage: UsageData;
 	effectiveCredits: CodexCreditsInfo | null;
@@ -330,7 +339,8 @@ function applyCodexUsageBookkeeping(
 
 	// Attach Codex credits state. Only overwrite when THIS observation carried
 	// credits; absence signals a non-credits-aware response, not "off credits", so
-	// carry the last known credits forward.
+	// carry the last known credits forward, updating weekly usage only from an
+	// observed percentage rather than the normalized window's synthetic fallback.
 	if (freshCredits !== null) {
 		codexUsage.codexCredits = freshCredits;
 	} else {
@@ -338,7 +348,10 @@ function applyCodexUsageBookkeeping(
 			prevUsage as { codexCredits?: CodexCreditsInfo | null } | null
 		)?.codexCredits;
 		if (prevCredits != null) {
-			codexUsage.codexCredits = prevCredits;
+			codexUsage.codexCredits =
+				weeklyUsedPct === null
+					? prevCredits
+					: { ...prevCredits, weeklyUsedPct };
 		}
 	}
 	const effectiveCredits = codexUsage.codexCredits ?? null;
@@ -350,7 +363,7 @@ function applyCodexUsageBookkeeping(
 	// Mirror the snapshot onto the account row so a restart / cache eviction can
 	// restore THIS reading instead of reconstructing one from an old stored
 	// request payload.
-	persistCodexUsageSnapshot(account, ctx, codexUsage);
+	persistCodexUsageSnapshot(account, ctx, codexUsage, weeklyUsedPct);
 
 	// Persist rate_limit_reset from usage windows (earliest of 5h/7d) so
 	// auto-refresh can track windows.
@@ -522,6 +535,7 @@ export function applyCodexObservation(
 			ctx,
 			codexUsage,
 			freshCredits,
+			parseCodexWeeklyUsedPct(response.headers),
 		);
 		usage = bookkeeping.usage;
 		effectiveCredits = bookkeeping.effectiveCredits;
@@ -634,6 +648,7 @@ export function applyCodexUsageStatus(
 			ctx,
 			status.usage,
 			freshCredits,
+			status.weeklyUsedPct,
 		);
 		usage = bookkeeping.usage;
 		effectiveCredits = bookkeeping.effectiveCredits;

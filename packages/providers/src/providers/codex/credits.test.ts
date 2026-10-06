@@ -11,6 +11,7 @@ const fullCreditsHeaders: Record<string, string> = {
 	"x-codex-credits-unlimited": "False",
 	"x-codex-plan-type": "prolite",
 	"x-codex-secondary-used-percent": "100",
+	"x-codex-secondary-window-minutes": "10080",
 };
 
 describe("parseCodexCreditsHeaders", () => {
@@ -51,6 +52,7 @@ describe("parseCodexCreditsHeaders", () => {
 				"x-codex-credits-unlimited": "False",
 				"x-codex-plan-type": "prolite",
 				"x-codex-secondary-used-percent": "42",
+				"x-codex-secondary-window-minutes": "10080",
 			}),
 		).toEqual({
 			hasCredits: false,
@@ -69,6 +71,7 @@ describe("parseCodexCreditsHeaders", () => {
 				"x-codex-credits-unlimited": "True",
 				"x-codex-plan-type": "promax",
 				"x-codex-secondary-used-percent": "100",
+				"x-codex-secondary-window-minutes": "10080",
 			}),
 		).toEqual({
 			hasCredits: true,
@@ -103,7 +106,39 @@ describe("parseCodexCreditsHeaders", () => {
 		}
 	});
 
-	it("returns null weeklyUsedPct when secondary-used-percent is missing", () => {
+	it.each([
+		["primary weekly with empty secondary", "10080", "100", "0", "0", 100],
+		["secondary weekly", "300", "100", "10080", "42", 42],
+		["primary precedence", "10080", "0", "10080", "100", 0],
+		["missing primary percent fallback", "10080", null, "10080", "73", 73],
+		["malformed primary percent fallback", "10080", "bad", "10080", "73", 73],
+		["zero is observed without a reset", "10080", "0", null, null, 0],
+		["missing durations", null, "100", null, "100", null],
+		["unknown durations", "600", "100", "bad", "100", null],
+		["empty slots", "0", "100", "0", "100", null],
+		["five-hour only", "300", "100", null, null, null],
+		["weekly without percent", "10080", null, null, null, null],
+		["nonfinite weekly", "10080", "Infinity", null, null, null],
+	] as const)("slots weekly usage: %s", (_name, primaryMinutes, primaryPct, secondaryMinutes, secondaryPct, expected) => {
+		const headers: Record<string, string> = {
+			"x-codex-credits-has-credits": "true",
+		};
+		for (const [key, value] of Object.entries({
+			"x-codex-primary-window-minutes": primaryMinutes,
+			"x-codex-primary-used-percent": primaryPct,
+			"x-codex-secondary-window-minutes": secondaryMinutes,
+			"x-codex-secondary-used-percent": secondaryPct,
+		})) {
+			if (value !== null) headers[key] = value;
+		}
+		for (const input of [headers, new Headers(headers)]) {
+			const info = parseCodexCreditsHeaders(input);
+			expect(info?.weeklyUsedPct).toBe(expected);
+			expect(isCodexOnCredits(info)).toBe(expected !== null && expected >= 100);
+		}
+	});
+
+	it("returns null weeklyUsedPct when no weekly percentage is reported", () => {
 		const info = parseCodexCreditsHeaders({
 			"x-codex-credits-has-credits": "True",
 		});

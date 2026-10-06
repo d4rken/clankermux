@@ -824,7 +824,10 @@ describe("RequestRecorder — billingType derivation", () => {
 		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("plan");
 	});
 
-	it("marks overage when a codex account is on credits past its weekly limit", async () => {
+	it.each([
+		"primary",
+		"secondary",
+	])("marks overage when codex credits exhaust the %s weekly slot", async (slot) => {
 		const h = makeHarness();
 		h.recorder.begin(
 			makeMeta({
@@ -832,7 +835,8 @@ describe("RequestRecorder — billingType derivation", () => {
 				responseHeaders: {
 					"x-codex-credits-has-credits": "true",
 					"x-codex-credits-unlimited": "false",
-					"x-codex-secondary-used-percent": "100",
+					[`x-codex-${slot}-used-percent`]: "100",
+					[`x-codex-${slot}-window-minutes`]: "10080",
 				},
 			}),
 		);
@@ -851,6 +855,7 @@ describe("RequestRecorder — billingType derivation", () => {
 					"x-codex-credits-has-credits": "true",
 					"x-codex-credits-unlimited": "false",
 					"x-codex-secondary-used-percent": "42",
+					"x-codex-secondary-window-minutes": "10080",
 				},
 			}),
 		);
@@ -898,7 +903,10 @@ describe("RequestRecorder — account side-effects fire in begin()", () => {
 		]);
 	});
 
-	it("auto-pauses a codex account on credits BEFORE any finishTransport", async () => {
+	it.each([
+		"primary",
+		"secondary",
+	])("auto-pauses codex credits on the %s weekly slot BEFORE finishTransport", async (slot) => {
 		const h = makeHarness();
 		h.recorder.begin(
 			makeMeta({
@@ -907,7 +915,8 @@ describe("RequestRecorder — account side-effects fire in begin()", () => {
 				responseHeaders: {
 					"x-codex-credits-has-credits": "true",
 					"x-codex-credits-unlimited": "false",
-					"x-codex-secondary-used-percent": "100",
+					[`x-codex-${slot}-used-percent`]: "100",
+					[`x-codex-${slot}-window-minutes`]: "10080",
 				},
 			}),
 		);
