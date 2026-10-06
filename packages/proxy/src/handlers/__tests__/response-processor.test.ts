@@ -1018,6 +1018,7 @@ describe("processProxyResponse — Codex credits carry-forward", () => {
 				"x-codex-credits-unlimited": "false",
 				"x-codex-plan-type": "pro",
 				"x-codex-secondary-used-percent": "88",
+				"x-codex-secondary-window-minutes": "10080",
 			}),
 			account,
 			ctx,

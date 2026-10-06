@@ -202,7 +202,7 @@ export interface CodexCreditsInfo {
 	balance: number | null; // rounded to 2 decimals; null when absent/unlimited-only/malformed
 	unlimited: boolean;
 	planType: string | null;
-	weeklyUsedPct: number | null; // x-codex-secondary-used-percent as a finite number, else null
+	weeklyUsedPct: number | null; // observed duration-slotted weekly utilization, else null
 }
 
 function readHeader(
@@ -211,6 +211,24 @@ function readHeader(
 ): string | null {
 	if (headers instanceof Headers) return headers.get(key);
 	return headers[key] ?? null;
+}
+
+/** Weekly utilization actually reported, excluding inferred defaults and empty slots. */
+export function parseCodexWeeklyUsedPct(
+	headers: Headers | Record<string, string>,
+): number | null {
+	for (const prefix of ["primary", "secondary"]) {
+		const minutes = parseNumber(
+			readHeader(headers, `x-codex-${prefix}-window-minutes`),
+		);
+		if (pickWindowSlot(minutes === null ? null : minutes * 60) !== "seven_day")
+			continue;
+		const utilization = parseNumber(
+			readHeader(headers, `x-codex-${prefix}-used-percent`),
+		);
+		if (utilization !== null) return utilization;
+	}
+	return null;
 }
 
 function parseBoolean(value: string | null): boolean {
@@ -235,9 +253,7 @@ export function parseCodexCreditsHeaders(
 		balance,
 		unlimited: parseBoolean(readHeader(headers, "x-codex-credits-unlimited")),
 		planType: readHeader(headers, "x-codex-plan-type"),
-		weeklyUsedPct: parseNumber(
-			readHeader(headers, "x-codex-secondary-used-percent"),
-		),
+		weeklyUsedPct: parseCodexWeeklyUsedPct(headers),
 	};
 }
 

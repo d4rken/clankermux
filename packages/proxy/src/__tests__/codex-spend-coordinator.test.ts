@@ -202,6 +202,7 @@ function makeUsageStatus(
 			five_hour: { utilization: 12, resets_at: null },
 			seven_day: { utilization: 34, resets_at: null },
 		},
+		weeklyUsedPct: 34,
 		allowed: true,
 		limitReached: false,
 		rateLimitReachedType: null,
@@ -2131,8 +2132,8 @@ describe("CodexSpendCoordinator.refreshManual — free-GET application (end-to-e
 			message: "Usage refreshed for 'codex-cf' (5h: 20%, 7d: 40%).",
 		});
 		const cached = usageCache.get(id) as UsageData | null;
-		// Prior credits survive the free refresh…
-		expect(cached?.codexCredits).toEqual(seeded);
+		// Credit availability survives; the weekly reading is refreshed.
+		expect(cached?.codexCredits).toEqual({ ...seeded, weeklyUsedPct: 40 });
 		// …while the window utilizations were genuinely refreshed (not the seed).
 		expect(cached?.five_hour?.utilization).toBe(20);
 		expect(cached?.seven_day.utilization).toBe(40);
@@ -2356,6 +2357,7 @@ describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
 				five_hour: { utilization: 50, resets_at: null },
 				seven_day: { utilization: 50, resets_at: null },
 			},
+			weeklyUsedPct: 50,
 			allowed: null,
 			limitReached: null,
 			rateLimitReachedType: null,
@@ -2389,6 +2391,7 @@ describe("applyCodexUsageStatus — exhausted-200 recovery guard", () => {
 				five_hour: { utilization: 20, resets_at: null },
 				seven_day: { utilization: 20, resets_at: null },
 			},
+			weeklyUsedPct: 20,
 			allowed: true,
 			limitReached: false,
 			rateLimitReachedType: null,

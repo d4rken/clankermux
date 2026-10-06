@@ -63,6 +63,7 @@ export {
 	normalizeCodexInputUsage,
 	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
+	parseCodexWeeklyUsedPct,
 } from "./usage";
 export type {
 	CodexUsageStatus,
