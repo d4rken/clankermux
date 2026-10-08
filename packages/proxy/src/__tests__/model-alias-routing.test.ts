@@ -595,13 +595,13 @@ describe("reasoning effort on alias attempts", () => {
 			{ role: "user", content: "again" },
 		]);
 	});
-	it("clamps it to the Claude family's range on an Anthropic account", async () => {
+	it("clamps it on a Claude target and sends a later target the client's own level", async () => {
 		const { ctx } = await setup(
 			["anthropic", "anthropic", "anthropic"],
-			["claude-haiku-4-5", "claude-opus-4-8"],
+			["claude-haiku-5-5", "backup-model"],
 		);
 		const sent = capture((model) =>
-			model === "claude-haiku-4-5"
+			model === "claude-haiku-5-5"
 				? Response.json(
 						{ error: { type: "rate_limit_error" } },
 						{ status: 429 },
@@ -610,25 +610,25 @@ describe("reasoning effort on alias attempts", () => {
 		);
 		const adaptive = {
 			thinking: { type: "adaptive" },
-			output_config: { effort: "high" },
+			output_config: { effort: "minimal" },
 			messages: [
 				{ role: "user", content: "hello" },
-				{ role: "system", output_config: { effort: "max" } },
+				{ role: "system", output_config: { effort: "minimal" } },
 			],
 		};
 		expect((await run(ctx, request(undefined, adaptive))).status).toBe(200);
 		expect(sent.map((s) => s.body.model)).toEqual([
-			"claude-haiku-4-5",
-			"claude-haiku-4-5",
-			"claude-opus-4-8",
+			"claude-haiku-5-5",
+			"claude-haiku-5-5",
+			"backup-model",
 		]);
 		for (const { body } of sent.slice(0, 2))
 			expect(body).toMatchObject({
 				thinking: { type: "adaptive" },
-				output_config: { effort: "medium" },
+				output_config: { effort: "low" },
 				messages: [
 					{ role: "user", content: "hello" },
-					{ role: "system", output_config: { effort: "medium" } },
+					{ role: "system", output_config: { effort: "low" } },
 				],
 			});
 		// The fallback gets the level the client asked for, not the clamped one.
@@ -654,13 +654,13 @@ describe("reasoning effort on alias attempts", () => {
 			["claude-haiku-4-5", "claude-opus-4-8"],
 		);
 		const sent = capture((model) => success(model));
-		const high = {
+		const minimal = {
 			model: "claude-haiku-4-5",
 			thinking: { type: "adaptive" },
-			output_config: { effort: "high" },
+			output_config: { effort: "minimal" },
 		};
-		expect((await run(ctx, request(undefined, high))).status).toBe(200);
-		expect(sent[0]?.body).toMatchObject(high);
+		expect((await run(ctx, request(undefined, minimal))).status).toBe(200);
+		expect(sent[0]?.body).toMatchObject(minimal);
 	});
 	it("leaves a request that did not name an alias as the client sent it", async () => {
 		const { ctx } = await setup([

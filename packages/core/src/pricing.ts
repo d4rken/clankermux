@@ -34,8 +34,9 @@ interface ModelCost {
 	cache_read?: number;
 	cache_write?: number;
 	/**
-	 * Rate cards that replace the base set above a threshold. Declared, not
-	 * charged: every cost computation here reads the base rates only.
+	 * Rate cards that replace the base set once a request's prompt (input +
+	 * cache read + cache write) exceeds `tier.size`. Only `estimateCostUSD`
+	 * charges them; the synchronous bundled lookups read the base set.
 	 */
 	tiers?: ModelCostTier[];
 }
@@ -95,6 +96,28 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 1.25,
 				},
 			},
+			// Haiku 5.5 has two rate cards chosen by prompt size: a prompt over
+			// 100,000 tokens pays 5x on every kind. Source: the pricing docs' model
+			// table, 2026-10-08.
+			[CLAUDE_MODEL_IDS.HAIKU_5_5]: {
+				id: CLAUDE_MODEL_IDS.HAIKU_5_5,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.HAIKU_5_5],
+				cost: {
+					input: 0.1,
+					output: 0.5,
+					cache_read: 0.01,
+					cache_write: 0.125,
+					tiers: [
+						{
+							input: 0.5,
+							output: 2.5,
+							cache_read: 0.05,
+							cache_write: 0.625,
+							tier: { type: "context", size: 100_000 },
+						},
+					],
+				},
+			},
 			[CLAUDE_MODEL_IDS.SONNET_4]: {
 				id: CLAUDE_MODEL_IDS.SONNET_4,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_4],
@@ -137,13 +160,16 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 2.5,
 				},
 			},
+			// Sonnet 5.5 cache reads fell to $0.10/M (0.05x, like Opus 5.5) with
+			// the Haiku 5.5 launch. Source: the pricing docs' model table,
+			// 2026-10-08.
 			[CLAUDE_MODEL_IDS.SONNET_5_5]: {
 				id: CLAUDE_MODEL_IDS.SONNET_5_5,
 				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.SONNET_5_5],
 				cost: {
 					input: 2,
 					output: 10,
-					cache_read: 0.2,
+					cache_read: 0.1,
 					cache_write: 2.5,
 				},
 			},
@@ -418,11 +444,6 @@ BUNDLED_PRICING.mimo = {
  * prompt cache and never reports cache-creation tokens, so `estimateCostUSD`
  * never asks for that rate — inventing one would be an unverifiable price on a
  * bucket that is always zero.
- *
- * models.dev also carries a >272K-context tier (roughly 2x) for these models.
- * the lookup reads only the base rates — for every provider, not just this one —
- * so requests above that threshold are undercharged. Pre-existing behaviour,
- * unchanged here.
  *
  * Note these entries are now also visible to the synchronous bundled-only
  * lookups (`resolveBundledCost` / `getModelCacheRates`). That is inert today:
@@ -1204,6 +1225,19 @@ class PriceCatalogue {
 			bundledCost.cache_write !== undefined
 		) {
 			cost.cache_write = bundledCost.cache_write * cacheScale;
+			filled = true;
+		}
+		// Bundled tiers are absolute prices on the bundled base card, so they
+		// carry over only when the resulting base input agrees with it.
+		if (
+			cost.tiers === undefined &&
+			Array.isArray(bundledCost.tiers) &&
+			typeof bundledInput === "number" &&
+			Number.isFinite(bundledInput) &&
+			bundledInput > 0 &&
+			cost.input === bundledInput
+		) {
+			cost.tiers = structuredClone(bundledCost.tiers);
 			filled = true;
 		}
 
@@ -2143,15 +2177,49 @@ function splitCacheWrites(tokens: TokenBreakdown): {
 }
 
 /**
- * Read one rate off the selected entry, in dollars per token (NOT per million).
- * @throws PricingLookupError when the entry does not define it.
+ * The rate card a prompt of `promptTokens` is charged on: the context tier with
+ * the largest size the prompt exceeds, over the base rates, or the base rates
+ * when it exceeds none. A kind the tier leaves out keeps its base rate.
+ *
+ *   base input 1, tiers {size 32K: input 2}, {size 128K: input 3}
+ *     32,000 tokens -> 1     32,001 -> 2     200,000 -> 3
  */
-function rateFromEntry(
-	entry: ModelDef,
+function rateCardFor(
+	cost: ModelCost,
+	promptTokens: number,
+): Partial<ModelCost> {
+	let selected: ModelCostTier | undefined;
+	for (const tier of Array.isArray(cost.tiers) ? cost.tiers : []) {
+		const size = tier?.tier?.size;
+		if (
+			tier?.tier?.type !== "context" ||
+			typeof size !== "number" ||
+			!(promptTokens > size)
+		) {
+			continue;
+		}
+		if (!selected || size > (selected.tier?.size ?? 0)) selected = tier;
+	}
+	if (!selected) return cost;
+	const card: Partial<ModelCost> = { ...cost };
+	for (const kind of COST_KINDS) {
+		const rate = selected[kind];
+		if (typeof rate === "number" && Number.isFinite(rate)) card[kind] = rate;
+	}
+	return card;
+}
+
+/**
+ * Read one rate off the selected rate card, in dollars per token (NOT per
+ * million).
+ * @throws PricingLookupError when the card does not define it.
+ */
+function rateFromCard(
+	card: Partial<ModelCost>,
 	modelId: string,
 	kind: CostKind,
 ): number {
-	const costPerMillion = entry.cost?.[kind];
+	const costPerMillion = card[kind];
 	if (costPerMillion === undefined) {
 		throw new PricingLookupError(
 			`Model ${modelId} has no ${kind} cost`,
@@ -2368,32 +2436,36 @@ export async function estimateCostUSD(
 			);
 		}
 
+		const card = rateCardFor(
+			entry.cost,
+			(tokens.inputTokens ?? 0) +
+				(tokens.cacheReadInputTokens ?? 0) +
+				(tokens.cacheCreationInputTokens ?? 0),
+		);
 		let totalCost = 0;
 
 		if (tokens.inputTokens) {
-			totalCost += tokens.inputTokens * rateFromEntry(entry, modelId, "input");
+			totalCost += tokens.inputTokens * rateFromCard(card, modelId, "input");
 		}
 
 		if (tokens.outputTokens) {
-			totalCost +=
-				tokens.outputTokens * rateFromEntry(entry, modelId, "output");
+			totalCost += tokens.outputTokens * rateFromCard(card, modelId, "output");
 		}
 
 		if (tokens.cacheReadInputTokens) {
 			totalCost +=
-				tokens.cacheReadInputTokens *
-				rateFromEntry(entry, modelId, "cache_read");
+				tokens.cacheReadInputTokens * rateFromCard(card, modelId, "cache_read");
 		}
 
 		if (writes.fiveMinute) {
 			totalCost +=
-				writes.fiveMinute * rateFromEntry(entry, modelId, "cache_write");
+				writes.fiveMinute * rateFromCard(card, modelId, "cache_write");
 		}
 
 		if (writes.oneHour) {
 			totalCost +=
 				writes.oneHour *
-				rateFromEntry(entry, modelId, "input") *
+				rateFromCard(card, modelId, "input") *
 				ONE_HOUR_CACHE_WRITE_MULT;
 		}
 

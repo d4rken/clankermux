@@ -144,8 +144,7 @@ describe("query options", () => {
 		expect(effort("claude-fable-5-1[1m]", "max")).toBe("max");
 		expect(effort("claude-sonnet-5", "xhigh")).toBe("xhigh");
 		expect(effort("claude-sonnet-5", "low")).toBe("low");
-		// A future Haiku takes an effort, within Haiku's range.
-		expect(effort("claude-haiku-5", "max")).toBe("medium");
+		expect(effort("claude-haiku-5-5", "max")).toBe("max");
 		// Haiku 4.5, Sonnet 4.5 and non-Claude ids take none: Claude Code's
 		// default stands.
 		for (const model of [

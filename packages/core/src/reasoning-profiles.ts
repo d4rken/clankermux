@@ -6,12 +6,14 @@ import {
 } from "@clankermux/types";
 import { getModelFamily } from "./model-mappings";
 
-const CLAUDE_EFFORTS: Record<string, readonly AliasReasoningEffort[]> = {
-	opus: ["low", "medium", "high", "xhigh", "max"],
-	sonnet: ["low", "medium", "high", "xhigh", "max"],
-	haiku: ["low", "medium"],
-	fable: ["low", "medium", "high", "xhigh", "max"],
-};
+/** The levels every Claude model that takes an effort accepts. */
+const CLAUDE_EFFORTS: readonly AliasReasoningEffort[] = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
 /**
  * Whether a Claude model takes an effort at all: Opus 4.5, and every model
  * from 4.6 on.
@@ -116,8 +118,7 @@ export function getModelReasoningEfforts(
 	model: string,
 ): readonly AliasReasoningEffort[] | null {
 	const normalized = model.toLowerCase().trim().replace(/^.*\//, "");
-	const family = getModelFamily(normalized);
-	if (family) return CLAUDE_EFFORTS[family];
+	if (getModelFamily(normalized)) return CLAUDE_EFFORTS;
 	if (/^gpt-5\.4-mini(?:$|-\d{4}-\d{2}-\d{2}$)/.test(normalized))
 		return GPT_EFFORTS["gpt-5.4-mini"];
 	if (/^gpt-6(?:$|[.-])/.test(normalized)) return GPT_EFFORTS["gpt-6"];
