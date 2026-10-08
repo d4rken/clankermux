@@ -27,9 +27,12 @@ describe("reasoning effort support", () => {
 			"xhigh",
 			"max",
 		]);
-		expect(getSupportedReasoningEfforts("claude-haiku-4-5")).toEqual([
+		expect(getSupportedReasoningEfforts("claude-haiku-5-5")).toEqual([
 			"low",
 			"medium",
+			"high",
+			"xhigh",
+			"max",
 		]);
 		expect(getSupportedReasoningEfforts("claude-fable-5")).toEqual([
 			"low",
@@ -162,8 +165,9 @@ describe("reasoning effort support", () => {
 			resolveReasoningEffort("max", { targetModel: "gpt-5.6-sol" }).effort,
 		).toBe("xhigh");
 		expect(
-			resolveReasoningEffort("max", { targetModel: "claude-haiku-4-5" }).effort,
-		).toBe("medium");
+			resolveReasoningEffort("minimal", { targetModel: "claude-haiku-4-5" })
+				.effort,
+		).toBe("low");
 	});
 
 	it("passes through effort unchanged when target model is unknown", () => {

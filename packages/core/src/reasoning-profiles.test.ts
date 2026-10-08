@@ -88,6 +88,7 @@ it("profiles Claude models that take an effort on every official Anthropic provi
 			"claude-opus-4-5",
 			"claude-sonnet-4-6",
 			"claude-mythos-5",
+			"claude-haiku-5-5",
 			"anthropic/claude-opus-5-5",
 		])
 			expect(resolveTargetReasoningProfile(model, provider)).toEqual({
@@ -168,9 +169,8 @@ it("clamps an alias effort to the Claude family only on Claude providers", () =>
 		expect(aliasEffortClampsToClaudeFamily(provider)).toBe(false);
 });
 it("clamps an effort to the nearest level the model accepts at or below it", () => {
-	expect(clampEffortToModel("claude-haiku-4-5", "high")).toBe("medium");
-	expect(clampEffortToModel("claude-haiku-4-5", "max")).toBe("medium");
-	expect(clampEffortToModel("claude-haiku-4-5", "low")).toBe("low");
+	expect(clampEffortToModel("claude-haiku-5-5", "max")).toBe("max");
+	expect(clampEffortToModel("claude-haiku-5-5", "minimal")).toBe("low");
 	expect(clampEffortToModel("claude-opus-4-8", "max")).toBe("max");
 	expect(clampEffortToModel("claude-sonnet-5", "max")).toBe("max");
 	expect(clampEffortToModel("claude-sonnet-5", "minimal")).toBe("low");
@@ -178,7 +178,7 @@ it("clamps an effort to the nearest level the model accepts at or below it", () 
 	expect(clampEffortToModel("claude-opus-4-8", "minimal")).toBe("low");
 	// Unknown model or a value outside the vocabulary: unchanged.
 	expect(clampEffortToModel("primary-model", "max")).toBe("max");
-	expect(clampEffortToModel("claude-haiku-4-5", "ultra")).toBe("ultra");
+	expect(clampEffortToModel("claude-haiku-5-5", "ultra")).toBe("ultra");
 });
 it("retains the original verified GPT-5.5 profile", () => {
 	expect(getAliasReasoningEfforts("gpt-5.5", "codex")).toEqual([

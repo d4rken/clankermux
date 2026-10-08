@@ -218,6 +218,36 @@ describe("1-hour cache writes", () => {
 	});
 });
 
+async function withRemoteCatalogue(
+	remote: unknown,
+	run: () => Promise<void>,
+): Promise<void> {
+	const offlineFetch = globalThis.fetch;
+	// Point the snapshot dir somewhere disposable so the stub catalogue can't
+	// leak into any later test through the on-disk cache. This is load-bearing,
+	// not hygiene: the loader reads a fresh snapshot BEFORE trying the network,
+	// so a shared dir would feed each case the previous case's catalogue and the
+	// stub below would never be fetched at all.
+	const remoteCacheHome = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
+	process.env.XDG_CACHE_HOME = remoteCacheHome;
+	globalThis.fetch = mockFetch(
+		async () =>
+			new Response(JSON.stringify(remote), {
+				headers: { "content-type": "application/json" },
+			}),
+	);
+	try {
+		__pricingTestHooks.reset();
+		await __pricingTestHooks.loadPricing();
+		await run();
+	} finally {
+		globalThis.fetch = offlineFetch;
+		process.env.XDG_CACHE_HOME = pricingCacheHome;
+		rmSync(remoteCacheHome, { recursive: true, force: true });
+		__pricingTestHooks.reset();
+	}
+}
+
 describe("bundled cost fields backfill a partial remote entry", () => {
 	// models.dev can list a freshly-released model before it carries cache
 	// pricing. Merging "remote wins wholesale" would then leave the merged entry
@@ -235,36 +265,6 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		cacheReadInputTokens: 1_000_000,
 		cacheCreationInputTokens: 1_000_000,
 	};
-
-	async function withRemoteCatalogue(
-		remote: unknown,
-		run: () => Promise<void>,
-	): Promise<void> {
-		const offlineFetch = globalThis.fetch;
-		// Point the snapshot dir somewhere disposable so the stub catalogue can't
-		// leak into any later test through the on-disk cache. This is load-bearing,
-		// not hygiene: the loader reads a fresh snapshot BEFORE trying the network,
-		// so a shared dir would feed each case the previous case's catalogue and the
-		// stub below would never be fetched at all.
-		const remoteCacheHome = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
-		process.env.XDG_CACHE_HOME = remoteCacheHome;
-		globalThis.fetch = mockFetch(
-			async () =>
-				new Response(JSON.stringify(remote), {
-					headers: { "content-type": "application/json" },
-				}),
-		);
-		try {
-			__pricingTestHooks.reset();
-			await __pricingTestHooks.loadPricing();
-			await run();
-		} finally {
-			globalThis.fetch = offlineFetch;
-			process.env.XDG_CACHE_HOME = pricingCacheHome;
-			rmSync(remoteCacheHome, { recursive: true, force: true });
-			__pricingTestHooks.reset();
-		}
-	}
 
 	it("prices writes that are all 1-hour from an entry with no cache_write", async () => {
 		// A 1-hour write is priced off input, so a missing 5-minute rate is not a
@@ -664,9 +664,63 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 	});
 });
 
+describe("bundled tiers backfill a remote entry that omits them", () => {
+	// A 150K-token prompt: 0.075 on Haiku 5.5's long-prompt card, 0.015 on its
+	// base card.
+	const longPrompt: TokenBreakdown = { inputTokens: 150_000 };
+	const haiku = (cost: Record<string, unknown>) => ({
+		anthropic: {
+			models: {
+				"claude-haiku-5-5": {
+					id: "claude-haiku-5-5",
+					name: "Claude Haiku 5.5",
+					cost,
+				},
+			},
+		},
+	});
+	const price = () =>
+		estimateCostUSD("claude-haiku-5-5", longPrompt, {
+			provider: "anthropic",
+		});
+
+	it("inherits them when the remote base input matches the bundled one", async () => {
+		await withRemoteCatalogue(
+			haiku({ input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 }),
+			async () => expect(await price()).toBeCloseTo(0.075, 9),
+		);
+	});
+
+	it("inherits them when the remote omits input and the bundled one fills it", async () => {
+		await withRemoteCatalogue(haiku({ output: 0.5 }), async () =>
+			expect(await price()).toBeCloseTo(0.075, 9),
+		);
+	});
+
+	it("keeps a repriced remote entry on its own base card", async () => {
+		await withRemoteCatalogue(
+			haiku({ input: 0.2, output: 0.5, cache_read: 0.02, cache_write: 0.25 }),
+			async () => expect(await price()).toBeCloseTo(0.03, 9),
+		);
+	});
+
+	it("keeps a remote zero input rate free", async () => {
+		await withRemoteCatalogue(haiku({ input: 0, output: 0.5 }), async () =>
+			expect(await price()).toBe(0),
+		);
+	});
+
+	it("keeps a remote entry's explicit empty tier list", async () => {
+		await withRemoteCatalogue(
+			haiku({ input: 0.1, output: 0.5, tiers: [] }),
+			async () => expect(await price()).toBeCloseTo(0.015, 9),
+		);
+	});
+});
+
 describe("bundled Sonnet 5 and 5.5 pricing (offline fallback)", () => {
-	// Both price at $2/M input, $10/M output, $0.20/M cache read, $2.50/M
-	// cache write.
+	// Both price at $2/M input, $10/M output, $2.50/M cache write. Cache reads
+	// are $0.20/M on Sonnet 5 and $0.10/M (0.05x) on Sonnet 5.5.
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -676,15 +730,131 @@ describe("bundled Sonnet 5 and 5.5 pricing (offline fallback)", () => {
 		cacheCreationInputTokens: 1_000_000,
 	};
 
-	for (const model of ["claude-sonnet-5", "claude-sonnet-5-5"]) {
+	for (const [model, cacheCost] of [
+		["claude-sonnet-5", 2.7],
+		["claude-sonnet-5-5", 2.6],
+	] as const) {
 		it(`prices ${model} input/output from bundled data`, async () => {
 			expect(await estimateCostUSD(model, ioTokens)).toBeCloseTo(12, 6);
 		});
 
 		it(`prices ${model} cache tokens from bundled data`, async () => {
-			expect(await estimateCostUSD(model, cacheTokens)).toBeCloseTo(2.7, 6);
+			expect(await estimateCostUSD(model, cacheTokens)).toBeCloseTo(
+				cacheCost,
+				6,
+			);
 		});
 	}
+});
+
+describe("bundled Haiku 5.5 pricing (offline fallback)", () => {
+	// Two rate cards chosen by prompt size (input + cache read + cache write):
+	//   <= 100K: $0.10 in, $0.50 out, $0.01 read, $0.125 write
+	//   >  100K: $0.50 in, $2.50 out, $0.05 read, $0.625 write
+	it("prices a prompt of exactly 100K tokens on the base card", async () => {
+		expect(
+			await estimateCostUSD("claude-haiku-5-5", {
+				inputTokens: 40_000,
+				cacheReadInputTokens: 60_000,
+				outputTokens: 1_000,
+			}),
+		).toBeCloseTo(0.0051, 9);
+	});
+
+	it("prices a prompt one token over 100K on the long-prompt card", async () => {
+		expect(
+			await estimateCostUSD("claude-haiku-5-5", {
+				inputTokens: 40_001,
+				cacheReadInputTokens: 60_000,
+				outputTokens: 1_000,
+			}),
+		).toBeCloseTo(0.0255005, 9);
+	});
+
+	it("counts cache writes toward the prompt size and prices them on the card", async () => {
+		expect(
+			await estimateCostUSD("claude-haiku-5-5", {
+				inputTokens: 1_000,
+				cacheCreationInputTokens: 150_000,
+			}),
+		).toBeCloseTo(0.0005 + 0.09375, 9);
+	});
+
+	it("prices 1-hour writes at 2x the selected card's input rate", async () => {
+		expect(
+			await estimateCostUSD("claude-haiku-5-5", {
+				cacheCreationInputTokens: 200_000,
+				cacheCreation1hInputTokens: 200_000,
+			}),
+		).toBeCloseTo(0.2, 9);
+	});
+});
+
+describe("context-tier rate cards from the catalogue", () => {
+	const tiered = {
+		openai: {
+			models: {
+				"tiered-model": {
+					id: "tiered-model",
+					name: "Tiered",
+					cost: {
+						input: 1,
+						output: 2,
+						cache_read: 0.1,
+						cache_write: 1.25,
+						tiers: [
+							{
+								input: 3,
+								output: 6,
+								tier: { type: "context", size: 128_000 },
+							},
+							{
+								input: 2,
+								output: 4,
+								cache_read: 0.2,
+								tier: { type: "context", size: 32_000 },
+							},
+							{ input: 99, output: 99, tier: { type: "batch", size: 0 } },
+						],
+					},
+				},
+			},
+		},
+	};
+	const price = (tokens: TokenBreakdown) =>
+		estimateCostUSD("tiered-model", tokens, { provider: "openai" });
+
+	it("uses the base card up to the smallest threshold", async () => {
+		await withRemoteCatalogue(tiered, async () => {
+			expect(
+				await price({ inputTokens: 32_000, outputTokens: 1_000_000 }),
+			).toBeCloseTo(0.032 + 2, 9);
+		});
+	});
+
+	it("uses the largest threshold the prompt exceeds", async () => {
+		await withRemoteCatalogue(tiered, async () => {
+			expect(
+				await price({ inputTokens: 64_000, outputTokens: 1_000_000 }),
+			).toBeCloseTo(0.128 + 4, 9);
+			expect(
+				await price({ inputTokens: 200_000, outputTokens: 1_000_000 }),
+			).toBeCloseTo(0.6 + 6, 9);
+		});
+	});
+
+	it("falls back to the base rate for a kind the selected card omits", async () => {
+		await withRemoteCatalogue(tiered, async () => {
+			// The 128K card has no cache_read or cache_write.
+			expect(
+				await price({
+					inputTokens: 100_000,
+					cacheReadInputTokens: 100_000,
+					cacheCreationInputTokens: 100_000,
+				}),
+			).toBeCloseTo(0.3 + 0.01 + 0.125, 9);
+		});
+	});
 });
 
 describe("bundled Mythos-class pricing (offline fallback)", () => {

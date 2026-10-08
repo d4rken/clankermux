@@ -797,15 +797,15 @@ describe("catalogue entry lookup", () => {
 		).toBe("openai entry");
 	});
 
-	it("prices a tiered entry from its base rates", async () => {
-		// The widened declarations expose `tiers` to readers; they must not reach
-		// the cost computation, which charges the base card for the whole request.
-		const cost = await estimateCostUSD(
-			"gpt-9-rich",
-			{ inputTokens: 1_000_000, outputTokens: 1_000_000 },
-			{ provider: "codex" },
-		);
-		expect(cost).toBeCloseTo(10, 6);
+	it("prices a tiered entry from the card its prompt size selects", async () => {
+		const price = (inputTokens: number) =>
+			estimateCostUSD(
+				"gpt-9-rich",
+				{ inputTokens, outputTokens: 1_000_000 },
+				{ provider: "codex" },
+			);
+		expect(await price(272_000)).toBeCloseTo(0.544 + 8, 6);
+		expect(await price(1_000_000)).toBeCloseTo(4 + 16, 6);
 	});
 });
 

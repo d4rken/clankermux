@@ -5,9 +5,32 @@ import {
 	getModelShortName,
 	isValidModelId,
 	LATEST_FABLE_MODEL,
+	LATEST_HAIKU_MODEL,
 	LATEST_OPUS_MODEL,
 	LATEST_SONNET_MODEL,
 } from "./models";
+
+describe("Claude Haiku 5.5 registration", () => {
+	it("exposes the claude-haiku-5-5 model id", () => {
+		expect(CLAUDE_MODEL_IDS.HAIKU_5_5).toBe("claude-haiku-5-5");
+	});
+
+	it("is the latest haiku model", () => {
+		expect(LATEST_HAIKU_MODEL).toBe("claude-haiku-5-5");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-haiku-5-5")).toBe("Claude Haiku 5.5");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		expect(getModelShortName("claude-haiku-5-5")).toBe("claude-haiku-5.5");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-haiku-5-5")).toBe(true);
+	});
+});
 
 describe("Claude Sonnet 5.5 registration", () => {
 	it("exposes the claude-sonnet-5-5 model id", () => {

@@ -77,8 +77,8 @@ export const OPENAI_EQ_WEIGHTS: EqTokenWeights = {
  * Code traffic is cache-read-dominated, so the shared weight would overstate
  * their exposure fourfold on the class that carries most of their tokens.
  *
- * Opus 5.5 reads cache at $0.20/M against $4/M input — 0.05x, the same
- * overstatement at half the size.
+ * Opus 5.5 reads cache at $0.20/M against $4/M input, and Sonnet 5.5 at
+ * $0.10/M against $2/M — 0.05x, the same overstatement at half the size.
  *
  * `eq-tokens.test.ts` derives its expectations from this map, so an entry that
  * stops matching the bundled price table fails, and so does a NEW divergence
@@ -101,6 +101,7 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-opus-5-5": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.05 },
+	"claude-sonnet-5-5": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.05 },
 };
 
 /** Provider axis the weights are selected on. */
