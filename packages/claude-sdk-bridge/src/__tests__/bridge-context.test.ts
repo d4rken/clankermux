@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage, SessionStore } from "@anthropic-ai/claude-agent-sdk";
+import { piHttpErrorMessage, piRetries } from "@clankermux/test-support";
 import {
 	SDK_BRIDGE_HISTORY_HEADER,
 	type SdkBridgeRoutePlan,
@@ -259,9 +260,11 @@ describe("client tool results Claude Code would replace", () => {
 				type: "invalid_request_error",
 				code: "sdk_bridge_tool_result_too_large",
 				message:
-					"The result for tool call toolu_1 is 500,001 characters; Claude Code passes at most 500,000 to the model whole",
+					"A tool result in this request is longer than Claude Code passes to the model whole",
 			},
 		});
+		// A permanent refusal: pi must not resend the same result.
+		expect(piRetries(piHttpErrorMessage(400, r.json?.error))).toBe(false);
 		await waitFor(() => h.repo.legs.get(refused.meta.legId)?.finished === true);
 		expect(h.repo.legs.get(refused.meta.legId)).toMatchObject({
 			turnId: t.plan.turnId,

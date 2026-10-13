@@ -646,6 +646,17 @@ a mid-stream error's own status only for 400, 413, 429 and 529, the last two
 with Retry-After; anything else answers 502. A 401 or 403 there would tell
 an OpenAI SDK client its own key is bad.
 
+When there is no explicit `error.code`, a Responses `response.failed`
+maps `api_error` to OpenAI's `server_error`. The event carries no HTTP
+status; pi classifies the composed code and message, and `server_error`
+matches its retry patterns where `api_error` alone does not. Before the
+head the same Claude Code failure is an HTTP 502, which pi retries too.
+Non-retryable patterns win over retryable ones. pi-ai 1.2.0's classifier
+is copied as `piRetries` in `packages/test-support`.
+
+Status-like numbers anywhere in the error text trigger a retry, so
+`sdk_bridge_tool_result_too_large` names neither sizes nor the call.
+
 A continuation is compared on the model string the client wrote, never the
 upstream model an alias resolves to. When the caller's own parked turn is
 answered under another model, `findContinuation` tears that turn down and
