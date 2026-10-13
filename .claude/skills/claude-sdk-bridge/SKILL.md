@@ -511,8 +511,9 @@ pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 `SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
 (`HEADS` in `pi-prompt.ts`): releases with the same stock preamble and the
 same head sections in the same order share an entry, whatever the sections
-hold. 0.99 and 1.0 share 0.87's; the `<docs>` "When asked about" list
-gained an MCP servers entry in 0.99 and a codemode entry in 1.0. A version is supported only while it has fixtures under
+hold. 0.99, 1.0 and 1.2 share 0.87's; the `<docs>` "When asked about" list
+gained an MCP servers entry in 0.99 and a codemode entry in 1.0, and 1.2
+renders exactly 1.0's text. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the

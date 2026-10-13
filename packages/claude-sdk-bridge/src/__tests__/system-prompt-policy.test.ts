@@ -414,4 +414,17 @@ describe("the version gate", () => {
 			reason: "unsupported_version",
 		});
 	});
+
+	it("serves 1.2 and still refuses 1.1, which sits between served layouts", () => {
+		expect(appendOf(decide(system, "1.2"))).toBe(
+			appendOf(decide(system, "1.0")),
+		);
+		const refused = refusalOf(decide(system, "1.1"));
+		expect(refused.error.code).toBe("sdk_bridge_prompt_unsupported");
+		expect(refused.error.message).toContain('"1.1"');
+		expect(refused.detail).toMatchObject({
+			version: "1.1",
+			reason: "unsupported_version",
+		});
+	});
 });
