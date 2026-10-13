@@ -285,17 +285,15 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
-	toolResultTooLarge(
-		toolUseId: string,
-		chars: number,
-		max: number,
-	): BridgeError {
-		const n = (x: number) => x.toLocaleString("en-US");
+	toolResultTooLarge(): BridgeError {
+		// Neither sizes nor the call id: pi retries an error whose text holds
+		// a status-like number. bridge-context.test.ts pins pi's verdict.
 		return {
 			status: 400,
 			type: "invalid_request_error",
 			code: "sdk_bridge_tool_result_too_large",
-			message: `The result for tool call ${toolUseId} is ${n(chars)} characters; Claude Code passes at most ${n(max)} to the model whole`,
+			message:
+				"A tool result in this request is longer than Claude Code passes to the model whole",
 			retryAfter: null,
 		};
 	},

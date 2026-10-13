@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SdkBridgeLimits } from "@clankermux/claude-sdk-bridge";
 import { clearProviderOverloadCooldown } from "@clankermux/proxy";
+import { piFailedErrorMessage, piRetries } from "@clankermux/test-support";
 import {
 	resultMessage,
 	streamedMessage,
@@ -382,6 +383,27 @@ for (const endpoint of ["responses", "chat"] as const) {
 			);
 		});
 
+		it("Claude Code error with no inner outcome after the head: a stream error a client retries", async () => {
+			const h = await harness();
+			const seen = await turn(h, endpoint, async (query) => {
+				startStreaming(query, MODEL);
+				await Bun.sleep(100);
+				giveUp(query, "error_during_execution");
+				query.end();
+			});
+
+			const failed = streamedError(seen, endpoint);
+			expect(String(failed.message)).toContain(
+				"Claude Code ended the turn with an error",
+			);
+			if (endpoint === "responses") {
+				expect(failed.code).toBe("server_error");
+				expect(piRetries(piFailedErrorMessage(failed))).toBe(true);
+			} else {
+				expect(failed.code).toBe("api_error");
+			}
+		});
+
 		it("deadline before any output: 504", async () => {
 			const h = await harness({ turnDeadlineMs: 300 });
 			const seen = await turn(h, endpoint, async () => {});
@@ -445,7 +467,7 @@ for (const endpoint of ["responses", "chat"] as const) {
 			if (endpoint === "responses") {
 				expect(seen.text).toContain("event: response.failed");
 				expect(streamedError(seen, endpoint)).toEqual({
-					code: "api_error",
+					code: "server_error",
 					message: "mock 500 mid-stream",
 				});
 			} else {

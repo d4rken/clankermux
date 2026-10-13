@@ -145,8 +145,17 @@ describe("translateAnthropicStreamToResponses", () => {
 			});
 		});
 	}
-	test("fails the response with the error's code, or its type when it has none", async () => {
+	test("fails the response with the error's code, or its type when it has none, api_error as server_error", async () => {
 		for (const [error, code] of [
+			[{ type: "api_error", message: "prompt is too long" }, "server_error"],
+			[
+				{
+					type: "api_error",
+					message: "prompt is too long",
+					code: "sdk_bridge_context_rewritten",
+				},
+				"sdk_bridge_context_rewritten",
+			],
 			[
 				{
 					type: "invalid_request_error",
@@ -194,11 +203,11 @@ describe("translateAnthropicStreamToResponses", () => {
 		for (const [error, expected] of [
 			[
 				{ type: 42, message: { nested: true } },
-				{ code: "api_error", message: "An error occurred during streaming" },
+				{ code: "server_error", message: "An error occurred during streaming" },
 			],
 			[
 				{ type: "   ", message: "   " },
-				{ code: "api_error", message: "An error occurred during streaming" },
+				{ code: "server_error", message: "An error occurred during streaming" },
 			],
 			[
 				{ type: "t".repeat(500), message: "m" },

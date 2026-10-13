@@ -820,9 +820,15 @@ function processEvent(
 			typeof err?.message === "string" && err.message.trim()
 				? err.message
 				: "An error occurred during streaming";
+		// Anthropic's `api_error` is the Responses API's `server_error`, a
+		// transient server failure. `response.failed` carries no HTTP status,
+		// so clients classify it by its code and message.
+		const code =
+			errorLabel(err?.code) ??
+			(errType === "api_error" ? "server_error" : errType);
 		emitTerminal(controller, state, {
 			status: "failed",
-			error: { code: errorLabel(err?.code) ?? errType, message: errMsg },
+			error: { code, message: errMsg },
 		});
 		return;
 	}

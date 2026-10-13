@@ -1874,13 +1874,7 @@ export function createClaudeSdkBridge(
 			for (const block of parsed.turn.toolResults) {
 				const chars = previewedChars(toMcpResult(block));
 				if (chars !== null && chars > MAX_TOOL_RESULT_CHARS)
-					return refuse(
-						bridgeErrors.toolResultTooLarge(
-							String(block.tool_use_id),
-							chars,
-							MAX_TOOL_RESULT_CHARS,
-						),
-					);
+					return refuse(bridgeErrors.toolResultTooLarge());
 			}
 			// findContinuation hands such results to a fresh turn; a caller that
 			// skipped it gets the refusal, and its retry finds the turn gone.

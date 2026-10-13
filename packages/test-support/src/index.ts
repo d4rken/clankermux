@@ -126,3 +126,9 @@ export function mockFetch(
 	const preconnect: typeof fetch.preconnect = () => {};
 	return Object.assign(impl, { preconnect }) as typeof fetch;
 }
+
+export {
+	piFailedErrorMessage,
+	piHttpErrorMessage,
+	piRetries,
+} from "./pi-retry-classifier";
