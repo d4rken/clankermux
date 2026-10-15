@@ -392,6 +392,42 @@ describe("ingestProxyRequest", () => {
 			expect(meta.officialAnthropicVia).toBe("direct");
 		});
 
+		for (const [label, model] of [
+			["missing", undefined],
+			["null", null],
+			["number", 7],
+			["boolean", false],
+			["array", []],
+			["object", {}],
+			["coercion-hostile object", { toString: null, valueOf: null }],
+			["empty string", ""],
+			["whitespace", "   "],
+		] as const) {
+			it(`rejects a ${label} native Responses model before routing`, async () => {
+				const req = jsonRequest("/v1/messages", contextBody());
+				setNativeResponsesRequestContext(req, {
+					nativeBody: JSON.stringify({ model, input: "hello" }),
+				});
+				const result = await ingestProxyRequest(
+					req,
+					urlFor("/v1/messages"),
+					makeCtx(),
+					null,
+					false,
+				);
+				expect(result.kind).toBe("response");
+				if (result.kind !== "response") throw new Error("expected a rejection");
+				expect(result.response.status).toBe(400);
+				expect(await result.response.json()).toEqual({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: "Invalid native Responses body or model",
+					},
+				});
+			});
+		}
+
 		it("takes the official-Anthropic floor from the adapters' in-process contexts only", async () => {
 			const responses = jsonRequest("/v1/messages", contextBody());
 			setNativeResponsesRequestContext(responses, {
