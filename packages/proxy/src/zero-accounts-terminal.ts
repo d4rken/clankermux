@@ -785,7 +785,7 @@ export async function resolveZeroAccountsOutcome(
 	// the request the floor excludes nothing, so pool_exhausted describes the
 	// right accounts.
 	if (
-		(requestMeta.pin || requestMeta.officialAnthropicExcluded) &&
+		(isPinActive(requestMeta.pin) || requestMeta.officialAnthropicExcluded) &&
 		!requestMeta.pinFailure
 	) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(
