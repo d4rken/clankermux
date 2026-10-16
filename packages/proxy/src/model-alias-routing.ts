@@ -23,7 +23,10 @@ import {
 	selectAliasRoute,
 } from "./resolved-route";
 import { recordRouteRejection } from "./routing-dispatch";
-import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
+import {
+	sdkBridgeRefusalLabel,
+	sdkBridgeRefusalTerminal,
+} from "./sdk-bridge-refusal";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 
 const AFFINITY_TTL_MS = 60 * 60 * 1000;
@@ -77,6 +80,8 @@ export function aliasFallbackReason(
 		case "server_error":
 		case "sdk_bridge_unavailable":
 			return "temporarily_unavailable";
+		case "sdk_bridge_extra_usage":
+			return "extra_usage_exhausted";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";
 		default:
@@ -303,16 +308,16 @@ export async function handleAliasProxy(
 		terminalMessage =
 			"Request exceeds the context capacity of the alias target";
 	}
-	// As in the ordinary give-up: the bridge's capacity 529 says when to retry.
-	const bridgeCapacity =
-		terminalStatus === 503 ? sdkBridgeCapacityTerminal(meta) : null;
-	if (bridgeCapacity) {
-		const capacityResponse = bridgeCapacity.terminalResponse();
+	// As in the ordinary give-up: the bridge's own refusal answers.
+	const bridgeRefusal =
+		terminalStatus === 503 ? sdkBridgeRefusalTerminal(meta) : null;
+	if (bridgeRefusal) {
+		const refusalResponse = bridgeRefusal.terminalResponse();
 		if (!ctx.requestRecorder.hasRecord(meta.id))
-			await record(capacityResponse, "sdk_bridge_capacity", {
+			await record(refusalResponse, sdkBridgeRefusalLabel(bridgeRefusal), {
 				failoverAttempts: attempts,
 			});
-		return capacityResponse;
+		return refusalResponse;
 	}
 	const response = Response.json(
 		{

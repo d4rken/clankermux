@@ -6,7 +6,8 @@ import {
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	SDK_BRIDGE_PI_PROMPT_HEADER,
-	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
+	SdkBridgeRefusalError,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
@@ -23,7 +24,7 @@ import {
 	type RoutingAttemptAudit,
 	sendAuthorizedRequest,
 } from "../routing-dispatch";
-import { priorSdkBridgeCapacity } from "../sdk-bridge-capacity";
+import { priorSdkBridgeRefusal } from "../sdk-bridge-refusal";
 import { createClientAbortResponse } from "./client-abort-response";
 import type { ProxyContext } from "./proxy-types";
 
@@ -146,11 +147,13 @@ export function sdkBridgeRequest(
 export type SdkBridgeAttemptResult =
 	| { kind: "response"; response: Response }
 	/**
-	 * Nothing ran; the caller may move on to its next candidate. `capacity`
-	 * is set when every Claude Code slot was taken, and carries the answer for
-	 * a request no other candidate serves.
+	 * Nothing reached the client; the caller may move on to its next
+	 * candidate. `refusal` is set when the bridge answered with its own
+	 * refusal (every Claude Code slot taken, or Anthropic out of extra usage
+	 * before the head), and carries the answer for a request no other
+	 * candidate serves.
 	 */
-	| { kind: "unavailable"; reason: string; capacity?: SdkBridgeCapacityError };
+	| { kind: "unavailable"; reason: string; refusal?: SdkBridgeRefusalError };
 
 /**
  * One attempt served by the SDK bridge. It runs none of the direct path's
@@ -190,9 +193,9 @@ export async function proxyViaSdkBridge(input: {
 					? availability.reason
 					: "shutting down",
 		};
-	const prior = priorSdkBridgeCapacity(requestMeta);
+	const prior = priorSdkBridgeRefusal(requestMeta);
 	if (prior)
-		return { kind: "unavailable", reason: prior.message, capacity: prior };
+		return { kind: "unavailable", reason: prior.message, refusal: prior };
 	const plan = buildSdkBridgeRoutePlan(
 		requestMeta,
 		account,
@@ -233,8 +236,8 @@ export async function proxyViaSdkBridge(input: {
 		return { kind: "response", response };
 	} catch (error) {
 		if (error instanceof RoutingPolicyError) throw error;
-		if (error instanceof SdkBridgeCapacityError)
-			return { kind: "unavailable", reason: error.message, capacity: error };
+		if (error instanceof SdkBridgeRefusalError)
+			return { kind: "unavailable", reason: error.message, refusal: error };
 		if (error instanceof SdkBridgeUnavailableError)
 			return { kind: "unavailable", reason: error.message };
 		// The transport promises to answer inference failures as Responses, so
@@ -342,6 +345,9 @@ export async function continueParkedSdkBridgeTurn(input: {
 		});
 	} catch (error) {
 		if (req.signal.aborted) return createClientAbortResponse();
+		// A continuation that fell back to a fresh start has no other route.
+		if (error instanceof SdkBridgeExtraUsageError)
+			return error.terminalResponse();
 		if (error instanceof SdkBridgeUnavailableError)
 			return errorResponse(
 				503,

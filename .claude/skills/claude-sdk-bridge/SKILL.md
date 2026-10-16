@@ -43,10 +43,26 @@ pipeline. The client keeps executing its own tools.
   Its response is final. Only `SdkBridgeUnavailableError` (bridge
   infrastructure) fails over to the next outer candidate. An inner 429/529
   never relaunches Claude Code on another outer candidate. Its subclass
-  `SdkBridgeCapacityError` (process or rebuild cap) fails over too, and when
-  it was the last failure the give-up terminals answer its 529 and
-  Retry-After instead of their own 503; later official candidates of the same
-  request skip the bridge (`sdk-bridge-capacity.ts`).
+  `SdkBridgeRefusalError` fails over too, and when it was the last failure
+  the give-up terminals answer it instead of their own 503; later official
+  candidates of the same request skip the bridge (`sdk-bridge-refusal.ts`).
+  Two refusals exist: `SdkBridgeCapacityError` (process or rebuild cap, its
+  529 and Retry-After) and `SdkBridgeExtraUsageError` (below).
+- **Out of extra usage.** An inner 400 whose upstream error message says
+  "out of extra usage" (`mapInnerOutcome` marks it `failover`) fails a start
+  leg over while its head is still held: no event sent and not past
+  `headHoldMs`. The query is torn down (turn `failed`, leg 400 `pre_head`)
+  before the leg's response rejects with `SdkBridgeExtraUsageError`. The
+  proxy then skips every remaining bridged account (the rest of the stage,
+  later alias stages, the rest of a pooled route) and goes on with direct
+  destinations; the alias reason is `extra_usage_exhausted`. With none left,
+  the client gets the 400 as `mapInnerOutcome` builds it, with the history
+  header. No account changes. A continuation, a committed head (the first
+  event or the hold timer's ping) and a released park's resume answer the
+  400 themselves, as before; a continuation that had to start afresh answers
+  it through the proxy's continuation path. A give-up waits up to 2 s for
+  the outcome of every inner call whose row began, so the call Claude Code
+  gave up on decides even when its report arrives after the error result.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
@@ -692,7 +708,8 @@ still refused, and stale or partial ones keep their own 409.
   prompt reproducibly draws a 400 "out of extra usage" from subscription
   accounts (gotgenes/pi-packages#883), which is why `pi-head-v1` removes
   pi's head and checks the rest. An "out of extra usage" 400
-  from an inner call reaches the client verbatim and changes no account.
+  from an inner call changes no account, and reaches the client verbatim
+  unless the request fails over (above).
 - **"Failed to authenticate".** The CLI reports any 403 from its base URL that
   way. The inner listener rewrites a ClankerMux 403 to 400 for the child, and
   the bridge never passes the CLI's credential wording to the client

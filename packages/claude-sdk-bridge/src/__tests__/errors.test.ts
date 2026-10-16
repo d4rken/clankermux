@@ -60,13 +60,45 @@ describe("error mapping", () => {
 					"You're out of extra usage. Add more at claude.ai/settings/usage",
 			}),
 		);
-		// Extra Usage fails closed and says so, verbatim.
+		// Extra Usage fails closed and says so, verbatim; the attempt may fail over.
 		expect(extra).toEqual({
 			status: 400,
 			type: "invalid_request_error",
 			message:
 				"You're out of extra usage. Add more at claude.ai/settings/usage",
 			retryAfter: null,
+			failover: "extra_usage_exhausted",
+		});
+	});
+
+	it("marks only an inner 400 saying it is out of extra usage for failover", () => {
+		const failover = (status: number, message: string | null) =>
+			mapInnerOutcome(outcome(status, { message })).failover;
+		expect(failover(400, "You're out of extra usage.")).toBe(
+			"extra_usage_exhausted",
+		);
+		expect(failover(400, "OUT OF EXTRA USAGE")).toBe("extra_usage_exhausted");
+		expect(failover(429, "You're out of extra usage.")).toBeUndefined();
+		expect(failover(403, "You're out of extra usage.")).toBeUndefined();
+		expect(
+			failover(400, "Extra usage is required for 1M context"),
+		).toBeUndefined();
+		expect(failover(400, null)).toBeUndefined();
+		expect(
+			failover(400, "prompt is too long: 3 tokens > 2 maximum"),
+		).toBeUndefined();
+	});
+
+	it("never sends the failover mark to the client", () => {
+		const mapped = mapInnerOutcome(
+			outcome(400, { message: "You're out of extra usage." }),
+		);
+		expect(errorBody(mapped)).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "You're out of extra usage.",
+			},
 		});
 	});
 

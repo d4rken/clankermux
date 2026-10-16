@@ -16,7 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import {
+	SDK_BRIDGE_HISTORY_HEADER,
 	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
 	type SdkBridgeInnerOutcome,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTurnMeta,
@@ -3253,28 +3255,269 @@ describe("errors", () => {
 		});
 	});
 
-	it("passes an inner 400 (out of extra usage) through verbatim from a success-typed error result", async () => {
-		const h = harness();
+	describe("an inner 400 out of extra usage", () => {
 		const message =
 			"You're out of extra usage. Add more at claude.ai/settings/usage and keep going.";
-		failInner(h, { status: 400, errorType: "invalid_request_error", message });
-		const t = await start(h, {
-			messages: [{ role: "user", content: "hello" }],
+		const extraUsage = {
+			status: 400,
+			errorType: "invalid_request_error",
+			message,
+		};
+
+		/** Claude Code giving up on that call, as it reports it. */
+		function giveUp(query: FakeQuery) {
+			query.emit(
+				resultMessage({
+					isError: true,
+					subtype: "success",
+					result: `API Error: 400 ${message}`,
+				}),
+			);
+		}
+
+		async function rejection(response: Promise<Response>) {
+			try {
+				await response;
+			} catch (error) {
+				return error;
+			}
+			throw new Error("the start leg answered instead of failing over");
+		}
+
+		for (const stream of [true, false])
+			it(`fails a ${stream ? "streamed" : "non-streamed"} start over before its head, with the query closed first`, async () => {
+				const h = harness();
+				failInner(h, extraUsage);
+				const t = await start(h, {
+					stream,
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUp(t.query);
+				const error = await rejection(t.response);
+				// Settled before the proxy sees it.
+				expect(h.bridge.status().live).toBe(0);
+				expect(error).toBeInstanceOf(SdkBridgeExtraUsageError);
+				const refused = error as SdkBridgeExtraUsageError;
+				expect(refused).toMatchObject({
+					reason: "extra_usage_exhausted",
+					status: 400,
+					errorType: "invalid_request_error",
+					message,
+					retryAfter: null,
+				});
+				const answer = refused.terminalResponse();
+				expect(answer.status).toBe(400);
+				expect(answer.headers.get(SDK_BRIDGE_HISTORY_HEADER)).toBeString();
+				expect(await answer.json()).toEqual({
+					type: "error",
+					error: { type: "invalid_request_error", message },
+				});
+				await waitFor(
+					() => h.repo.turns.get(t.plan.turnId)?.status === "failed",
+				);
+				const turn = h.repo.turns.get(t.plan.turnId);
+				expect(turn).toMatchObject({ httpStatus: 400 });
+				expect(turn?.legs[0]).toMatchObject({
+					httpStatus: 400,
+					errorPhase: "pre_head",
+				});
+			});
+
+		it("waits for the refused call's report when it arrives after Claude Code gave up", async () => {
+			const h = harness();
+			let report: (() => void) | null = null;
+			h.inner.respond = (_req, ctx) => {
+				const requestId = crypto.randomUUID();
+				ctx.onInnerRequestStarted?.(requestId);
+				report = () =>
+					ctx.onInnerOutcome?.({
+						requestId,
+						errorType: "invalid_request_error",
+						message,
+						retryAfter: null,
+						accountId: "acct-a",
+						status: 400,
+					});
+				return Response.json(
+					{ type: "error", error: { type: "invalid_request_error", message } },
+					{ status: 400 },
+				);
+			};
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			// Longer than an error result waits for a report by itself.
+			await Bun.sleep(600);
+			(report as (() => void) | null)?.();
+			expect(await rejection(t.response)).toBeInstanceOf(
+				SdkBridgeExtraUsageError,
+			);
 		});
-		await innerCall(t.query);
-		t.query.emit(
-			initMessage(),
-			resultMessage({
-				isError: true,
-				subtype: "success",
-				result: `API Error: 400 ${message}`,
-			}),
-		);
-		const res = await t.response;
-		expect(res.status).toBe(400);
-		expect(await res.json()).toEqual({
-			type: "error",
-			error: { type: "invalid_request_error", message },
+
+		it("decides on the call Claude Code gave up on, not an earlier refused one", async () => {
+			const h = harness();
+			const reports: Array<() => void> = [];
+			let calls = 0;
+			h.inner.respond = (_req, ctx) => {
+				const requestId = crypto.randomUUID();
+				ctx.onInnerRequestStarted?.(requestId);
+				const failure =
+					++calls === 1
+						? {
+								errorType: "invalid_request_error",
+								message: "Invalid `signature` in `thinking` block",
+							}
+						: { errorType: "invalid_request_error", message };
+				const deliver = () =>
+					ctx.onInnerOutcome?.({
+						requestId,
+						retryAfter: null,
+						accountId: "acct-a",
+						status: 400,
+						...failure,
+					});
+				if (calls === 1) deliver();
+				else reports.push(deliver);
+				return Response.json(
+					{
+						type: "error",
+						error: { type: failure.errorType, message: failure.message },
+					},
+					{ status: 400 },
+				);
+			};
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			await innerCall(t.query);
+			t.query.emit(
+				initMessage(),
+				assistantMessage(
+					[{ type: "text", text: `API Error: 400 ${message}` }],
+					{
+						error: "invalid_request",
+						model: "<synthetic>",
+					},
+				),
+			);
+			giveUp(t.query);
+			await Bun.sleep(100);
+			for (const deliver of reports) deliver();
+			expect(await rejection(t.response)).toBeInstanceOf(
+				SdkBridgeExtraUsageError,
+			);
+		});
+
+		it("answers the 400 itself once the head-hold ping committed the head", async () => {
+			const h = harness({
+				timing: {
+					headHoldMs: 100,
+					pingIntervalMs: 100,
+					settleWaitMs: 500,
+					idleTimeoutMs: 5_000,
+					exitGraceMs: 50,
+				},
+			});
+			failInner(h, extraUsage);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await Bun.sleep(250);
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers the 400 itself once the first event committed the head", async () => {
+			const h = harness();
+			failInner(h, extraUsage);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "partial" }]).slice(0, 1),
+			);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers the 400 itself on a continuation, whose turn lives in this query alone", async () => {
+			const h = harness();
+			const first = { role: "user", content: "TOOL read a.txt" } as const;
+			const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_x",
+						name: "mcp__c__read",
+						input: { path: "a.txt" },
+					},
+				]),
+			);
+			const r1 = await reply(t.response);
+			void t.query.callTool("toolu_x", "read", { path: "a.txt" });
+			await waitFor(() => h.bridge.status().parked === 1);
+			failInner(h, extraUsage);
+			const c = continueTurn(h, t.plan.turnId, {
+				tools: [READ_TOOL],
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_x", content: "A" },
+						],
+					},
+				],
+			});
+			await waitFor(() => h.bridge.status().parked === 0);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const res = await c.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers another inner 400 itself", async () => {
+			const h = harness();
+			failInner(h, {
+				status: 400,
+				errorType: "invalid_request_error",
+				message: "messages.0: unexpected field",
+			});
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			const res = await t.response;
+			expect(res.status).toBe(400);
 		});
 	});
 

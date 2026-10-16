@@ -72,6 +72,8 @@ const TEARDOWN_STATUS: Record<TeardownReason, SdkBridgeTurnStatus> = {
 
 /** How long an error `result` waits for the proxy's report of the failed call. */
 const OUTCOME_GRACE_MS = 250;
+/** How long a give-up waits for the reports of calls whose rows began. */
+const OUTCOME_WAIT_MS = 2_000;
 /** SIGTERM to SIGKILL, for a child that ignores the polite signal. */
 const KILL_GRACE_MS = 2_000;
 /** From a prompt message's read to the tool results that must follow it. */
@@ -257,6 +259,8 @@ export class LiveQuery {
 	private clientMessages: ClientMessage[];
 	private lastOutcome: SdkBridgeInnerOutcome | null = null;
 	private outcomeSeq = 0;
+	/** `outcomeSeq` when Claude Code gave up. */
+	private giveUpSeq = 0;
 	private decisive: SdkBridgeInnerOutcome | null = null;
 	private gaveUp = false;
 	private claudeCodeErrorText: string | null = null;
@@ -469,6 +473,7 @@ export class LiveQuery {
 	private noteGiveUp(): void {
 		if (this.gaveUp) return;
 		this.gaveUp = true;
+		this.giveUpSeq = this.outcomeSeq;
 		this.decisive =
 			this.lastOutcome && this.lastOutcome.status >= 400
 				? this.lastOutcome
@@ -1210,6 +1215,17 @@ export class LiveQuery {
 	 * so a give-up can overtake its report; wait briefly for it.
 	 */
 	private async failAfterGrace(): Promise<void> {
+		// Calls whose rows began report after their response went back to
+		// Claude Code; the one it gave up on is the last of them to report.
+		const until = Date.now() + OUTCOME_WAIT_MS;
+		while (this.unreportedInnerCalls() && Date.now() < until)
+			await Bun.sleep(10);
+		if (
+			this.outcomeSeq > this.giveUpSeq &&
+			this.lastOutcome &&
+			this.lastOutcome.status >= 400
+		)
+			this.decisive = this.lastOutcome;
 		if (!this.decisive) {
 			const seq = this.outcomeSeq;
 			const until = Date.now() + OUTCOME_GRACE_MS;
@@ -1220,6 +1236,12 @@ export class LiveQuery {
 		this.failTurn(this.claudeCodeFailure());
 	}
 
+	private unreportedInnerCalls(): boolean {
+		for (const id of this.innerRequestsStarted)
+			if (!this.innerOutcomesSeen.has(id)) return true;
+		return false;
+	}
+
 	private claudeCodeFailure(fallbackText: string | null = null): BridgeError {
 		return mapClaudeCodeFailure(this.decisive, {
 			text: this.claudeCodeErrorText ?? fallbackText,
@@ -1228,6 +1250,18 @@ export class LiveQuery {
 	}
 
 	private failTurn(error: BridgeError): void {
+		// Only a start leg: a continuation's turn lives in this query alone.
+		if (
+			error.failover &&
+			this.leg?.kind === "start" &&
+			!this.leg.response.committed
+		) {
+			this.init.log.info(
+				`SDK bridge turn ${this.turnId}: ${error.failover} before the head; the attempt fails over`,
+			);
+			this.teardown("error", error);
+			return;
+		}
 		this.finalError = error;
 		this.deliveredOk = false;
 		const leg = this.leg;
@@ -1307,7 +1341,7 @@ export class LiveQuery {
 			);
 		} else if (!this.resultOk) {
 			// failAfterGrace may still be waiting on the proxy's report.
-			const until = Date.now() + OUTCOME_GRACE_MS + 50;
+			const until = Date.now() + OUTCOME_WAIT_MS + OUTCOME_GRACE_MS + 50;
 			while (this.leg && Date.now() < until) await Bun.sleep(10);
 			if (this.leg) this.failTurn(this.claudeCodeFailure());
 		}
@@ -1348,8 +1382,10 @@ export class LiveQuery {
 		const leg = this.leg;
 		if (leg) {
 			const committed = leg.response.committed;
-			// A no-op for a client that is already gone.
-			leg.response.fail(error);
+			// A no-op for a client that is already gone. A start leg's failover
+			// rejects only once this teardown has closed the query.
+			if (leg.kind !== "start" || !leg.response.failOver(error))
+				leg.response.fail(error);
 			this.finishLeg(leg, { httpStatus: error.status, error, committed });
 			this.leg = null;
 		}

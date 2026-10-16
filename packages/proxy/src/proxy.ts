@@ -84,11 +84,14 @@ import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
 } from "./routing-service";
-import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
 import {
 	reportSdkBridgeInnerFailure,
 	reportSdkBridgeInnerResponse,
 } from "./sdk-bridge-inner-outcome";
+import {
+	sdkBridgeRefusalLabel,
+	sdkBridgeRefusalTerminal,
+} from "./sdk-bridge-refusal";
 import { isIngressRecordable } from "./should-record-request";
 import {
 	createSyntheticTerminalRecorder,
@@ -1341,15 +1344,18 @@ async function handleIngestedProxy(
 	// attempted-accounts computation below (so it covers the needsReauth throw too).
 	if (req.signal.aborted) return createClientAbortResponse();
 
-	// The last candidate tried was the SDK bridge, refused for capacity: its
-	// 529 and Retry-After say when to come back, a generic 503 would not.
-	const bridgeCapacity = sdkBridgeCapacityTerminal(requestMeta);
-	if (bridgeCapacity) {
-		const response = bridgeCapacity.terminalResponse();
+	// The last candidate tried was the SDK bridge, refused with an answer of
+	// its own: a capacity 529 and Retry-After say when to come back, Anthropic's
+	// extra-usage 400 says why; a generic 503 would say neither.
+	const bridgeRefusal = sdkBridgeRefusalTerminal(requestMeta);
+	if (bridgeRefusal) {
+		const response = bridgeRefusal.terminalResponse();
 		if (!ctx.requestRecorder.hasRecord(requestMeta.id))
-			await recordSyntheticErrorResponse(response, "sdk_bridge_capacity", {
-				failoverAttempts: upstreamAttempts,
-			});
+			await recordSyntheticErrorResponse(
+				response,
+				sdkBridgeRefusalLabel(bridgeRefusal),
+				{ failoverAttempts: upstreamAttempts },
+			);
 		return response;
 	}
 

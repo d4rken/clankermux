@@ -10,6 +10,7 @@ import {
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+	ATTEMPT_SDK_BRIDGE_EXTRA_USAGE,
 	ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
 	ATTEMPT_TRANSPORT_FAILED,
 	FAST_MODE_SERVICE_TIER,
@@ -17,6 +18,8 @@ import {
 	readReasoningEffortAdaptation,
 	readServiceTierAdaptation,
 	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
+	SdkBridgeRefusalError,
 	SdkBridgeUnavailableError,
 	type ServiceTierGroup,
 } from "@clankermux/types";
@@ -392,7 +395,7 @@ export async function sendAuthorizedRequest(
 			? answered.status
 			: error instanceof RoutingPolicyError
 				? 403
-				: error instanceof SdkBridgeCapacityError
+				: error instanceof SdkBridgeRefusalError
 					? error.status
 					: error instanceof SdkBridgeUnavailableError
 						? 503
@@ -403,9 +406,11 @@ export async function sendAuthorizedRequest(
 				? error.message
 				: error instanceof SdkBridgeCapacityError
 					? `${ATTEMPT_SDK_BRIDGE_AT_CAPACITY}${error.message}`
-					: error instanceof SdkBridgeUnavailableError
-						? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
-						: ATTEMPT_TRANSPORT_FAILED;
+					: error instanceof SdkBridgeExtraUsageError
+						? `${ATTEMPT_SDK_BRIDGE_EXTRA_USAGE}${error.message}`
+						: error instanceof SdkBridgeUnavailableError
+							? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
+							: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else

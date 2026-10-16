@@ -14,6 +14,7 @@ import {
 	type ModelAlias,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
 	SdkBridgeUnavailableError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	setChatContext,
@@ -395,6 +396,141 @@ describe("SDK bridge floor with a bridge", () => {
 			expect(response.status).toBe(529);
 			expect(response.headers.get("retry-after")).toBe("10");
 			expect(bridge.starts).toHaveLength(1);
+		});
+	});
+
+	describe("when Anthropic answers out of extra usage before the head", () => {
+		const MESSAGE =
+			"You're out of extra usage. Add more at claude.ai/settings/usage";
+		const outOfExtraUsage = () =>
+			makeFakeBridge(() => {
+				throw new SdkBridgeExtraUsageError({
+					status: 400,
+					type: "invalid_request_error",
+					message: MESSAGE,
+					retryAfter: null,
+					headers: { "x-clankermux-sdk-bridge-history": "fresh" },
+				});
+			});
+
+		function mixedAlias(first: Account, second: Account): ModelAlias {
+			return {
+				id: "alias:mixed",
+				displayName: "Mixed",
+				revision: 0,
+				targets: [
+					{ model: MODEL, accountIds: [first.id] },
+					{ model: "gpt-x", accountIds: [second.id] },
+				],
+			};
+		}
+
+		it("moves on to the next alias stage, which a non-bridged account serves", async () => {
+			const bridge = outOfExtraUsage();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([a, o], {
+				bridge,
+				model: "alias:mixed",
+			});
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: { get: async () => mixedAlias(a, o) },
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			const rows = sends(harness);
+			expect(rows.map((r) => r.account_id)).toEqual(["claude-a", "other"]);
+			expect(rows[0].status).toBe(400);
+			expect(rows[0].error).toBe(`sdk_bridge_extra_usage: ${MESSAGE}`);
+		});
+
+		it("skips every other official account of a pooled route and is served by the non-bridged one", async () => {
+			const bridge = outOfExtraUsage();
+			const a = claudeA();
+			const b = claudeB();
+			harness = await makeBridgeHarness([a, b, other()], { bridge });
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			expect(sends(harness).map((r) => r.account_id)).toEqual([
+				"claude-a",
+				"other",
+			]);
+			// The refusal is the request's, not the accounts'.
+			expect(harness.ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+			for (const account of [a, b]) {
+				expect(account.rate_limited_until ?? null).toBeNull();
+				expect(account.paused ?? false).toBeFalsy();
+			}
+			expect(
+				getProviderOverloadUntil("anthropic", Date.now(), MODEL),
+			).toBeNull();
+		});
+
+		it("answers Anthropic's 400 when no other destination remains", async () => {
+			const bridge = outOfExtraUsage();
+			harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+			const { response, text } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(400);
+			expect(response.headers.get("retry-after")).toBeNull();
+			expect(response.headers.get("x-clankermux-sdk-bridge-history")).toBe(
+				"fresh",
+			);
+			expect(JSON.parse(text)).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message: MESSAGE },
+			});
+			expect(bridge.starts).toHaveLength(1);
+			expect(harness.upstreamKeys).toEqual([]);
+			const recorded = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof spyOn>;
+			expect(recorded).toHaveBeenCalledTimes(1);
+			expect(recorded.mock.calls[0]?.[2]).toBe("sdk_bridge_extra_usage");
+		});
+
+		it("answers Anthropic's 400 after the last alias stage, not the alias 503", async () => {
+			const bridge = outOfExtraUsage();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([o, a], {
+				bridge,
+				model: "alias:mixed",
+				upstream: () => new Response("down", { status: 503 }),
+			});
+			const alias: ModelAlias = {
+				id: "alias:mixed",
+				displayName: "Mixed",
+				revision: 0,
+				targets: [
+					{ model: "gpt-x", accountIds: [o.id] },
+					{ model: MODEL, accountIds: [a.id] },
+				],
+			};
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: { get: async () => alias },
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response, text } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(400);
+			expect(JSON.parse(text).error.message).toBe(MESSAGE);
 		});
 	});
 
@@ -1122,6 +1258,29 @@ describe("SDK bridge continuations", () => {
 
 		expect(bridge.lookupCallers).toEqual([{ apiKeyId: KEY, model: "sonnet" }]);
 		expect(bridge.continues[0]?.meta.model).toBe("sonnet");
+	});
+
+	it("answer Anthropic's extra-usage 400 when the turn had to start afresh, with no other route", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+		bridge.continueTurn = async () => {
+			throw new SdkBridgeExtraUsageError({
+				status: 400,
+				type: "invalid_request_error",
+				message: "You're out of extra usage.",
+				retryAfter: null,
+			});
+		};
+
+		const { response, text } = await run(flooredRequest(toolResults), h.ctx);
+
+		expect(response.status).toBe(400);
+		expect(JSON.parse(text)).toEqual({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "You're out of extra usage.",
+			},
+		});
 	});
 
 	it("leave another key's turn to the bridge, which refuses and records it", async () => {

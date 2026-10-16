@@ -1,3 +1,4 @@
+import { SdkBridgeExtraUsageError } from "@clankermux/types";
 import {
 	type BridgeError,
 	bridgeErrors,
@@ -106,6 +107,7 @@ export interface LegResponseOptions {
 export class LegResponse {
 	readonly response: Promise<Response>;
 	private resolveResponse!: (response: Response) => void;
+	private rejectResponse!: (error: Error) => void;
 	private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	private readonly buffered: Uint8Array[] = [];
 	private readonly reducer: MessageReducer | null;
@@ -117,8 +119,9 @@ export class LegResponse {
 	private readonly abortListener: () => void;
 
 	constructor(private readonly opts: LegResponseOptions) {
-		this.response = new Promise((resolve) => {
+		this.response = new Promise((resolve, reject) => {
 			this.resolveResponse = resolve;
+			this.rejectResponse = reject;
 		});
 		this.reducer = opts.stream ? null : new MessageReducer();
 		if (opts.stream)
@@ -256,6 +259,27 @@ export class LegResponse {
 		try {
 			this.controller?.close();
 		} catch {}
+	}
+
+	/**
+	 * The reply failed in a way the proxy fails over on: while nothing went
+	 * out, the response rejects with the typed error instead of answering.
+	 * False once it has committed; the caller fails it as usual then.
+	 */
+	failOver(error: BridgeError): boolean {
+		if (this.state !== "holding" || !error.failover) return false;
+		this.state = "done";
+		this.cleanup();
+		this.rejectResponse(
+			new SdkBridgeExtraUsageError({
+				status: error.status,
+				type: error.type,
+				message: error.message,
+				retryAfter: error.retryAfter,
+				headers: this.opts.headers,
+			}),
+		);
+		return true;
 	}
 
 	private cleanup(): void {

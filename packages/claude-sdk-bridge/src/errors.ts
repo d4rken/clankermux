@@ -1,5 +1,6 @@
 import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
 import {
+	SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED,
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	SDK_BRIDGE_SIDE_REQUEST_HEADER,
 	type SdkBridgeInnerOutcome,
@@ -13,6 +14,11 @@ export interface BridgeError {
 	retryAfter: string | null;
 	/** OpenAI-style `error.code`, for a condition clients branch on. */
 	code?: string;
+	/**
+	 * Set when the outer attempt may fail over on this error, as long as the
+	 * start leg it ends has sent nothing yet. Never sent to the client.
+	 */
+	failover?: typeof SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED;
 }
 
 /** Retry-After for a 429/503/529 whose cause named none. */
@@ -67,6 +73,8 @@ const OVERFLOW_TERMINAL_REASONS: ReadonlySet<string> = new Set<TerminalReason>([
 	"rapid_refill_breaker",
 ]);
 const OVERFLOW_CODE = "context_length_exceeded";
+/** Anthropic's 400 for a subscription account with no extra usage to spend. */
+const EXTRA_USAGE_EXHAUSTED = /\bout of extra usage\b/i;
 
 /**
  * Whether a failure is the conversation outgrowing the model's context:
@@ -155,6 +163,9 @@ export function mapInnerOutcome(outcome: SdkBridgeInnerOutcome): BridgeError {
 			type: knownType(outcome.errorType, "invalid_request_error"),
 			message,
 			retryAfter: null,
+			...(outcome.message && EXTRA_USAGE_EXHAUSTED.test(outcome.message)
+				? { failover: SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED }
+				: {}),
 		};
 	if (status === 403)
 		return { status, type: "permission_error", message, retryAfter: null };

@@ -101,6 +101,7 @@ const ALIAS_REASONS: Record<string, string> = {
 	rate_limited: "rate limited",
 	provider_overloaded: "provider overloaded",
 	temporarily_unavailable: "temporarily unavailable",
+	extra_usage_exhausted: "out of extra usage",
 	pool_unavailable: "no eligible account available",
 	conversation_affinity: "continuing with this conversation's backend",
 };

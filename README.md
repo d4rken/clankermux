@@ -139,6 +139,11 @@ What differs from a direct request:
   Code's system prompts are not sent. A client ClankerMux does not recognize
   (curl, an SDK, your own program), on a key whose application is generic or
   unset, has its system prompt appended unchanged.
+* When a Claude account answers "You're out of extra usage" before any of the
+  reply went out, the request moves on to destinations that are not Claude
+  accounts (the next alias stage, or the rest of the pool), skipping the other
+  Claude accounts. With none left, you get that 400. Once the reply has
+  started streaming, the error ends the stream instead.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
   `tool_choice` that forces or forbids tool use, and server tools (any tool
   with a `type` other than `custom`, such as Anthropic's web search) are

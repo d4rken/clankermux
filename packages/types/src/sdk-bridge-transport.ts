@@ -269,7 +269,9 @@ export interface SdkBridgeTransport {
 	/**
 	 * Start a new user turn. Resolves with an Anthropic Messages response (SSE
 	 * or JSON). Inference failures are error Responses; it throws
-	 * {@link SdkBridgeUnavailableError} only when the bridge itself cannot run.
+	 * {@link SdkBridgeUnavailableError} only when the bridge itself cannot run,
+	 * and its {@link SdkBridgeRefusalError} subclasses for a refusal the outer
+	 * attempt fails over on.
 	 */
 	startTurn(input: {
 		request: Request;
@@ -309,17 +311,18 @@ export class SdkBridgeUnavailableError extends Error {
 }
 
 /**
- * Every Claude Code slot (or rebuild slot) is taken. The outer attempt fails
- * over like any unavailability, but when no other candidate serves, this is
- * the answer the client gets: the bridge's 529 and its Retry-After, not a
- * generic pool-exhausted 503.
+ * The bridge refused this attempt with an answer of its own. The outer
+ * attempt fails over like any unavailability, and later official candidates
+ * of the same request skip the bridge; when no other candidate serves, this
+ * is the answer the client gets instead of a generic pool-exhausted one.
  */
-export class SdkBridgeCapacityError extends SdkBridgeUnavailableError {
+export class SdkBridgeRefusalError extends SdkBridgeUnavailableError {
 	readonly status: number;
 	readonly errorType: string;
 	readonly retryAfter: string | null;
-	/** `process_cap` or `rebuild_cap`. */
 	readonly reason: string;
+	/** Headers the bridge's own answer would have carried. */
+	readonly headers: Readonly<Record<string, string>>;
 
 	constructor(input: {
 		reason: string;
@@ -327,18 +330,21 @@ export class SdkBridgeCapacityError extends SdkBridgeUnavailableError {
 		type: string;
 		message: string;
 		retryAfter: string | null;
+		headers?: Record<string, string>;
 	}) {
 		super(input.message);
-		this.name = "SdkBridgeCapacityError";
+		this.name = "SdkBridgeRefusalError";
 		this.reason = input.reason;
 		this.status = input.status;
 		this.errorType = input.type;
 		this.retryAfter = input.retryAfter;
+		this.headers = { ...input.headers };
 	}
 
 	/** The terminal answer, built fresh on every call (a body reads once). */
 	terminalResponse(headers: Record<string, string> = {}): Response {
 		const out = new Headers({
+			...this.headers,
 			"content-type": "application/json",
 			...headers,
 		});
@@ -350,6 +356,36 @@ export class SdkBridgeCapacityError extends SdkBridgeUnavailableError {
 			}),
 			{ status: this.status, headers: out },
 		);
+	}
+}
+
+/**
+ * Every Claude Code slot (or rebuild slot) is taken: the bridge's 529 and
+ * its Retry-After. `reason` is `process_cap` or `rebuild_cap`.
+ */
+export class SdkBridgeCapacityError extends SdkBridgeRefusalError {
+	constructor(input: ConstructorParameters<typeof SdkBridgeRefusalError>[0]) {
+		super(input);
+		this.name = "SdkBridgeCapacityError";
+	}
+}
+
+export const SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED = "extra_usage_exhausted";
+
+/**
+ * Anthropic answered the start leg's model call with its 400 "out of extra
+ * usage" before anything reached the client. The query is closed when this
+ * is thrown; the answer is that 400 as the client would have had it.
+ */
+export class SdkBridgeExtraUsageError extends SdkBridgeRefusalError {
+	constructor(
+		input: Omit<
+			ConstructorParameters<typeof SdkBridgeRefusalError>[0],
+			"reason"
+		>,
+	) {
+		super({ ...input, reason: SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED });
+		this.name = "SdkBridgeExtraUsageError";
 	}
 }
 

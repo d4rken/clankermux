@@ -44,6 +44,11 @@ export interface GatewayAccount {
 	name: string;
 	/** The account's OAuth access token; the mock upstream sees it as Bearer. */
 	token: string;
+	/**
+	 * `anthropic-compatible`: an account the proxy sends to directly, never
+	 * bridged, with `token` as its API key (`x-api-key`). Default `anthropic`.
+	 */
+	provider?: "anthropic" | "anthropic-compatible";
 }
 
 export interface Gateway {
@@ -126,12 +131,14 @@ export async function startGateway(opts: {
 	const now = Date.now();
 	for (const [priority, a] of opts.accounts.entries())
 		await adapter.run(
-			`INSERT INTO accounts (id, name, provider, access_token, refresh_token, expires_at, created_at, priority, custom_endpoint)
-			 VALUES (?, ?, 'anthropic', ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO accounts (id, name, provider, access_token, api_key, refresh_token, expires_at, created_at, priority, custom_endpoint)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				a.id,
 				a.name,
-				a.token,
+				a.provider ?? "anthropic",
+				a.provider === "anthropic-compatible" ? null : a.token,
+				a.provider === "anthropic-compatible" ? a.token : null,
 				`fake-refresh-${a.id}`,
 				now + 30 * 24 * 3600_000,
 				now,
