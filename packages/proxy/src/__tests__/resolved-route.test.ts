@@ -517,7 +517,8 @@ describe("a [1m] id", () => {
 			expect.objectContaining({
 				statusCode: 400,
 				code: "model_suffix_requires_claude_code",
-				message: expect.stringContaining('"claude-opus-5-5[1m]"'),
+				message:
+					'Anthropic serves no model "claude-opus-5-5[1m]": Claude Code sends the bare id itself, and other clients reach it through the SDK bridge',
 			}),
 		);
 	});

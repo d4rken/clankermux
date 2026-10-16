@@ -89,7 +89,7 @@ export class ModelSuffixRouteError extends RoutingPolicyError {
 	override readonly statusCode = 400;
 	constructor(model: string) {
 		super(
-			`Model "${model}" is served only through the SDK bridge (Responses or Chat Completions on /wire/openai); Anthropic serves no model by that id`,
+			`Anthropic serves no model "${model}": Claude Code sends the bare id itself, and other clients reach it through the SDK bridge`,
 		);
 	}
 }
