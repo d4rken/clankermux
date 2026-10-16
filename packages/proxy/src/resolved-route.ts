@@ -48,6 +48,12 @@ export class ModelSubstitutionRouteError extends RoutingPolicyError {
 	override readonly code = "model_substituted";
 	override readonly statusCode = 503;
 }
+/** Raised at selection: no destination of the installed route still permits its model. */
+export class NoPermittedAccountError extends RoutingPolicyError {
+	constructor() {
+		super("No account retains permission for this request's resolved model");
+	}
+}
 export class ChatCapabilityError extends RoutingPolicyError {
 	override readonly code = "unsupported_parameter";
 	override readonly statusCode = 400;
@@ -467,16 +473,25 @@ function describeExclusions(reasons: readonly string[]): string {
 }
 const routes = new WeakMap<RequestMeta, ResolvedRoute>();
 const aliasStages = new WeakMap<RequestMeta, readonly ResolvedRoute[]>();
+/** The stages a request can be sent to, in plan order. */
+export function admissibleAliasStages(
+	stages: readonly ResolvedRoute[],
+): ResolvedRoute[] {
+	return stages.filter((stage) => !stage.admissionError);
+}
+/** Only when admission rejected every stage does the first one's rejection answer the request. */
 export function installAliasRoutes(
 	meta: RequestMeta,
 	stages: readonly ResolvedRoute[],
 ): void {
 	if (!stages.length)
 		throw new RoutingPolicyError("Alias has no permitted destinations");
-	if (stages[0].admissionError) throw stages[0].admissionError;
-	installResolvedRoute(meta, stages[0]);
+	const [first] = admissibleAliasStages(stages);
+	if (!first) throw stages[0].admissionError;
+	installResolvedRoute(meta, first);
 	aliasStages.set(meta, Object.freeze([...stages]));
 }
+/** Every stage of the plan, rejected ones included (they are audited, never sent). */
 export function getAliasRoutes(
 	meta: RequestMeta,
 ): readonly ResolvedRoute[] | undefined {
@@ -491,9 +506,12 @@ export function selectAliasRoute(
 		throw new RoutingPolicyError(
 			"Alias target is outside the frozen routing plan",
 		);
+	if (route.admissionError)
+		throw new RoutingPolicyError(
+			"Alias target was rejected when the routing plan was built",
+		);
 	route.setAliasReason(reason);
 	routes.set(meta, route);
-	if (route.admissionError) throw route.admissionError;
 }
 export function installResolvedRoute(
 	meta: RequestMeta,

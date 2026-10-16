@@ -101,6 +101,41 @@ export async function recordLocalRoutingOutcome(
 	});
 	audit.id = id;
 }
+/** A rejection of the route itself, before any account was chosen. */
+export async function recordRouteRejection(
+	ctx: ProxyContext,
+	meta: RequestMeta,
+	error: RoutingPolicyError,
+	route?: { ruleId: string | null; snapshot: string },
+): Promise<void> {
+	await ctx.dbOps.routing.recordAttempt({
+		id: crypto.randomUUID(),
+		request_id: meta.id,
+		rule_id: route?.ruleId ?? error.ruleId ?? null,
+		route_snapshot:
+			route?.snapshot ??
+			error.routeSnapshot ??
+			JSON.stringify({ error: error.message }),
+		account_id: null,
+		provider: null,
+		requested_model: meta.requestedModel ?? "",
+		resolved_model: null,
+		outgoing_model: null,
+		reported_model: null,
+		kind: "local_reject",
+		started_at: Date.now(),
+		finished_at: Date.now(),
+		status: error.statusCode,
+		error: error.message,
+		// Refused before any body was serialized for any destination.
+		reasoning_effort_requested: null,
+		reasoning_effort_effective: null,
+		reasoning_effort_reason: null,
+		service_tier_requested: null,
+		service_tier_sent: null,
+		service_tier_reason: null,
+	});
+}
 
 /** Every client inference send (including retries and force) must pass here. */
 export async function sendAuthorizedRequest(

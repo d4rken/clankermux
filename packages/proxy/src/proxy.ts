@@ -78,6 +78,7 @@ import {
 } from "./resolved-route";
 import { CLIENT_REQUEST_ID_HEADER } from "./response-handler";
 import { retryAfterFromDeadlines } from "./retry-after";
+import { recordRouteRejection } from "./routing-dispatch";
 import {
 	eligibleRouteAccounts,
 	initializeRequestRoute,
@@ -352,33 +353,7 @@ export async function handleProxy(
 				route = getResolvedRoute(requestMeta);
 			} catch {}
 			if (!error.attemptRecorded)
-				await ctx.dbOps.routing.recordAttempt({
-					id: crypto.randomUUID(),
-					request_id: requestMeta.id,
-					rule_id: route?.ruleId ?? error.ruleId ?? null,
-					route_snapshot:
-						route?.snapshot ??
-						error.routeSnapshot ??
-						JSON.stringify({ error: error.message }),
-					account_id: null,
-					provider: null,
-					requested_model: requestMeta.requestedModel ?? "",
-					resolved_model: null,
-					outgoing_model: null,
-					reported_model: null,
-					kind: "local_reject",
-					started_at: Date.now(),
-					finished_at: Date.now(),
-					status: error.statusCode,
-					error: error.message,
-					// Refused before any body was serialized for any destination.
-					reasoning_effort_requested: null,
-					reasoning_effort_effective: null,
-					reasoning_effort_reason: null,
-					service_tier_requested: null,
-					service_tier_sent: null,
-					service_tier_reason: null,
-				});
+				await recordRouteRejection(ctx, requestMeta, error, route);
 			retractIfNeverStarted(error.statusCode);
 			const response = Response.json(
 				{

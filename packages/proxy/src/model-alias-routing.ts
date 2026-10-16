@@ -14,11 +14,15 @@ import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
 import type { IngressContext } from "./request-ingress";
 import {
+	admissibleAliasStages,
 	getAliasRoutes,
 	getAttemptTarget,
+	NoPermittedAccountError,
+	type ResolvedRoute,
 	RoutingPolicyError,
 	selectAliasRoute,
 } from "./resolved-route";
+import { recordRouteRejection } from "./routing-dispatch";
 import { sdkBridgeCapacityTerminal } from "./sdk-bridge-capacity";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 
@@ -108,12 +112,36 @@ export async function handleAliasProxy(
 	const held = key ? affinity.get(key) : undefined;
 	const preferred =
 		held && held.expires > Date.now()
-			? stages.find((s) => s.alias?.targetIndex === held.targetIndex)
+			? admissibleAliasStages(stages).find(
+					(s) => s.alias?.targetIndex === held.targetIndex,
+				)
 			: undefined;
+	// Stages admission rejected keep their place: each is audited where the
+	// request passes it, never sent.
 	const ordered = preferred
 		? [preferred, ...stages.filter((s) => s !== preferred)]
 		: [...stages];
 	let reason: string | null = preferred ? "conversation_affinity" : null;
+	const unaudited = new Set(ordered.filter((s) => s.admissionError));
+	// Called for a rejected stage the loop reaches, and with no argument once no
+	// stage served; a stage after the one that served is never audited.
+	const auditRejected = async (only?: ResolvedRoute) => {
+		for (const stage of only ? [only] : ordered) {
+			if (!stage.admissionError || !unaudited.delete(stage)) continue;
+			stage.setAliasReason(reason);
+			await recordRouteRejection(ctx, meta, stage.admissionError, stage);
+		}
+	};
+	// The first stage that ended before any account could be tried. It answers
+	// only when every stage reached ended that way.
+	let unservable:
+		| {
+				stage: ResolvedRoute;
+				reason: string | null;
+				permission: NoPermittedAccountError | null;
+		  }
+		| undefined;
+	let servableReached = false;
 	let attempts = 0;
 	// The marker suppresses sibling diversion, not the first recovery attempt.
 	const oauthAccountIds = new Set(
@@ -142,8 +170,20 @@ export async function handleAliasProxy(
 			cacheBodyStore.discardStaged(meta.id);
 			return createClientAbortResponse();
 		}
+		if (stage.admissionError) {
+			await auditRejected(stage);
+			continue;
+		}
 		selectAliasRoute(meta, stage, reason);
-		const selected = await selectAccountsForRequest(meta, ctx);
+		let selected: Account[];
+		try {
+			selected = await selectAccountsForRequest(meta, ctx);
+		} catch (error) {
+			if (!(error instanceof NoPermittedAccountError)) throw error;
+			unservable ??= { stage, reason, permission: error };
+			reason = "pool_unavailable";
+			continue;
+		}
 		const gates = createAdmissionGates({
 			requestMeta: meta,
 			gateTokenEstimate,
@@ -165,13 +205,13 @@ export async function handleAliasProxy(
 			meta.routing.primaryAttemptAccountId = accounts[0]?.id ?? null;
 			meta.routing.candidatesCount = accounts.length;
 		}
-		// A request too large for this stage is a compatibility error, not quota exhaustion.
 		if (!accounts.length && gates.contextExcludedAccounts.length) {
-			terminalStatus = 400;
-			terminalMessage =
-				"Request exceeds the context capacity of the alias target";
-			break;
+			unservable ??= { stage, reason, permission: null };
+			reason = "pool_unavailable";
+			continue;
 		}
+		servableReached = true;
+		const laterStages = admissibleAliasStages(ordered.slice(stageIndex + 1));
 		let mayAdvance = true;
 		let stageReason = provider.overloaded.length
 			? "provider_overloaded"
@@ -198,12 +238,7 @@ export async function handleAliasProxy(
 				);
 			const isLastAliasAttempt = () =>
 				isLastAccountAttempt() &&
-				ordered
-					.slice(stageIndex + 1)
-					.every(
-						(next) =>
-							!next.admissionError && next.accountIds().every(burstSuppressed),
-					);
+				laterStages.every((next) => next.accountIds().every(burstSuppressed));
 			let outcome: ProxyAttemptOutcome | undefined;
 			const result = await attemptThroughProbeGate(account, async () => {
 				attempts++;
@@ -236,7 +271,7 @@ export async function handleAliasProxy(
 				if (result.response.ok) {
 					if (stage.alias) remember(key, stage.alias.targetIndex);
 					followServedAccount?.(account);
-				}
+				} else await auditRejected();
 				return result.response;
 			}
 			if (result.suppressed) {
@@ -256,6 +291,18 @@ export async function handleAliasProxy(
 	}
 	cacheBodyStore.discardStaged(meta.id);
 	if (req.signal.aborted) return createClientAbortResponse();
+	await auditRejected();
+	if (unservable && !servableReached) {
+		if (unservable.permission) {
+			// Audited against the stage it came from, as a single-stage route would be.
+			selectAliasRoute(meta, unservable.stage, unservable.reason);
+			throw unservable.permission;
+		}
+		// A request too large for every stage is a compatibility error, not quota exhaustion.
+		terminalStatus = 400;
+		terminalMessage =
+			"Request exceeds the context capacity of the alias target";
+	}
 	// As in the ordinary give-up: the bridge's capacity 529 says when to retry.
 	const bridgeCapacity =
 		terminalStatus === 503 ? sdkBridgeCapacityTerminal(meta) : null;

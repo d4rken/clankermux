@@ -222,6 +222,36 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 			refreshes: refreshMisses.mock.calls.length,
 		};
 	}
+	it("installs the first target admission did not reject", async () => {
+		const { codex, ctx, meta } = aliasSetup("swe-2-high");
+		setChatContext(meta, {
+			requirements: { fields: [] },
+			defaultMaxTokens: 8192,
+		});
+		await initializeRequestRoute(meta, ctx, null);
+		const [devinStage, codexStage] = getAliasRoutes(meta) ?? [];
+		expect(devinStage?.admissionError?.message).toBe(
+			'No permitted destination for model "alias:balanced" supports Chat Completions; supported providers are codex and openrouter',
+		);
+		expect(getResolvedRoute(meta)).toBe(codexStage);
+		expect(codexStage?.target(codex)?.upstreamModel).toBe("gpt-5.6-sol");
+	});
+	it("raises the first target's rejection when admission rejects every target", async () => {
+		const { ctx, meta } = aliasSetup("swe-2-high");
+		setChatContext(meta, {
+			requirements: { fields: ["max_tokens"] },
+			defaultMaxTokens: 8192,
+		});
+		await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
+			{
+				statusCode: 403,
+				code: "routing_policy_rejected",
+				message:
+					'No permitted destination for model "alias:balanced" supports Chat Completions; supported providers are codex and openrouter',
+			},
+		);
+		expect(getAliasRoutes(meta)).toBeUndefined();
+	});
 	it("routes the sibling that serves the requested effort", async () => {
 		const routed = await stageModels("swe-2-max", "high");
 		expect(routed.devin).toBe("swe-2-high");

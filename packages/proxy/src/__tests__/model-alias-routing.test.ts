@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -502,25 +502,216 @@ it("cleans staged bodies and audits the rejected fallback target", async () => {
 			],
 		}),
 	);
-	expect(response.status).toBe(403);
+	// The rejected fallback is not a target: the last primary failure is the answer.
+	expect(response.status).toBe(503);
+	expect(await response.text()).toBe("temporarily unavailable");
 	expect(stagedDuringAttempt).toBe(true);
 	expect(cacheBodyStore.getStagingSize()).toBe(0);
 	expect(seen.map((s) => s.model)).toEqual(["primary-model", "primary-model"]);
-	const calls = ctx.recorder.recordSynthetic.mock.calls as unknown[][];
-	expect(calls).toHaveLength(1);
-	expect(calls[0][0]).toMatchObject({ responseStatus: 403 });
+	const audit = await auditOf(routing);
+	expect(audit.map((a) => a.kind)).toEqual([
+		"upstream_send",
+		"upstream_send",
+		"local_reject",
+	]);
+	const rejected = audit[2];
+	expect(rejected).toMatchObject({ status: 403, account_id: null });
+	expect(rejected.error).toContain('"backup-model"');
+	expect(JSON.parse(rejected.route_snapshot ?? "{}").alias).toMatchObject({
+		id: "alias:good",
+		targetIndex: 1,
+	});
+});
+
+async function auditOf(routing: RoutingRepository) {
 	const db = dbs.at(-1);
 	if (!db) throw new Error("missing database");
 	const row = db
 		.query("SELECT request_id FROM routing_attempts LIMIT 1")
 		.get() as { request_id: string };
-	const rejected = (await routing.listAttempts(row.request_id)).find(
-		(attempt) => attempt.kind === "local_reject",
-	);
-	expect(rejected).toBeDefined();
-	expect(JSON.parse(rejected?.route_snapshot ?? "{}").alias).toMatchObject({
-		id: "alias:good",
-		targetIndex: 1,
+	return routing.listAttempts(row.request_id);
+}
+function aliasTargetOf(attempt: { route_snapshot?: string | null }) {
+	return JSON.parse(attempt.route_snapshot ?? "{}").alias?.targetIndex;
+}
+describe("an alias target that cannot serve the request", () => {
+	it("serves from the next target when admission rejects the first", async () => {
+		const { ctx, accounts, routing } = await setup();
+		for (const a of accounts.slice(0, 2))
+			await routing.setManualModels(a.id, modelPermissionScope(a), [], true);
+		const seen = upstream((model) => success(model));
+		expect((await run(ctx)).status).toBe(200);
+		expect(seen.map((s) => s.model)).toEqual(["backup-model"]);
+		const audit = await auditOf(routing);
+		expect(audit.map((a) => [a.kind, aliasTargetOf(a)])).toEqual([
+			["local_reject", 0],
+			["upstream_send", 1],
+		]);
+		expect(audit[0]?.status).toBe(403);
+	});
+	it("raises the first target's rejection when admission rejects every target", async () => {
+		const { ctx, accounts, routing } = await setup();
+		for (const a of accounts)
+			await routing.setManualModels(a.id, modelPermissionScope(a), [], true);
+		const seen = upstream((model) => success(model));
+		const response = await run(ctx);
+		expect(response.status).toBe(403);
+		const body = (await response.json()) as { error: { message: string } };
+		expect(body.error.message).toContain('"primary-model"');
+		expect(seen).toEqual([]);
+		const audit = await auditOf(routing);
+		expect(audit.map((a) => [a.kind, aliasTargetOf(a)])).toEqual([
+			["local_reject", 0],
+		]);
+	});
+	it("passes over a rejected middle target after the first is rate limited", async () => {
+		const { ctx, accounts, routing, modelAliases } = await setup();
+		await modelAliases.save({
+			id: "alias:good",
+			displayName: "Good model",
+			revision: 1,
+			targets: [
+				{ model: "primary-model", accountIds: [accounts[0].id] },
+				{ model: "middle-model", accountIds: [accounts[1].id] },
+				{ model: "backup-model", accountIds: [accounts[2].id] },
+			],
+		});
+		await routing.setManualModels(
+			accounts[1].id,
+			modelPermissionScope(accounts[1]),
+			[],
+			true,
+		);
+		const seen = upstream((model) =>
+			model === "primary-model"
+				? Response.json(
+						{ error: { type: "rate_limit_error" } },
+						{ status: 429 },
+					)
+				: success(model),
+		);
+		expect((await run(ctx)).status).toBe(200);
+		expect(seen.map((s) => s.model)).toEqual(["primary-model", "backup-model"]);
+		const audit = await auditOf(routing);
+		expect(audit.map((a) => [a.kind, aliasTargetOf(a)])).toEqual([
+			["upstream_send", 0],
+			["local_reject", 1],
+			["upstream_send", 2],
+		]);
+		expect(JSON.parse(audit[2]?.route_snapshot ?? "{}").alias.reason).toBe(
+			"quota_exhausted",
+		);
+	});
+	it("does not audit a rejected target after the one that served", async () => {
+		const { ctx, accounts, routing } = await setup();
+		await routing.setManualModels(
+			accounts[2].id,
+			modelPermissionScope(accounts[2]),
+			[],
+			true,
+		);
+		upstream((model) => success(model));
+		expect((await run(ctx)).status).toBe(200);
+		expect((await auditOf(routing)).map((a) => a.kind)).toEqual([
+			"upstream_send",
+		]);
+	});
+	it("keeps a conversation off a held target that admission now rejects", async () => {
+		const { ctx, accounts, routing } = await setup();
+		for (const a of accounts.slice(0, 2))
+			a.rate_limited_until = Date.now() + 60000;
+		const seen = upstream((model) => success(model));
+		expect((await run(ctx, request("conversation-one"))).status).toBe(200);
+		for (const a of accounts) a.rate_limited_until = null;
+		await routing.setManualModels(
+			accounts[2].id,
+			modelPermissionScope(accounts[2]),
+			[],
+			true,
+		);
+		expect((await run(ctx, request("conversation-one"))).status).toBe(200);
+		expect(seen.map((s) => s.model)).toEqual(["backup-model", "primary-model"]);
+	});
+
+	// 128K window; the request below estimates at ~150K tokens.
+	const tooLargeForSpark = "x".repeat(450_000);
+	function large(text: string) {
+		return request(undefined, { messages: [{ role: "user", content: text }] });
+	}
+	it("advances past a target whose window is too small for the request", async () => {
+		const { ctx } = await setup(
+			["codex", "codex", "anthropic"],
+			["gpt-5.3-codex-spark", "backup-model"],
+		);
+		const seen = upstream((model) => success(model));
+		expect((await run(ctx, large(tooLargeForSpark))).status).toBe(200);
+		expect(seen.map((s) => s.model)).toEqual(["backup-model"]);
+	});
+	it("returns the context-capacity error only when every target is too small", async () => {
+		const { ctx } = await setup(
+			["codex", "codex", "codex"],
+			["gpt-5.3-codex-spark", "gpt-5.4-mini"],
+		);
+		const seen = upstream((model) => success(model));
+		// ~300K tokens: over both the 128K and the 272K window.
+		const response = await run(ctx, large("x".repeat(900_000)));
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({
+			error: {
+				type: "invalid_request_error",
+				message: "Request exceeds the context capacity of the alias target",
+			},
+		});
+		expect(seen).toEqual([]);
+	});
+	it("reports a later target that is only cooling down as unavailable, not the request as too large", async () => {
+		const { ctx, accounts } = await setup(
+			["codex", "codex", "anthropic"],
+			["gpt-5.3-codex-spark", "backup-model"],
+		);
+		accounts[2].rate_limited_until = Date.now() + 60000;
+		const seen = upstream((model) => success(model));
+		const response = await run(ctx, large(tooLargeForSpark));
+		expect(response.status).toBe(503);
+		expect(response.headers.get("retry-after")).toBe("30");
+		expect(seen).toEqual([]);
+	});
+	it("advances past a target whose accounts lose permission before selection", async () => {
+		const { ctx, routing } = await setup();
+		const suppressed = spyOn(routing, "isModelSuppressed").mockImplementation(
+			async (_account, _scope, model) => model === "primary-model",
+		);
+		try {
+			const seen = upstream((model) => success(model));
+			expect((await run(ctx)).status).toBe(200);
+			expect(seen.map((s) => s.model)).toEqual(["backup-model"]);
+		} finally {
+			suppressed.mockRestore();
+		}
+	});
+	it("keeps the permission error when no target retains permission at selection", async () => {
+		const { ctx, routing } = await setup();
+		const suppressed = spyOn(routing, "isModelSuppressed").mockResolvedValue(
+			true,
+		);
+		try {
+			const seen = upstream((model) => success(model));
+			const response = await run(ctx);
+			expect(response.status).toBe(403);
+			expect(await response.json()).toMatchObject({
+				error: {
+					message:
+						"No account retains permission for this request's resolved model",
+				},
+			});
+			expect(seen).toEqual([]);
+			const audit = await auditOf(routing);
+			expect(audit.map((a) => [a.kind, aliasTargetOf(a)])).toEqual([
+				["local_reject", 0],
+			]);
+		} finally {
+			suppressed.mockRestore();
+		}
 	});
 });
 
