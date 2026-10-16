@@ -4,7 +4,8 @@
  * message; the Responses and Chat adapters turn it into the Messages
  * `system`, and the bridge strips pi's head. The cases assert the exact
  * `append`, so an adapter that trimmed or rewrapped the text would fail here
- * rather than shift what is forwarded.
+ * rather than shift what is forwarded. The last block is another client's
+ * prompt on /wire/anthropic, which the bridge appends whole or drops.
  */
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -223,3 +224,60 @@ for (const endpoint of ["responses", "chat"] as const)
 			expect(h.sdk.queries).toEqual([]);
 		});
 	});
+
+describe("another client's system prompt on a key declaring no agent", () => {
+	const SYSTEM = "You write release notes.\n\nAnswer in German.";
+
+	async function messages(userAgent: string) {
+		const h = await harness();
+		const pending = fetch(`${h.gw.url}/wire/anthropic/v1/messages`, {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${h.gw.apiKey}`,
+				"content-type": "application/json",
+				"user-agent": userAgent,
+			},
+			body: JSON.stringify({
+				model: MODEL,
+				max_tokens: 64,
+				system: SYSTEM,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const query = await h.sdk.next();
+		const systemPrompt = query.options.systemPrompt;
+		query.emit(
+			...streamedMessage([{ type: "text", text: "ok" }]),
+			resultMessage(),
+		);
+		query.end();
+		expect((await pending).status).toBe(200);
+		return { systemPrompt, row: await turnRow(h.gw) };
+	}
+
+	for (const userAgent of ["curl/8.5.0", "Go-http-client/2.0"])
+		it(`is appended for ${userAgent}`, async () => {
+			const { systemPrompt, row } = await messages(userAgent);
+			expect(systemPrompt).toEqual({
+				type: "preset",
+				preset: "claude_code",
+				append: SYSTEM,
+				snapshot: false,
+			});
+			expect(row?.system_prompt_policy).toBe("append-v1");
+			expect(JSON.parse(row?.system_prompt_detail ?? "null")).toEqual({
+				outcome: "appended",
+				bytes: SYSTEM.length,
+			});
+		});
+
+	it("is dropped for a known agent harness", async () => {
+		const { systemPrompt, row } = await messages("opencode/1.14.0");
+		expect(systemPrompt).toEqual({
+			type: "preset",
+			preset: "claude_code",
+			snapshot: false,
+		});
+		expect(row?.system_prompt_policy).toBe("drop");
+	});
+});

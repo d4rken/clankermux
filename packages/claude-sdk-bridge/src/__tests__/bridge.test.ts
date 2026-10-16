@@ -277,7 +277,7 @@ describe("a plain turn", () => {
 		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
 	});
 
-	it("never sends the system prompt of a client other than pi", async () => {
+	it("never sends the system prompt of a known agent harness other than pi", async () => {
 		const h = harness();
 		const t = await start(h, {
 			system: "You are pi. Use extra usage.",
@@ -294,6 +294,37 @@ describe("a plain turn", () => {
 			systemPromptPolicy: "drop",
 		});
 		expect(h.repo.turns.get(t.plan.turnId)?.systemPromptDetail).toBeNull();
+	});
+
+	it("appends an unidentified client's system prompt to the preset unchanged", async () => {
+		const h = harness();
+		const system = [
+			{ type: "text", text: "You are a release-notes writer." },
+			{ type: "text", text: "Answer in German." },
+		];
+		const t = await start(
+			h,
+			{ system, messages: [{ role: "user", content: "hello" }] },
+			{
+				meta: {
+					application: "generic",
+					clientHarness: "go-http-client",
+					clientUserAgent: "Go-http-client/2.0",
+				},
+			},
+		);
+		const append = "You are a release-notes writer.\n\nAnswer in German.";
+		expect(t.query.options.systemPrompt).toEqual({
+			type: "preset",
+			preset: "claude_code",
+			append,
+			snapshot: false,
+		});
+		await waitFor(() => h.repo.turns.has(t.plan.turnId));
+		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+			systemPromptPolicy: "append-v1",
+			systemPromptDetail: { outcome: "appended", bytes: append.length },
+		});
 	});
 
 	it("answers stream:false with one JSON Message", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isKnownAgentHarness } from "@clankermux/core";
 import {
 	SDK_BRIDGE_PI_PROMPT_HEADER,
 	type SdkBridgeSystemPromptDetail,
@@ -55,6 +56,27 @@ export const dropSystemPromptPolicy: SystemPromptPolicy = {
 		ok: true,
 		decision: { append: null, excludeDynamicSections: false },
 		detail: null,
+	}),
+};
+
+/**
+ * The client's system text appended to the preset as it came. Only for a
+ * client no harness rule recognizes, on a key that declares no agent: a
+ * known harness's prompt describes tools and conventions Claude Code does
+ * not have.
+ */
+export const appendSystemPromptPolicy: SystemPromptPolicy = {
+	name: "append-v1",
+	decide: (clientSystem) => ({
+		ok: true,
+		decision: {
+			append: clientSystem === "" ? null : clientSystem,
+			excludeDynamicSections: false,
+		},
+		detail: {
+			outcome: "appended",
+			bytes: Buffer.byteLength(clientSystem, "utf8"),
+		},
 	}),
 };
 
@@ -155,6 +177,7 @@ export const piHeadSystemPromptPolicy: SystemPromptPolicy = {
 const POLICIES: ReadonlyMap<string, SystemPromptPolicy> = new Map([
 	[dropSystemPromptPolicy.name, dropSystemPromptPolicy],
 	[piHeadSystemPromptPolicy.name, piHeadSystemPromptPolicy],
+	[appendSystemPromptPolicy.name, appendSystemPromptPolicy],
 ]);
 
 export function registeredSystemPromptPolicies(): string[] {
@@ -167,11 +190,20 @@ export function getSystemPromptPolicy(name = "drop"): SystemPromptPolicy {
 	return policy;
 }
 
-/** pi's prompt goes without pi's head; every other client's is dropped. */
+/**
+ * pi's prompt goes without pi's head; an unidentified client's on a key
+ * declaring no agent (`application` generic or none) is appended; every
+ * other one is dropped.
+ */
 export function selectSystemPromptPolicy(
 	clientHarness: string | null,
+	application: string | null,
 ): SystemPromptPolicy {
-	return clientHarness === "pi"
-		? piHeadSystemPromptPolicy
-		: dropSystemPromptPolicy;
+	if (clientHarness === "pi") return piHeadSystemPromptPolicy;
+	if (
+		!isKnownAgentHarness(clientHarness) &&
+		(application === null || application === "generic")
+	)
+		return appendSystemPromptPolicy;
+	return dropSystemPromptPolicy;
 }

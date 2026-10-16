@@ -171,6 +171,7 @@ export {
 	HARNESS_LABEL_FOR_APPLICATION,
 	type HarnessDetection,
 	isCodexClient,
+	isKnownAgentHarness,
 	normalizeClientUserAgent,
 } from "./harness";
 export {

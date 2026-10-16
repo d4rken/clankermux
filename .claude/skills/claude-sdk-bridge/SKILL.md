@@ -494,14 +494,24 @@ stops recovering refused thinking on its own.
 
 ## System prompt policies
 
-`system-prompt-policy.ts` picks the policy by harness, once per start turn,
+`system-prompt-policy.ts` picks the policy by harness and the key's
+application (`SdkBridgeTurnMeta.application`), once per start turn,
 and records it as `sdk_bridge_turns.system_prompt_policy` with
 `system_prompt_detail` (JSON, never the prompt text). A policy returns a
 typed outcome and never throws; a refusal goes through `reject()` before
 the conversation claim, so it supersedes no parked turn and leaves a
 `rejected` row with its `pre_head` leg.
 
-- `drop` (every harness but `pi`): the `claude_code` preset alone.
+- `append-v1`: the client's system text (text blocks joined by a blank
+  line) appended to the preset unchanged; detail
+  `{outcome: "appended", bytes}` (UTF-8). Only when `isKnownAgentHarness`
+  (`@clankermux/core`: every application's harness label, and `qwen-code`)
+  is false for the detected harness and the application is `generic` or
+  absent: curl, an SDK, a Go program on a generic key. Owner decision
+  2026-10-16: no known agent harness gets it, whatever its key.
+- `drop` (every other client but `pi`: a known agent harness, or a key
+  declaring an application other than `generic`): the `claude_code` preset
+  alone.
 - `pi-head-v1` (`clientHarness === "pi"`, `pi-prompt.ts`): when the text
   starts with pi's stock preamble followed by `<tools>`, `<rules>` and
   `<docs>`, that head and the blank line after it are removed; everything

@@ -135,7 +135,10 @@ What differs from a direct request:
   follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
   contains pi's opening line at the start of a line, or both `docs/custom-provider.md` and
   `docs/packages.md`, which subscription accounts answer with a 400
-  (`sdk_bridge_prompt_refused`). Other clients' system prompts are not sent.
+  (`sdk_bridge_prompt_refused`). OpenCode's, Codex's, oh-my-pi's and Qwen
+  Code's system prompts are not sent. A client ClankerMux does not recognize
+  (curl, an SDK, your own program), on a key whose application is generic or
+  unset, has its system prompt appended unchanged.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
   `tool_choice` that forces or forbids tool use, and server tools (any tool
   with a `type` other than `custom`, such as Anthropic's web search) are

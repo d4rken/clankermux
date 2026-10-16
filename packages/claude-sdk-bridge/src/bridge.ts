@@ -1271,7 +1271,10 @@ export function createClaudeSdkBridge(
 		const { plan, meta } = input;
 		const startedAt = now();
 		const recorder = new TurnRecorder(deps.turnRepo, log, plan.turnId);
-		const policy = selectSystemPromptPolicy(meta.clientHarness);
+		const policy = selectSystemPromptPolicy(
+			meta.clientHarness,
+			meta.application,
+		);
 		const promptRecord: PromptRecord = { policy: policy.name, detail: null };
 		const sideRequest = meta.sideRequest ?? null;
 		const kind: SdkBridgeTurnKind =
