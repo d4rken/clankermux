@@ -27,6 +27,10 @@ import {
 	AccountModelPermissionService,
 } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
+import {
+	isSdkBridgeTurnRequest,
+	resolveApiKeyProfile,
+} from "./official-anthropic-floor";
 
 /**
  * A live suppression's reason, or null when the pair is not suppressed.
@@ -253,20 +257,7 @@ export async function initializeRequestRoute(
 			model,
 			apiKeyId,
 		);
-	let application: string | null = null;
-	if (apiKeyId && !meta.internal) {
-		const pin = await ctx.dbOps.getApiKeyPin(apiKeyId);
-		if (!pin || pin.malformed)
-			throw new RoutingPolicyError(
-				"API key destinations are missing or invalid",
-			);
-		application = pin.application ?? null;
-		meta.pin = {
-			accountId: pin.pinnedAccountId,
-			providers: pin.pinnedProviders,
-			excludedProviders: pin.excludedProviders ?? null,
-		};
-	}
+	const application = await resolveApiKeyProfile(meta, ctx, apiKeyId);
 	const headerAccountId = meta.headers?.get("x-clankermux-account-id") ?? null;
 	let maintenance: BuildRouteInput["maintenance"];
 	if (meta.internal) {
@@ -290,17 +281,17 @@ export async function initializeRequestRoute(
 	// Read once, here: whether official Anthropic accounts are candidates at
 	// all. A bridged attempt re-checks before it starts a turn, and fails over
 	// if the bridge has begun shutting down since.
-	meta.officialAnthropicExcluded =
+	const officialAnthropicExclusion =
 		meta.officialAnthropicVia === "sdk-bridge"
-			? sdkBridgeExclusionReason(ctx)
+			? sdkBridgeExclusionReason(ctx, meta)
 			: null;
 	const restrictions = {
 		pin: meta.pin ?? null,
 		headerAccountId,
-		officialAnthropicExclusion: meta.officialAnthropicExcluded,
+		officialAnthropicExclusion,
 		bridgesOfficialAnthropic:
 			meta.officialAnthropicVia === "sdk-bridge" &&
-			meta.officialAnthropicExcluded === null,
+			officialAnthropicExclusion === null,
 		sdkBridgeRefusal: meta.sdkBridgeRefusedField ?? null,
 		maintenance,
 	};
@@ -322,10 +313,13 @@ export async function initializeRequestRoute(
 	// An account dropped here never reaches buildResolvedRoute's own loop, so
 	// carry its reason along or the rejection can only explain the survivors.
 	const priorExclusions = new Map<string, string>();
+	meta.officialAnthropicExcluded = null;
 	const pool = accounts.filter((a) => {
 		const blocked = destinationExclusionReason(a, restrictions, winning);
 		if (blocked)
 			priorExclusions.set(a.id, `${routeAccountLabel(a)}: ${blocked}`);
+		if (blocked && blocked === officialAnthropicExclusion)
+			meta.officialAnthropicExcluded = blocked;
 		return !blocked;
 	});
 	// One model for the whole pool: only the routing table can change a model id,
@@ -529,10 +523,16 @@ async function installPooledRoute(
 }
 
 /**
- * Why an SDK bridge request cannot use official Anthropic accounts right now,
- * or null when the bridge can serve it.
+ * Why an SDK bridge request cannot use official Anthropic accounts, or null
+ * when the bridge can serve it. The bridge serves Messages turns only, so a
+ * `count_tokens` or any other path is excluded whatever its availability.
  */
-function sdkBridgeExclusionReason(ctx: ProxyContext): string | null {
+function sdkBridgeExclusionReason(
+	ctx: ProxyContext,
+	meta: RequestMeta,
+): string | null {
+	if (!isSdkBridgeTurnRequest(meta))
+		return `official Anthropic accounts serve this client only through the SDK bridge, which serves only POST /v1/messages, not ${meta.method} ${meta.path}`;
 	const availability = ctx.sdkBridge?.availability() ?? {
 		state: "unavailable" as const,
 		reason: "not configured",

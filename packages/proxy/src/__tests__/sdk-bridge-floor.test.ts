@@ -2,13 +2,15 @@
  * The floor for non-Claude-Code clients: an official Anthropic account may
  * serve such a request only through the SDK bridge. With a bridge available the
  * account stays a candidate and its attempt goes to the bridge instead of a
- * direct fetch; without one the account is excluded exactly as before.
+ * direct fetch; without one the account is excluded. Only Claude Code on a
+ * `claude-code` key goes direct.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
 import {
 	type Account,
 	type ChatRequirements,
+	type ClientApplication,
 	type ModelAlias,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	SdkBridgeCapacityError,
@@ -32,6 +34,8 @@ import { CLIENT_REQUEST_ID_HEADER } from "../response-handler";
 import { provisionRouting, routingAttempts } from "./fixtures/routing-harness";
 import {
 	type BridgeHarness,
+	CLAUDE_CODE_USER_AGENT,
+	claudeCodeRequest,
 	type FakeBridge,
 	makeBridgeAccount,
 	makeBridgeHarness,
@@ -43,6 +47,7 @@ const MODEL = "claude-sonnet-4-5";
 const KEY = "key-pi";
 const realAdmission = rateLimitCooldown.getRateLimitProbeAdmission;
 const URL_ = new URL("https://proxy.local/v1/messages");
+const COUNT_URL = new URL("https://proxy.local/v1/messages/count_tokens");
 
 const claudeA = () => makeBridgeAccount({ id: "claude-a", name: "A" });
 const claudeB = () => makeBridgeAccount({ id: "claude-b", name: "B" });
@@ -432,14 +437,17 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(JSON.parse(plan.routeSnapshot ?? "{}").alias.targetIndex).toBe(1);
 	});
 
-	it("does not bridge an unfloored request, whatever headers it sends", async () => {
+	it("does not bridge Claude Code on a claude-code key, whatever headers it sends", async () => {
 		const bridge = makeFakeBridge();
-		harness = await makeBridgeHarness([claudeA()], { bridge });
+		harness = await makeBridgeHarness([claudeA()], {
+			bridge,
+			application: "claude-code",
+		});
 		// The same spies the bridged case asserts silent, shown live here.
 		const { token, stage } = spyAccountHandling();
 
 		const { response } = await run(
-			messagesRequest({}, { "x-clankermux-deny-official-anthropic": "1" }),
+			claudeCodeRequest({}, { "x-clankermux-deny-official-anthropic": "1" }),
 			harness.ctx,
 		);
 
@@ -449,6 +457,206 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(token).toHaveBeenCalled();
 		expect(stage).toHaveBeenCalled();
 		expect(harness.ctx.requestRecorder.begin).toHaveBeenCalled();
+	});
+});
+
+describe("the floor on the Anthropic-native endpoint", () => {
+	async function served(
+		application: ClientApplication | null,
+		req: Request,
+		accounts: Account[] = [claudeA()],
+	) {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness(accounts, { bridge, application });
+		const { response, text } = await run(req, harness.ctx);
+		return { bridge, response, text, h: harness };
+	}
+
+	for (const [label, application, userAgent] of [
+		["a generic key and Go-http-client", "generic", "Go-http-client/2.0"],
+		["a claude-code key and curl", "claude-code", "curl/8.14.1"],
+		["a pi key and Claude Code's user agent", "pi", CLAUDE_CODE_USER_AGENT],
+		[
+			"a key without a profile and Claude Code's user agent",
+			null,
+			CLAUDE_CODE_USER_AGENT,
+		],
+	] as const)
+		it(`bridges ${label}`, async () => {
+			const { bridge, response, h } = await served(
+				application,
+				messagesRequest({}, { "user-agent": userAgent }),
+			);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			expect(h.upstreamKeys).toEqual([]);
+		});
+
+	it("sends Claude Code on a claude-code key directly", async () => {
+		const { bridge, response, h } = await served(
+			"claude-code",
+			claudeCodeRequest(),
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toEqual([]);
+		expect(h.upstreamKeys).toEqual(["key-claude-a"]);
+	});
+
+	it("sends internal maintenance without a key directly", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+		const req = messagesRequest(
+			{},
+			{
+				"x-clankermux-keepalive": "1",
+				"x-clankermux-account-id": "claude-a",
+			},
+		);
+
+		const response = await handleProxy(
+			req,
+			URL_,
+			harness.ctx,
+			null,
+			null,
+			true,
+		);
+		await response.text();
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toEqual([]);
+		expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
+		expect(harness.ctx.dbOps.getApiKeyPin).not.toHaveBeenCalled();
+	});
+
+	it("bridges a Chat request on a claude-code key with Claude Code's user agent", async () => {
+		const req = claudeCodeRequest({ stream: true });
+		setChatContext(req, {
+			requirements: { fields: [] },
+			defaultMaxTokens: 8192,
+			denyDirectOfficialAnthropic: true,
+		});
+
+		const { bridge, h } = await served("claude-code", req);
+
+		expect(bridge.starts).toHaveLength(1);
+		expect(h.upstreamKeys).toEqual([]);
+	});
+
+	it("hands the bridge the key's application on a start and a side request", async () => {
+		const start = await served("generic", messagesRequest());
+		expect(start.bridge.starts[0].meta.application).toBe("generic");
+		harness?.restore();
+
+		const side = await served(
+			"pi",
+			flooredRequest(
+				{ tool_choice: { type: "none" } },
+				{ "x-clankermux-side-request": "session-fork-v1" },
+			),
+		);
+		expect(side.bridge.starts[0].meta.application).toBe("pi");
+		expect(side.bridge.starts[0].meta.sideRequest).toBe("session-fork-v1");
+	});
+
+	describe("on count_tokens", () => {
+		const countRequest = (headers: Record<string, string> = {}) =>
+			new Request(COUNT_URL, {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body: JSON.stringify({
+					model: MODEL,
+					messages: [{ role: "user", content: "hello" }],
+				}),
+			});
+		const count = (h: BridgeHarness, req: Request) =>
+			handleProxy(req, COUNT_URL, h.ctx, KEY, "key");
+
+		it("leaves official accounts out, even with the bridge available, for another provider", async () => {
+			const bridge = makeFakeBridge();
+			harness = await makeBridgeHarness([claudeA(), other()], {
+				bridge,
+				application: "generic",
+			});
+
+			const response = await count(harness, countRequest());
+			await response.text();
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toEqual([]);
+			expect(sends(harness).map((r) => r.account_id)).toEqual(["other"]);
+		});
+
+		it("answers a clear refusal when only official accounts exist", async () => {
+			const bridge = makeFakeBridge();
+			harness = await makeBridgeHarness([claudeA()], {
+				bridge,
+				application: "generic",
+			});
+
+			const response = await count(harness, countRequest());
+			const message: string = (await response.json()).error.message;
+
+			expect(response.status).toBe(403);
+			expect(message).toContain(
+				"official Anthropic accounts serve this client only through the SDK bridge, which serves only POST /v1/messages, not POST /v1/messages/count_tokens",
+			);
+			expect(bridge.starts).toEqual([]);
+			expect(harness.upstreamKeys).toEqual([]);
+		});
+
+		it("still reach official accounts for Claude Code on a claude-code key", async () => {
+			harness = await makeBridgeHarness([claudeA()], {
+				bridge: makeFakeBridge(),
+				application: "claude-code",
+			});
+
+			const response = await count(
+				harness,
+				countRequest({ "user-agent": CLAUDE_CODE_USER_AGENT }),
+			);
+			await response.text();
+
+			expect(sends(harness).map((r) => r.account_id)).toEqual(["claude-a"]);
+		});
+	});
+
+	describe("server tools", () => {
+		const serverTool = {
+			tools: [
+				{ name: "read", input_schema: { type: "object" } },
+				{ type: "web_search_20250305", name: "web_search" },
+			],
+		};
+
+		it("leave a generic client's request to a candidate that is not bridged", async () => {
+			const { bridge, response, h } = await served(
+				"generic",
+				messagesRequest(serverTool),
+				[claudeA(), other()],
+			);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toEqual([]);
+			expect(sends(h).map((r) => r.account_id)).toEqual(["other"]);
+		});
+
+		it("answer the bridge's 400 naming tools when only bridged accounts remain", async () => {
+			const { bridge, response, text } = await served(
+				"generic",
+				messagesRequest(serverTool),
+			);
+
+			expect(response.status).toBe(400);
+			expect(JSON.parse(text).error).toMatchObject({
+				param: "tools",
+				message:
+					'Tool type "web_search_20250305" is not supported through the SDK bridge; only custom tools are',
+			});
+			expect(bridge.starts).toEqual([]);
+		});
 	});
 });
 
@@ -740,10 +948,16 @@ describe("fields the SDK bridge refuses", () => {
 
 	it("do not touch a direct request", async () => {
 		const bridge = makeFakeBridge();
-		harness = await makeBridgeHarness([claudeA()], { bridge });
+		harness = await makeBridgeHarness([claudeA()], {
+			bridge,
+			application: "claude-code",
+		});
 
 		const { response } = await run(
-			messagesRequest({ stop_sequences: ["END"] }),
+			claudeCodeRequest({
+				stop_sequences: ["END"],
+				tools: [{ type: "web_search_20250305", name: "web_search" }],
+			}),
 			harness.ctx,
 		);
 
@@ -878,10 +1092,11 @@ describe("SDK bridge continuations", () => {
 
 	async function withContinuation(
 		owner: string | null,
+		application: ClientApplication | null = null,
 	): Promise<{ bridge: FakeBridge; h: BridgeHarness }> {
 		const bridge = makeFakeBridge();
 		bridge.continuation = { turnId: "turn-parked", ownerApiKeyId: owner };
-		harness = await makeBridgeHarness([claudeA()], { bridge });
+		harness = await makeBridgeHarness([claudeA()], { bridge, application });
 		return { bridge, h: harness };
 	}
 
@@ -973,12 +1188,43 @@ describe("SDK bridge continuations", () => {
 		expect(routingAttempts(h.ctx)).toEqual([]);
 	});
 
-	it("are never looked up for an unfloored request", async () => {
-		const { bridge, h } = await withContinuation(KEY);
+	it("are never looked up for Claude Code on a claude-code key", async () => {
+		const { bridge, h } = await withContinuation(KEY, "claude-code");
 
-		await run(messagesRequest(toolResults), h.ctx);
+		await run(claudeCodeRequest(toolResults), h.ctx);
 
 		expect(bridge.lookups).toEqual([]);
+	});
+
+	it("are looked up for a generic client on the Messages endpoint", async () => {
+		const { bridge, h } = await withContinuation(KEY, "generic");
+
+		const { text } = await run(
+			messagesRequest(toolResults, { "user-agent": "Go-http-client/2.0" }),
+			h.ctx,
+		);
+
+		expect(JSON.parse(text)).toEqual({ continued: "turn-parked" });
+		expect(bridge.continues[0].meta.application).toBe("generic");
+	});
+
+	it("are never looked up for count_tokens, which leaves the park alone and routes under the floor", async () => {
+		const { bridge, h } = await withContinuation(KEY, "generic");
+		const req = new Request(COUNT_URL, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: MODEL, ...toolResults }),
+		});
+
+		const response = await handleProxy(req, COUNT_URL, h.ctx, KEY, "key");
+
+		expect(bridge.lookups).toEqual([]);
+		expect(bridge.continues).toEqual([]);
+		expect(bridge.starts).toEqual([]);
+		expect(response.status).toBe(403);
+		expect((await response.json()).error.message).toContain(
+			"serves only POST /v1/messages",
+		);
 	});
 });
 
@@ -1004,7 +1250,7 @@ describe("SDK bridge and the recovery-probe gate", () => {
 			// Claude Code's model call: direct traffic on the same account, while
 			// the outer attempt is still in flight.
 			const response = await handleProxy(
-				messagesRequest(),
+				claudeCodeRequest(),
 				URL_,
 				harness?.ctx as BridgeHarness["ctx"],
 				KEY,
@@ -1020,7 +1266,10 @@ describe("SDK bridge and the recovery-probe gate", () => {
 				usage: { input_tokens: 1, output_tokens: 1 },
 			});
 		});
-		harness = await makeBridgeHarness([a], { bridge });
+		harness = await makeBridgeHarness([a], {
+			bridge,
+			application: "claude-code",
+		});
 
 		const { response } = await run(flooredRequest(), harness.ctx);
 

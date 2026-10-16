@@ -1,30 +1,41 @@
 ---
 name: claude-sdk-bridge
-description: How ClankerMux serves non-Claude-Code clients (pi, Codex, OpenCode on /wire/openai) on official Anthropic accounts by running real Claude Code through the Agent SDK. Read this before touching packages/claude-sdk-bridge, the sdk-bridge-inner routing mode, officialAnthropicVia, the bridged attempt in proxy-operations, or the Claude Code child's options and environment.
+description: How ClankerMux serves non-Claude-Code clients (pi, Codex, OpenCode on /wire/openai, and any client but Claude Code on /wire/anthropic) on official Anthropic accounts by running real Claude Code through the Agent SDK. Read this before touching packages/claude-sdk-bridge, the sdk-bridge-inner routing mode, officialAnthropicVia, the bridged attempt in proxy-operations, or the Claude Code child's options and environment.
 ---
 
 # Claude Agent SDK bridge
 
-A Responses or Chat request (`/wire/openai`) is never sent to an official
-Anthropic account (`anthropic`, `claude-oauth`, `claude-console-api`) by a
-direct fetch. When routing lands such a request on one, ClankerMux runs real
+Only Claude Code's own requests are sent to an official Anthropic account
+(`anthropic`, `claude-oauth`, `claude-console-api`) by a direct fetch. When
+routing lands any other request on one, ClankerMux runs real
 Claude Code (`@anthropic-ai/claude-agent-sdk`, bundled CLI) for the turn, and
 Claude Code's own model calls come back through ClankerMux's normal Anthropic
 pipeline. The client keeps executing its own tools.
 
 ## Architecture map
 
-- **Floor.** The Responses and Chat adapters mark `denyDirectOfficialAnthropic`
-  in their in-process WeakMap contexts. Ingress turns that into
-  `RequestMeta.officialAnthropicVia = "sdk-bridge"`. No header can set or clear
-  it. `/wire/anthropic` is `"direct"` and never bridged.
+- **Floor.** `officialAnthropicVia` (`official-anthropic-floor.ts`) sets
+  `RequestMeta.officialAnthropicVia` after ingestion, before the
+  continuation lookup and routing, from one read of the key's destinations
+  and `client_profiles.application` (kept on `meta.pin` and
+  `meta.clientApplication`, which routing reuses). `"direct"`: a bridge
+  inner call, internal maintenance, and a `claude-code` key whose request
+  `detectHarness` reads as `claude-code`. `"sdk-bridge"`: everything else,
+  and always a Responses or Chat request (the adapters'
+  `denyDirectOfficialAnthropic` in their in-process WeakMap contexts),
+  whatever its key and user agent. A request with no key that is not
+  internal is floored.
 - **Route construction** (`routing-service.ts`, `resolved-route.ts`) reads
-  `sdkBridge.availability()` once. Unavailable or shutting down: official
-  Anthropic accounts are excluded with the reason. Available: they stay
-  candidates, except when the body carries a field the bridge refuses
-  (`sdkBridgeRefusedField` in `@clankermux/types`, shared with the bridge's
-  own parse). Then they are excluded, and a route left empty by that alone
-  answers the bridge's 400 naming the field.
+  `sdkBridge.availability()` once. A floored request that is not
+  `POST /v1/messages` (`count_tokens`, any other model-bearing path) excludes
+  official Anthropic accounts whatever the availability: the bridge serves
+  Messages turns only. Unavailable or shutting down: they are excluded with
+  the reason. `meta.officialAnthropicExcluded` records the reason only when
+  it excluded an account. Available: they stay candidates, except when the
+  body carries a field the bridge refuses (`sdkBridgeRefusedField` in
+  `@clankermux/types`, shared with the bridge's own parse: `stop_sequences`,
+  a forcing `tool_choice`, a server tool). Then they are excluded, and a
+  route left empty by that alone answers the bridge's 400 naming the field.
 - **Outer bridged attempt** (`handlers/sdk-bridge-attempt.ts`, branched in
   `proxyWithAccount` before cache staging and token
   resolution). It runs none of the account machinery: no cooldowns, no
@@ -55,11 +66,12 @@ pipeline. The client keeps executing its own tools.
   outcome when the stream ends, from what it carried: an `error` event counts
   as its status, a missing `message_stop` as 502. `handleProxy` returns the
   wrapped response, which is the one Claude Code must read.
-- **Continuations bypass routing.** A request whose final user message (the
-  trailing user messages, merged: Chat sends text typed with tool results as
-  a user message after them) holds `tool_result` ids a live query waits on
-  *now* goes straight to that query (`continueParkedSdkBridgeTurn`), before
-  any route is built. The bridge refuses, with one `continue` leg recorded
+- **Continuations bypass routing.** A floored `POST /v1/messages` request
+  whose final user message (the trailing user messages, merged: Chat sends
+  text typed with tool results as a user message after them) holds
+  `tool_result` ids a live query waits on *now* goes straight to that query
+  (`continueParkedSdkBridgeTurn`), before any route is built. Any other path
+  is never looked up: `findContinuation` itself can tear a turn down. The bridge refuses, with one `continue` leg recorded
   each: another key's turn (409), ids that do not name every awaited call
   exactly once, name one it does not wait on, or that an earlier round
   handed out (409 "stale tool results"), shutdown (503). The same holds for

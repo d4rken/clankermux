@@ -613,9 +613,12 @@ describe("client-abort terminals", () => {
 	// ===== T2: the selection-time terminals =====
 
 	it("client aborts during selection → 499 instead of pool_exhausted, and NO synthetic history row", async () => {
+		// Not an official Anthropic account: a keyless request reaches one only
+		// through the SDK bridge, and its terminal would be the floor's.
 		const cooled = makeAccount({
 			id: "acc-cooled",
 			name: "Cooled",
+			provider: "test-provider" as Account["provider"],
 			rate_limited_until: Date.now() + 3_600_000,
 		});
 
@@ -670,6 +673,8 @@ describe("client-abort terminals", () => {
 			provider: "codex",
 			rate_limited_until: Date.now() + 3_600_000,
 		});
+		// What the floor excludes, which is what makes the terminal the pinned one.
+		const official = makeAccount({ id: "claude-floored", name: "Floored" });
 		// The Responses adapter's floor, as it marks it: in-process, not a header.
 		const floored = (req: Request): Request => {
 			setNativeResponsesRequestContext(req, {
@@ -687,7 +692,7 @@ describe("client-abort terminals", () => {
 
 		// Baseline (live client): the pinned terminal DOES record a row.
 		const liveCtx = makeContext(
-			[cooled],
+			[cooled, official],
 			makeSelectionAbortStrategy(() => {}),
 		);
 		const liveResponse = await callHandleProxy(
@@ -703,7 +708,7 @@ describe("client-abort terminals", () => {
 
 		const controller = new AbortController();
 		const abortedCtx = makeContext(
-			[cooled],
+			[cooled, official],
 			makeSelectionAbortStrategy(() => controller.abort()),
 		);
 		const response = await callHandleProxy(

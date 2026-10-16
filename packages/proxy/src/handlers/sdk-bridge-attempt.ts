@@ -15,6 +15,7 @@ import {
 	sdkBridgeHeaderToken,
 	sdkBridgeSideRequestMode,
 } from "@clankermux/types";
+import { isSdkBridgeTurnRequest } from "../official-anthropic-floor";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
 import { getResolvedRoute, RoutingPolicyError } from "../resolved-route";
@@ -112,6 +113,7 @@ export function sdkBridgeTurnMeta(
 		legId: meta.id,
 		apiKeyId,
 		apiKeyName,
+		application: meta.clientApplication ?? null,
 		clientHarness: meta.clientHarness ?? null,
 		clientUserAgent: meta.clientUserAgent ?? null,
 		project: meta.project ?? null,
@@ -301,6 +303,9 @@ export async function continueParkedSdkBridgeTurn(input: {
 	const { req, ctx, requestMeta } = input;
 	const bridge = ctx.sdkBridge;
 	if (requestMeta.officialAnthropicVia !== "sdk-bridge" || !bridge) return null;
+	// Only a Messages turn answers one: looking up a count_tokens body that
+	// carries the same results could already tear the parked turn down.
+	if (!isSdkBridgeTurnRequest(requestMeta)) return null;
 	// A side request never answers the conversation's parked turn; the bridge
 	// refuses tool results on it.
 	if (sdkBridgeSideRequestMode(req.headers) !== null) return null;

@@ -58,6 +58,7 @@ import {
 	continueParkedSdkBridgeTurn,
 	isSdkBridgeAttempt,
 } from "./handlers/sdk-bridge-attempt";
+import { resolveOfficialAnthropicFloor } from "./official-anthropic-floor";
 import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
 import { trackPreHeadClientAbort } from "./pre-head-client-abort";
@@ -423,6 +424,13 @@ async function handleIngestedProxy(
 		canRearmIdleTimeout,
 	} = ingressContext;
 
+	await resolveOfficialAnthropicFloor(
+		requestMeta,
+		ctx,
+		apiKeyId ?? null,
+		req.headers,
+		requestBodyContext.getParsedJson(),
+	);
 	// Tool results for a parked bridge turn go back to that turn, unrouted.
 	const continued = await continueParkedSdkBridgeTurn({
 		req,

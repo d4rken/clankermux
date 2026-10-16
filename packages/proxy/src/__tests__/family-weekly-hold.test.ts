@@ -19,10 +19,16 @@ import { mockFetch } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
+import { type FakeBridge, makeFakeBridge } from "./fixtures/sdk-bridge-harness";
 
+/**
+ * Keyless, because the hold skips every pinned request and routing pins every
+ * keyed one to its key's destinations. A keyless client reaches official
+ * accounts only through the SDK bridge, so the context carries one.
+ */
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
-	return handleProxy(req, url, ctx);
+	return handleProxy(req, url, ctx, null);
 }
 
 const EXHAUSTED_ID = "acc-exhausted";
@@ -99,8 +105,12 @@ function seedUsage(
 	} as never);
 }
 
-function makeContext(accounts: Account[]): ProxyContext {
+function makeContext(
+	accounts: Account[],
+	sdkBridge: FakeBridge = makeFakeBridge(),
+): ProxyContext {
 	return {
+		sdkBridge,
 		strategy: {
 			select: (accs: Account[]) => {
 				const now = Date.now();
@@ -238,7 +248,8 @@ describe("family-weekly transient-cooldown hold", () => {
 			name: "Backup1",
 			rate_limited_until: Date.now() + 250,
 		});
-		const ctx = makeContext([exhausted, sibling]);
+		const bridge = makeFakeBridge();
+		const ctx = makeContext([exhausted, sibling], bridge);
 
 		const res = await callHandleProxy(
 			fableRequest(),
@@ -247,6 +258,9 @@ describe("family-weekly transient-cooldown hold", () => {
 		);
 
 		expect(res.status).toBe(200);
+		expect(bridge.starts.map((s) => s.plan.preferredAccountId)).toEqual([
+			SIBLING_ID,
+		]);
 	});
 
 	it("skips the hold and reports the SIBLING cooldown (not the 5-day family window) when the cooldown exceeds the budget", async () => {

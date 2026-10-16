@@ -39,7 +39,7 @@ async function callHandleProxy(req: Request, ctx: ProxyContext) {
 			suppressed.push({ accountId, model: suppressedModel, reason });
 		},
 	);
-	return handleProxy(req, new URL(req.url), ctx, null, null, false);
+	return handleProxy(req, new URL(req.url), ctx, undefined, null, false);
 }
 
 /**
@@ -48,11 +48,20 @@ async function callHandleProxy(req: Request, ctx: ProxyContext) {
  * the thrown class would pass while the client still received a generic 503.
  */
 async function callDispatch(req: Request, ctx: ProxyContext) {
-	const { provisionRouting } = await import("./fixtures/routing-harness");
+	const { asClaudeCodeClient, provisionRouting } = await import(
+		"./fixtures/routing-harness"
+	);
 	const { dispatchProxyRequest } = await import("../dispatch");
 	const model = (await req.clone().json()).model as string;
 	await provisionRouting(ctx, model, await ctx.dbOps.getAllAccounts());
-	return dispatchProxyRequest(req, new URL(req.url), ctx, null, null, false);
+	return dispatchProxyRequest(
+		req,
+		new URL(req.url),
+		ctx,
+		asClaudeCodeClient(ctx, req),
+		null,
+		false,
+	);
 }
 
 /**

@@ -9,15 +9,11 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	defaultProjectRules,
-	getChatContext,
 	getNativeResponsesRequestContext,
 	getSdkBridgeInnerRequestContext,
 	type ProjectAttributionSource,
 	type RequestMeta,
-	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	type SdkBridgeInnerContext,
-	sdkBridgeRefusedField,
-	sdkBridgeSideRequestMode,
 	setNativeResponsesMetaContext,
 	setSdkBridgeInnerMetaContext,
 	transferChatContext,
@@ -430,27 +426,6 @@ export async function ingestProxyRequest(
 		parseReasoningEffort(parsedBody) ??
 		nativeResponsesCtx?.reasoningEffort ??
 		null;
-	// The floor for clients that are not Claude Code: the Responses and Chat
-	// adapters mark it in their in-process contexts, so a client cannot set or
-	// clear it. Such a request reaches an official Anthropic account only
-	// through the SDK bridge, independent of any API-key pin. A bridge inner call
-	// IS Claude Code, so it goes direct and can never be bridged again.
-	const floored =
-		nativeResponsesCtx?.denyDirectOfficialAnthropic === true ||
-		getChatContext(requestMeta)?.denyDirectOfficialAnthropic === true;
-	requestMeta.officialAnthropicVia =
-		floored && !sdkBridgeInner ? "sdk-bridge" : "direct";
-	// A side-request mode the bridge does not serve is the bridge's to refuse,
-	// with its own code, whatever the body's fields.
-	const sideRequestMode = sdkBridgeSideRequestMode(req.headers);
-	requestMeta.sdkBridgeRefusedField =
-		requestMeta.officialAnthropicVia === "sdk-bridge" &&
-		(sideRequestMode === null ||
-			sideRequestMode === SDK_BRIDGE_SIDE_REQUEST_FORK)
-			? sdkBridgeRefusedField(parsedBody, {
-					sideRequest: sideRequestMode === SDK_BRIDGE_SIDE_REQUEST_FORK,
-				})
-			: null;
 	if (sdkBridgeInner) {
 		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);
 		requestMeta.sdkBridgeTurnId = sdkBridgeInner.turnId;

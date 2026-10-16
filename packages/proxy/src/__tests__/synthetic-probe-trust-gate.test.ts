@@ -174,7 +174,7 @@ async function runProxy(
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
-			null,
+			undefined,
 			null,
 			isInternal,
 		);

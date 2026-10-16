@@ -222,18 +222,21 @@ one target's native metadata.
 
 `claude-opus-5-5[1m]`, `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` are
 served on an official Anthropic account that permits the bare id, through the
-SDK bridge only (Responses and Chat Completions on `/wire/openai`). Their
+SDK bridge only (Responses and Chat Completions on `/wire/openai`, and
+Messages on `/wire/anthropic` from a client other than Claude Code). Their
 `contextWindow` is `1000000`; every other metadata field is the bare id's,
 and the bare ids stay at `200000`. Any other `[1m]` id is a literal no
 account serves. A route that would send a suffixed id to Anthropic directly,
-such as `/wire/anthropic` from a client other than Claude Code, answers
-`400 model_suffix_requires_claude_code` before anything is sent, and that
-client's Anthropic-format catalogue publishes no metadata for it.
+which only Claude Code's own requests reach, answers
+`400 model_suffix_requires_claude_code` before anything is sent. The
+Anthropic-format catalogue of a client other than Claude Code publishes no
+metadata for a suffixed id.
 
 ## SDK bridge history header
 
-A Responses or Chat Completions request on `/wire/openai` that an official
-Anthropic account serves through the SDK bridge carries
+A request that an official Anthropic account serves through the SDK bridge
+(Responses or Chat Completions on `/wire/openai`, or Messages on
+`/wire/anthropic` from a client other than Claude Code) carries
 `x-clankermux-sdk-bridge-history` on its response, streamed or JSON, success
 or error, once the turn's history is decided. It says how the conversation
 reached Claude Code, and names the rebuild reason when there is one:

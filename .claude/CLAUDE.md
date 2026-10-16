@@ -33,7 +33,9 @@ A third one, approved 2026-09-23: the Agent SDK bridge
 Its model calls reach ClankerMux only through the bridge's private loopback
 listener and then take the normal Anthropic pipeline on the accounts. It is
 reached only by client turns that route to an official Anthropic account
-under the deny floor (Responses and Chat on `/wire/openai`). Driving it by
+under the deny floor: every Responses and Chat turn on `/wire/openai`, and
+every Messages turn on `/wire/anthropic` except Claude Code's own (a
+`claude-code` client key and a `claude-cli` user agent). Driving it by
 script or by hand against a real account stays forbidden, the spike drivers
 included. Its tests use fake accounts and a mock upstream inside a
 loopback-only network namespace. See the `claude-sdk-bridge` skill.

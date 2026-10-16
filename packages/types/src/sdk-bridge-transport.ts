@@ -163,6 +163,8 @@ export interface SdkBridgeTurnMeta {
 	readonly legId: string;
 	readonly apiKeyId: string | null;
 	readonly apiKeyName: string | null;
+	/** The key's `client_profiles.application`; null without a profile. */
+	readonly application: string | null;
 	readonly clientHarness: string | null;
 	readonly clientUserAgent: string | null;
 	readonly project: string | null;

@@ -17,6 +17,7 @@ import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { routingAttempts } from "./fixtures/routing-harness";
 import {
 	type BridgeHarness,
+	claudeCodeRequest,
 	makeBridgeAccount,
 	makeBridgeHarness,
 	makeFakeBridge,
@@ -213,11 +214,12 @@ describe("SDK bridge inner calls", () => {
 					"messages.1.content.0: Invalid `signature` in `thinking` block",
 					() => innerRequest(innerContext(), withThinking),
 				],
-				[BINDING, () => messagesRequest(withThinking)],
+				[BINDING, () => claudeCodeRequest(withThinking)],
 			] as const) {
 				harness?.restore();
 				harness = await makeBridgeHarness([a, b, c], {
 					upstream: refusedOnce(message),
+					application: "claude-code",
 				});
 
 				const res = await dispatchProxyRequest(
@@ -232,6 +234,28 @@ describe("SDK bridge inner calls", () => {
 				expect(harness.upstreamKeys).toHaveLength(2);
 			}
 		});
+	});
+
+	it("count tokens on the planned accounts directly, outside the floor's Messages-only rule", async () => {
+		harness = await makeBridgeHarness([a, b, c], { bridge: makeFakeBridge() });
+		const url = new URL("https://proxy.local/v1/messages/count_tokens");
+		const req = new Request(url, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"user-agent": "claude-cli/2.1.300 (external, sdk-ts)",
+			},
+			body: JSON.stringify({
+				model: MODEL,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		setSdkBridgeInnerRequestContext(req, innerContext());
+
+		const res = await dispatchProxyRequest(req, url, harness.ctx, KEY, "outer");
+
+		expect(res.status).not.toBe(403);
+		expect(upstreamAccounts(harness)[0]).toBe(b.id);
 	});
 
 	it("reject a model the plan does not target, without an upstream call", async () => {
@@ -579,10 +603,11 @@ describe("SDK bridge inner calls", () => {
 	it("cannot be entered through headers: without the in-process context the key's pin applies", async () => {
 		harness = await makeBridgeHarness([a, b, c], {
 			pin: { pinnedAccountId: c.id, pinnedProviders: null },
+			application: "claude-code",
 		});
 
 		const res = await dispatchProxyRequest(
-			messagesRequest(
+			claudeCodeRequest(
 				{},
 				{
 					"x-clankermux-sdk-bridge-turn-id": "turn-1",

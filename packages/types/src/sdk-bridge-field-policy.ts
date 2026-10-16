@@ -1,7 +1,7 @@
 /** A request field a turn served through the SDK bridge cannot honour. */
 export interface SdkBridgeRefusedField {
 	/** The field's Messages name. */
-	readonly field: "stop_sequences" | "tool_choice";
+	readonly field: "stop_sequences" | "tool_choice" | "tools";
 	/** The 400 message, naming the field. */
 	readonly message: string;
 }
@@ -12,12 +12,15 @@ const SIDE_REQUEST_FORCING_TOOL_CHOICES = new Set(["any", "tool"]);
 /**
  * The field of a Messages body that the SDK bridge refuses, or null. Claude
  * Code applies no stop sequences and decides for itself when to call a tool,
- * so a bridged answer would not be the one the client asked for:
+ * so a bridged answer would not be the one the client asked for. The client
+ * runs every tool it is shown, so a server tool has no place in the turn:
  *
- *   { stop_sequences: ["END"] }         → stop_sequences
- *   { tool_choice: { type: "any" } }    → tool_choice (so are "tool" and "none")
- *   { tool_choice: { type: "auto" } }   → null
- *   { stop_sequences: [] }              → null
+ *   { stop_sequences: ["END"] }                    → stop_sequences
+ *   { tool_choice: { type: "any" } }               → tool_choice (so are "tool" and "none")
+ *   { tools: [{ type: "web_search_20250305" }] }   → tools
+ *   { tool_choice: { type: "auto" } }              → null
+ *   { stop_sequences: [] }                         → null
+ *   { tools: [{ name: "a" }, { type: "custom" }] } → null
  *
  * With `sideRequest` (the request declares SDK_BRIDGE_SIDE_REQUEST_FORK),
  * `tool_choice: { type: "none" }` passes.
@@ -30,10 +33,11 @@ export function sdkBridgeRefusedField(
 	options: { sideRequest?: boolean } = {},
 ): SdkBridgeRefusedField | null {
 	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-	const { stop_sequences: stops, tool_choice: toolChoice } = body as Record<
-		string,
-		unknown
-	>;
+	const {
+		stop_sequences: stops,
+		tool_choice: toolChoice,
+		tools,
+	} = body as Record<string, unknown>;
 	if (Array.isArray(stops) ? stops.length > 0 : stops != null)
 		return {
 			field: "stop_sequences",
@@ -51,6 +55,21 @@ export function sdkBridgeRefusedField(
 		return {
 			field: "tool_choice",
 			message: `tool_choice "${choice}" is not supported through the SDK bridge; Claude Code decides when to call tools`,
+		};
+	const serverTool = Array.isArray(tools)
+		? tools.find(
+				(tool): tool is Record<string, unknown> =>
+					!!tool &&
+					typeof tool === "object" &&
+					!Array.isArray(tool) &&
+					(tool as Record<string, unknown>).type !== undefined &&
+					(tool as Record<string, unknown>).type !== "custom",
+			)
+		: undefined;
+	if (serverTool)
+		return {
+			field: "tools",
+			message: `Tool type "${String(serverTool.type)}" is not supported through the SDK bridge; only custom tools are`,
 		};
 	return null;
 }

@@ -100,13 +100,17 @@ provider. These restrictions also apply to explicit account requests and fallbac
 
 ## Claude subscription accounts from pi, Codex and other non-Claude-Code clients
 
-A client on `/wire/openai` (pi, Codex, OpenCode in OpenAI mode) never reaches
-a Claude account (Anthropic OAuth or Claude API key) directly. When routing
-picks one for such a request, ClankerMux runs real Claude Code for that turn
+Only Claude Code reaches a Claude account (Anthropic OAuth or Claude API key)
+directly: a request on `/wire/anthropic` from a client configured as Claude
+Code that also identifies itself as Claude Code. No other request does,
+`/wire/openai` (pi, Codex, OpenCode in OpenAI mode) included. When routing
+picks a Claude account for one, ClankerMux runs real Claude Code for that turn
 through the Claude Agent SDK, and Claude Code's model calls go to the account
 through the normal pipeline. The client keeps executing its own tools: each
 tool call is handed back to it, and its results resume the same Claude Code
-run.
+run. Only Messages turns (`POST /v1/messages`) are served this way; such a
+client's `count_tokens` and other requests go to other providers, or are
+refused when the client may use no other.
 
 There is nothing to configure beyond having the Claude models in the client's
 catalogue, which follows from the client's allowed destinations. To keep a
@@ -132,9 +136,11 @@ What differs from a direct request:
   contains pi's opening line at the start of a line, or both `docs/custom-provider.md` and
   `docs/packages.md`, which subscription accounts answer with a 400
   (`sdk_bridge_prompt_refused`). Other clients' system prompts are not sent.
-* `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
-  `tool_choice` that forces or forbids tool use are rejected with a 400 naming
-  the field, unless another destination in the route can serve the request.
+* `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
+  `tool_choice` that forces or forbids tool use, and server tools (any tool
+  with a `type` other than `custom`, such as Anthropic's web search) are
+  rejected with a 400 naming the field, unless another destination in the
+  route can serve the request.
 * A client's auxiliary requests (pi's recap and session title) send
   `x-clankermux-side-request: session-fork-v1` with the conversation's session
   header, its history, and one new user message. They run on a copy of the

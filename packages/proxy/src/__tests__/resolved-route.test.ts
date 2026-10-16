@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import type {
-	Account,
-	ChatField,
-	RequestMeta,
-	RoutingRule,
+import {
+	type Account,
+	type ChatField,
+	type RequestMeta,
+	type RoutingRule,
+	sdkBridgeRefusedField,
 } from "@clankermux/types";
 import {
 	buildResolvedRoute,
@@ -394,6 +395,45 @@ describe("fields the SDK bridge refuses", () => {
 				}).accountIds(),
 			].sort(),
 		).toEqual(["a", "o"]);
+	});
+});
+
+describe("server tools under the SDK bridge field policy", () => {
+	const serverTool = sdkBridgeRefusedField({
+		tools: [
+			{ name: "read", input_schema: { type: "object" } },
+			{ type: "custom", name: "edit", input_schema: { type: "object" } },
+			{ type: "web_search_20250305", name: "web_search" },
+		],
+	});
+	const mixed = {
+		rules: [],
+		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+		bridgesOfficialAnthropic: true,
+		sdkBridgeRefusal: serverTool,
+	};
+
+	it("are refused by the policy; custom and untyped tools are not", () => {
+		expect(serverTool).toEqual({
+			field: "tools",
+			message:
+				'Tool type "web_search_20250305" is not supported through the SDK bridge; only custom tools are',
+		});
+		expect(
+			sdkBridgeRefusedField({
+				tools: [{ name: "read" }, { type: "custom", name: "edit" }],
+			}),
+		).toBeNull();
+	});
+
+	it("leave a bridged account out of a route with another candidate", () => {
+		expect(build(mixed).accountIds()).toEqual(["o"]);
+	});
+
+	it("raise the bridge's 400 naming tools when nothing else remains", () => {
+		expect(() =>
+			build({ ...mixed, pin: { accountId: "a", providers: null } }),
+		).toThrow(expect.objectContaining({ statusCode: 400, param: "tools" }));
 	});
 });
 

@@ -23,6 +23,7 @@ import { clearAliasAffinity } from "../model-alias-routing";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
 import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
+import { asClaudeCodeClient } from "./fixtures/routing-harness";
 
 const originalFetch = globalThis.fetch;
 const dbs: Database[] = [];
@@ -123,7 +124,12 @@ function upstream(handler: (model: string, url: string) => Response) {
 	return seen;
 }
 async function run(ctx: ReturnType<typeof makeContext>, req = request()) {
-	const response = await handleProxy(req, new URL(req.url), ctx);
+	const response = await handleProxy(
+		req,
+		new URL(req.url),
+		ctx,
+		asClaudeCodeClient(ctx, req),
+	);
 	await response.clone().text();
 	return response;
 }
@@ -905,10 +911,12 @@ describe("a client that leaves before the response starts", () => {
 				),
 			);
 		});
+		const req = aliasRequest(client.signal);
 		const pending = handleProxy(
-			aliasRequest(client.signal),
+			req,
 			new URL("https://proxy.test/v1/messages"),
 			ctx,
+			asClaudeCodeClient(ctx, req),
 		);
 		while (sent === 0) await Bun.sleep(5);
 		client.abort();
@@ -954,10 +962,12 @@ describe("a client that leaves before the response starts", () => {
 		const seen = upstream(() =>
 			Response.json({ error: { type: "rate_limit_error" } }, { status: 429 }),
 		);
+		const req = aliasRequest(client.signal);
 		const response = await handleProxy(
-			aliasRequest(client.signal),
+			req,
 			new URL("https://proxy.test/v1/messages"),
 			ctx,
+			asClaudeCodeClient(ctx, req),
 		);
 		expect(response.status).toBe(499);
 		expect(seen.map((s) => s.model)).toEqual([

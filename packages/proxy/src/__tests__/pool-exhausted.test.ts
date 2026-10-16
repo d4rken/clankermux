@@ -286,16 +286,18 @@ describe("pool exhausted — 503 response", () => {
 			paused: true,
 			pause_reason: "manual",
 		});
-		const anthropicAccount = makeAccount({
-			id: "acc-anthropic",
-			name: "anthropic-account",
-			provider: "anthropic",
+		// Not an official Anthropic account: a keyless request is never served
+		// by one directly, so its 503 would be the floor's, not this one.
+		const zaiAccount = makeAccount({
+			id: "acc-zai",
+			name: "zai-account",
+			provider: "zai",
 			paused: true,
 			pause_reason: "manual",
 		});
 
 		// Both accounts in DB, but only codex accounts should appear in response
-		const ctx = makeContext([codexAccount, anthropicAccount]);
+		const ctx = makeContext([codexAccount, zaiAccount]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),

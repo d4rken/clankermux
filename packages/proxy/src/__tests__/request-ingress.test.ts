@@ -12,6 +12,9 @@ import {
 	NETWORK,
 } from "@clankermux/core";
 import {
+	getChatContext,
+	getNativeResponsesMetaContext,
+	getSdkBridgeInnerMetaContext,
 	setChatContext,
 	setNativeResponsesRequestContext,
 	setSdkBridgeInnerRequestContext,
@@ -388,8 +391,9 @@ describe("ingestProxyRequest", () => {
 			expect(meta.affinityKey).toBe(sessionId);
 			expect(meta.affinityScope).toBe("claude_session");
 			expect(meta.affinityPartition).toBe(`api_key:${apiKeyId}`);
-			// The retired floor header is client-controlled and means nothing.
-			expect(meta.officialAnthropicVia).toBe("direct");
+			// Resolved after ingestion, from the key's profile
+			// (`resolveOfficialAnthropicFloor`).
+			expect(meta.officialAnthropicVia).toBeUndefined();
 		});
 
 		for (const [label, model] of [
@@ -428,7 +432,7 @@ describe("ingestProxyRequest", () => {
 			});
 		}
 
-		it("takes the official-Anthropic floor from the adapters' in-process contexts only", async () => {
+		it("carries the adapters' and the bridge's in-process contexts onto the metadata", async () => {
 			const responses = jsonRequest("/v1/messages", contextBody());
 			setNativeResponsesRequestContext(responses, {
 				nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
@@ -440,8 +444,6 @@ describe("ingestProxyRequest", () => {
 				defaultMaxTokens: 1024,
 				denyDirectOfficialAnthropic: true,
 			});
-			// A bridge inner call is Claude Code itself: never floored, so it can
-			// never be bridged again, whatever else it carries.
 			const inner = jsonRequest("/v1/messages", contextBody());
 			setNativeResponsesRequestContext(inner, {
 				nativeBody: JSON.stringify({ model: "claude-sonnet-4-5" }),
@@ -476,10 +478,15 @@ describe("ingestProxyRequest", () => {
 				return result.context.requestMeta;
 			};
 
-			expect((await via(responses)).officialAnthropicVia).toBe("sdk-bridge");
-			expect((await via(chat)).officialAnthropicVia).toBe("sdk-bridge");
+			expect(
+				getNativeResponsesMetaContext(await via(responses))
+					?.denyDirectOfficialAnthropic,
+			).toBe(true);
+			expect(getChatContext(await via(chat))?.denyDirectOfficialAnthropic).toBe(
+				true,
+			);
 			const innerMeta = await via(inner);
-			expect(innerMeta.officialAnthropicVia).toBe("direct");
+			expect(getSdkBridgeInnerMetaContext(innerMeta)?.turnId).toBe("turn-1");
 			expect(innerMeta.sdkBridgeTurnId).toBe("turn-1");
 		});
 
@@ -552,7 +559,7 @@ describe("ingestProxyRequest", () => {
 			expect(meta.affinityKey).toBeNull();
 			expect(meta.affinityScope).toBeNull();
 			expect(meta.affinityPartition).toBeNull();
-			expect(meta.officialAnthropicVia).toBe("direct");
+			expect(meta.officialAnthropicVia).toBeUndefined();
 		});
 
 		it("opens no session for an internal auto-refresh probe", async () => {

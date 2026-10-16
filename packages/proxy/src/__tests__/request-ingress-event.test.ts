@@ -55,7 +55,7 @@ async function callHandleProxy(
 	url: URL,
 	ctx: ProxyContext,
 	isInternal = false,
-	apiKeyId: string | null = null,
+	apiKeyId?: string | null,
 	apiKeyName: string | null = null,
 ) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
@@ -559,6 +559,10 @@ describe("handleProxy live-dashboard ingress events", () => {
 			expect(entry.apiKeyName).toBe(API_KEY_NAME);
 		});
 
+		/** A keyless request reaches an official Anthropic account only through the SDK bridge. */
+		const NOT_OFFICIAL = () =>
+			makeAccount({ provider: "test-provider" as Account["provider"] });
+
 		it("reports null for keyless traffic", async () => {
 			globalThis.fetch = upstreamOnlyFetch(() => ok200());
 
@@ -568,7 +572,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 			await callHandleProxy(
 				messagesRequest(),
 				new URL("https://proxy.local/v1/messages"),
-				makeContext([makeAccount()]),
+				makeContext([NOT_OFFICIAL()]),
 			);
 
 			const [ingress] = ofType("ingress");
@@ -590,7 +594,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 			await callHandleProxy(
 				messagesRequest(),
 				new URL("https://proxy.local/v1/messages"),
-				makeContext([makeAccount()], UNPINNED_KEY),
+				makeContext([NOT_OFFICIAL()], UNPINNED_KEY),
 				false,
 				"",
 				"",
