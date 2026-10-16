@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
+import type {
+	Account,
+	ChatField,
+	RequestMeta,
+	RoutingRule,
+} from "@clankermux/types";
 import {
 	buildResolvedRoute,
 	enforceOutgoingModel,
@@ -235,7 +240,7 @@ it("names the requested model and why each account dropped out", () => {
 
 describe("Chat capability boundary", () => {
 	it("filters only within pinned permitted targets and freezes the field requirements", () => {
-		const fields = ["temperature"];
+		const fields: ChatField[] = ["stop"];
 		const route = build({
 			rules: [],
 			requestedModel: "gpt-6-astra",
@@ -245,27 +250,34 @@ describe("Chat capability boundary", () => {
 		fields.length = 0;
 		expect(route.accountIds()).toEqual(["o"]);
 		expect(JSON.parse(route.snapshot).chatRequirements.fields).toEqual([
-			"temperature",
+			"stop",
 		]);
 		expect(route.target(c)).toBeNull();
 	});
-	it("returns a field-specific capability error for a Codex-only pin", () => {
-		try {
-			build({ chatRequirements: { fields: ["max_tokens"] } });
-			throw new Error("Expected rejection");
-		} catch (error) {
-			expect(error).toMatchObject({
-				statusCode: 400,
-				code: "unsupported_parameter",
-				param: "max_tokens",
-			});
-		}
+	for (const field of ["stop", "reasoning_content"] as const)
+		it(`returns a field-specific capability error for a Codex-only pin (${field})`, () => {
+			try {
+				build({ chatRequirements: { fields: ["max_tokens", field] } });
+				throw new Error("Expected rejection");
+			} catch (error) {
+				expect(error).toMatchObject({
+					statusCode: 400,
+					code: "unsupported_parameter",
+					param: field,
+				});
+			}
+		});
+	it("admits a Codex-only pin for the fields Codex accepts without applying", () => {
+		const route = build({
+			chatRequirements: { fields: ["max_tokens", "temperature", "top_p"] },
+		});
+		expect(route.accountIds()).toEqual(["c"]);
 	});
 	it("does not classify a permission or pin conflict as a field error", () => {
 		expect(() =>
 			build({
 				pin: { accountId: "o", providers: null },
-				chatRequirements: { fields: ["max_tokens"] },
+				chatRequirements: { fields: ["stop"] },
 			}),
 		).toThrow("No permitted");
 	});
@@ -332,7 +344,7 @@ describe("fields the SDK bridge refuses", () => {
 	const mixed = {
 		rules: [],
 		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
-		chatRequirements: { fields: ["stop"] },
+		chatRequirements: { fields: ["stop"] as ChatField[] },
 	};
 
 	it("leave a bridged account out of a route with another candidate", () => {

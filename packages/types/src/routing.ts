@@ -107,4 +107,10 @@ export interface RoutingAttempt {
 	service_tier_requested: string | null;
 	service_tier_sent: string | null;
 	service_tier_reason: string | null;
+	/**
+	 * Chat fields this attempt's destination accepted without applying, in
+	 * request order. NULL when there were none, on every non-Chat attempt, and
+	 * on every row written before the column existed.
+	 */
+	ignored_fields: readonly string[] | null;
 }

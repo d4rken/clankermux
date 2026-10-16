@@ -175,6 +175,7 @@ describe("routing storage", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 		expect(await repo.listAttempts("request")).toHaveLength(1);
 		expect(
@@ -220,6 +221,7 @@ describe("routing storage", () => {
 				service_tier_requested: null,
 				service_tier_sent: null,
 				service_tier_reason: null,
+				ignored_fields: null,
 			});
 		}
 		expect(
@@ -257,6 +259,7 @@ describe("routing storage", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -268,6 +271,7 @@ describe("routing storage", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -279,6 +283,7 @@ describe("routing storage", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 		await repo.recordAttempt({
 			...base,
@@ -290,6 +295,7 @@ describe("routing storage", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 
 		expect(
@@ -304,6 +310,59 @@ describe("routing storage", () => {
 			["unchanged", "high", "high", null],
 			["defaulted", null, "medium", "proxy_default"],
 			["absent", null, null, null],
+		]);
+	});
+	it("round-trips the fields an attempt accepted without applying", async () => {
+		const base = {
+			request_id: "request",
+			rule_id: null,
+			route_snapshot: "{}",
+			account_id: null,
+			provider: "codex",
+			requested_model: "gpt-6-astra",
+			resolved_model: "gpt-6-astra",
+			outgoing_model: "gpt-6-astra",
+			reported_model: null,
+			kind: "upstream_send" as const,
+			finished_at: null,
+			status: null,
+			error: null,
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
+			reasoning_effort_reason: null,
+			service_tier_requested: null,
+			service_tier_sent: null,
+			service_tier_reason: null,
+		};
+		await repo.recordAttempt({
+			...base,
+			id: "ignored",
+			started_at: 10,
+			ignored_fields: ["max_tokens", "temperature"],
+		});
+		await repo.recordAttempt({
+			...base,
+			id: "none",
+			started_at: 11,
+			ignored_fields: null,
+		});
+
+		expect(
+			db
+				.query("SELECT id,ignored_fields FROM routing_attempts ORDER BY id")
+				.all(),
+		).toEqual([
+			{ id: "ignored", ignored_fields: '["max_tokens","temperature"]' },
+			{ id: "none", ignored_fields: null },
+		]);
+		expect(
+			(await repo.listAttempts("request")).map((attempt) => [
+				attempt.id,
+				attempt.ignored_fields,
+			]),
+		).toEqual([
+			["ignored", ["max_tokens", "temperature"]],
+			["none", null],
 		]);
 	});
 	it("manual additions preserve unknown discovery and explicit empty intent is distinct", async () => {

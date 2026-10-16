@@ -1,4 +1,8 @@
-import { supportsChatIngress, unsupportedChatField } from "@clankermux/core";
+import {
+	chatFieldCapability,
+	ignoredChatFields,
+	refusedChatField,
+} from "@clankermux/core";
 import {
 	localTokenCountUrl,
 	supportsLocalTokenCounting,
@@ -98,6 +102,7 @@ export async function recordLocalRoutingOutcome(
 		service_tier_requested: null,
 		service_tier_sent: null,
 		service_tier_reason: null,
+		ignored_fields: null,
 	});
 	audit.id = id;
 }
@@ -134,6 +139,7 @@ export async function recordRouteRejection(
 		service_tier_requested: null,
 		service_tier_sent: null,
 		service_tier_reason: null,
+		ignored_fields: null,
 	});
 }
 
@@ -188,6 +194,7 @@ export async function sendAuthorizedRequest(
 		service_tier_requested: tier?.requested ?? null,
 		service_tier_sent: tier?.sent ?? null,
 		service_tier_reason: tier?.reason ?? null,
+		ignored_fields: null,
 	};
 	let response: Response;
 	// The upstream's own status line, once a head has arrived.
@@ -202,11 +209,12 @@ export async function sendAuthorizedRequest(
 		// Only the bridge's own transport may carry Chat to an official
 		// Anthropic account.
 		const chat = getChatContext(meta);
-		const bridged = transport !== undefined;
+		const chatCapability = chat
+			? chatFieldCapability(account.provider, transport !== undefined)
+			: null;
 		if (
 			chat &&
-			(!supportsChatIngress(account.provider, bridged) ||
-				unsupportedChatField(account.provider, chat.requirements))
+			(!chatCapability || refusedChatField(chatCapability, chat.requirements))
 		)
 			throw new RoutingPolicyError(
 				"Chat capability boundary changed before dispatch",
@@ -322,6 +330,11 @@ export async function sendAuthorizedRequest(
 					? devinProvenance.model
 					: await enforceOutgoingModel(request, target.upstreamModel);
 			attempt.kind = "upstream_send";
+			const ignored =
+				chat && chatCapability
+					? ignoredChatFields(chatCapability, chat.requirements)
+					: [];
+			if (ignored.length) attempt.ignored_fields = ignored;
 		}
 		await ctx.dbOps.routing.recordAttempt(attempt);
 		recorded = true;

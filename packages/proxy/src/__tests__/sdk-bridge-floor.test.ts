@@ -187,6 +187,7 @@ describe("SDK bridge floor with a bridge", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 	});
 
@@ -475,6 +476,7 @@ describe("Chat Completions through the SDK bridge", () => {
 		expect(bridge.starts).toHaveLength(1);
 		expect(harness.upstreamKeys).toEqual([]);
 		expect(sends(harness).map((r) => r.account_id)).toEqual(["claude-a"]);
+		expect(sends(harness)[0].ignored_fields).toBeNull();
 	});
 
 	it("never sends Chat to an official Anthropic account directly", async () => {
@@ -501,6 +503,7 @@ describe("Chat Completions through the SDK bridge", () => {
 		expect(response.status).toBe(200);
 		expect(bridge.starts).toHaveLength(1);
 		expect(bridge.starts[0].meta.translationGaps).toBeNull();
+		expect(sends(harness)[0].ignored_fields).toEqual(["temperature", "top_p"]);
 	});
 
 	it("tells the bridge what the Responses translation could not carry", async () => {

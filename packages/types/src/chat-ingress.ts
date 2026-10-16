@@ -1,6 +1,13 @@
+/** A Chat request field that not every destination can honor. */
+export type ChatField =
+	| "max_tokens"
+	| "temperature"
+	| "top_p"
+	| "stop"
+	| "reasoning_content";
 /** In-process Chat ingress context. Client headers cannot create or replace it. */
 export interface ChatRequirements {
-	readonly fields: readonly string[];
+	readonly fields: readonly ChatField[];
 }
 export interface ChatIngressContext {
 	readonly requirements: ChatRequirements;

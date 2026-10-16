@@ -1,12 +1,12 @@
 import {
+	chatFieldCapability,
 	isAccountAllowedByPin,
 	isModelPermitted,
 	isRoutingPinValid,
 	matchRoutingRule,
 	type RoutingPin,
+	refusedChatField,
 	resolveRoutingTarget,
-	supportsChatIngress,
-	unsupportedChatField,
 } from "@clankermux/core";
 import {
 	type Account,
@@ -373,7 +373,8 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			const bridged =
 				input.bridgesOfficialAnthropic === true &&
 				isOfficialAnthropicProvider(account.provider);
-			if (!supportsChatIngress(account.provider, bridged)) {
+			const capability = chatFieldCapability(account.provider, bridged);
+			if (!capability) {
 				unsupportedProvider = true;
 				exclude(
 					account,
@@ -381,10 +382,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 				);
 				continue;
 			}
-			const field = unsupportedChatField(
-				account.provider,
-				input.chatRequirements,
-			);
+			const field = refusedChatField(capability, input.chatRequirements);
 			if (field) {
 				unsupportedField ??= field;
 				exclude(account, `cannot honor Chat Completions field "${field}"`);

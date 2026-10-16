@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ChatRequirements } from "@clankermux/types";
+import type { ChatField, ChatRequirements } from "@clankermux/types";
 import { ChatError, keys, object, string } from "./errors";
 
 type ImageSource =
@@ -95,7 +95,7 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 			);
 		includeUsage = options.include_usage === true;
 	}
-	const fields: string[] = [];
+	const fields: ChatField[] = [];
 	for (const field of ["max_tokens", "temperature", "top_p"] as const) {
 		if (!(field in req)) continue;
 		const v = req[field];

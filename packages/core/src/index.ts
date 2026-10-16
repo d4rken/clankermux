@@ -101,7 +101,13 @@ export {
 	type ShareCandidate,
 	type ShareRule,
 } from "./capacity-runway-scenario";
-export { supportsChatIngress, unsupportedChatField } from "./chat-capabilities";
+export {
+	type ChatFieldCapability,
+	type ChatFieldTreatment,
+	chatFieldCapability,
+	ignoredChatFields,
+	refusedChatField,
+} from "./chat-capabilities";
 // The standing claim-series audit, on the same terms as the quota-drift
 // estimator below: pure, DB-free, and reachable from http-api only through this
 // root entry.

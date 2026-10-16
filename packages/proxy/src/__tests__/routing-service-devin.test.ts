@@ -101,7 +101,7 @@ it.each([
 		last_error: null,
 	});
 	setChatContext(meta, {
-		requirements: { fields: ["max_tokens"] },
+		requirements: { fields: ["stop"] },
 		defaultMaxTokens: 8192,
 	});
 	await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
@@ -109,9 +109,9 @@ it.each([
 			? {
 					statusCode: 400,
 					code: "unsupported_parameter",
-					param: "max_tokens",
+					param: "stop",
 					message:
-						'No permitted destination for model "swe-2" can honor Chat Completions field "max_tokens"',
+						'No permitted destination for model "swe-2" can honor Chat Completions field "stop"',
 				}
 			: {
 					statusCode: 403,
@@ -239,7 +239,7 @@ describe("alias stages map the requested effort onto a Devin variant", () => {
 	it("raises the first target's rejection when admission rejects every target", async () => {
 		const { ctx, meta } = aliasSetup("swe-2-high");
 		setChatContext(meta, {
-			requirements: { fields: ["max_tokens"] },
+			requirements: { fields: ["stop"] },
 			defaultMaxTokens: 8192,
 		});
 		await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(

@@ -29,6 +29,7 @@ it("distinguishes requested, sent and unreported model identities", () => {
 					service_tier_requested: null,
 					service_tier_sent: null,
 					service_tier_reason: null,
+					ignored_fields: null,
 				},
 			]}
 		/>,
@@ -69,6 +70,7 @@ for (const [snapshot, expected] of [
 						service_tier_requested: null,
 						service_tier_sent: null,
 						service_tier_reason: null,
+						ignored_fields: null,
 					},
 				]}
 			/>,
@@ -101,6 +103,7 @@ const attempt = (overrides: Partial<RoutingAttempt> = {}): RoutingAttempt => ({
 	service_tier_requested: null,
 	service_tier_sent: null,
 	service_tier_reason: null,
+	ignored_fields: null,
 	...overrides,
 });
 
@@ -240,4 +243,22 @@ it("says nothing about the tier when none was sent", () => {
 		<RoutingAttemptList attempts={[attempt()]} />,
 	);
 	expect(html).not.toContain("service tier");
+});
+
+it("names the fields an attempt accepted without applying", () => {
+	const html = renderToStaticMarkup(
+		<RoutingAttemptList
+			attempts={[attempt({ ignored_fields: ["max_tokens", "temperature"] })]}
+		/>,
+	);
+	expect(html).toContain("Accepted, not applied: max_tokens, temperature");
+});
+
+it("says nothing about ignored fields when the attempt had none", () => {
+	for (const ignored_fields of [null, []]) {
+		const html = renderToStaticMarkup(
+			<RoutingAttemptList attempts={[attempt({ ignored_fields })]} />,
+		);
+		expect(html).not.toContain("not applied");
+	}
 });
