@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import type { ChatField, ChatRequirements } from "@clankermux/types";
+import type {
+	ChatField,
+	ChatRequirements,
+	ChatStructuredOutput,
+} from "@clankermux/types";
 import { ChatError, keys, object, string } from "./errors";
 
 type ImageSource =
@@ -31,6 +35,9 @@ export interface MessagesBody {
 	temperature?: number;
 	top_p?: number;
 	stop_sequences?: string[];
+	output_config?: {
+		format: { type: "json_schema"; schema: Record<string, unknown> };
+	};
 }
 export interface TranslatedChat {
 	body: MessagesBody;
@@ -38,6 +45,7 @@ export interface TranslatedChat {
 	includeUsage: boolean;
 	names: Map<string, string>;
 	requirements: ChatRequirements;
+	structuredOutput?: ChatStructuredOutput;
 }
 export function translateChatRequest(value: unknown): TranslatedChat {
 	const req = object(value, "body");
@@ -70,16 +78,45 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 			400,
 			"unsupported_parameter",
 		);
+	let structuredOutput: ChatStructuredOutput | undefined;
 	if ("response_format" in req) {
 		const format = object(req.response_format, "response_format");
-		keys(format, ["type"], "response_format");
-		if (format.type !== "text")
-			throw new ChatError(
-				"Only text response_format is supported",
-				"response_format",
-				400,
-				"unsupported_parameter",
-			);
+		if (format.type === "json_schema") {
+			keys(format, ["type", "json_schema"], "response_format");
+			const p = "response_format.json_schema",
+				spec = object(format.json_schema, p);
+			keys(spec, ["name", "description", "schema", "strict"], p);
+			const name = string(spec.name, `${p}.name`);
+			if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name))
+				throw new ChatError(
+					"Schema names must contain 1–64 letters, digits, underscores or hyphens",
+					`${p}.name`,
+				);
+			if ("strict" in spec && typeof spec.strict !== "boolean")
+				throw new ChatError(`${p}.strict: expected a boolean`, `${p}.strict`);
+			body.output_config = {
+				format: {
+					type: "json_schema",
+					schema: object(spec.schema, `${p}.schema`),
+				},
+			};
+			structuredOutput = {
+				name,
+				...(spec.description !== undefined
+					? { description: string(spec.description, `${p}.description`, true) }
+					: {}),
+				strict: spec.strict === true,
+			};
+		} else {
+			keys(format, ["type"], "response_format");
+			if (format.type !== "text")
+				throw new ChatError(
+					"Only text and json_schema response_format are supported",
+					"response_format",
+					400,
+					"unsupported_parameter",
+				);
+		}
 	}
 	let includeUsage = false;
 	if ("stream_options" in req) {
@@ -95,7 +132,7 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 			);
 		includeUsage = options.include_usage === true;
 	}
-	const fields: ChatField[] = [];
+	const fields: ChatField[] = structuredOutput ? ["response_format"] : [];
 	for (const field of ["max_tokens", "temperature", "top_p"] as const) {
 		if (!(field in req)) continue;
 		const v = req[field];
@@ -175,6 +212,13 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 		});
 		if (!body.tools.length) delete body.tools;
 	}
+	if (structuredOutput && body.tools)
+		throw new ChatError(
+			"json_schema response_format cannot be combined with tools",
+			"response_format",
+			400,
+			"unsupported_parameter",
+		);
 	if ("tool_choice" in req) {
 		const c = req.tool_choice;
 		if (c === "auto" || c === "none" || c === "required") {
@@ -431,5 +475,6 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 		includeUsage,
 		names,
 		requirements: Object.freeze({ fields: Object.freeze(fields) }),
+		...(structuredOutput ? { structuredOutput } : {}),
 	};
 }

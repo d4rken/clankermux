@@ -263,8 +263,10 @@ async function jsonResponse(
 		signal.removeEventListener("abort", abort);
 		void reader.cancel().catch(() => {});
 	}
-	if (!final?.choices[0]?.finish_reason)
-		throw upstreamFailure("Missing terminal completion");
+	const finish = final?.choices[0]?.finish_reason;
+	if (!final || !finish) throw upstreamFailure("Missing terminal completion");
+	// Partial JSON of a refused structured answer is no answer at all.
+	if (finish === "content_filter" && ctx.structuredOutput) content = "";
 	return Response.json({
 		id: final.id,
 		object: "chat.completion",
@@ -281,7 +283,7 @@ async function jsonResponse(
 						? { tool_calls: calls.map(({ index: _index, ...call }) => call) }
 						: {}),
 				},
-				finish_reason: final.choices[0].finish_reason,
+				finish_reason: finish,
 			},
 		],
 		...(usage ? { usage } : {}),
@@ -359,6 +361,9 @@ async function respondToChatCompletionsRequest(
 			);
 		const ctx: ChatIngressContext = {
 			requirements: translated.requirements,
+			...(translated.structuredOutput
+				? { structuredOutput: translated.structuredOutput }
+				: {}),
 			defaultMaxTokens,
 			// Not Claude Code: an official Claude account may serve this only
 			// through the SDK bridge (see the Responses adapter).

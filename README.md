@@ -182,6 +182,25 @@ Anthropic's legal and compliance terms for Claude Code state that Anthropic
 or Max plan credentials on behalf of their users". Whether this use of your
 accounts is permitted is for you, as the operator, to judge.
 
+## Structured output on Chat Completions
+
+`/wire/openai/v1/chat/completions` accepts `response_format` with type
+`json_schema`. The answer is the JSON text in `message.content`, with
+`finish_reason` `stop`, or `length` when the backend hit its token limit. What
+the schema guarantees depends on where the request lands:
+
+| Route | What the schema does |
+| --- | --- |
+| Codex | Constrains the answer when `strict` is `true`; guides it when `strict` is `false` or absent. |
+| OpenRouter | Passed to the upstream provider. The request is routed only to providers that support it (`require_parameters`). |
+| Claude accounts through the SDK bridge | Claude Code validates the answer against the schema and retries on a mismatch. A failure at the token limit answers 200 with `finish_reason` `length` and empty content. Any other structured-output failure is an error (`structured_output_failed`), never a 200. |
+
+On Codex and OpenRouter, a refusal answers `finish_reason` `content_filter`
+with empty content. When streaming, JSON already sent before a late refusal
+stays sent.
+`json_schema` together with tools is refused with a 400, and `json_object` is
+not supported.
+
 ## Integrations
 
 * Model metadata discovery: client keys can add `?clankermux_metadata=1` to

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
+import { setChatContext } from "@clankermux/types";
 import { OpenRouterProvider } from "../provider";
 
 describe("OpenRouterProvider", () => {
@@ -269,5 +270,65 @@ describe("OpenRouter malformed body preservation", () => {
 		expect(await new OpenRouterProvider().transformRequestBody(request)).toBe(
 			request,
 		);
+	});
+});
+
+describe("OpenRouter Chat structured output", () => {
+	const format = {
+		type: "json_schema",
+		schema: { type: "object", properties: { city: { type: "string" } } },
+	};
+	const chatRequest = (structured: boolean, extra: object = {}) => {
+		const request = new Request("https://openrouter.ai/api/v1/messages", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "deepseek/deepseek-v4-pro",
+				max_tokens: 100,
+				messages: [{ role: "user", content: "hello" }],
+				...(structured ? { output_config: { format } } : {}),
+				...extra,
+			}),
+		});
+		setChatContext(request, {
+			requirements: { fields: structured ? ["response_format"] : [] },
+			defaultMaxTokens: 8192,
+			...(structured
+				? {
+						structuredOutput: {
+							name: "weather",
+							description: "Today",
+							strict: true,
+						},
+					}
+				: {}),
+		});
+		return request;
+	};
+	it("passes the schema as-is and routes only to providers that honor it", async () => {
+		const out = await (
+			await new OpenRouterProvider().transformRequestBody(chatRequest(true))
+		).json();
+		expect(out.output_config).toEqual({ format });
+		expect(out.provider).toEqual({ require_parameters: true });
+		const text = JSON.stringify(out);
+		expect(text).not.toContain("weather");
+		expect(text).not.toContain("strict");
+	});
+	it("merges into provider preferences already on the body", async () => {
+		const out = await (
+			await new OpenRouterProvider().transformRequestBody(
+				chatRequest(true, { provider: { order: ["a", "b"] } }),
+			)
+		).json();
+		expect(out.provider).toEqual({
+			order: ["a", "b"],
+			require_parameters: true,
+		});
+	});
+	it("adds no provider preferences to a request without a schema", async () => {
+		const out = await (
+			await new OpenRouterProvider().transformRequestBody(chatRequest(false))
+		).json();
+		expect(out.provider).toBeUndefined();
 	});
 });

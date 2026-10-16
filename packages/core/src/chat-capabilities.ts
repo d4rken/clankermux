@@ -17,6 +17,7 @@ const CODEX: ChatFieldCapability = {
 	top_p: "ignored",
 	stop: "refused",
 	reasoning_content: "refused",
+	response_format: "passed",
 };
 const OPENROUTER: ChatFieldCapability = {
 	max_tokens: "passed",
@@ -24,6 +25,7 @@ const OPENROUTER: ChatFieldCapability = {
 	top_p: "passed",
 	stop: "passed",
 	reasoning_content: "passed",
+	response_format: "passed",
 };
 // The bridge's own field policy refuses what it cannot serve, reading the
 // translated Messages body the same way for Chat and Responses.
@@ -33,6 +35,7 @@ const SDK_BRIDGE: ChatFieldCapability = {
 	top_p: "ignored",
 	stop: "passed",
 	reasoning_content: "passed",
+	response_format: "refused",
 };
 
 /**

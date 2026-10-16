@@ -12,6 +12,7 @@ const every: readonly ChatField[] = [
 	"top_p",
 	"stop",
 	"reasoning_content",
+	"response_format",
 ];
 const verdict = (provider: string, viaSdkBridge = false) => {
 	const capability = chatFieldCapability(provider, viaSdkBridge);
@@ -31,13 +32,14 @@ const verdict = (provider: string, viaSdkBridge = false) => {
 };
 
 describe("Chat field capability", () => {
-	it("Codex ignores the sampling and limit fields and refuses stop and reasoning history", () => {
+	it("Codex ignores the sampling and limit fields, refuses stop and reasoning history, and passes a schema", () => {
 		expect(verdict("codex")).toEqual({
 			max_tokens: "ignored",
 			temperature: "ignored",
 			top_p: "ignored",
 			stop: "refused",
 			reasoning_content: "refused",
+			response_format: "passed",
 		});
 	});
 	it("OpenRouter passes every field on", () => {
@@ -47,15 +49,17 @@ describe("Chat field capability", () => {
 			top_p: "passed",
 			stop: "passed",
 			reasoning_content: "passed",
+			response_format: "passed",
 		});
 	});
-	it("the SDK bridge ignores temperature and top_p and leaves refusals to its own field policy", () => {
+	it("the SDK bridge ignores temperature and top_p, refuses a schema, and leaves other refusals to its own field policy", () => {
 		expect(verdict("anthropic", true)).toEqual({
 			max_tokens: "passed",
 			temperature: "ignored",
 			top_p: "ignored",
 			stop: "passed",
 			reasoning_content: "passed",
+			response_format: "refused",
 		});
 	});
 	it("has no Chat ingress for other providers, or for a direct send to an official Anthropic account", () => {
