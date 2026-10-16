@@ -1692,7 +1692,7 @@ describe("client service integration", () => {
 			});
 		});
 
-		it("withholds a [1m] entry from an Anthropic-format catalogue only Claude Code can use", async () => {
+		it("describes a [1m] entry on the Anthropic format as the SDK bridge serves it", async () => {
 			dbOps
 				.getAdapter()
 				.getSQLiteDb()
@@ -1732,27 +1732,58 @@ describe("client service integration", () => {
 				return (await create(draft)).client.apiKeyId;
 			};
 			const generic = await oneM("generic");
-			// Its /wire/anthropic requests for the id answer 400
-			// model_suffix_requires_claude_code, so it has no route at all...
-			const direct = (await service.modelMetadata(generic, "anthropic")).models;
-			expect(direct["claude-opus-5-5[1m]"]).not.toHaveProperty("contextWindow");
-			// ...and the alias is described by the one target it can reach.
+			// Bridged on either format, so both of the alias's stages are reachable.
+			for (const format of ["anthropic", "openai"] as const) {
+				const bridged = (await service.modelMetadata(generic, format)).models;
+				expect([format, bridged["claude-opus-5-5[1m]"]?.contextWindow]).toEqual(
+					[format, 1_000_000],
+				);
+				// Two rate cards that disagree publish none.
+				expect(bridged["claude-long"]).not.toHaveProperty("cost");
+			}
+			// Claude Code sends the entry's bare id directly, served at 1M, but an
+			// alias stage hands the direct route the suffixed id, which it refuses:
+			// only the Astra stage describes the alias.
+			const claudeCode = await oneM("claude-code");
+			const direct = (await service.modelMetadata(claudeCode, "anthropic"))
+				.models;
+			expect(direct["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
 			expect(direct["claude-long"]?.cost).toMatchObject({
 				input: 10,
 				output: 50,
 			});
-			// The same client's OpenAI-format requests are bridged.
-			const bridged = (await service.modelMetadata(generic, "openai")).models;
-			expect(bridged["claude-opus-5-5[1m]"]?.contextWindow).toBe(1_000_000);
-			// Two rate cards that disagree publish none.
-			expect(bridged["claude-long"]).not.toHaveProperty("cost");
-			// Claude Code resolves the suffix itself.
-			const claudeCode = await oneM("claude-code");
-			expect(
-				(await service.modelMetadata(claudeCode, "anthropic")).models[
-					"claude-opus-5-5[1m]"
-				]?.contextWindow,
-			).toBe(1_000_000);
+		});
+
+		it("describes a rule's [1m] target as served for an Anthropic-format client other than Claude Code", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='anthropic' WHERE id='d'")
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["claude-opus-5-5"]);
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "opus-to-1m",
+				name: "Opus to 1M",
+				match_model_kind: "family",
+				match_model_value: "anthropic:opus",
+				target_kind: "literal",
+				target_model: "claude-opus-5-5[1m]",
+			});
+			const draft = blank();
+			draft.catalogues.anthropic.models = [
+				{
+					id: "claude-opus-5-5",
+					displayName: "Opus",
+					targetModel: "claude-opus-5-5",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const { models } = await service.modelMetadata(id, "anthropic");
+			// The rule rewrites it to the suffixed id, which the bridge serves.
+			expect(models["claude-opus-5-5"]?.contextWindow).toBe(1_000_000);
 		});
 
 		it("withholds a Claude Code entry whose rule introduces a [1m] target", async () => {
