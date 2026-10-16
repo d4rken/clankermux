@@ -18,9 +18,10 @@ export type UpstreamMessageEnd =
 const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "refusal"]);
 const FORWARDED_BLOCKS = new Set(["text", "thinking", "redacted_thinking"]);
 /**
- * UTF-16 units of a tool call's input per `input_json_delta`. A client's SSE
- * reader bounds its frames (the Chat adapter at 1 MiB); escaped, a chunk
- * this size stays well under that.
+ * UTF-16 units per `input_json_delta` of a tool call's input, or per
+ * `text_delta` of a structured answer. A client's SSE reader bounds its
+ * frames (the Chat adapter at 1 MiB); escaped, a chunk this size stays well
+ * under that.
  */
 export const INPUT_JSON_CHUNK = 64 * 1024;
 /** A model call's input and cache counts before it reports any. */
@@ -204,6 +205,8 @@ export class ReplyComposer {
 	private held: Held[] = [];
 	/** The model stream broke its one-block-at-a-time order; nothing more goes out. */
 	private faulted = false;
+	/** A structured reply's message_start, held until its answer or its end. */
+	private heldStart: Record<string, unknown> | null = null;
 
 	constructor(
 		private readonly opts: {
@@ -229,6 +232,12 @@ export class ReplyComposer {
 			webSearch?: boolean;
 			/** A WebSearch call started. */
 			onWebSearch?: (id: string) => void;
+			/**
+			 * The client asked for a structured answer: no model block goes
+			 * out and no model stop ends the reply. Only the SDK result does,
+			 * through {@link structuredAnswer} or {@link finish}.
+			 */
+			structuredOutput?: boolean;
 		},
 	) {}
 
@@ -254,6 +263,7 @@ export class ReplyComposer {
 		// Calls an earlier leg left held never reach this one's client.
 		this.dropHeld();
 		this.faulted = false;
+		this.heldStart = null;
 		this.sink = sink;
 		this.streaming = false;
 		this.legStarted = false;
@@ -324,6 +334,13 @@ export class ReplyComposer {
 	private startMessage(message: Record<string, unknown>): void {
 		if (this.legStarted) return;
 		this.legStarted = true;
+		// Nothing is shown before the answer, so a failure until then still
+		// gets its real status.
+		if (this.opts.structuredOutput) this.heldStart = message;
+		else this.emitStart(message);
+	}
+
+	private emitStart(message: Record<string, unknown>): void {
 		this.emit({
 			type: "message_start",
 			message: {
@@ -572,7 +589,8 @@ export class ReplyComposer {
 
 	/** Open an output block for an upstream text or thinking block; null when it is not forwarded. */
 	private openBlock(block: Block): number | null {
-		if (!FORWARDED_BLOCKS.has(block.type)) return null;
+		if (this.opts.structuredOutput || !FORWARDED_BLOCKS.has(block.type))
+			return null;
 		const index = this.nextIndex++;
 		this.accumulated.set(index, { type: block.type, text: "" });
 		this.emit({ type: "content_block_start", index, content_block: block });
@@ -611,6 +629,7 @@ export class ReplyComposer {
 		this.lastStopReason = stopReason;
 		const forwarded = this.forwardedThisMessage;
 		this.forwardedThisMessage = 0;
+		if (this.opts.structuredOutput) return { kind: "continue", stopReason };
 		if (stopReason === "tool_use")
 			return forwarded > 0
 				? { kind: "end", stopReason }
@@ -857,6 +876,41 @@ export class ReplyComposer {
 		return this.endOfUpstreamMessage(String(message.stop_reason));
 	}
 
+	/**
+	 * A structured reply's answer: `value` as JSON in one text block, in
+	 * `text_delta` pieces of at most {@link INPUT_JSON_CHUNK} units. False when
+	 * it has no JSON form.
+	 *
+	 *   { city: "Zürich" } → text `{"city":"Zürich"}`;  0 → text `0`
+	 */
+	structuredAnswer(value: unknown): boolean {
+		const json = JSON.stringify(value) as string | undefined;
+		if (json === undefined) return false;
+		this.startMessage({});
+		this.releaseStart();
+		const index = this.nextIndex++;
+		this.accumulated.set(index, { type: "text", text: json });
+		this.emit({
+			type: "content_block_start",
+			index,
+			content_block: { type: "text", text: "" },
+		});
+		for (const text of inputJsonChunks(json))
+			this.emit({
+				type: "content_block_delta",
+				index,
+				delta: { type: "text_delta", text },
+			});
+		this.emit({ type: "content_block_stop", index });
+		return true;
+	}
+
+	private releaseStart(): void {
+		const start = this.heldStart;
+		this.heldStart = null;
+		if (start) this.emitStart(start);
+	}
+
 	private openAndReplay(start: Block, deltas: Record<string, unknown>[]): void {
 		const out = this.openBlock(start);
 		if (out === null) return;
@@ -876,6 +930,7 @@ export class ReplyComposer {
 	finish(stopReason: string | null): void {
 		if (!this.sink) return;
 		this.startMessage({});
+		this.releaseStart();
 		// A search still unanswered never completed.
 		for (const search of this.searches.values())
 			if (!search.answered)

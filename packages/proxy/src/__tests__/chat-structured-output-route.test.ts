@@ -5,14 +5,10 @@ import type {
 	ModelAlias,
 	RequestMeta,
 } from "@clankermux/types";
-import { setChatContext } from "@clankermux/types";
+import { sdkBridgeRefusedField, setChatContext } from "@clankermux/types";
 import { modelPermissionScope } from "../account-model-permissions";
 import type { ProxyContext } from "../handlers/proxy-types";
-import {
-	ChatCapabilityError,
-	getAliasRoutes,
-	getResolvedRoute,
-} from "../resolved-route";
+import { getAliasRoutes, getResolvedRoute } from "../resolved-route";
 import { initializeRequestRoute } from "../routing-service";
 
 const claude = {
@@ -29,7 +25,15 @@ const codex = {
 	name: "Codex",
 } as Account;
 
-function setup(stages: ModelAlias["targets"], fields: ChatField[]) {
+/**
+ * `fields` null: a native Messages client on /wire/anthropic, floored to
+ * the bridge, whose body the bridge's field policy read.
+ */
+function setup(
+	stages: ModelAlias["targets"],
+	fields: ChatField[] | null,
+	body: Record<string, unknown> = {},
+) {
 	const alias: ModelAlias = {
 		id: "alias:structured",
 		displayName: "Structured",
@@ -71,15 +75,17 @@ function setup(stages: ModelAlias["targets"], fields: ChatField[]) {
 		timestamp: Date.now(),
 		officialAnthropicVia: "sdk-bridge",
 		headers: new Headers(),
+		sdkBridgeRefusedField: sdkBridgeRefusedField(body),
 	} as RequestMeta;
-	setChatContext(meta, {
-		requirements: { fields },
-		defaultMaxTokens: 8192,
-		denyDirectOfficialAnthropic: true,
-		...(fields.includes("response_format")
-			? { structuredOutput: { name: "answer", strict: true } }
-			: {}),
-	});
+	if (fields)
+		setChatContext(meta, {
+			requirements: { fields },
+			defaultMaxTokens: 8192,
+			denyDirectOfficialAnthropic: true,
+			...(fields.includes("response_format")
+				? { structuredOutput: { name: "answer", strict: true } }
+				: {}),
+		});
 	return { ctx, meta };
 }
 
@@ -88,19 +94,18 @@ const bridgedThenCodex = [
 	{ model: "gpt-5.6-sol", accountIds: [codex.id] },
 ];
 
+const format = { type: "json_schema", schema: { type: "object" } };
+
 describe("a Chat json_schema request's route", () => {
-	it("skips the bridged Claude stage for the Codex one", async () => {
-		const { ctx, meta } = setup(bridgedThenCodex, ["response_format"]);
-		await initializeRequestRoute(meta, ctx, null);
-		const [claudeStage, codexStage] = getAliasRoutes(meta) ?? [];
-		expect(claudeStage?.admissionError).toBeInstanceOf(ChatCapabilityError);
-		expect(claudeStage?.admissionError).toMatchObject({
-			statusCode: 400,
-			code: "unsupported_parameter",
-			param: "response_format",
+	it("keeps the bridged Claude stage, which serves the schema", async () => {
+		const { ctx, meta } = setup(bridgedThenCodex, ["response_format"], {
+			output_config: { format },
 		});
-		expect(getResolvedRoute(meta)).toBe(codexStage);
-		expect(codexStage?.target(codex)?.upstreamModel).toBe("gpt-5.6-sol");
+		await initializeRequestRoute(meta, ctx, null);
+		const [claudeStage] = getAliasRoutes(meta) ?? [];
+		expect(claudeStage?.admissionError).toBeUndefined();
+		expect(getResolvedRoute(meta)).toBe(claudeStage);
+		expect(claudeStage?.target(claude)?.upstreamModel).toBe("claude-sonnet-5");
 	});
 	it("keeps the bridged Claude stage for a request without a schema", async () => {
 		const { ctx, meta } = setup(bridgedThenCodex, []);
@@ -109,17 +114,55 @@ describe("a Chat json_schema request's route", () => {
 		expect(claudeStage?.admissionError).toBeUndefined();
 		expect(getResolvedRoute(meta)).toBe(claudeStage);
 	});
-	it("answers a 400 naming response_format when only the bridge would serve it", async () => {
+	it("routes to the bridge when only the bridge would serve it", async () => {
 		const { ctx, meta } = setup(
 			[{ model: "claude-sonnet-5", accountIds: [claude.id] }],
 			["response_format"],
+			{ output_config: { format } },
+		);
+		await initializeRequestRoute(meta, ctx, null);
+		expect(getResolvedRoute(meta)?.accountIds()).toEqual([claude.id]);
+	});
+});
+
+describe("a native Messages request with a schema and tools", () => {
+	const body = {
+		output_config: { format },
+		tools: [{ name: "read", input_schema: { type: "object" } }],
+	};
+	it("skips the bridged Claude stage for the Codex one", async () => {
+		const { ctx, meta } = setup(bridgedThenCodex, null, body);
+		await initializeRequestRoute(meta, ctx, null);
+		const [claudeStage, codexStage] = getAliasRoutes(meta) ?? [];
+		expect(claudeStage?.admissionError).toMatchObject({
+			statusCode: 400,
+			param: "output_config.format",
+		});
+		expect(getResolvedRoute(meta)).toBe(codexStage);
+		expect(codexStage?.target(codex)?.upstreamModel).toBe("gpt-5.6-sol");
+	});
+	it("answers the bridge's 400 naming the field when only the bridge would serve it", async () => {
+		const { ctx, meta } = setup(
+			[{ model: "claude-sonnet-5", accountIds: [claude.id] }],
+			null,
+			body,
 		);
 		await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
 			{
 				statusCode: 400,
-				code: "unsupported_parameter",
-				param: "response_format",
+				code: "invalid_request_error",
+				param: "output_config.format",
+				message: expect.stringContaining("cannot be combined with tools"),
 			},
 		);
+	});
+	it("keeps the bridged stage for a schema without tools", async () => {
+		const { ctx, meta } = setup(bridgedThenCodex, null, {
+			output_config: { format },
+			tools: [],
+		});
+		await initializeRequestRoute(meta, ctx, null);
+		const [claudeStage] = getAliasRoutes(meta) ?? [];
+		expect(getResolvedRoute(meta)).toBe(claudeStage);
 	});
 });

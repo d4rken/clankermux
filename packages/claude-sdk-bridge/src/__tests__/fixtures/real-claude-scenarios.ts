@@ -2397,6 +2397,63 @@ await scenario("oversizedInnerBody", async () => {
 	}
 });
 
+await scenario("structuredOutput", async () => {
+	const format = {
+		type: "json_schema",
+		schema: {
+			type: "object",
+			properties: { city: { type: "string" }, temps: { type: "array" } },
+			required: ["city"],
+			additionalProperties: false,
+		},
+	};
+	const run = async (text: string, maxTokens = 1024) => {
+		const p = plan();
+		const from = mock.requests.length;
+		const reply = await read(
+			bridge.startTurn({
+				request: request([{ role: "user", content: text }], [], {
+					max_tokens: maxTokens,
+					output_config: { format },
+				}),
+				plan: p,
+				meta: meta(),
+				signal: new AbortController().signal,
+			}),
+		);
+		await settled();
+		const calls = mock.requests
+			.slice(from)
+			.filter((q) => q.path.startsWith("/v1/messages"));
+		const first = calls[0]?.body as
+			| {
+					tools?: Array<{ name: string; input_schema?: unknown }>;
+					tool_choice?: unknown;
+					output_config?: unknown;
+			  }
+			| undefined;
+		return {
+			reply,
+			turnStatus: repo.turns.get(p.turnId)?.status,
+			upstreamCalls: calls.length,
+			upstreamStatuses: calls.map((q) => q.status),
+			tools: (first?.tools ?? []).map((t) => t.name),
+			structuredSchema:
+				first?.tools?.find((t) => t.name === "StructuredOutput")
+					?.input_schema ?? null,
+			toolChoice: first?.tool_choice ?? null,
+			upstreamOutputConfig: first?.output_config ?? null,
+		};
+	};
+	const ok = await run("STRUCTOK weather in Zürich");
+	const bad = await run("STRUCTBAD weather in Zürich");
+	const cut = await run("STRUCTCUT weather in Zürich", 16);
+	console.log(
+		`[claude-sdk-bridge] structured output: ok ${JSON.stringify(ok.reply)} after ${ok.upstreamCalls} call(s); schema mismatch ${bad.reply.status} after ${bad.upstreamCalls} call(s); token limit ${JSON.stringify(cut.reply)} after ${cut.upstreamCalls} call(s); tools ${JSON.stringify(ok.tools)}, tool_choice ${JSON.stringify(ok.toolChoice)}`,
+	);
+	return { ok, bad, cut };
+});
+
 await scenario("rssAtCap", async () => {
 	const turns = await Promise.all(
 		[1, 2, 3, 4].map((i) =>

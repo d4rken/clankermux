@@ -27,15 +27,16 @@ const OPENROUTER: ChatFieldCapability = {
 	reasoning_content: "passed",
 	response_format: "passed",
 };
-// The bridge's own field policy refuses what it cannot serve, reading the
-// translated Messages body the same way for Chat and Responses.
+// `passed`: the field reaches the bridge in the translated Messages body,
+// where the bridge's own field policy decides, as for every bridged client
+// (counterpart: `sdkBridgeRefusedField`).
 const SDK_BRIDGE: ChatFieldCapability = {
 	max_tokens: "passed",
 	temperature: "ignored",
 	top_p: "ignored",
 	stop: "passed",
 	reasoning_content: "passed",
-	response_format: "refused",
+	response_format: "passed",
 };
 
 /**

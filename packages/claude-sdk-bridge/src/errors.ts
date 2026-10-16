@@ -464,6 +464,25 @@ export const bridgeErrors = {
 			retryAfter: null,
 		};
 	},
+	structuredOutputFailed(why: string): BridgeError {
+		return {
+			status: 502,
+			type: "api_error",
+			code: "structured_output_failed",
+			message: `No answer matching the response schema: ${why}`,
+			retryAfter: null,
+		};
+	},
+	structuredOutputOnContinuation(): BridgeError {
+		return bridgeErrors.invalid(
+			"output_config.format (response_format in Chat Completions) is not supported on tool results that continue a turn through the SDK bridge; send it on a new turn without tools",
+		);
+	},
+	structuredOutputOnSideRequest(): BridgeError {
+		return bridgeErrors.invalid(
+			"output_config.format (response_format in Chat Completions) is not supported on a side request through the SDK bridge",
+		);
+	},
 	interleavedBlocks(why: string): BridgeError {
 		return {
 			status: 502,

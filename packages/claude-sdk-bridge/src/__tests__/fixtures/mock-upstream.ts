@@ -21,6 +21,12 @@
 //                                              (on the first allowed domain, else
 //                                              results.example), then a text; a query with
 //                                              "SEARCHFAIL" gets a web_search_tool_result_error
+//   tools offer StructuredOutput and a user text contains "STRUCT"
+//                                           -> one StructuredOutput tool_use with
+//                                              {city: "Zürich", temps: [0, -1.5]};
+//                                              "STRUCTBAD" gives {town: 42} instead;
+//                                              "STRUCTCUT" cuts its input mid-string
+//                                              and stops on max_tokens
 //   last user text contains "SLOW"          -> any of the above, 3 s late
 //   last user text contains "MAXTOK"        -> the text ends with stop_reason max_tokens
 //   last user text contains "THINK"         -> a signed thinking block before the rest
@@ -313,6 +319,9 @@ function script(
 		String(t.type ?? "").startsWith("web_search_"),
 	);
 	const offersWebSearch = body.tools?.some((t) => t.name === "WebSearch");
+	const offersStructuredOutput = body.tools?.some(
+		(t) => t.name === "StructuredOutput",
+	);
 	const flattenedResult = /\[tool result id=[^\]]*\]\n([^\n]*)/.exec(text);
 	const loop = /LOOP(\d+)/.exec(userTexts(body.messages));
 	const resultsSoFar = body.messages
@@ -320,6 +329,20 @@ function script(
 		.filter((b) => b.type === "tool_result").length;
 	if (searchTool) {
 		content.push(...webSearchReply(body, searchTool));
+	} else if (
+		offersStructuredOutput &&
+		/STRUCT/.test(userTexts(body.messages))
+	) {
+		const texts = userTexts(body.messages);
+		content.push({
+			type: "tool_use",
+			id: `toolu_mock_${++toolSeq}`,
+			name: "StructuredOutput",
+			input: /STRUCTBAD/.test(texts)
+				? { town: 42 }
+				: { city: "Zürich", temps: [0, -1.5] },
+			...(/STRUCTCUT/.test(texts) ? { partialJson: '{"city": "Zü' } : {}),
+		});
 	} else if (
 		offersWebSearch &&
 		toolResults.length === 0 &&
@@ -422,6 +445,9 @@ function script(
 
 	const stopReason =
 		shape.stopReason ??
+		(content.some((b) => typeof b.partialJson === "string")
+			? "max_tokens"
+			: undefined) ??
 		(content.some((b) => b.type === "tool_use")
 			? "tool_use"
 			: /MAXTOK/.test(text)
@@ -498,7 +524,10 @@ function script(
 				index,
 				delta: {
 					type: "input_json_delta",
-					partial_json: JSON.stringify(block.input),
+					partial_json:
+						typeof block.partialJson === "string"
+							? block.partialJson
+							: JSON.stringify(block.input),
 				},
 			});
 		}

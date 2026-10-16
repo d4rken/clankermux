@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type {
 	EffortLevel,
+	JsonSchemaOutputFormat,
 	McpSdkServerConfigWithInstance,
 	Options,
 	SessionStore,
@@ -95,6 +96,8 @@ export interface QueryOptionsInput {
 	effort: EffortLevel | null;
 	/** From the turn's starting request; the child keeps it for the whole query. */
 	maxOutputTokens: number | null;
+	/** The client's `output_config.format`; null for a reply in prose. */
+	outputFormat?: JsonSchemaOutputFormat | null;
 	sessionId: string;
 	/** Resume `sessionId` from the session store instead of starting it. */
 	resume: boolean;
@@ -157,6 +160,7 @@ export function buildQueryOptions(input: QueryOptionsInput): Options {
 				}
 			: {}),
 		...(input.maxTurns ? { maxTurns: input.maxTurns } : {}),
+		...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
 		extraArgs: { "thinking-display": "summarized" },
 		includePartialMessages: true,
 		persistSession: true,

@@ -299,3 +299,63 @@ describe("a side request's body", () => {
 		).toBe(true);
 	});
 });
+
+describe("output_config.format", () => {
+	const schema = { type: "object", properties: { a: { type: "string" } } };
+	const parse = (patch: Record<string, unknown>) =>
+		parseTurnRequest({ ...base, ...patch }, null, 1);
+
+	it("reads a JSON schema format and counts its schema with the tools'", () => {
+		const parsed = parse({
+			output_config: {
+				effort: "high",
+				format: { type: "json_schema", schema },
+			},
+		});
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		expect(parsed.turn.outputFormat).toEqual({ type: "json_schema", schema });
+		expect(parsed.turn.schemaBytes).toBe(JSON.stringify(schema).length);
+		expect(parsed.turn.effort).toBe("high");
+	});
+
+	it("leaves a body without one, or with null, in prose", () => {
+		for (const patch of [
+			{},
+			{ output_config: { effort: "low" } },
+			{ output_config: { format: null } },
+		]) {
+			const parsed = parse(patch);
+			if (!parsed.ok) throw new Error(parsed.error.message);
+			expect(parsed.turn.outputFormat).toBeNull();
+			expect(parsed.turn.schemaBytes).toBe(0);
+		}
+	});
+
+	it("refuses any other format", () => {
+		for (const format of [
+			{ type: "json_object" },
+			{ type: "json_schema" },
+			{ type: "json_schema", schema: "{}" },
+			[],
+		]) {
+			const parsed = parse({ output_config: { format } });
+			expect(!parsed.ok && parsed.error.status).toBe(400);
+			expect(!parsed.ok && parsed.error.message).toContain(
+				"output_config.format",
+			);
+		}
+	});
+
+	it("refuses a format next to client tools, and takes one next to an empty list", () => {
+		const output_config = { format: { type: "json_schema", schema } };
+		const refused = parse({
+			output_config,
+			tools: [{ name: "read", input_schema: { type: "object" } }],
+		});
+		expect(!refused.ok && refused.error.status).toBe(400);
+		expect(!refused.ok && refused.error.message).toContain(
+			"cannot be combined with tools",
+		);
+		expect(parse({ output_config, tools: [] }).ok).toBe(true);
+	});
+});

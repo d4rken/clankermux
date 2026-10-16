@@ -1011,6 +1011,7 @@ export function createClaudeSdkBridge(
 		const { turn, toolNames, sideRequest } = input;
 		// A side request's tools are refused, so it gets no WebSearch either.
 		const webSearch = sideRequest ? null : (meta.hostedWebSearch ?? null);
+		const outputFormat = sideRequest ? null : turn.outputFormat;
 		const dirs = workDirs();
 		let live: LiveQuery | null = null;
 		const context: SdkBridgeInnerContext = {
@@ -1067,6 +1068,7 @@ export function createClaudeSdkBridge(
 				maxOutputTokens: turn.maxOutputTokens,
 				sessionId: input.sessionId,
 				maxTurns: sideRequest ? 1 : null,
+				outputFormat,
 				resume:
 					input.historyMode === "resume" ||
 					input.historyMode === "resume_extended" ||
@@ -1101,6 +1103,7 @@ export function createClaudeSdkBridge(
 			forwardToolUse: !sideRequest,
 			webSearch: webSearch !== null,
 			onWebSearch: () => input.recorder.noteWebSearchCall(),
+			structuredOutput: outputFormat !== null,
 		});
 		const current = limits();
 		live = new LiveQuery({
@@ -1145,6 +1148,7 @@ export function createClaudeSdkBridge(
 			conversationKey: input.convKey,
 			sideRequest,
 			webSearchRequired: webSearch?.required ?? false,
+			structuredOutput: outputFormat !== null,
 			discardSession,
 			discardClaudeCodeTranscripts,
 			onPeakRss: notePeakRss,
@@ -1374,6 +1378,8 @@ export function createClaudeSdkBridge(
 				"side_request",
 			);
 			if (!parsed.ok) return refuse(parsed.error, "invalid");
+			if (parsed.body.outputFormat)
+				return refuse(bridgeErrors.structuredOutputOnSideRequest(), "invalid");
 			const prepared = prepare(parsed.body);
 			if (prepared instanceof Response) return prepared;
 			return startSideRequest({
@@ -1850,6 +1856,8 @@ export function createClaudeSdkBridge(
 				return refuse(
 					bridgeErrors.invalid("A continuation must carry tool_result blocks"),
 				);
+			if (parsed.turn.outputFormat)
+				return refuse(bridgeErrors.structuredOutputOnContinuation());
 			// The body was read asynchronously; the query may have ended meanwhile.
 			if (shuttingDown) return refuse(bridgeErrors.shutdown());
 			// Its release timer may have fired while the body arrived: once the
@@ -2006,6 +2014,8 @@ export function createClaudeSdkBridge(
 			return refuse(
 				bridgeErrors.invalid("A continuation must carry tool_result blocks"),
 			);
+		if (parsed.turn.outputFormat)
+			return refuse(bridgeErrors.structuredOutputOnContinuation());
 		return resumeReleased(entry, input, startedAt, body, parsed.turn);
 	}
 

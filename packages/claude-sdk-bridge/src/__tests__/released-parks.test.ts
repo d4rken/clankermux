@@ -580,6 +580,32 @@ describe("resuming a released park", () => {
 		expect(h.sdk.queries.length).toBe(1);
 	});
 
+	it("refuses results asking for a structured answer, with or without tools, and keeps the park", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		for (const tools of [[], [READ_TOOL]]) {
+			const r = await reply(
+				h.bridge.continueTurn({
+					turnId: p.turnId,
+					request: messagesRequest({
+						tools,
+						messages: results(p),
+						output_config: {
+							format: { type: "json_schema", schema: { type: "object" } },
+						},
+					}),
+					meta: makeMeta(),
+					signal: new AbortController().signal,
+				}),
+			);
+			expect(r.status).toBe(400);
+			expect(JSON.stringify(r.body)).toContain("output_config.format");
+		}
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(h.sdk.queries.length).toBe(1);
+	});
+
 	it("refuses another key's results and leaves the park", async () => {
 		const h = await releaseHarness();
 		const p = await parkTurn(h);

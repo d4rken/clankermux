@@ -52,14 +52,14 @@ describe("Chat field capability", () => {
 			response_format: "passed",
 		});
 	});
-	it("the SDK bridge ignores temperature and top_p, refuses a schema, and leaves other refusals to its own field policy", () => {
+	it("the SDK bridge ignores temperature and top_p, and leaves every refusal to its own field policy", () => {
 		expect(verdict("anthropic", true)).toEqual({
 			max_tokens: "passed",
 			temperature: "ignored",
 			top_p: "ignored",
 			stop: "passed",
 			reasoning_content: "passed",
-			response_format: "refused",
+			response_format: "passed",
 		});
 	});
 	it("has no Chat ingress for other providers, or for a direct send to an official Anthropic account", () => {

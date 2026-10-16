@@ -34,7 +34,8 @@ pipeline. The client keeps executing its own tools.
   it excluded an account. Available: they stay candidates, except when the
   body carries a field the bridge refuses (`sdkBridgeRefusedField` in
   `@clankermux/types`, shared with the bridge's own parse: `stop_sequences`,
-  a forcing `tool_choice`, a server tool). Then they are excluded, and a
+  a forcing `tool_choice`, a server tool, `output_config.format` next to
+  non-empty `tools`). Then they are excluded, and a
   route left empty by that alone answers the bridge's 400 naming the field.
 - **Outer bridged attempt** (`handlers/sdk-bridge-attempt.ts`, branched in
   `proxyWithAccount` before cache staging and token
@@ -414,6 +415,46 @@ annotations from URLs in the text was declined on 2026-09-29.
   over their results. It is not the provider's
   `usage.server_tool_use.web_search_requests`, which nothing persists.
 
+## Structured output
+
+`output_config.format` (`{type: "json_schema", schema}`; Chat's
+`response_format` arrives as it) becomes `Options.outputFormat`. Claude Code
+offers the model a `StructuredOutput` tool with the schema, validates its
+input and retries on a mismatch (`MAX_STRUCTURED_OUTPUT_RETRIES`, not set);
+the tool's input is the result's `structured_output`, and the turn ends on
+it with no further model call. `real-claude.integration.test.ts` pins that
+it works with the bridge's own options (`tools: []`, `dontAsk`).
+
+- **Refused.** Next to non-empty `tools` (field policy, so routing excludes
+  the bridge); on tool results continuing a parked or released turn,
+  whatever their `tools`; on a side request. Each is a 400 before anything
+  runs, and a parked turn stays parked. A structured turn has no client
+  tools, so it never parks and the resume descriptor has no field for it.
+- **Reply** (`ReplyComposer` with `structuredOutput`). No model block goes
+  out and no model stop ends the leg; the `message_start` is held too, so
+  until `headHoldMs` commits the head a failure keeps its real status. Only
+  the SDK result ends it: `Object.hasOwn(result, "structured_output")` on a
+  success is the answer, falsy values included, sent as one text block of
+  `JSON.stringify(value)` in `text_delta` pieces of `INPUT_JSON_CHUNK` with
+  `stop_reason: "end_turn"`. `legContent()` is that text.
+- **No answer.** A failed inner call and a context overflow answer as for
+  any turn. Otherwise, when the last model call of the turn stopped on
+  `max_tokens` (the composer's `lastStopReason`) or Claude Code reported its
+  `max_output_tokens` assistant error, the turn is the token limit's: 200,
+  no content block, `stop_reason: "max_tokens"` (Chat: `length`, empty
+  content), status `completed`. Anything else (retries exhausted, a
+  refusal, a success without the field, an exit without a result) is 502
+  `structured_output_failed`, an SSE `error` once the head is committed;
+  never prose. Chat answers a mid-stream error as a JSON 502 when the client
+  asked for JSON. Measured on CLI 2.1.280 against the mock upstream: a
+  schema mismatch takes five model calls before the failed result; a
+  StructuredOutput input cut off at `max_tokens` is retried the same way
+  and ends as the token limit's; a complete input in a message that stopped
+  on `max_tokens` is accepted as the answer.
+- **Session.** Claude Code's transcript holds the StructuredOutput call, not
+  the text the client got, so the session is never registered: the next
+  turn rebuilds from the client's history.
+
 ## Claude Code's environment block
 
 The inner listener removes Claude Code's environment block from every
@@ -672,7 +713,8 @@ cause changes its 502. Overflow is recognised in one place,
 | Inner 401, other 5xx | 502 `api_error` |
 | A streamed inner `error` event | the status its type stands for (`anthropicErrorStatus`), with its `code`, then as above |
 | `terminal_reason` `prompt_too_long`, `blocking_limit`, `rapid_refill_breaker`; an error assistant message, result text or SDK exception saying "Prompt is too long" | 400 `context_length_exceeded` |
-| `max_output_tokens` assistant error, `error_max_turns`, `error_max_structured_output_retries`, `error_during_execution`, exit without a result | 502 `api_error` |
+| `max_output_tokens` assistant error, `error_max_turns`, `error_during_execution`, exit without a result | 502 `api_error` |
+| A structured turn without an answer (Structured output, above) | 200 `max_tokens` with no content, or 502 `structured_output_failed` |
 
 `blocking_limit` is Claude Code refusing before any model call: with
 `DISABLE_AUTO_COMPACT` it is what an oversized history usually meets, so

@@ -192,6 +192,11 @@ export interface LiveQueryInit {
 	sideRequest?: boolean;
 	/** The client's hosted web search must complete before the reply may end. */
 	webSearchRequired?: boolean;
+	/**
+	 * The client asked for `output_config.format`: Claude Code's result, not
+	 * a model stop, ends the reply, with its structured output as the answer.
+	 */
+	structuredOutput?: boolean;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
 	/** Claude Code's own copy of the session, which nothing resumes from. */
@@ -265,6 +270,10 @@ export class LiveQuery {
 	private gaveUp = false;
 	private claudeCodeErrorText: string | null = null;
 	private claudeCodeCause: ClaudeCodeFailureCause | null = null;
+	/** The `error` of the last error assistant message Claude Code reported. */
+	private assistantError: string | null = null;
+	/** Why a structured turn's result carried no answer. */
+	private structuredMiss: string | null = null;
 	private resultSeen = false;
 	private resultOk = false;
 	/** A side request's reply is settled; nothing Claude Code does after counts. */
@@ -441,6 +450,8 @@ export class LiveQuery {
 		this.gaveUp = false;
 		this.claudeCodeErrorText = null;
 		this.claudeCodeCause = null;
+		this.assistantError = null;
+		this.structuredMiss = null;
 		this.init.composer.attach((event) => leg.response.send(event));
 		this.armIdle();
 	}
@@ -739,7 +750,11 @@ export class LiveQuery {
 			return;
 		}
 		this.state = "finishing";
-		this.register([...this.clientMessages, { role: "assistant", content }]);
+		// A structured turn's session holds Claude Code's StructuredOutput call,
+		// not the text the client got: its next turn rebuilds from the client's
+		// history.
+		if (!this.init.structuredOutput)
+			this.register([...this.clientMessages, { role: "assistant", content }]);
 		// Calls in a reply that did not end on them (a refusal after a
 		// tool_use, withheld with its message) are never answered by the
 		// client: the session holds a call and maybe a result the client
@@ -1099,6 +1114,7 @@ export class LiveQuery {
 					});
 				if (message.error) {
 					this.noteGiveUp();
+					this.assistantError = message.error;
 					const text = textOf(message.message.content as unknown as Block[]);
 					this.claudeCodeErrorText = text;
 					if (isContextOverflow({ text }))
@@ -1191,6 +1207,10 @@ export class LiveQuery {
 			this.resultOk = this.finalError === null;
 			return;
 		}
+		if (this.init.structuredOutput) {
+			this.onStructuredResult(message);
+			return;
+		}
 		const failed = message.is_error || message.subtype !== "success";
 		// A refusal reached the client as its reply; the error result that
 		// follows it is Claude Code declining to go on, not a failed turn.
@@ -1208,6 +1228,87 @@ export class LiveQuery {
 		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
 			this.claudeCodeCause ??= "context_overflow";
 		void this.failAfterGrace();
+	}
+
+	/**
+	 * A structured turn ends on its result alone: its structured output is
+	 * the answer, even a falsy one (0, false, null, ""). Anything else is a
+	 * miss, which {@link giveUp} answers once the inner outcomes are in.
+	 */
+	private onStructuredResult(
+		message: Extract<SDKMessage, { type: "result" }>,
+	): void {
+		const failed = message.is_error || message.subtype !== "success";
+		const value = (message as { structured_output?: unknown })
+			.structured_output;
+		if (
+			!failed &&
+			Object.hasOwn(message, "structured_output") &&
+			JSON.stringify(value) !== undefined
+		) {
+			this.resultOk = true;
+			if (this.leg && this.init.composer.structuredAnswer(value))
+				this.endLeg("end_turn");
+			return;
+		}
+		this.noteGiveUp();
+		const text =
+			message.subtype === "success"
+				? message.result
+				: (message.errors ?? []).join("; ") || message.subtype;
+		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
+		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
+			this.claudeCodeCause ??= "context_overflow";
+		this.structuredMiss =
+			message.subtype === "error_max_structured_output_retries" ||
+			message.terminal_reason === "structured_output_retry_exhausted"
+				? "the model's answers did not match it within Claude Code's retries"
+				: this.init.composer.lastStopReason === "refusal"
+					? "the model refused to answer"
+					: !failed
+						? "Claude Code finished the turn without a structured answer"
+						: `Claude Code ended the turn with an error: ${sanitizeMessage(text)}`;
+		void this.failAfterGrace();
+	}
+
+	/**
+	 * A structured turn's miss is the token limit's when the last model call
+	 * of the turn stopped on `max_tokens`, or Claude Code gave up with its
+	 * `max_output_tokens` error: whatever it did after that (retries that
+	 * ran out, a result without the answer) followed from the cut.
+	 */
+	private missedOnTokenLimit(): boolean {
+		return (
+			this.init.composer.lastStopReason === "max_tokens" ||
+			this.assistantError === "max_output_tokens"
+		);
+	}
+
+	/**
+	 * End a turn Claude Code gave up on. A failed inner call or a context
+	 * overflow answers as for any turn. A structured turn's other misses
+	 * never answer in prose: one cut by the token limit ends with no
+	 * content and `max_tokens`, anything else is `structured_output_failed`.
+	 */
+	private giveUp(fallbackText: string | null = null): void {
+		if (
+			!this.init.structuredOutput ||
+			this.decisive ||
+			this.claudeCodeCause !== null
+		) {
+			this.failTurn(this.claudeCodeFailure(fallbackText));
+			return;
+		}
+		if (this.resultSeen && this.missedOnTokenLimit()) {
+			this.resultOk = true;
+			this.endLeg("max_tokens");
+			return;
+		}
+		this.failTurn(
+			bridgeErrors.structuredOutputFailed(
+				this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
+			),
+		);
 	}
 
 	/**
@@ -1233,7 +1334,7 @@ export class LiveQuery {
 			if (this.lastOutcome && this.lastOutcome.status >= 400)
 				this.decisive = this.lastOutcome;
 		}
-		this.failTurn(this.claudeCodeFailure());
+		this.giveUp();
 	}
 
 	private unreportedInnerCalls(): boolean {
@@ -1336,14 +1437,12 @@ export class LiveQuery {
 		}
 		if (!this.resultSeen) {
 			this.noteGiveUp();
-			this.failTurn(
-				this.claudeCodeFailure("Claude Code exited without a result"),
-			);
+			this.giveUp("Claude Code exited without a result");
 		} else if (!this.resultOk) {
 			// failAfterGrace may still be waiting on the proxy's report.
 			const until = Date.now() + OUTCOME_WAIT_MS + OUTCOME_GRACE_MS + 50;
 			while (this.leg && Date.now() < until) await Bun.sleep(10);
-			if (this.leg) this.failTurn(this.claudeCodeFailure());
+			if (this.leg) this.giveUp();
 		}
 		this.samplePeakRss();
 		this.close(this.resultOk ? "completed" : "failed", this.resultOk);

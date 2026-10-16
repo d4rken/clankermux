@@ -145,10 +145,10 @@ What differs from a direct request:
   Claude accounts. With none left, you get that 400. Once the reply has
   started streaming, the error ends the stream instead.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
-  `tool_choice` that forces or forbids tool use, and server tools (any tool
-  with a `type` other than `custom`, such as Anthropic's web search) are
-  rejected with a 400 naming the field, unless another destination in the
-  route can serve the request.
+  `tool_choice` that forces or forbids tool use, server tools (any tool
+  with a `type` other than `custom`, such as Anthropic's web search) and
+  `output_config.format` together with tools are rejected with a 400 naming
+  the field, unless another destination in the route can serve the request.
 * A client's auxiliary requests (pi's recap and session title) send
   `x-clankermux-side-request: session-fork-v1` with the conversation's session
   header, its history, and one new user message. They run on a copy of the
@@ -193,13 +193,19 @@ the schema guarantees depends on where the request lands:
 | --- | --- |
 | Codex | Constrains the answer when `strict` is `true`; guides it when `strict` is `false` or absent. |
 | OpenRouter | Passed to the upstream provider. The request is routed only to providers that support it (`require_parameters`). |
-| Claude accounts through the SDK bridge | Claude Code validates the answer against the schema and retries on a mismatch. A failure at the token limit answers 200 with `finish_reason` `length` and empty content. Any other structured-output failure is an error (`structured_output_failed`), never a 200. |
+| Claude accounts through the SDK bridge | Claude Code validates the answer against the schema and retries on a mismatch. Nothing streams before the answer, which arrives whole at the end. When the last model call stopped at the token limit, the answer is 200 with `finish_reason` `length` and empty content. Any other failure to produce a matching answer (retries exhausted, a refusal, no answer at all) is an error with code `structured_output_failed`, never a 200: a 502 before the response started, an error chunk after it. Upstream errors such as rate limits keep their own status. |
 
 On Codex and OpenRouter, a refusal answers `finish_reason` `content_filter`
 with empty content. When streaming, JSON already sent before a late refusal
 stays sent.
 `json_schema` together with tools is refused with a 400, and `json_object` is
-not supported.
+not supported. Through the SDK bridge, a schema is also refused with a 400 on
+tool results that continue a turn, and on a side request.
+
+A native Messages client on `/wire/anthropic` that sends
+`output_config.format` (`{"type": "json_schema", "schema": {...}}`) to a Claude
+account is served the same way through the SDK bridge; its answer is one text
+block holding the JSON.
 
 ## Integrations
 
