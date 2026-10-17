@@ -529,6 +529,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 				method: "POST",
 				path: "/v1/messages",
 				timestamp: Date.now(),
+				officialAnthropicVia: "direct",
 				requestedModel: MODEL,
 				headers: req.headers,
 			};

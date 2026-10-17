@@ -88,6 +88,7 @@ function makeRequestMeta(): RequestMeta {
 		method: "POST",
 		path: "/v1/messages",
 		timestamp: INCIDENT_NOW,
+		officialAnthropicVia: "direct",
 		headers: new Headers(),
 	};
 }

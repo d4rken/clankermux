@@ -24,7 +24,12 @@ pipeline. The client keeps executing its own tools.
   and always a Responses or Chat request (the adapters'
   `denyDirectOfficialAnthropic` in their in-process WeakMap contexts),
   whatever its key and user agent. A request with no key that is not
-  internal is floored.
+  internal is floored. `sendAuthorizedRequest`, the last gate before the
+  wire, fails closed: without the bridge's transport it refuses (audited
+  403 `RoutingPolicyError`) a send to an official account unless
+  `officialAnthropicVia` is `"direct"`, so a request that never passed the
+  floor is not sent directly. Tests that dispatch to one directly set
+  `"direct"` themselves; nothing defaults it.
 - **Route construction** (`routing-service.ts`, `resolved-route.ts`) reads
   `sdkBridge.availability()` once. A floored request that is not
   `POST /v1/messages` (`count_tokens`, any other model-bearing path) excludes

@@ -71,6 +71,7 @@ async function send(account: Account): Promise<Response> {
 		path: "/v1/messages",
 		timestamp: Date.now(),
 		requestedModel: MODEL,
+		officialAnthropicVia: "direct",
 	} as RequestMeta;
 	installResolvedRoute(
 		meta,

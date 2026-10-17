@@ -15,6 +15,7 @@ import {
 	ATTEMPT_TRANSPORT_FAILED,
 	FAST_MODE_SERVICE_TIER,
 	getChatContext,
+	isOfficialAnthropicProvider,
 	readReasoningEffortAdaptation,
 	readServiceTierAdaptation,
 	SdkBridgeCapacityError,
@@ -221,6 +222,15 @@ export async function sendAuthorizedRequest(
 		)
 			throw new RoutingPolicyError(
 				"Chat capability boundary changed before dispatch",
+			);
+		// Fail closed: a request the floor never classified is not Claude Code's.
+		if (
+			!transport &&
+			isOfficialAnthropicProvider(account.provider) &&
+			meta.officialAnthropicVia !== "direct"
+		)
+			throw new RoutingPolicyError(
+				"Official Anthropic accounts serve this request only through the SDK bridge",
 			);
 		const current = await ctx.dbOps.getAccount(account.id);
 		if (current?.disabled)
