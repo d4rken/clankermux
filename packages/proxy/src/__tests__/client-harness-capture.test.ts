@@ -312,7 +312,11 @@ describe("client user-agent / harness capture", () => {
 
 	it("writes NULL for both when the request carried no user-agent", async () => {
 		globalThis.fetch = upstreamOnlyFetch(upstreamJson);
-		const { ctx, saved } = makeContext([makeAccount()]);
+		// Not an official Anthropic account, which serves a request without
+		// Claude Code's user agent only through the SDK bridge.
+		const { ctx, saved } = makeContext([
+			makeAccount({ provider: "test-provider" as Account["provider"] }),
+		]);
 
 		// Bun's Request adds no user-agent of its own, so this is a genuinely
 		// agentless request — the shape that must stay distinguishable from a

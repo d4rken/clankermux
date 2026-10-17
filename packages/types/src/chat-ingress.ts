@@ -1,9 +1,27 @@
+/** A Chat request field that not every destination can honor. */
+export type ChatField =
+	| "max_tokens"
+	| "temperature"
+	| "top_p"
+	| "stop"
+	| "reasoning_content"
+	| "response_format";
 /** In-process Chat ingress context. Client headers cannot create or replace it. */
 export interface ChatRequirements {
-	readonly fields: readonly string[];
+	readonly fields: readonly ChatField[];
+}
+/**
+ * What a Chat `json_schema` response_format carries beyond the schema, which
+ * travels in the Messages body as `output_config.format`.
+ */
+export interface ChatStructuredOutput {
+	readonly name: string;
+	readonly description?: string;
+	readonly strict: boolean;
 }
 export interface ChatIngressContext {
 	readonly requirements: ChatRequirements;
+	readonly structuredOutput?: ChatStructuredOutput;
 	readonly defaultMaxTokens: number;
 	/** See NativeResponsesContext.denyDirectOfficialAnthropic. */
 	readonly denyDirectOfficialAnthropic?: boolean;

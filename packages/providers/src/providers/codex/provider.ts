@@ -13,6 +13,7 @@ import {
 	type Account,
 	applyReasoningEffortAdaptation,
 	applyServiceTierAdaptation,
+	type ChatStructuredOutput,
 	getChatContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
@@ -255,6 +256,15 @@ interface CodexRequest {
 		| "none"
 		| { type: "function"; name: string };
 	parallel_tool_calls?: boolean;
+	text?: {
+		format: {
+			type: "json_schema";
+			name: string;
+			description?: string;
+			schema: Record<string, unknown>;
+			strict: boolean;
+		};
+	};
 }
 
 // ── Anthropic request types ───────────────────────────────────────────────────
@@ -375,6 +385,8 @@ interface StreamState {
 	cacheCreationInputTokens?: number;
 	// Anthropic clients expect stop_reason=tool_use when the assistant emitted a tool call.
 	sawToolUse: boolean;
+	// A refusal content part arrived; its text is never forwarded as content.
+	sawRefusal: boolean;
 	contextWindow: ContextWindow | null;
 	// Track function_call items: output_index → buffered arguments and block index
 	functionCallBlocks: Map<number, FunctionCallBuffer>;
@@ -639,6 +651,7 @@ export class CodexProvider extends BaseProvider {
 			const { codexBody, reasoningAdaptation } = this.convertToCodexFormat(
 				body,
 				account,
+				getChatContext(request)?.structuredOutput,
 			);
 			const tierAdaptation = applyFastModeServiceTier(
 				codexBody as unknown as Record<string, unknown>,
@@ -1393,6 +1406,7 @@ export class CodexProvider extends BaseProvider {
 	private convertToCodexFormat(
 		body: AnthropicRequest,
 		account?: Account,
+		structuredOutput?: ChatStructuredOutput,
 	): {
 		codexBody: CodexRequest;
 		reasoningAdaptation: ReasoningEffortAdaptation;
@@ -1582,6 +1596,28 @@ export class CodexProvider extends BaseProvider {
 		}
 		if (tools) {
 			codexRequest.tools = tools;
+		}
+		const format = (body.output_config as { format?: unknown } | undefined)
+			?.format as { type?: unknown; schema?: unknown } | undefined;
+		if (
+			format?.type === "json_schema" &&
+			format.schema &&
+			typeof format.schema === "object" &&
+			!Array.isArray(format.schema)
+		) {
+			// Messages carries only the schema; a client that is not on Chat
+			// ingress gets a generic name and schema-guided output.
+			codexRequest.text = {
+				format: {
+					type: "json_schema",
+					name: structuredOutput?.name ?? "response",
+					...(structuredOutput?.description !== undefined
+						? { description: structuredOutput.description }
+						: {}),
+					schema: format.schema as Record<string, unknown>,
+					strict: structuredOutput?.strict ?? false,
+				},
+			};
 		}
 
 		return { codexBody: codexRequest, reasoningAdaptation };
@@ -1821,6 +1857,7 @@ export class CodexProvider extends BaseProvider {
 			contextWindow: null,
 			functionCallBlocks: new Map(),
 			sawToolUse: false,
+			sawRefusal: false,
 		};
 
 		const headers = sanitizeResponseHeaders(response.headers);
@@ -2323,9 +2360,15 @@ export class CodexProvider extends BaseProvider {
 				break;
 			}
 
+			case "response.refusal.delta":
+			case "response.refusal.done":
+				state.sawRefusal = true;
+				break;
+
 			case "response.content_part.added": {
 				const part = data.part as Record<string, unknown> | undefined;
 				const partType = part?.type as string | undefined;
+				if (partType === "refusal") state.sawRefusal = true;
 
 				if (partType === "output_text") {
 					await ensureMessageStart();
@@ -2569,9 +2612,11 @@ export class CodexProvider extends BaseProvider {
 						? incompleteDetails?.reason === "content_filter"
 							? "refusal"
 							: "max_tokens"
-						: state.sawToolUse
-							? "tool_use"
-							: "end_turn";
+						: state.sawRefusal
+							? "refusal"
+							: state.sawToolUse
+								? "tool_use"
+								: "end_turn";
 
 				const messageDelta: {
 					type: "message_delta";

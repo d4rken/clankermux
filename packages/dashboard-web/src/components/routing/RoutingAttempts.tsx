@@ -89,11 +89,19 @@ function ServiceTierLine({ attempt }: { attempt: RoutingAttempt }) {
 	);
 }
 
+/** ["max_tokens", "temperature"] → "Accepted, not applied: max_tokens, temperature" */
+function IgnoredFieldsLine({ attempt }: { attempt: RoutingAttempt }) {
+	const fields = attempt.ignored_fields;
+	if (!fields?.length) return null;
+	return <p>Accepted, not applied: {fields.join(", ")}</p>;
+}
+
 const ALIAS_REASONS: Record<string, string> = {
 	quota_exhausted: "quota exhausted",
 	rate_limited: "rate limited",
 	provider_overloaded: "provider overloaded",
 	temporarily_unavailable: "temporarily unavailable",
+	extra_usage_exhausted: "out of extra usage",
 	pool_unavailable: "no eligible account available",
 	conversation_affinity: "continuing with this conversation's backend",
 };
@@ -174,6 +182,7 @@ export function RoutingAttemptList({
 					<AliasDecisionLine snapshot={attempt.route_snapshot} />
 					<ReasoningEffortAdaptationLine attempt={attempt} />
 					<ServiceTierLine attempt={attempt} />
+					<IgnoredFieldsLine attempt={attempt} />
 					{attempt.error && <p>{attempt.error}</p>}
 					<details>
 						<summary className="cursor-pointer">Routing decision</summary>

@@ -14,6 +14,7 @@ import {
 	detectHarness,
 	HARNESS_LABEL_FOR_APPLICATION,
 	isCodexClient,
+	isKnownAgentHarness,
 	normalizeClientUserAgent,
 } from "./harness";
 
@@ -226,5 +227,21 @@ describe("HARNESS_LABEL_FOR_APPLICATION", () => {
 
 	it("maps generic to null because it declares no harness", () => {
 		expect(HARNESS_LABEL_FOR_APPLICATION.generic).toBeNull();
+	});
+});
+
+describe("isKnownAgentHarness", () => {
+	it("names every declarable harness and qwen-code", () => {
+		for (const label of Object.values(HARNESS_LABEL_FOR_APPLICATION))
+			if (label !== null) expect(isKnownAgentHarness(label)).toBe(true);
+		expect(isKnownAgentHarness("qwen-code")).toBe(true);
+	});
+
+	it("does not name what an unrecognized user-agent is labelled with", () => {
+		for (const ua of ["Go-http-client/2.0", "curl/8.5.0", "openai/5.1.0"]) {
+			const { harness } = detectHarness(headers({ "user-agent": ua }));
+			expect(isKnownAgentHarness(harness)).toBe(false);
+		}
+		expect(isKnownAgentHarness(null)).toBe(false);
 	});
 });

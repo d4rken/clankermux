@@ -745,13 +745,14 @@ export class ClientService {
 		format: ClientFormat,
 		application: ClientProfile["application"],
 	): Promise<ClientModelMetadataResponse> {
-		// Anthropic-format requests reach official Anthropic accounts directly,
-		// where a `[1m]` id is refused. Claude Code sends an entry's bare id:
+		// Only Claude Code reaches official Anthropic accounts directly, where a
+		// `[1m]` id is refused; every other client reaches them through the SDK
+		// bridge, which serves one. Claude Code sends an entry's bare id:
 		//
-		//   entry claude-opus-5-5[1m], no rule   -> sends claude-opus-5-5, served at 1M
-		//   rule rewriting to claude-opus-5-5[1m] -> refused
-		const directAnthropic = format === "anthropic";
-		const claudeCode = directAnthropic && application === "claude-code";
+		//   Claude Code, entry claude-opus-5-5[1m]             -> sends claude-opus-5-5, served at 1M
+		//   Claude Code, rule rewriting to claude-opus-5-5[1m] -> refused
+		//   pi, rule rewriting to claude-opus-5-5[1m]          -> bridged, served at 1M
+		const claudeCode = format === "anthropic" && application === "claude-code";
 		const rules = await this.deps.dbOps.routing.listRules();
 		const accounts = await this.accounts({
 			accountId: key.pinnedAccountId,
@@ -840,7 +841,7 @@ export class ClientService {
 							)
 								continue;
 							if (
-								directAnthropic &&
+								claudeCode &&
 								!servedAsWritten &&
 								isOfficialAnthropicProvider(account.provider) &&
 								sdkBridgeWireModel(target) !== target

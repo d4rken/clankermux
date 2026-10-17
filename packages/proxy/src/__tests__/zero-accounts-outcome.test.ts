@@ -88,6 +88,8 @@ interface HarnessOptions {
 	accounts?: Account[];
 	pin?: { accountId: string | null; providers: string[] | null } | null;
 	pinFailure?: { code: string; message: string } | null;
+	/** Why the floor kept official Anthropic accounts out of the route. */
+	officialAnthropicExcluded?: string | null;
 	gateTokenEstimate?: number;
 	contextExcludedAccounts?: Array<{ account: Account; model: string }>;
 	familyWeeklyExcludedAccounts?: Array<{
@@ -122,6 +124,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		accounts = [],
 		pin = null,
 		pinFailure = null,
+		officialAnthropicExcluded = null,
 		gateTokenEstimate = 100,
 		contextExcludedAccounts = [],
 		familyWeeklyExcludedAccounts = [],
@@ -150,6 +153,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		internal: false,
 		pin,
 		pinFailure,
+		officialAnthropicExcluded,
 		...(comboName ? { comboName } : {}),
 	} as unknown as RequestMeta;
 
@@ -682,6 +686,75 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 
 		expect(res.status).toBe(400);
 		expect(cacheBodyStore.getStagingSize()).toBe(baseline);
+	});
+
+	// Routing records a pin for every key, destinations or none, so only an
+	// active pin, or the floor's exclusion, may answer with the pinned terminal.
+	describe("the pinned terminal after every other terminal declined", () => {
+		const paused = () =>
+			makeAccount({
+				id: uniqueId("acc"),
+				paused: true,
+				pause_reason: "manual",
+			});
+
+		async function errorType(res: Response): Promise<string> {
+			return ((await res.json()) as { error: { type: string } }).error.type;
+		}
+
+		it("answers pool_exhausted to a key with no destinations", async () => {
+			const harness = makeHarness({
+				accounts: [paused()],
+				pin: { accountId: null, providers: null },
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(503);
+			expect(await errorType(res)).toBe("pool_exhausted");
+			expect(harness.recorded).toEqual(["pool_exhausted"]);
+		});
+
+		it("answers the pinned terminal to an account pin", async () => {
+			const account = paused();
+			const harness = makeHarness({
+				accounts: [account],
+				pin: { accountId: account.id, providers: null },
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(503);
+			expect(await errorType(res)).toBe("pinned_target_unavailable");
+			expect(harness.recorded).toEqual(["pinned_target_unavailable"]);
+		});
+
+		it("answers the pinned terminal to a provider pin", async () => {
+			const harness = makeHarness({
+				accounts: [paused()],
+				pin: { accountId: null, providers: ["anthropic"] },
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(503);
+			expect(await errorType(res)).toBe("pinned_target_unavailable");
+			expect(harness.recorded).toEqual(["pinned_target_unavailable"]);
+		});
+
+		it("answers the pinned terminal when the floor excluded official accounts", async () => {
+			const harness = makeHarness({
+				accounts: [paused()],
+				pin: { accountId: null, providers: null },
+				officialAnthropicExcluded: "SDK bridge unavailable: not configured",
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(503);
+			expect(await errorType(res)).toBe("pinned_target_unavailable");
+			expect(harness.recorded).toEqual(["pinned_target_unavailable"]);
+		});
 	});
 
 	it("records NOTHING when the client disconnected before the terminals", async () => {

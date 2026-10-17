@@ -3384,6 +3384,54 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 		});
 	});
 
+	for (const stream of [true, false])
+		it(`maps a completed refusal content part to a refusal without its text (stream=${stream})`, async () => {
+			const provider = new CodexProvider();
+			const upstreamBody = sseBody([
+				...eventLine("response.created", {
+					response: { id: "resp_refusal", model: "gpt-5.5" },
+				}),
+				...eventLine("response.output_item.added", {
+					item: { type: "message" },
+					output_index: 0,
+				}),
+				...eventLine("response.content_part.added", {
+					part: { type: "refusal", refusal: "" },
+				}),
+				...eventLine("response.refusal.delta", { delta: "No can do." }),
+				...eventLine("response.refusal.done", { refusal: "No can do." }),
+				...eventLine("response.output_item.done", {
+					item: { type: "message" },
+					output_index: 0,
+				}),
+				...eventLine("response.completed", {
+					response: {
+						model: "gpt-5.5",
+						status: "completed",
+						usage: { input_tokens: 3, output_tokens: 1 },
+					},
+				}),
+			]);
+			const response = new Response(upstreamBody, {
+				status: 200,
+				headers: {
+					"content-type": "text/event-stream",
+					"x-clankermux-request-stream": String(stream),
+				},
+			});
+			const text = await (
+				await provider.processResponse(response, null)
+			).text();
+			expect(text).not.toContain("No can do.");
+			if (stream) expect(text).toContain('"stop_reason":"refusal"');
+			else {
+				const payload = JSON.parse(text);
+				expect(payload.stop_reason).toBe("refusal");
+				expect(payload.stop_details.category).toBe("content_filter");
+				expect(payload.content).toEqual([{ type: "text", text: "" }]);
+			}
+		});
+
 	it("leaves an ordinary non-streaming completion at end_turn with no stop_details key", async () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([

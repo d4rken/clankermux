@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/types";
 import { PI_PROMPT_HEAD_VERSIONS } from "../pi-prompt";
 import {
+	appendSystemPromptPolicy,
 	dropSystemPromptPolicy,
+	getSystemPromptPolicy,
 	piHeadSystemPromptPolicy,
 	type SystemPromptOutcome,
 	selectSystemPromptPolicy,
@@ -39,10 +41,35 @@ function appendOf(outcome: SystemPromptOutcome): string | null {
 const fixture = (name: string) => loadPiPromptFixture("0.87", name);
 
 describe("policy selection", () => {
-	it("strips pi's head from pi's prompt and drops every other client's", () => {
-		expect(selectSystemPromptPolicy("pi").name).toBe("pi-head-v1");
-		for (const harness of ["opencode", "codex", "oh-my-pi", null])
-			expect(selectSystemPromptPolicy(harness).name).toBe("drop");
+	const select = (harness: string | null, application: string | null) =>
+		selectSystemPromptPolicy(harness, application).name;
+
+	it("appends an unidentified client's prompt on a generic key or none", () => {
+		for (const harness of ["go-http-client", "curl", "openai", null])
+			for (const application of ["generic", null])
+				expect(select(harness, application)).toBe("append-v1");
+	});
+
+	it("drops a known agent harness's prompt, whatever the key declares", () => {
+		for (const harness of [
+			"opencode",
+			"codex",
+			"oh-my-pi",
+			"qwen-code",
+			"claude-code",
+		])
+			for (const application of ["generic", null, harness])
+				expect(select(harness, application)).toBe("drop");
+	});
+
+	it("drops the prompt of a key declaring an agent, whatever the user-agent", () => {
+		for (const application of ["codex", "opencode", "claude-code", "pi"])
+			expect(select("curl", application)).toBe("drop");
+	});
+
+	it("strips pi's head from pi's prompt", () => {
+		for (const application of ["pi", "generic", null])
+			expect(select("pi", application)).toBe("pi-head-v1");
 	});
 
 	it("drop never appends, whatever the text", () => {
@@ -57,6 +84,38 @@ describe("policy selection", () => {
 			decision: { append: null, excludeDynamicSections: false },
 			detail: null,
 		});
+	});
+});
+
+describe("append-v1", () => {
+	const turn = {
+		model: "m",
+		clientHarness: "curl",
+		piPromptVersion: null,
+	};
+
+	it("appends the client's text unchanged and records its UTF-8 size", () => {
+		const system = "You are a helper.\n\nAnswer in Français, 🙂.";
+		expect(appendSystemPromptPolicy.decide(system, turn)).toEqual({
+			ok: true,
+			decision: { append: system, excludeDynamicSections: false },
+			detail: {
+				outcome: "appended",
+				bytes: Buffer.byteLength(system, "utf8"),
+			},
+		});
+	});
+
+	it("sends the preset alone for an empty prompt", () => {
+		expect(appendSystemPromptPolicy.decide("", turn)).toEqual({
+			ok: true,
+			decision: { append: null, excludeDynamicSections: false },
+			detail: { outcome: "appended", bytes: 0 },
+		});
+	});
+
+	it("is registered", () => {
+		expect(getSystemPromptPolicy("append-v1")).toBe(appendSystemPromptPolicy);
 	});
 });
 

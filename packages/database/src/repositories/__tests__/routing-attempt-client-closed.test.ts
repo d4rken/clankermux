@@ -37,6 +37,7 @@ describe("client-closed attempt stamp", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 	};
 
@@ -161,6 +162,7 @@ describe("client-closed attempt stamp", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 		expect(await repo.finishAttemptClientClosed("local", 50)).toBe(false);
 		expect(row("local")).toMatchObject({ status: null, error: null });

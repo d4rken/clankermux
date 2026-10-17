@@ -108,6 +108,7 @@ function wellFormed(detail: SdkBridgeSystemPromptDetail): boolean {
 			typeof d.headStripped === "boolean" &&
 			Array.isArray(d.sectionsSeen)
 		);
+	if (d.outcome === "appended") return typeof d.bytes === "number";
 	if (d.outcome === "refused")
 		return (
 			typeof d.code === "string" &&
@@ -124,17 +125,25 @@ function PromptDetailFields({
 }: {
 	detail: SdkBridgeSystemPromptDetail;
 }) {
-	const layout = (
-		<Field label="Prompt layout">
-			{typeof detail.version === "string" ? detail.version : "None declared"}
-		</Field>
-	);
+	// No layout is declared for a prompt appended whole.
+	const layout =
+		detail.outcome === "appended" ? null : (
+			<Field label="Prompt layout">
+				{typeof detail.version === "string" ? detail.version : "None declared"}
+			</Field>
+		);
 	if (!wellFormed(detail))
 		return (
 			<>
 				{layout}
 				<Field label="Prompt detail">unavailable</Field>
 			</>
+		);
+	if (detail.outcome === "appended")
+		return (
+			<Field label="Client prompt">
+				{detail.bytes.toLocaleString()} bytes appended
+			</Field>
 		);
 	if (detail.outcome === "forwarded")
 		return (

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
+import {
+	type Account,
+	type ChatField,
+	type RequestMeta,
+	type RoutingRule,
+	sdkBridgeRefusedField,
+} from "@clankermux/types";
 import {
 	buildResolvedRoute,
 	enforceOutgoingModel,
@@ -235,7 +241,7 @@ it("names the requested model and why each account dropped out", () => {
 
 describe("Chat capability boundary", () => {
 	it("filters only within pinned permitted targets and freezes the field requirements", () => {
-		const fields = ["temperature"];
+		const fields: ChatField[] = ["stop"];
 		const route = build({
 			rules: [],
 			requestedModel: "gpt-6-astra",
@@ -245,27 +251,34 @@ describe("Chat capability boundary", () => {
 		fields.length = 0;
 		expect(route.accountIds()).toEqual(["o"]);
 		expect(JSON.parse(route.snapshot).chatRequirements.fields).toEqual([
-			"temperature",
+			"stop",
 		]);
 		expect(route.target(c)).toBeNull();
 	});
-	it("returns a field-specific capability error for a Codex-only pin", () => {
-		try {
-			build({ chatRequirements: { fields: ["max_tokens"] } });
-			throw new Error("Expected rejection");
-		} catch (error) {
-			expect(error).toMatchObject({
-				statusCode: 400,
-				code: "unsupported_parameter",
-				param: "max_tokens",
-			});
-		}
+	for (const field of ["stop", "reasoning_content"] as const)
+		it(`returns a field-specific capability error for a Codex-only pin (${field})`, () => {
+			try {
+				build({ chatRequirements: { fields: ["max_tokens", field] } });
+				throw new Error("Expected rejection");
+			} catch (error) {
+				expect(error).toMatchObject({
+					statusCode: 400,
+					code: "unsupported_parameter",
+					param: field,
+				});
+			}
+		});
+	it("admits a Codex-only pin for the fields Codex accepts without applying", () => {
+		const route = build({
+			chatRequirements: { fields: ["max_tokens", "temperature", "top_p"] },
+		});
+		expect(route.accountIds()).toEqual(["c"]);
 	});
 	it("does not classify a permission or pin conflict as a field error", () => {
 		expect(() =>
 			build({
 				pin: { accountId: "o", providers: null },
-				chatRequirements: { fields: ["max_tokens"] },
+				chatRequirements: { fields: ["stop"] },
 			}),
 		).toThrow("No permitted");
 	});
@@ -332,7 +345,7 @@ describe("fields the SDK bridge refuses", () => {
 	const mixed = {
 		rules: [],
 		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
-		chatRequirements: { fields: ["stop"] },
+		chatRequirements: { fields: ["stop"] as ChatField[] },
 	};
 
 	it("leave a bridged account out of a route with another candidate", () => {
@@ -382,6 +395,45 @@ describe("fields the SDK bridge refuses", () => {
 				}).accountIds(),
 			].sort(),
 		).toEqual(["a", "o"]);
+	});
+});
+
+describe("server tools under the SDK bridge field policy", () => {
+	const serverTool = sdkBridgeRefusedField({
+		tools: [
+			{ name: "read", input_schema: { type: "object" } },
+			{ type: "custom", name: "edit", input_schema: { type: "object" } },
+			{ type: "web_search_20250305", name: "web_search" },
+		],
+	});
+	const mixed = {
+		rules: [],
+		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+		bridgesOfficialAnthropic: true,
+		sdkBridgeRefusal: serverTool,
+	};
+
+	it("are refused by the policy; custom and untyped tools are not", () => {
+		expect(serverTool).toEqual({
+			field: "tools",
+			message:
+				'Tool type "web_search_20250305" is not supported through the SDK bridge; only custom tools are',
+		});
+		expect(
+			sdkBridgeRefusedField({
+				tools: [{ name: "read" }, { type: "custom", name: "edit" }],
+			}),
+		).toBeNull();
+	});
+
+	it("leave a bridged account out of a route with another candidate", () => {
+		expect(build(mixed).accountIds()).toEqual(["o"]);
+	});
+
+	it("raise the bridge's 400 naming tools when nothing else remains", () => {
+		expect(() =>
+			build({ ...mixed, pin: { accountId: "a", providers: null } }),
+		).toThrow(expect.objectContaining({ statusCode: 400, param: "tools" }));
 	});
 });
 
@@ -465,7 +517,8 @@ describe("a [1m] id", () => {
 			expect.objectContaining({
 				statusCode: 400,
 				code: "model_suffix_requires_claude_code",
-				message: expect.stringContaining('"claude-opus-5-5[1m]"'),
+				message:
+					'Anthropic serves no model "claude-opus-5-5[1m]": Claude Code sends the bare id itself, and other clients reach it through the SDK bridge',
 			}),
 		);
 	});

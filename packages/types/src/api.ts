@@ -119,16 +119,24 @@ export interface RequestMeta {
 	/** Set when a pin strict-fails account selection; handleProxy returns a terminal pinned_target_unavailable error. */
 	pinFailure?: { code: string; message: string } | null;
 	/**
+	 * The authenticated API key's `client_profiles.application`, read once per
+	 * request with its destinations. Null without a key, a profile, or for an
+	 * internal request; absent until it has been read.
+	 */
+	clientApplication?: string | null;
+	/**
 	 * How this request may reach an official Anthropic account. `"sdk-bridge"`
-	 * is the floor the Responses and Chat adapters set through their in-process
-	 * contexts: such an account may serve the request only through the Claude
-	 * Agent SDK bridge, never by a direct fetch. Absent or `"direct"` is an
-	 * ordinary request. Never derived from a header.
+	 * is the floor for every client but Claude Code on a key whose profile says
+	 * so (and for every Responses or Chat request): such an account may serve
+	 * the request only through the Claude Agent SDK bridge, never by a direct
+	 * fetch. `"direct"` is Claude Code itself, a bridge inner call or internal
+	 * maintenance. Set before routing; never derived from a header alone.
 	 */
 	officialAnthropicVia?: "direct" | "sdk-bridge";
 	/**
-	 * Set at route construction when an `"sdk-bridge"` request found the bridge
-	 * unavailable: official Anthropic accounts were excluded, for this reason.
+	 * Set at route construction when official Anthropic accounts were excluded
+	 * from an `"sdk-bridge"` request, for this reason: the bridge was
+	 * unavailable, or the request is not a Messages turn the bridge serves.
 	 * Null when nothing was excluded on that ground.
 	 */
 	officialAnthropicExcluded?: string | null;

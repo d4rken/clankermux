@@ -1266,7 +1266,8 @@ export function ensureSchema(db: Database): void {
 		kind TEXT NOT NULL CHECK(kind IN ('upstream_send','local_reject','local_success')),
 		started_at INTEGER NOT NULL, finished_at INTEGER, status INTEGER, error TEXT,
 		reasoning_effort_requested TEXT, reasoning_effort_effective TEXT, reasoning_effort_reason TEXT,
-		service_tier_requested TEXT, service_tier_sent TEXT, service_tier_reason TEXT
+		service_tier_requested TEXT, service_tier_sent TEXT, service_tier_reason TEXT,
+		ignored_fields TEXT
 	)`);
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_request ON routing_attempts(request_id, started_at)`,
@@ -2132,6 +2133,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "service_tier",
 		ddl: "ALTER TABLE requests ADD COLUMN service_tier TEXT",
+	},
+	// JSON array of the Chat fields one attempt's destination accepted without
+	// applying; NULL when there were none.
+	{
+		table: "routing_attempts",
+		column: "ignored_fields",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN ignored_fields TEXT",
 	},
 ];
 

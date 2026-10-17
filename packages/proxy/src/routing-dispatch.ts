@@ -1,4 +1,8 @@
-import { supportsChatIngress, unsupportedChatField } from "@clankermux/core";
+import {
+	chatFieldCapability,
+	ignoredChatFields,
+	refusedChatField,
+} from "@clankermux/core";
 import {
 	localTokenCountUrl,
 	supportsLocalTokenCounting,
@@ -6,13 +10,17 @@ import {
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
+	ATTEMPT_SDK_BRIDGE_EXTRA_USAGE,
 	ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
 	ATTEMPT_TRANSPORT_FAILED,
 	FAST_MODE_SERVICE_TIER,
 	getChatContext,
+	isOfficialAnthropicProvider,
 	readReasoningEffortAdaptation,
 	readServiceTierAdaptation,
 	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
+	SdkBridgeRefusalError,
 	SdkBridgeUnavailableError,
 	type ServiceTierGroup,
 } from "@clankermux/types";
@@ -98,8 +106,45 @@ export async function recordLocalRoutingOutcome(
 		service_tier_requested: null,
 		service_tier_sent: null,
 		service_tier_reason: null,
+		ignored_fields: null,
 	});
 	audit.id = id;
+}
+/** A rejection of the route itself, before any account was chosen. */
+export async function recordRouteRejection(
+	ctx: ProxyContext,
+	meta: RequestMeta,
+	error: RoutingPolicyError,
+	route?: { ruleId: string | null; snapshot: string },
+): Promise<void> {
+	await ctx.dbOps.routing.recordAttempt({
+		id: crypto.randomUUID(),
+		request_id: meta.id,
+		rule_id: route?.ruleId ?? error.ruleId ?? null,
+		route_snapshot:
+			route?.snapshot ??
+			error.routeSnapshot ??
+			JSON.stringify({ error: error.message }),
+		account_id: null,
+		provider: null,
+		requested_model: meta.requestedModel ?? "",
+		resolved_model: null,
+		outgoing_model: null,
+		reported_model: null,
+		kind: "local_reject",
+		started_at: Date.now(),
+		finished_at: Date.now(),
+		status: error.statusCode,
+		error: error.message,
+		// Refused before any body was serialized for any destination.
+		reasoning_effort_requested: null,
+		reasoning_effort_effective: null,
+		reasoning_effort_reason: null,
+		service_tier_requested: null,
+		service_tier_sent: null,
+		service_tier_reason: null,
+		ignored_fields: null,
+	});
 }
 
 /** Every client inference send (including retries and force) must pass here. */
@@ -153,6 +198,7 @@ export async function sendAuthorizedRequest(
 		service_tier_requested: tier?.requested ?? null,
 		service_tier_sent: tier?.sent ?? null,
 		service_tier_reason: tier?.reason ?? null,
+		ignored_fields: null,
 	};
 	let response: Response;
 	// The upstream's own status line, once a head has arrived.
@@ -167,14 +213,24 @@ export async function sendAuthorizedRequest(
 		// Only the bridge's own transport may carry Chat to an official
 		// Anthropic account.
 		const chat = getChatContext(meta);
-		const bridged = transport !== undefined;
+		const chatCapability = chat
+			? chatFieldCapability(account.provider, transport !== undefined)
+			: null;
 		if (
 			chat &&
-			(!supportsChatIngress(account.provider, bridged) ||
-				unsupportedChatField(account.provider, chat.requirements))
+			(!chatCapability || refusedChatField(chatCapability, chat.requirements))
 		)
 			throw new RoutingPolicyError(
 				"Chat capability boundary changed before dispatch",
+			);
+		// Fail closed: a request the floor never classified is not Claude Code's.
+		if (
+			!transport &&
+			isOfficialAnthropicProvider(account.provider) &&
+			meta.officialAnthropicVia !== "direct"
+		)
+			throw new RoutingPolicyError(
+				"Official Anthropic accounts serve this request only through the SDK bridge",
 			);
 		const current = await ctx.dbOps.getAccount(account.id);
 		if (current?.disabled)
@@ -287,6 +343,11 @@ export async function sendAuthorizedRequest(
 					? devinProvenance.model
 					: await enforceOutgoingModel(request, target.upstreamModel);
 			attempt.kind = "upstream_send";
+			const ignored =
+				chat && chatCapability
+					? ignoredChatFields(chatCapability, chat.requirements)
+					: [];
+			if (ignored.length) attempt.ignored_fields = ignored;
 		}
 		await ctx.dbOps.routing.recordAttempt(attempt);
 		recorded = true;
@@ -344,7 +405,7 @@ export async function sendAuthorizedRequest(
 			? answered.status
 			: error instanceof RoutingPolicyError
 				? 403
-				: error instanceof SdkBridgeCapacityError
+				: error instanceof SdkBridgeRefusalError
 					? error.status
 					: error instanceof SdkBridgeUnavailableError
 						? 503
@@ -355,9 +416,11 @@ export async function sendAuthorizedRequest(
 				? error.message
 				: error instanceof SdkBridgeCapacityError
 					? `${ATTEMPT_SDK_BRIDGE_AT_CAPACITY}${error.message}`
-					: error instanceof SdkBridgeUnavailableError
-						? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
-						: ATTEMPT_TRANSPORT_FAILED;
+					: error instanceof SdkBridgeExtraUsageError
+						? `${ATTEMPT_SDK_BRIDGE_EXTRA_USAGE}${error.message}`
+						: error instanceof SdkBridgeUnavailableError
+							? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
+							: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else

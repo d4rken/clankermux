@@ -99,6 +99,7 @@ function makeRequestMeta(overrides: Partial<RequestMeta> = {}): RequestMeta {
 		method: "POST",
 		path: "/v1/messages",
 		timestamp: Date.now(),
+		officialAnthropicVia: "direct",
 		headers: new Headers(),
 		...overrides,
 	} as RequestMeta;

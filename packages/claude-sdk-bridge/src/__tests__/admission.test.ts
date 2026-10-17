@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { checkAdmission, checkBodySize } from "../admission";
-import { parseTurnRequest, type TurnRequest } from "../turn-request";
+import {
+	parseTurnBody,
+	parseTurnRequest,
+	type TurnRequest,
+} from "../turn-request";
 import { DEFAULT_SDK_BRIDGE_LIMITS } from "../types";
 import { makePlan } from "./fixtures/fake-sdk";
 
@@ -102,6 +106,40 @@ describe("admission", () => {
 				}),
 			),
 		).toMatchObject({ status: 529, reason: "rebuild_cap" });
+	});
+
+	it("counts an output format's schema under maxSchemaBytes, with the tools'", () => {
+		const schema = { type: "object", properties: { x: {} } };
+		const bytes = JSON.stringify(schema).length;
+		const output_config = { format: { type: "json_schema", schema } };
+		const tools = [{ name: "a", input_schema: { type: "object" } }];
+		const at = (maxSchemaBytes: number, extra: Record<string, unknown>) =>
+			checkAdmission(
+				input({
+					limits: { ...DEFAULT_SDK_BRIDGE_LIMITS, maxSchemaBytes },
+					turn: turn({ output_config, ...extra }),
+				}),
+			);
+		expect(at(bytes, {})).toBeNull();
+		expect(at(bytes - 1, {})).toMatchObject({
+			status: 413,
+			type: "request_too_large",
+			message: `SDK bridge limit maxSchemaBytes exceeded: ${bytes} > ${bytes - 1}`,
+		});
+		// A format never shares a turn with tools, but the count is one sum.
+		const both = parseTurnBody(
+			{
+				model: "claude-sonnet-5",
+				messages: [{ role: "user", content: "hi" }],
+				tools,
+			},
+			null,
+			1,
+		);
+		if (!both.ok) throw new Error(both.error.message);
+		expect(both.body.schemaBytes).toBe(
+			JSON.stringify(tools[0]?.input_schema).length,
+		);
 	});
 
 	it("keeps the defaults far above real sessions", () => {

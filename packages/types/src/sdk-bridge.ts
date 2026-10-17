@@ -128,6 +128,11 @@ export type SdkBridgeSystemPromptDetail =
 			sectionsSeen: string[];
 	  }
 	| {
+			outcome: "appended";
+			/** UTF-8 bytes of the client's text appended to the preset whole. */
+			bytes: number;
+	  }
+	| {
 			outcome: "refused";
 			/** Null when the client declared none. */
 			version: string | null;

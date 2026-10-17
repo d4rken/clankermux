@@ -415,3 +415,184 @@ it("preserves partial overlapping Codex calls on output-limit termination", asyn
 		),
 	).toEqual(['{"value":', '{"value":']);
 });
+
+describe("Chat structured output on Codex", () => {
+	const schema = {
+		type: "object",
+		properties: {
+			city: { type: "string" },
+			forecast: {
+				type: "object",
+				properties: { high: { type: "number" } },
+			},
+		},
+	};
+	const responseFormat = (extra: object = {}) => ({
+		response_format: {
+			type: "json_schema",
+			json_schema: { name: "weather", schema, ...extra },
+		},
+	});
+	async function converted(chat: object | null) {
+		const translated = translateChatRequest({
+			...body,
+			...(chat ?? responseFormat()),
+		});
+		const request = new Request(
+			"https://chatgpt.com/backend-api/codex/responses",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(translated.body),
+			},
+		);
+		if (chat)
+			setChatContext(request, {
+				requirements: translated.requirements,
+				defaultMaxTokens: 8192,
+				...(translated.structuredOutput
+					? { structuredOutput: translated.structuredOutput }
+					: {}),
+			});
+		return (await new CodexProvider().transformRequestBody(request)).json();
+	}
+	it("constrains the answer when the client asked for strict", async () => {
+		const out = await converted(
+			responseFormat({ strict: true, description: "Today's weather" }),
+		);
+		expect(out.text).toEqual({
+			format: {
+				type: "json_schema",
+				name: "weather",
+				description: "Today's weather",
+				schema,
+				strict: true,
+			},
+		});
+		expect(out.output_config).toBeUndefined();
+	});
+	it("sends a non-strict schema as guidance", async () => {
+		const out = await converted(responseFormat());
+		expect(out.text).toEqual({
+			format: { type: "json_schema", name: "weather", schema, strict: false },
+		});
+	});
+	it("names and relaxes a schema that arrived without a Chat context", async () => {
+		const out = await converted(null);
+		expect(out.text).toEqual({
+			format: { type: "json_schema", name: "response", schema, strict: false },
+		});
+	});
+	it("sends no text format for a plain request", async () => {
+		expect((await converted({})).text).toBeUndefined();
+	});
+
+	const answer = { city: "Zürich ☀", forecast: { high: 21.5, low: 0 } };
+	const answerText = JSON.stringify(answer);
+	const messageStart = frame("response.output_item.added", {
+		output_index: 0,
+		item: { type: "message", role: "assistant" },
+	});
+	const textPart =
+		frame("response.content_part.added", {
+			output_index: 0,
+			content_index: 0,
+			part: { type: "output_text", text: "" },
+		}) +
+		frame("response.output_text.delta", {
+			delta: answerText.slice(0, 12),
+		}) +
+		frame("response.output_text.delta", { delta: answerText.slice(12) });
+	const refusalPart =
+		frame("response.content_part.added", {
+			output_index: 0,
+			content_index: 1,
+			part: { type: "refusal", refusal: "" },
+		}) +
+		frame("response.refusal.delta", { delta: "I can't help with that." }) +
+		frame("response.refusal.done", { refusal: "I can't help with that." }) +
+		frame("response.content_part.done", {
+			output_index: 0,
+			content_index: 1,
+			part: { type: "refusal", refusal: "I can't help with that." },
+		});
+	const completed = (status = "completed", reason?: string) =>
+		frame("response.output_item.done", {
+			output_index: 0,
+			item: { type: "message", role: "assistant" },
+		}) +
+		frame(
+			status === "completed" ? "response.completed" : "response.incomplete",
+			{
+				response: {
+					id: "r",
+					status,
+					...(reason ? { incomplete_details: { reason } } : {}),
+				},
+			},
+		);
+	const stream = (parts: string, status?: string, reason?: string) =>
+		frame("response.created", { response: { id: "r" } }) +
+		messageStart +
+		parts +
+		completed(status, reason);
+	const chunks = (text: string) =>
+		text
+			.split("\n")
+			.filter((x) => x.startsWith("data: {"))
+			.map((x) => JSON.parse(x.slice(6)));
+	const streamed = (text: string) =>
+		chunks(text)
+			.map((c) => c.choices[0]?.delta?.content ?? "")
+			.join("");
+	const finish = (text: string) =>
+		chunks(text).find((c) => c.choices[0]?.finish_reason)?.choices[0]
+			.finish_reason;
+
+	it("answers the JSON text as content without tool calls", async () => {
+		const r = await run(stream(textPart), false, true, false, responseFormat());
+		const choice = (await r.json()).choices[0];
+		expect(JSON.parse(choice.message.content)).toEqual(answer);
+		expect(choice.message.tool_calls).toBeUndefined();
+		expect(choice.finish_reason).toBe("stop");
+	});
+	it("streams the JSON text as content deltas", async () => {
+		const r = await run(stream(textPart), true, true, false, responseFormat());
+		const text = await r.text();
+		expect(JSON.parse(streamed(text))).toEqual(answer);
+		expect(text).not.toContain("tool_calls");
+		expect(finish(text)).toBe("stop");
+		expect(text).toContain("[DONE]");
+	});
+	for (const streaming of [false, true])
+		it(`reports a token-limit stop as length (stream=${streaming})`, async () => {
+			const r = await run(
+				stream(textPart, "incomplete", "max_output_tokens"),
+				streaming,
+				true,
+				false,
+				responseFormat(),
+			);
+			if (streaming) expect(finish(await r.text())).toBe("length");
+			else expect((await r.json()).choices[0].finish_reason).toBe("length");
+		});
+	for (const [label, parts] of [
+		["a refusal", refusalPart],
+		["a refusal after partial JSON", textPart + refusalPart],
+	] as const) {
+		it(`answers ${label} as content_filter with no content`, async () => {
+			const r = await run(stream(parts), false, true, false, responseFormat());
+			const choice = (await r.json()).choices[0];
+			expect(choice.finish_reason).toBe("content_filter");
+			expect(choice.message.content).toBe("");
+		});
+		it(`streams ${label} as content_filter without the refusal text`, async () => {
+			const r = await run(stream(parts), true, true, false, responseFormat());
+			const text = await r.text();
+			expect(finish(text)).toBe("content_filter");
+			expect(text).not.toContain("can't help");
+			// Text already sent before a late refusal cannot be retracted.
+			expect(streamed(text)).toBe(parts === refusalPart ? "" : answerText);
+		});
+	}
+});

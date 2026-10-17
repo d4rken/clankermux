@@ -65,6 +65,21 @@ export const HARNESS_LABEL_FOR_APPLICATION: Record<
 	pi: "pi",
 };
 
+const KNOWN_AGENT_HARNESSES: ReadonlySet<string> = new Set([
+	...Object.values(HARNESS_LABEL_FOR_APPLICATION).filter(
+		(label): label is string => label !== null,
+	),
+	"qwen-code",
+]);
+
+/**
+ * Is this a label `detectHarness` gives a known agent harness, as opposed to
+ * the leading user-agent token of a client it does not recognize?
+ */
+export function isKnownAgentHarness(harness: string | null): boolean {
+	return harness !== null && KNOWN_AGENT_HARNESSES.has(harness);
+}
+
 /**
  * Did a client of the Codex family send this request?
  *

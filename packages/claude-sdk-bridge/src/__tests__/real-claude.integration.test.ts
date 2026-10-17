@@ -177,6 +177,62 @@ describe.skipIf(reason !== null)(
 		);
 
 		it(
+			"serves output_config.format through Claude Code's StructuredOutput tool",
+			async () => {
+				const s = scenario(await results(), "structuredOutput");
+				type Run = {
+					reply: {
+						status: number;
+						stop?: unknown;
+						content?: unknown[];
+						body?: unknown;
+					};
+					turnStatus: unknown;
+					upstreamCalls: number;
+					tools: string[];
+					structuredSchema: unknown;
+					toolChoice: unknown;
+					upstreamOutputConfig: unknown;
+				};
+				const ok = s.ok as Run;
+				// With the bridge's own options (no tools, dontAsk) Claude Code
+				// still offers the tool, and the result carries its input.
+				expect(ok.tools).toEqual(["StructuredOutput"]);
+				// The schema goes to the model as the tool's, never as a format.
+				expect(
+					(ok.upstreamOutputConfig as { format?: unknown } | null)?.format,
+				).toBeUndefined();
+				expect(ok.reply).toMatchObject({
+					status: 200,
+					stop: "end_turn",
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({ city: "Zürich", temps: [0, -1.5] }),
+						},
+					],
+				});
+				expect(ok.upstreamCalls).toBe(1);
+				expect(ok.turnStatus).toBe("completed");
+
+				const bad = s.bad as Run;
+				expect(bad.reply.status).toBe(502);
+				expect(bad.reply.body).toMatchObject({
+					error: { code: "structured_output_failed" },
+				});
+				expect(bad.upstreamCalls).toBeGreaterThan(1);
+
+				const cut = s.cut as Run;
+				expect(cut.reply).toMatchObject({
+					status: 200,
+					stop: "max_tokens",
+					content: [],
+				});
+			},
+			TIMEOUT,
+		);
+
+		it(
 			"sends the client's max_tokens upstream as Claude Code's output limit",
 			async () => {
 				const s = scenario(await results(), "outputLimit");

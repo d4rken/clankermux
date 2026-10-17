@@ -18,7 +18,10 @@ import {
 	makeContext,
 	upstreamOnlyFetch,
 } from "./fixtures/proxy-terminal-harness";
-import { provisionRouting } from "./fixtures/routing-harness";
+import {
+	asClaudeCodeClient,
+	provisionRouting,
+} from "./fixtures/routing-harness";
 
 const MODEL = "claude-haiku-4-5";
 
@@ -60,7 +63,7 @@ describe("dispatchProxyRequest — give-up pacing", () => {
 			req,
 			new URL(req.url),
 			ctx,
-			null,
+			asClaudeCodeClient(ctx, req),
 			null,
 			false,
 		);

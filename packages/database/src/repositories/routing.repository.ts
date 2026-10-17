@@ -547,7 +547,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				"INSERT OR IGNORE INTO routing_snapshots(id,content) VALUES(?,?)",
 			).run(snapshotId, a.route_snapshot);
 			db.query(
-				`INSERT INTO routing_attempts(id,request_id,rule_id,route_snapshot_id,account_id,provider,requested_model,resolved_model,outgoing_model,reported_model,kind,started_at,finished_at,status,error,reasoning_effort_requested,reasoning_effort_effective,reasoning_effort_reason,service_tier_requested,service_tier_sent,service_tier_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				`INSERT INTO routing_attempts(id,request_id,rule_id,route_snapshot_id,account_id,provider,requested_model,resolved_model,outgoing_model,reported_model,kind,started_at,finished_at,status,error,reasoning_effort_requested,reasoning_effort_effective,reasoning_effort_reason,service_tier_requested,service_tier_sent,service_tier_reason,ignored_fields) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			).run(
 				a.id,
 				a.request_id,
@@ -570,6 +570,7 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 				a.service_tier_requested,
 				a.service_tier_sent,
 				a.service_tier_reason,
+				a.ignored_fields?.length ? JSON.stringify(a.ignored_fields) : null,
 			);
 		});
 	}
@@ -753,9 +754,29 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 	async listAttempts(requestId: string): Promise<RoutingAttempt[]> {
 		// Millisecond timestamps can tie; SQLite row order preserves dispatch
 		// insertion order while random attempt UUIDs do not.
-		return this.query(
+		const rows = await this.query<
+			Omit<RoutingAttempt, "ignored_fields"> & { ignored_fields: string | null }
+		>(
 			"SELECT a.*,s.content AS route_snapshot FROM routing_attempts a LEFT JOIN routing_snapshots s ON s.id=a.route_snapshot_id WHERE request_id=? ORDER BY started_at,a.rowid",
 			[requestId],
 		);
+		return rows.map((row) => ({
+			...row,
+			ignored_fields: parseIgnoredFields(row.ignored_fields),
+		}));
+	}
+}
+
+function parseIgnoredFields(column: string | null): string[] | null {
+	if (column === null) return null;
+	try {
+		const parsed: unknown = JSON.parse(column);
+		return Array.isArray(parsed) &&
+			parsed.length > 0 &&
+			parsed.every((field) => typeof field === "string")
+			? parsed
+			: null;
+	} catch {
+		return null;
 	}
 }

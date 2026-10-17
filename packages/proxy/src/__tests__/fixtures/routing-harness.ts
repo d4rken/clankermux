@@ -1,7 +1,7 @@
 /** Routing setup for pre-routing-table behavior tests. New isolation tests use
  * explicit repositories and permissions instead of this permissive fixture. */
 import { mock } from "bun:test";
-import { resolveRoutingTarget } from "@clankermux/core";
+import { CLAUDE_CLI_VERSION, resolveRoutingTarget } from "@clankermux/core";
 import type {
 	Account,
 	AccountModelPermissions,
@@ -13,6 +13,7 @@ import {
 	ATTEMPT_TRANSPORT_ENDINGS,
 	CLIENT_CLOSED_REQUEST,
 	getNativeResponsesRequestContext,
+	isOfficialAnthropicProvider,
 } from "@clankermux/types";
 import { modelPermissionScope } from "../../account-model-permissions";
 import { selectAccountsForRequest as runSelection } from "../../handlers/account-selector";
@@ -150,6 +151,51 @@ export async function provisionRouting(
 		),
 	};
 }
+/** The key {@link asClaudeCodeClient} sends a request on. */
+export const CLAUDE_CODE_TEST_KEY = "test-claude-code-key";
+/** Claude Code's user agent at the default version, so the tracked client version stays the default. */
+export const CLAUDE_CODE_TEST_USER_AGENT = `claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`;
+
+/**
+ * Make `req` a Claude Code request on a `claude-code` key, the only client
+ * that reaches official Anthropic accounts directly: it gets
+ * {@link CLAUDE_CODE_TEST_USER_AGENT} unless it names a user agent, and the
+ * context's key reads answer `application: "claude-code"` for any key whose
+ * profile the test leaves out, {@link CLAUDE_CODE_TEST_KEY} included.
+ * Returns that key, for a test that has none of its own.
+ */
+export function asClaudeCodeClient(ctx: ProxyContext, req: Request): string {
+	if (!req.headers.has("user-agent"))
+		req.headers.set("user-agent", CLAUDE_CODE_TEST_USER_AGENT);
+	const current = ctx.dbOps.getApiKeyPin as
+		| ProxyContext["dbOps"]["getApiKeyPin"]
+		| undefined;
+	if (!current || !claudeCodeKeyReads.has(current)) {
+		const read = current?.bind(ctx.dbOps);
+		const wrapped: ProxyContext["dbOps"]["getApiKeyPin"] = async (id) => {
+			const pin =
+				(await read?.(id)) ??
+				(id === CLAUDE_CODE_TEST_KEY
+					? { pinnedAccountId: null, pinnedProviders: null, malformed: false }
+					: null);
+			return pin && !("application" in pin)
+				? { ...pin, application: "claude-code" }
+				: pin;
+		};
+		claudeCodeKeyReads.add(wrapped);
+		(ctx.dbOps as unknown as Record<string, unknown>).getApiKeyPin = wrapped;
+	}
+	return CLAUDE_CODE_TEST_KEY;
+}
+const claudeCodeKeyReads = new WeakSet<object>();
+
+/**
+ * These behavior tests exercise the direct path to official Anthropic
+ * accounts. When the context has one, an external request is Claude Code
+ * ({@link asClaudeCodeClient}), sent on its key unless the call names a key
+ * or an explicit `null`. Without one the request is left as the test built
+ * it.
+ */
 export async function handleProxy(...args: Parameters<typeof runProxy>) {
 	let model = "claude-sonnet-4-5";
 	try {
@@ -161,6 +207,15 @@ export async function handleProxy(...args: Parameters<typeof runProxy>) {
 	if (args[5] && !args[0].headers.has("x-clankermux-account-id")) {
 		const account = (await args[2].dbOps.getAllAccounts())[0];
 		if (account) args[0].headers.set("x-clankermux-account-id", account.id);
+	}
+	if (
+		!args[5] &&
+		(await args[2].dbOps.getAllAccounts()).some((a) =>
+			isOfficialAnthropicProvider(a.provider),
+		)
+	) {
+		const key = asClaudeCodeClient(args[2], args[0]);
+		if (args[3] === undefined) args[3] = key;
 	}
 	return runProxy(...args);
 }

@@ -485,6 +485,8 @@ export function resultMessage(
 		result?: string;
 		errors?: string[];
 		terminalReason?: string;
+		/** Claude Code's `structured_output`, set when the key is present. */
+		structuredOutput?: unknown;
 	} = {},
 ): SDKMessage {
 	return {
@@ -507,6 +509,9 @@ export function resultMessage(
 		modelUsage: {},
 		permission_denials: [],
 		...(opts.terminalReason ? { terminal_reason: opts.terminalReason } : {}),
+		...("structuredOutput" in opts
+			? { structured_output: opts.structuredOutput }
+			: {}),
 		uuid: uuid(),
 		session_id: "s",
 	} as unknown as SDKMessage;
@@ -847,6 +852,7 @@ export function makeMeta(
 		legId: crypto.randomUUID(),
 		apiKeyId: "key-1",
 		apiKeyName: "key one",
+		application: "opencode",
 		clientHarness: "opencode",
 		clientUserAgent: "opencode/1.14.0",
 		project: "proj",
