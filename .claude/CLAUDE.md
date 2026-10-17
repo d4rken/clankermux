@@ -34,10 +34,12 @@ Its model calls reach ClankerMux only through the bridge's private loopback
 listener and then take the normal Anthropic pipeline on the accounts. It is
 reached only by client turns that route to an official Anthropic account
 under the deny floor: every Responses and Chat turn on `/wire/openai`, and
-every Messages turn on `/wire/anthropic` except Claude Code's own (a
-`claude-code` client key and a `claude-cli` user agent). Driving it by
-script or by hand against a real account stays forbidden, the spike drivers
-included. Its tests use fake accounts and a mock upstream inside a
+every Messages turn on `/wire/anthropic` except Claude Code's own. Widened
+2026-10-16 by owner decision to Messages turns on `/wire/anthropic` from
+clients other than Claude Code as defined below. Claude Code here is a
+request on a `claude-code` client key that sends a `claude-cli` user agent.
+Driving it by script or by hand against a real account stays forbidden, the
+spike drivers included. Its tests use fake accounts and a mock upstream inside a
 loopback-only network namespace. See the `claude-sdk-bridge` skill.
 
 Everything else stays forbidden, including curling any exception's

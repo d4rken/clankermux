@@ -220,6 +220,11 @@ one target's native metadata.
 
 ## 1M-context model ids
 
+An inference request is Claude Code's when its key's application is
+`claude-code` and it sends Claude Code's user agent. Only such a client
+request reaches an official Anthropic account directly; every other one
+reaches it only through the SDK bridge.
+
 `claude-opus-5-5[1m]`, `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` are
 served on an official Anthropic account that permits the bare id, through the
 SDK bridge only (Responses and Chat Completions on `/wire/openai`, and
@@ -228,9 +233,13 @@ Messages on `/wire/anthropic` from a client other than Claude Code). Their
 and the bare ids stay at `200000`. Any other `[1m]` id is a literal no
 account serves. A route that would send a suffixed id to Anthropic directly,
 which only Claude Code's own requests reach, answers
-`400 model_suffix_requires_claude_code` before anything is sent. The
-Anthropic-format catalogue of a client other than Claude Code publishes no
-metadata for a suffixed id.
+`400 model_suffix_requires_claude_code` before anything is sent.
+
+Catalogue metadata follows the key's application and the catalogue's format,
+never the user agent. Anthropic-format catalogues for applications other than
+`claude-code` publish eligible supported `[1m]` ids at 1M. Claude Code
+catalogues exclude official-Anthropic suffixed targets introduced by rules or
+aliases; other eligible targets may still contribute metadata.
 
 ## SDK bridge history header
 
