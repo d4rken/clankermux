@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES } from "@clankermux/types";
 import { parseTurnBody, parseTurnRequest } from "../turn-request";
 
 const base = {
@@ -357,5 +358,27 @@ describe("output_config.format", () => {
 			"cannot be combined with tools",
 		);
 		expect(parse({ output_config, tools: [] }).ok).toBe(true);
+	});
+
+	it("refuses a schema whose JSON is over the limit in UTF-8 bytes, and takes one at it", () => {
+		const padded = (bytes: number) => {
+			const pad = bytes - JSON.stringify({ description: "" }).length;
+			// Each "é" is two UTF-8 bytes and one character.
+			return {
+				description: "é".repeat(Math.floor(pad / 2)) + "x".repeat(pad % 2),
+			};
+		};
+		const at = (bytes: number) =>
+			parse({
+				output_config: {
+					format: { type: "json_schema", schema: padded(bytes) },
+				},
+			});
+		expect(at(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES).ok).toBe(true);
+		const refused = at(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES + 1);
+		expect(!refused.ok && refused.error.status).toBe(400);
+		expect(!refused.ok && refused.error.message).toContain(
+			String(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES),
+		);
 	});
 });

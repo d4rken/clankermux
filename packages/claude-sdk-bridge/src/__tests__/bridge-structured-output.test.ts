@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import {
+	SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES,
+	type SdkBridgeTurnMeta,
+} from "@clankermux/types";
 import { INPUT_JSON_CHUNK } from "../reply-composer";
 import {
 	assistantMessage,
@@ -417,6 +420,27 @@ describe("structured output through the bridge", () => {
 			const h = harness();
 			const res = await h.bridge.startTurn({
 				request: messagesRequest({ ...ask, tools: [READ_TOOL] }),
+				plan: makePlan(),
+				meta: makeMeta(),
+				signal: new AbortController().signal,
+			});
+			expect(res.status).toBe(400);
+			expect(
+				((await res.json()) as { error: { message: string } }).error.message,
+			).toContain("output_config.format");
+			expect(h.sdk.queries).toHaveLength(0);
+		});
+
+		it("refuses a schema too large for Claude Code's argument list before anything runs", async () => {
+			const h = harness();
+			const schema = {
+				description: "x".repeat(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES),
+			};
+			const res = await h.bridge.startTurn({
+				request: messagesRequest({
+					...ask,
+					output_config: { format: { type: "json_schema", schema } },
+				}),
 				plan: makePlan(),
 				meta: makeMeta(),
 				signal: new AbortController().signal,

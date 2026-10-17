@@ -200,7 +200,9 @@ with empty content. When streaming, JSON already sent before a late refusal
 stays sent.
 `json_schema` together with tools is refused with a 400, and `json_object` is
 not supported. Through the SDK bridge, a schema is also refused with a 400 on
-tool results that continue a turn, and on a side request.
+tool results that continue a turn, and on a side request. A schema over 64 KiB
+as JSON is not sent through the SDK bridge: the request goes to another target
+of its route, or gets a 400 when the bridge is the only one.
 
 A native Messages client on `/wire/anthropic` that sends
 `output_config.format` (`{"type": "json_schema", "schema": {...}}`) to a Claude

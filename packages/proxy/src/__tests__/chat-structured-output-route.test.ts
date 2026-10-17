@@ -5,7 +5,11 @@ import type {
 	ModelAlias,
 	RequestMeta,
 } from "@clankermux/types";
-import { sdkBridgeRefusedField, setChatContext } from "@clankermux/types";
+import {
+	SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES,
+	sdkBridgeRefusedField,
+	setChatContext,
+} from "@clankermux/types";
 import { modelPermissionScope } from "../account-model-permissions";
 import type { ProxyContext } from "../handlers/proxy-types";
 import { getAliasRoutes, getResolvedRoute } from "../resolved-route";
@@ -164,5 +168,53 @@ describe("a native Messages request with a schema and tools", () => {
 		await initializeRequestRoute(meta, ctx, null);
 		const [claudeStage] = getAliasRoutes(meta) ?? [];
 		expect(getResolvedRoute(meta)).toBe(claudeStage);
+	});
+});
+
+describe("a schema too large for Claude Code's argument list", () => {
+	const oversized = {
+		output_config: {
+			format: {
+				type: "json_schema",
+				schema: { description: "x".repeat(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES) },
+			},
+		},
+	};
+	for (const [label, fields] of [
+		["a Chat request", ["response_format"]],
+		["a native Messages request", null],
+	] as const) {
+		it(`skips the bridged Claude stage for the Codex one on ${label}`, async () => {
+			const { ctx, meta } = setup(
+				bridgedThenCodex,
+				fields ? [...fields] : null,
+				oversized,
+			);
+			await initializeRequestRoute(meta, ctx, null);
+			const [claudeStage, codexStage] = getAliasRoutes(meta) ?? [];
+			expect(claudeStage?.admissionError).toMatchObject({
+				statusCode: 400,
+				param: "output_config.format",
+			});
+			expect(getResolvedRoute(meta)).toBe(codexStage);
+			expect(codexStage?.target(codex)?.upstreamModel).toBe("gpt-5.6-sol");
+		});
+	}
+	it("answers 400 naming the limit when only the bridge would serve it", async () => {
+		const { ctx, meta } = setup(
+			[{ model: "claude-sonnet-5", accountIds: [claude.id] }],
+			["response_format"],
+			oversized,
+		);
+		await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
+			{
+				statusCode: 400,
+				code: "invalid_request_error",
+				param: "output_config.format",
+				message: expect.stringContaining(
+					String(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES),
+				),
+			},
+		);
 	});
 });

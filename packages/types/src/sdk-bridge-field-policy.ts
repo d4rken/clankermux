@@ -10,6 +10,14 @@ export interface SdkBridgeRefusedField {
 	readonly message: string;
 }
 
+/**
+ * The largest output schema the SDK bridge takes, in UTF-8 bytes of its
+ * JSON. The Agent SDK hands it to the Claude Code child as one argument
+ * (`--json-schema <json>`), and Linux refuses to start a process with an
+ * argument over 128 KiB (MAX_ARG_STRLEN).
+ */
+export const SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES = 64 * 1024;
+
 const FORCING_TOOL_CHOICES = new Set(["any", "tool", "none"]);
 const SIDE_REQUEST_FORCING_TOOL_CHOICES = new Set(["any", "tool"]);
 
@@ -19,12 +27,13 @@ const SIDE_REQUEST_FORCING_TOOL_CHOICES = new Set(["any", "tool"]);
  * so a bridged answer would not be the one the client asked for. The client
  * runs every tool it is shown, so a server tool has no place in the turn.
  * A structured answer ends the turn, so it cannot share one with client
- * tool calls:
+ * tool calls, and its schema has to fit on Claude Code's command line:
  *
  *   { stop_sequences: ["END"] }                           → stop_sequences
  *   { tool_choice: { type: "any" } }                      → tool_choice (so are "tool" and "none")
  *   { tools: [{ type: "web_search_20250305" }] }          → tools
  *   { output_config: { format }, tools: [{ name: "a" }] } → output_config.format
+ *   { output_config: { format: { schema: 65537 bytes } } } → output_config.format
  *   { tool_choice: { type: "auto" } }                     → null
  *   { stop_sequences: [] }                                → null
  *   { tools: [{ name: "a" }, { type: "custom" }] }        → null
@@ -90,5 +99,17 @@ export function sdkBridgeRefusedField(
 			message:
 				"output_config.format (response_format in Chat Completions) cannot be combined with tools through the SDK bridge",
 		};
+	const schema =
+		format && typeof format === "object"
+			? (format as Record<string, unknown>).schema
+			: undefined;
+	if (schema && typeof schema === "object") {
+		const bytes = new TextEncoder().encode(JSON.stringify(schema)).length;
+		if (bytes > SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES)
+			return {
+				field: "output_config.format",
+				message: `The output_config.format schema (response_format in Chat Completions) is ${bytes} bytes as JSON; the SDK bridge takes at most ${SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES}`,
+			};
+	}
 	return null;
 }

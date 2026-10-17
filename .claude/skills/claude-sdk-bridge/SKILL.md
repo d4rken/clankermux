@@ -35,7 +35,8 @@ pipeline. The client keeps executing its own tools.
   body carries a field the bridge refuses (`sdkBridgeRefusedField` in
   `@clankermux/types`, shared with the bridge's own parse: `stop_sequences`,
   a forcing `tool_choice`, a server tool, `output_config.format` next to
-  non-empty `tools`). Then they are excluded, and a
+  non-empty `tools` or with a schema over
+  `SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES`). Then they are excluded, and a
   route left empty by that alone answers the bridge's 400 naming the field.
 - **Outer bridged attempt** (`handlers/sdk-bridge-attempt.ts`, branched in
   `proxyWithAccount` before cache staging and token
@@ -425,9 +426,14 @@ the tool's input is the result's `structured_output`, and the turn ends on
 it with no further model call. `real-claude.integration.test.ts` pins that
 it works with the bridge's own options (`tools: []`, `dontAsk`).
 
-- **Refused.** Next to non-empty `tools` (field policy, so routing excludes
-  the bridge); on tool results continuing a parked or released turn,
-  whatever their `tools`; on a side request. Each is a 400 before anything
+- **Refused.** Next to non-empty `tools`, or with a schema whose JSON is
+  over `SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES` (64 KiB, UTF-8): Agent SDK
+  0.3.280 passes it on the child's argv as `--json-schema <json>`, and Linux
+  caps one argument at 128 KiB (`MAX_ARG_STRLEN`): past that the spawn fails
+  with E2BIG. Both are field policy, so routing excludes the bridge. The cap
+  is separate from the aggregate `maxSchemaBytes`, which counts it with the
+  tool schemas. Also refused on tool results continuing a parked or released
+  turn, whatever their `tools`, and on a side request. Each is a 400 before anything
   runs, and a parked turn stays parked. A structured turn has no client
   tools, so it never parks and the resume descriptor has no field for it.
 - **Reply** (`ReplyComposer` with `structuredOutput`). No model block goes
