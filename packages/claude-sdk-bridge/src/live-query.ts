@@ -205,6 +205,17 @@ export interface LiveQueryInit {
 	onClosed: (live: LiveQuery) => void;
 }
 
+/** One of Claude Code's model calls, as the leg it belongs to sees it. */
+interface InnerCall {
+	/** Absent for a refusal before dispatch, which has no row. */
+	readonly requestId: string | null;
+	/** Its place among the query's calls, by start (or, unseen, by report). */
+	readonly ordinal: number;
+	/** Started after Claude Code gave up on the leg: never its cause. */
+	readonly afterGiveUp: boolean;
+	outcome: SdkBridgeInnerOutcome | null;
+}
+
 /**
  * One Claude Code query serving one logical turn, across the legs (outer HTTP
  * requests) that carry it: the start leg, then one continuation per round of
@@ -262,10 +273,14 @@ export class LiveQuery {
 		this.deferredFinish = null;
 	}
 	private clientMessages: ClientMessage[];
-	private lastOutcome: SdkBridgeInnerOutcome | null = null;
-	private outcomeSeq = 0;
-	/** `outcomeSeq` when Claude Code gave up. */
-	private giveUpSeq = 0;
+	private callOrdinal = 0;
+	/** Counts legs, so that work begun for one never settles a later one. */
+	private legGeneration = 0;
+	/** The current leg's inner calls; an earlier leg's never decide it. */
+	private legCalls: InnerCall[] = [];
+	/** The current leg's give-up, settled once whoever waits on it. */
+	private giveUpResolution: { generation: number; done: Promise<void> } | null =
+		null;
 	private decisive: SdkBridgeInnerOutcome | null = null;
 	private gaveUp = false;
 	private claudeCodeErrorText: string | null = null;
@@ -445,7 +460,9 @@ export class LiveQuery {
 		this.toolUsesThisLeg = 0;
 		// A failure answers the leg it happens in; an earlier leg's inner
 		// outcome or wording must not decide it.
-		this.lastOutcome = null;
+		this.legGeneration++;
+		this.legCalls = [];
+		this.giveUpResolution = null;
 		this.decisive = null;
 		this.gaveUp = false;
 		this.claudeCodeErrorText = null;
@@ -484,32 +501,71 @@ export class LiveQuery {
 	private noteGiveUp(): void {
 		if (this.gaveUp) return;
 		this.gaveUp = true;
-		this.giveUpSeq = this.outcomeSeq;
-		this.decisive =
-			this.lastOutcome && this.lastOutcome.status >= 400
-				? this.lastOutcome
-				: null;
+		this.decisive = this.newestFailure(null);
+	}
+
+	/**
+	 * The failed outcome of the newest reported call Claude Code could have
+	 * given up on, or `fallback` when that call succeeded. Calls by start:
+	 *
+	 *   1 failed, 2 failed                → 2
+	 *   1 failed, 2 succeeded             → fallback
+	 *   1 failed late, 2 failed before it → 2 (arriving last decides nothing)
+	 */
+	private newestFailure(
+		fallback: SdkBridgeInnerOutcome | null,
+	): SdkBridgeInnerOutcome | null {
+		let newest: InnerCall | null = null;
+		for (const call of this.legCalls)
+			if (
+				call.outcome &&
+				!call.afterGiveUp &&
+				(!newest || call.ordinal > newest.ordinal)
+			)
+				newest = call;
+		return newest?.outcome && newest.outcome.status >= 400
+			? newest.outcome
+			: fallback;
 	}
 
 	/** An inner call's `requests` row began: that is what `inner_call_count` counts. */
 	onInnerRequestStarted(requestId: string): void {
 		if (!requestId || this.innerRequestsStarted.has(requestId)) return;
 		this.innerRequestsStarted.add(requestId);
+		this.legCalls.push({
+			requestId,
+			ordinal: ++this.callOrdinal,
+			afterGiveUp: this.gaveUp,
+			outcome: null,
+		});
 		void this.init.recorder.bump({ innerCalls: 1 });
 	}
 
 	/**
 	 * How an inner call ended. A refusal before dispatch has no request id and
-	 * no row, so it counts as an error only.
+	 * no row, so it counts as an error only. A call an earlier leg started
+	 * still counts, and decides nothing here.
 	 */
 	onInnerOutcome(outcome: SdkBridgeInnerOutcome): void {
 		if (outcome.requestId) {
 			if (this.innerOutcomesSeen.has(outcome.requestId)) return;
 			this.innerOutcomesSeen.add(outcome.requestId);
 		}
-		this.lastOutcome = outcome;
-		this.outcomeSeq++;
 		if (outcome.status >= 400) void this.init.recorder.bump({ innerErrors: 1 });
+		const call = outcome.requestId
+			? this.legCalls.find((c) => c.requestId === outcome.requestId)
+			: undefined;
+		if (call) call.outcome = outcome;
+		else if (
+			!outcome.requestId ||
+			!this.innerRequestsStarted.has(outcome.requestId)
+		)
+			this.legCalls.push({
+				requestId: outcome.requestId || null,
+				ordinal: ++this.callOrdinal,
+				afterGiveUp: false,
+				outcome,
+			});
 	}
 
 	/**
@@ -1227,7 +1283,7 @@ export class LiveQuery {
 		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
 		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
 			this.claudeCodeCause ??= "context_overflow";
-		void this.failAfterGrace();
+		void this.resolveGiveUp();
 	}
 
 	/**
@@ -1268,7 +1324,7 @@ export class LiveQuery {
 					: !failed
 						? "Claude Code finished the turn without a structured answer"
 						: `Claude Code ended the turn with an error: ${sanitizeMessage(text)}`;
-		void this.failAfterGrace();
+		void this.resolveGiveUp();
 	}
 
 	/**
@@ -1312,35 +1368,40 @@ export class LiveQuery {
 	}
 
 	/**
-	 * The proxy reports a failed call's body after handing the response back,
-	 * so a give-up can overtake its report; wait briefly for it.
+	 * End the current leg's give-up once its inner outcomes are in. The proxy
+	 * reports a call after handing its response back, so a give-up can
+	 * overtake the report of the call it gave up on. One task per leg, which
+	 * the result and the process's exit both wait on; a task outlived by its
+	 * leg settles nothing.
 	 */
-	private async failAfterGrace(): Promise<void> {
-		// Calls whose rows began report after their response went back to
-		// Claude Code; the one it gave up on is the last of them to report.
-		const until = Date.now() + OUTCOME_WAIT_MS;
-		while (this.unreportedInnerCalls() && Date.now() < until)
-			await Bun.sleep(10);
-		if (
-			this.outcomeSeq > this.giveUpSeq &&
-			this.lastOutcome &&
-			this.lastOutcome.status >= 400
-		)
-			this.decisive = this.lastOutcome;
-		if (!this.decisive) {
-			const seq = this.outcomeSeq;
-			const until = Date.now() + OUTCOME_GRACE_MS;
-			while (this.outcomeSeq === seq && Date.now() < until) await Bun.sleep(10);
-			if (this.lastOutcome && this.lastOutcome.status >= 400)
-				this.decisive = this.lastOutcome;
-		}
-		this.giveUp();
+	private resolveGiveUp(fallbackText: string | null = null): Promise<void> {
+		const generation = this.legGeneration;
+		if (this.giveUpResolution?.generation === generation)
+			return this.giveUpResolution.done;
+		const done = (async () => {
+			const until = Date.now() + OUTCOME_WAIT_MS;
+			while (this.unreportedInnerCalls() && Date.now() < until)
+				await Bun.sleep(10);
+			let decisive = this.newestFailure(this.decisive);
+			if (!decisive) {
+				// A refusal before dispatch, or a call whose row never began,
+				// reports with nothing to wait for.
+				const graceUntil = Date.now() + OUTCOME_GRACE_MS;
+				while (!decisive && Date.now() < graceUntil) {
+					await Bun.sleep(10);
+					decisive = this.newestFailure(this.decisive);
+				}
+			}
+			if (this.legGeneration !== generation || this.state === "closed") return;
+			this.decisive = decisive;
+			this.giveUp(fallbackText);
+		})();
+		this.giveUpResolution = { generation, done };
+		return done;
 	}
 
 	private unreportedInnerCalls(): boolean {
-		for (const id of this.innerRequestsStarted)
-			if (!this.innerOutcomesSeen.has(id)) return true;
-		return false;
+		return this.legCalls.some((call) => !call.afterGiveUp && !call.outcome);
 	}
 
 	private claudeCodeFailure(fallbackText: string | null = null): BridgeError {
@@ -1436,12 +1497,15 @@ export class LiveQuery {
 			return;
 		}
 		if (!this.resultSeen) {
+			const fallbackText = "Claude Code exited without a result";
 			this.noteGiveUp();
-			this.giveUp("Claude Code exited without a result");
-		} else if (!this.resultOk) {
-			// failAfterGrace may still be waiting on the proxy's report.
-			const until = Date.now() + OUTCOME_WAIT_MS + OUTCOME_GRACE_MS + 50;
-			while (this.leg && Date.now() < until) await Bun.sleep(10);
+			if (!this.leg) this.giveUp(fallbackText);
+			else {
+				await this.resolveGiveUp(fallbackText);
+				if (this.leg) this.giveUp(fallbackText);
+			}
+		} else if (!this.resultOk && this.leg) {
+			await this.resolveGiveUp();
 			if (this.leg) this.giveUp();
 		}
 		this.samplePeakRss();

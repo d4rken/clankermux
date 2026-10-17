@@ -3414,6 +3414,276 @@ describe("errors", () => {
 			);
 		});
 
+		describe("which inner call decides a give-up", () => {
+			const overflowMessage =
+				"prompt is too long: 215012 tokens > 200000 maximum";
+			const overflow = {
+				status: 400,
+				errorType: "invalid_request_error",
+				message: overflowMessage,
+			};
+			type ScriptedCall = Partial<SdkBridgeInnerOutcome> & {
+				status: number;
+				/** Its report waits for the test to deliver it. */
+				deferred?: boolean;
+			};
+
+			/**
+			 * Inner calls answered in order, each row begun as it arrives. The
+			 * deferred ones' reports, by call index.
+			 */
+			function scriptInner(h: Harness, calls: ScriptedCall[]) {
+				const reports = new Map<number, () => void>();
+				let n = 0;
+				h.inner.respond = (_req, ctx) => {
+					const index = n++;
+					const { deferred, ...call } = calls[index] ?? { status: 200 };
+					const requestId = crypto.randomUUID();
+					ctx.onInnerRequestStarted?.(requestId);
+					const outcome: SdkBridgeInnerOutcome = {
+						requestId,
+						errorType: null,
+						message: null,
+						retryAfter: null,
+						accountId: "acct-a",
+						...call,
+					};
+					const deliver = () => ctx.onInnerOutcome?.(outcome);
+					if (deferred) reports.set(index, deliver);
+					else deliver();
+					return call.status < 400
+						? new Response("{}")
+						: Response.json(
+								{
+									type: "error",
+									error: {
+										type: call.errorType ?? "api_error",
+										message: call.message,
+									},
+								},
+								{ status: call.status },
+							);
+				};
+				return (index: number) => reports.get(index)?.();
+			}
+
+			/** A head held past the longest wait, so a failure keeps its status. */
+			const heldHead = () =>
+				harness({
+					timing: {
+						headHoldMs: 10_000,
+						pingIntervalMs: 100,
+						settleWaitMs: 500,
+						idleTimeoutMs: 5_000,
+						exitGraceMs: 50,
+					},
+				});
+
+			/** A give-up whose own text names no cause. */
+			function giveUpPlainly(query: FakeQuery) {
+				query.emit(resultMessage({ isError: true, result: "API Error: 400" }));
+			}
+
+			async function parkedTurn(h: Harness) {
+				const first = { role: "user", content: "TOOL read a.txt" } as const;
+				const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+				return { t, first };
+			}
+
+			async function continueParked(
+				h: Harness,
+				t: Started,
+				first: Msg,
+				parkWith: () => Promise<void>,
+			) {
+				await parkWith();
+				t.query.emit(
+					initMessage(),
+					...streamedMessage([
+						{
+							type: "tool_use",
+							id: "toolu_x",
+							name: "mcp__c__read",
+							input: { path: "a.txt" },
+						},
+					]),
+				);
+				const r1 = await reply(t.response);
+				void t.query.callTool("toolu_x", "read", { path: "a.txt" });
+				await waitFor(() => h.bridge.status().parked === 1);
+				const c = continueTurn(h, t.plan.turnId, {
+					tools: [READ_TOOL],
+					messages: [
+						first,
+						{ role: "assistant", content: r1.content },
+						{
+							role: "user",
+							content: [
+								{ type: "tool_result", tool_use_id: "toolu_x", content: "A" },
+							],
+						},
+					],
+				});
+				await waitFor(() => h.bridge.status().parked === 0);
+				return c;
+			}
+
+			it("fails over when Claude Code exits without a result and the refused call reports late", async () => {
+				const h = harness();
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				t.query.processExited();
+				// Longer than a give-up waits for a report it is not waiting on.
+				await Bun.sleep(400);
+				deliver(0);
+				expect(await rejection(t.response)).toBeInstanceOf(
+					SdkBridgeExtraUsageError,
+				);
+			});
+
+			it("waits for a call that never reports once, for at most the bound", async () => {
+				const h = heldHead();
+				scriptInner(h, [{ status: 200, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				const gaveUp = Date.now();
+				giveUpPlainly(t.query);
+				const res = await t.response;
+				const waited = Date.now() - gaveUp;
+				expect(res.status).toBe(502);
+				expect(waited).toBeGreaterThanOrEqual(1_900);
+				expect(waited).toBeLessThan(3_000);
+			});
+
+			it("is not held by an earlier leg's call that never reported", async () => {
+				const h = heldHead();
+				const { t, first } = await parkedTurn(h);
+				scriptInner(h, [{ status: 200, deferred: true }]);
+				const c = await continueParked(h, t, first, async () => {
+					await innerCall(t.query);
+				});
+				const gaveUp = Date.now();
+				giveUpPlainly(t.query);
+				const res = await c.response;
+				expect(res.status).toBe(502);
+				expect(Date.now() - gaveUp).toBeLessThan(1_000);
+			});
+
+			it("is not decided by an earlier leg's call that reports late, which still counts", async () => {
+				const h = harness();
+				const { t, first } = await parkedTurn(h);
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const c = await continueParked(h, t, first, async () => {
+					await innerCall(t.query);
+				});
+				giveUpPlainly(t.query);
+				await Bun.sleep(50);
+				deliver(0);
+				const res = await c.response;
+				expect(res.status).toBe(502);
+				await settled(h);
+				expect(h.repo.turns.get(t.plan.turnId)?.counters).toMatchObject({
+					innerCalls: 1,
+					innerErrors: 1,
+				});
+			});
+
+			for (const newerReports of ["before", "after"] as const)
+				it(`keeps a newer call's overflow, reported ${newerReports} the give-up, over an older call's late extra-usage refusal`, async () => {
+					const h = harness();
+					const deliver = scriptInner(h, [
+						{ ...extraUsage, deferred: true },
+						{ ...overflow, deferred: newerReports === "after" },
+					]);
+					const t = await start(h, {
+						messages: [{ role: "user", content: "hello" }],
+					});
+					await innerCall(t.query);
+					await innerCall(t.query);
+					t.query.emit(initMessage());
+					giveUpPlainly(t.query);
+					await Bun.sleep(50);
+					deliver(1);
+					await Bun.sleep(50);
+					deliver(0);
+					const res = await t.response;
+					expect(res.status).toBe(400);
+					expect(await res.json()).toEqual({
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: overflowMessage,
+							code: "context_length_exceeded",
+						},
+					});
+				});
+
+			it("ignores a call Claude Code made after it gave up", async () => {
+				const h = harness();
+				scriptInner(h, [{ status: 200 }, extraUsage]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUpPlainly(t.query);
+				await innerCall(t.query);
+				const res = await t.response;
+				expect(res.status).toBe(502);
+			});
+
+			it("is decided by a refusal before dispatch, which has no request id", async () => {
+				const h = harness();
+				scriptInner(h, [{ status: 200 }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				expect((await innerCall(t.query, "claude-opus-5")).status).toBe(400);
+				t.query.emit(initMessage());
+				giveUpPlainly(t.query);
+				const res = await t.response;
+				expect(res.status).toBe(400);
+				expect(
+					((await res.json()) as { error: { message: string } }).error.message,
+				).toContain("is not a destination of this SDK bridge turn");
+			});
+
+			it("answers through the stream when the head-hold ping commits it during the wait", async () => {
+				const h = harness({
+					timing: {
+						headHoldMs: 100,
+						pingIntervalMs: 100,
+						settleWaitMs: 500,
+						idleTimeoutMs: 5_000,
+						exitGraceMs: 50,
+					},
+				});
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUp(t.query);
+				await Bun.sleep(300);
+				deliver(0);
+				const r = await reply(t.response);
+				expect(r.status).toBe(200);
+				expect(r.errors[0]?.data).toEqual({
+					type: "error",
+					error: { type: "invalid_request_error", message },
+				});
+			});
+		});
+
 		it("answers the 400 itself once the head-hold ping committed the head", async () => {
 			const h = harness({
 				timing: {

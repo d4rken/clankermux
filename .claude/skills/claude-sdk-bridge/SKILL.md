@@ -62,9 +62,15 @@ pipeline. The client keeps executing its own tools.
   header. No account changes. A continuation, a committed head (the first
   event or the hold timer's ping) and a released park's resume answer the
   400 themselves, as before; a continuation that had to start afresh answers
-  it through the proxy's continuation path. A give-up waits up to 2 s for
-  the outcome of every inner call whose row began, so the call Claude Code
-  gave up on decides even when its report arrives after the error result.
+  it through the proxy's continuation path. A give-up (an error result, or
+  an exit without one) waits up to 2 s, once per leg, for the outcomes of
+  the current leg's inner calls that began before it, then 250 ms more for
+  a refusal without a row when none failed. The newest of them by start
+  decides when it failed; when it succeeded, the newest call reported by
+  the give-up does, if it failed. A later report from an older call, a call begun
+  after the give-up, and any call of an earlier leg count toward the turn
+  and decide nothing. A head committed during the wait answers through the
+  stream.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
