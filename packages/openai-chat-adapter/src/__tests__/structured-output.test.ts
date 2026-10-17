@@ -62,6 +62,16 @@ describe("Chat response_format", () => {
 			strict: false,
 		});
 	});
+	it("reads a null strict as false and a null description as none", () => {
+		const translated = translateChatRequest({
+			...input,
+			response_format: jsonSchema({ strict: null, description: null }),
+		});
+		expect(translated.structuredOutput).toEqual({
+			name: "weather",
+			strict: false,
+		});
+	});
 	it("keeps text as plain output with nothing recorded", () => {
 		const translated = translateChatRequest({
 			...input,

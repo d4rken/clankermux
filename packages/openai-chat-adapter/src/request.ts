@@ -92,7 +92,7 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 					"Schema names must contain 1–64 letters, digits, underscores or hyphens",
 					`${p}.name`,
 				);
-			if ("strict" in spec && typeof spec.strict !== "boolean")
+			if (spec.strict != null && typeof spec.strict !== "boolean")
 				throw new ChatError(`${p}.strict: expected a boolean`, `${p}.strict`);
 			body.output_config = {
 				format: {
@@ -102,7 +102,7 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 			};
 			structuredOutput = {
 				name,
-				...(spec.description !== undefined
+				...(spec.description != null
 					? { description: string(spec.description, `${p}.description`, true) }
 					: {}),
 				strict: spec.strict === true,
