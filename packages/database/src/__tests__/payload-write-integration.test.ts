@@ -185,6 +185,43 @@ test(
 );
 
 test(
+	"writes compressed encrypted payloads with stored-byte accounting",
+	async () => {
+		const codec = await loadPayloadEncryptionWithTestKey();
+		const settlements: PayloadSettlement[] = [];
+		const client = makeClient({ settlements });
+		seedRequest("compressed-enc");
+		const json = JSON.stringify({ history: "message content ".repeat(20_000) });
+		const stored = await codec.encodePayloadForStorage(json);
+		expect((await codec.decryptPayload(stored)).startsWith("zst:")).toBe(true);
+		expect(
+			client.publish({
+				requestId: "compressed-enc",
+				ciphertext: stored,
+				timestamp: Date.now(),
+				transportBytes: Buffer.byteLength(stored),
+				payloadBytes: Buffer.byteLength(json),
+			}),
+		).toBe(true);
+		await waitFor(() => settlements.length === 1, "compressed settlement");
+		expect(settlements[0].outcome).toBe("committed");
+		expect(settlements[0].transportBytes).toBe(Buffer.byteLength(stored));
+		expect(settlements[0].payloadBytes).toBe(Buffer.byteLength(json));
+		expect(
+			await codec.decodePayloadFromStorage(
+				storedPayload("compressed-enc") ?? "",
+			),
+		).toBe(json);
+		expect(
+			db
+				.query("SELECT bytes FROM request_payloads WHERE id = ?")
+				.get("compressed-enc"),
+		).toEqual({ bytes: Buffer.byteLength(stored) });
+	},
+	TEST_TIMEOUT_MS,
+);
+
+test(
 	"enforces the FK: a payload without its request row is entry-permanent",
 	async () => {
 		const settlements: PayloadSettlement[] = [];

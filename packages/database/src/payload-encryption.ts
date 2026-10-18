@@ -1,9 +1,11 @@
 import { Logger } from "@clankermux/logger";
 
 /**
- * Payload encryption at rest using AES-256-GCM (Web Crypto).
+ * Payload storage: optional zstd compression before AES-256-GCM encryption.
  *
- * Stored format: `enc:` + base64(iv || ciphertext || authTag)
+ * Compressed format: `zst:` + base64(zstd(json)).
+ * Encrypted format: `enc:` + base64(iv || ciphertext || authTag), wrapping
+ * either raw JSON or the compressed format.
  *
  * - The 12-byte IV is generated per-encryption with `crypto.getRandomValues`.
  * - GCM's authentication tag is appended by `crypto.subtle.encrypt`, so any
@@ -112,6 +114,25 @@ export async function encryptPayload(plaintext: string): Promise<string> {
 	combined.set(iv);
 	combined.set(new Uint8Array(ciphertext), IV_LENGTH);
 	return ENC_PREFIX + Buffer.from(combined).toString("base64");
+}
+
+/** Produce the opaque stored form without blocking the proxy on zstd work. */
+export async function encodePayloadForStorage(json: string): Promise<string> {
+	let body = json;
+	const bytes = Buffer.byteLength(json);
+	if (bytes >= 512) {
+		try {
+			// Bun schedules this on its native job pool, not the JS thread.
+			const compressed = await Bun.zstdCompress(json);
+			const encoded = ZSTD_PREFIX + compressed.toString("base64");
+			if (encoded.length < bytes) body = encoded;
+		} catch (error) {
+			// Compression is optional; encryption is not. Its errors must still
+			// propagate so the recorder drops the payload rather than exposing it.
+			log.warn("Payload compression failed; storing uncompressed:", error);
+		}
+	}
+	return encryptPayload(body);
 }
 
 /**
