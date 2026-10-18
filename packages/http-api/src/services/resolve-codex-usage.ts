@@ -1,4 +1,7 @@
-import type { DatabaseOperations } from "@clankermux/database";
+import {
+	type DatabaseOperations,
+	RequestRepository,
+} from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import {
 	type CodexCreditsInfo,
@@ -83,8 +86,8 @@ async function scanCodexUsageFromPayloads(
 	accountId: string,
 	accountName: string,
 ): Promise<{ data: UsageData; timestampMs: number } | null> {
-	const rows = await db.query<{ json: string; timestamp: number | null }>(
-		`SELECT rp.json, COALESCE(rp.timestamp, r.timestamp) as timestamp
+	const rows = await db.query<{ id: string; timestamp: number | null }>(
+		`SELECT rp.id, COALESCE(rp.timestamp, r.timestamp) as timestamp
 		 FROM request_payloads rp
 		 JOIN requests r ON rp.id = r.id
 		 WHERE r.account_used = ?
@@ -93,14 +96,18 @@ async function scanCodexUsageFromPayloads(
 		[accountId],
 	);
 
+	const requests = new RequestRepository(db);
 	for (const row of rows) {
-		if (!row.json || !row.timestamp) continue;
+		if (!row.timestamp) continue;
 
 		try {
-			const payload = JSON.parse(row.json) as {
+			// The column may be encrypted or compressed. Keep decoding at the
+			// repository boundary, including tolerance for legacy malformed JSON.
+			const payload = (await requests.getPayload(row.id)) as {
 				response?: { headers?: Record<string, string>; status?: number };
 				meta?: { timestamp?: number };
-			};
+			} | null;
+			if (!payload) continue;
 			const headerEntries = Object.entries(payload.response?.headers ?? {});
 			if (headerEntries.length === 0) continue;
 

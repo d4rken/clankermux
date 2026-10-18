@@ -110,6 +110,33 @@ describe("RequestRepository.listPayloadsWithAccountNames", () => {
 		expect(results[0].json).not.toBeNull();
 	});
 
+	it("decodes compressed rows in single and both list readers", async () => {
+		const json = JSON.stringify({ messages: ["history ".repeat(1000)] });
+		const stored = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;
+		insertRequestWithPayload(db, "compressed", Date.now(), stored);
+
+		expect(await repo.getPayload("compressed")).toEqual(JSON.parse(json));
+		expect((await repo.listPayloads())[0].json).toBe(json);
+		expect((await repo.listPayloadsWithAccountNames())[0].json).toBe(json);
+	});
+
+	it("throws on corrupt compressed rows in strict reads but isolates list failures", async () => {
+		insertRequestWithPayload(db, "corrupt", Date.now(), "zst:bm90IHpzdGQ=");
+		insertRequestWithPayload(db, "valid", Date.now() - 1, '{"ok":true}');
+
+		await expect(repo.getPayload("corrupt")).rejects.toThrow();
+		for (const rows of [
+			await repo.listPayloads(),
+			await repo.listPayloadsWithAccountNames(),
+		]) {
+			expect(
+				JSON.parse(rows.find((row) => row.id === "corrupt")?.json ?? "null")
+					.error,
+			).toBe("Payload could not be decoded");
+			expect(rows.find((row) => row.id === "valid")?.json).toBe('{"ok":true}');
+		}
+	});
+
 	it("timestamp field is present and correct for requests without payload", async () => {
 		const ts = 1_700_000_000_000;
 		insertRequest(db, "req-ts", ts);

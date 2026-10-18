@@ -137,11 +137,15 @@ function makeDbOps(
 				if (sql.includes("FROM accounts")) return accounts;
 				if (sql.includes("request_payloads")) {
 					payloadQueries.push(sql);
-					return payloads;
+					return payloads.map((row, index) => ({
+						id: String(index),
+						timestamp: row.timestamp,
+					}));
 				}
 				return [];
 			},
-			get: async () => null,
+			get: async (_sql: string, params: unknown[]) =>
+				payloads[Number(params[0])] ?? null,
 		}),
 		getStatsRepository: () => ({
 			getSessionStats: async () => new Map(),

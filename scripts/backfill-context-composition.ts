@@ -26,7 +26,7 @@
  * stored as 0, never coerced to NULL. Only `context_largest_tool_name` may be
  * NULL within an otherwise-recorded row.
  *
- * Deep imports below are intentional: `decryptPayload` is deliberately not
+ * Deep imports below are intentional: `decodePayloadFromStorage` is deliberately not
  * exported from the @clankermux/database package barrel (it is an internal
  * concern of payload storage), and the composition walk lives in
  * packages/proxy/src. A one-off script importing source files directly is
@@ -39,7 +39,7 @@
 
 import { Database } from "bun:sqlite";
 import {
-	decryptPayload,
+	decodePayloadFromStorage,
 	initPayloadEncryption,
 	isEncryptionEnabled,
 } from "../packages/database/src/payload-encryption";
@@ -237,7 +237,7 @@ async function runBackfill(
 
 			let envelope: PayloadEnvelope;
 			try {
-				const plaintext = await decryptPayload(row.json);
+				const plaintext = await decodePayloadFromStorage(row.json);
 				try {
 					envelope = JSON.parse(plaintext) as PayloadEnvelope;
 				} catch {

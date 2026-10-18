@@ -10,7 +10,10 @@ import type {
 	UsageSource,
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
-import { decryptPayload, encryptPayload } from "../payload-encryption";
+import {
+	decodePayloadFromStorage,
+	encryptPayload,
+} from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 import {
 	buildRequestFilterConditions,
@@ -23,7 +26,7 @@ import {
 const log = new Logger("RequestRepository");
 
 /**
- * Decrypt a stored payload for a list endpoint, swallowing per-row errors
+ * Decode a stored payload for a list endpoint, swallowing per-row errors
  * so a single corrupted/tampered row cannot take down the whole list.
  *
  * The error is logged so misconfiguration is still observable, and a JSON
@@ -32,13 +35,13 @@ const log = new Logger("RequestRepository");
  * Single-row reads (`getPayload`) MUST stay strict and let the error
  * propagate — there's no fallback that makes sense for a single row.
  */
-async function decryptForList(id: string, json: string): Promise<string> {
+async function decodeForList(id: string, json: string): Promise<string> {
 	try {
-		return await decryptPayload(json);
+		return await decodePayloadFromStorage(json);
 	} catch (err) {
-		log.error(`Failed to decrypt payload ${id}:`, err);
+		log.error(`Failed to decode payload ${id}:`, err);
 		return JSON.stringify({
-			error: "Payload could not be decrypted",
+			error: "Payload could not be decoded",
 			id,
 		});
 	}
@@ -794,11 +797,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 
 		if (!row) return null;
 
-		// Decryption errors must propagate — they indicate tampering, a wrong key,
-		// or a missing key for an encrypted row. Silently returning null would
-		// hide real misconfiguration. Only JSON parse errors are tolerated, since
-		// historical rows may contain malformed payloads.
-		const decoded = await decryptPayload(row.json);
+		// Decode errors must propagate: wrong/missing keys, tampering and corrupt
+		// compressed rows must not look like absent data. Historical malformed
+		// JSON remains tolerated.
+		const decoded = await decodePayloadFromStorage(row.json);
 		try {
 			return JSON.parse(decoded);
 		} catch {
@@ -820,7 +822,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		return Promise.all(
 			rows.map(async (row) => ({
 				id: row.id,
-				json: await decryptForList(row.id, row.json),
+				json: await decodeForList(row.id, row.json),
 			})),
 		);
 	}
@@ -853,7 +855,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			rows.map(async (row) => ({
 				id: row.id,
 				timestamp: row.timestamp,
-				json: row.json ? await decryptForList(row.id, row.json) : null,
+				json: row.json ? await decodeForList(row.id, row.json) : null,
 				account_name: row.account_name,
 			})),
 		);

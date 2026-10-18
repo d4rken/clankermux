@@ -132,11 +132,16 @@ function makeDbOps(options: {
 		getAdapter: () => ({
 			query: async (sql: string) => {
 				options.adapterQueries?.push(sql);
-				if (sql.includes("request_payloads")) return options.payloads ?? [];
+				if (sql.includes("request_payloads"))
+					return (options.payloads ?? []).map((row, index) => ({
+						id: String(index),
+						timestamp: row.timestamp,
+					}));
 				if (sql.includes("FROM accounts")) return options.codexColumns ?? [];
 				return [];
 			},
-			get: async () => null,
+			get: async (_sql: string, params: unknown[]) =>
+				options.payloads?.[Number(params[0])] ?? null,
 		}),
 		getRecentUsageSnapshotsForAccounts: async (accountIds: string[]) => {
 			if (options.snapshotsThrow) throw new Error("snapshot read failed");

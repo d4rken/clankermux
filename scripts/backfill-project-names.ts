@@ -29,7 +29,7 @@
  *            that happens to equal a junk entry is authoritative, e.g. a
  *            genuine cwd of /workspace/projects).
  *
- * Deep imports below are intentional: `decryptPayload` is deliberately not
+ * Deep imports below are intentional: `decodePayloadFromStorage` is deliberately not
  * exported from the @clankermux/database package barrel (it is an internal
  * concern of payload storage), and the extractor/sanitizer live in
  * packages/proxy/src. A one-off script importing source files directly is
@@ -48,7 +48,7 @@ import { Database } from "bun:sqlite";
 import { Config } from "../packages/config/src/index";
 import { resolveDbPath } from "../packages/database/src/paths";
 import {
-	decryptPayload,
+	decodePayloadFromStorage,
 	initPayloadEncryption,
 	isEncryptionEnabled,
 } from "../packages/database/src/payload-encryption";
@@ -348,7 +348,7 @@ async function runPassA(
 
 			let envelope: PayloadEnvelope;
 			try {
-				const plaintext = await decryptPayload(row.json);
+				const plaintext = await decodePayloadFromStorage(row.json);
 				try {
 					envelope = JSON.parse(plaintext) as PayloadEnvelope;
 				} catch {

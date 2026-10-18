@@ -24,6 +24,7 @@ const KEY_LENGTH_BITS = 256;
 const KEY_LENGTH_BYTES = 32;
 const HEX_KEY_LENGTH = KEY_LENGTH_BYTES * 2;
 const ENC_PREFIX = "enc:";
+const ZSTD_PREFIX = "zst:";
 
 let encryptionKey: CryptoKey | null = null;
 let initPromise: Promise<boolean> | null = null;
@@ -152,6 +153,19 @@ export async function decryptPayload(stored: string): Promise<string> {
 		ciphertext,
 	);
 	return new TextDecoder().decode(decrypted);
+}
+
+/** Decode current and legacy stored rows: decrypt first, then decompress. */
+export async function decodePayloadFromStorage(
+	stored: string,
+): Promise<string> {
+	const decoded = await decryptPayload(stored);
+	if (!decoded.startsWith(ZSTD_PREFIX)) return decoded;
+	return (
+		await Bun.zstdDecompress(
+			Buffer.from(decoded.slice(ZSTD_PREFIX.length), "base64"),
+		)
+	).toString("utf8");
 }
 
 /** Returns true when a key has been imported and encryption is active. */
