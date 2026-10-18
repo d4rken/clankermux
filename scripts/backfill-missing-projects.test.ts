@@ -77,7 +77,13 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 			id === "existing" ? "keep" : null,
 			"none",
 		);
-		if (id !== "no-payload") save.run(id, envelope(body));
+		if (id !== "no-payload") {
+			const json = envelope(body);
+			const stored = id === "repair"
+				? `zst:${(await Bun.zstdCompress(json)).toString("base64")}`
+				: json;
+			save.run(id, stored);
+		}
 	}
 	db.query("UPDATE request_payloads SET json = ? WHERE id = ?").run(
 		JSON.stringify({ request: { body: null } }),

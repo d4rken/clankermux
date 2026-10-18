@@ -16,7 +16,7 @@ import { closeSync, fsyncSync, openSync, writeFileSync } from "node:fs";
 import type { ProjectRules } from "@clankermux/types";
 import { Config } from "../packages/config/src/index";
 import { resolveDbPath } from "../packages/database/src/paths";
-import { decryptPayload } from "../packages/database/src/payload-encryption";
+import { decodePayloadFromStorage } from "../packages/database/src/payload-encryption";
 import { extractProjectFromRequest } from "../packages/proxy/src/project-extraction";
 
 interface Candidate {
@@ -65,7 +65,7 @@ export async function planMissingProjects(
 			missingBody++;
 			continue;
 		}
-		const plaintext = await decryptPayload(stored.json);
+		const plaintext = await decodePayloadFromStorage(stored.json);
 		let envelope;
 		let body;
 		try {

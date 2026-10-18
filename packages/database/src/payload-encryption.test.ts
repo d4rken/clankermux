@@ -135,6 +135,39 @@ describe("payload encryption", () => {
 		expect(mod.decryptPayload(onlyIv)).rejects.toThrow();
 	});
 
+	for (const encrypted of [false, true]) {
+		for (const compressed of [false, true]) {
+			it(`decodes stored payloads (encrypted=${encrypted}, compressed=${compressed})`, async () => {
+				if (encrypted) process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+				const mod = await loadFreshModule();
+				const json = JSON.stringify({ text: "日本語 payload ".repeat(1000) });
+				const body = compressed
+					? `zst:${(await Bun.zstdCompress(json)).toString("base64")}`
+					: json;
+				const stored = await mod.encryptPayload(body);
+				expect(await mod.decodePayloadFromStorage(stored)).toBe(json);
+			});
+		}
+	}
+
+	it("rejects corrupt compressed rows rather than returning undecoded text", async () => {
+		const mod = await loadFreshModule();
+		await expect(
+			mod.decodePayloadFromStorage("zst:bm90IHpzdGQ="),
+		).rejects.toThrow();
+	});
+
+	it("propagates encryption failures through the storage decoder", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const enc = await loadFreshModule();
+		const stored = await enc.encryptPayload("zst:irrelevant");
+		delete process.env.PAYLOAD_ENCRYPTION_KEY;
+		const dec = await loadFreshModule();
+		await expect(dec.decodePayloadFromStorage(stored)).rejects.toThrow(
+			"not configured",
+		);
+	});
+
 	it("init is idempotent — concurrent calls share the same promise", async () => {
 		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
 		const mod = await loadFreshModule();

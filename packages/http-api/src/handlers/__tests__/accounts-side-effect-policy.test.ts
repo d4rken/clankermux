@@ -103,11 +103,11 @@ function makeDbOps(lastUsedMs: number): DatabaseOperations {
 			query: async (sql: string) => {
 				if (sql.includes("FROM accounts")) return accounts;
 				if (sql.includes("request_payloads")) {
-					return [payloadRow(lastUsedMs, 33)];
+					return [{ id: "payload", timestamp: lastUsedMs }];
 				}
 				return [];
 			},
-			get: async () => null,
+			get: async () => payloadRow(lastUsedMs, 33),
 		}),
 		getStatsRepository: () => ({
 			getSessionStats: async () => new Map(),
