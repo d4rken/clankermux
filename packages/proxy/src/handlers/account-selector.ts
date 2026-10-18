@@ -6,7 +6,11 @@ import {
 	getSdkBridgeInnerMetaContext,
 	type RequestMeta,
 } from "@clankermux/types";
-import { getResolvedRoute, RoutingPolicyError } from "../resolved-route";
+import {
+	getResolvedRoute,
+	NoPermittedAccountError,
+	RoutingPolicyError,
+} from "../resolved-route";
 import { eligibleRouteAccounts } from "../routing-service";
 import type { ProxyContext } from "./proxy-types";
 
@@ -109,10 +113,7 @@ export async function getOrderedAccounts(
 	ctx: ProxyContext,
 ): Promise<Account[]> {
 	const accounts = await eligibleRouteAccounts(meta, ctx);
-	if (!accounts.length)
-		throw new RoutingPolicyError(
-			"No account retains permission for this request's resolved model",
-		);
+	if (!accounts.length) throw new NoPermittedAccountError();
 	await ensureUsageFreshForSelection(accounts, ctx, Date.now());
 	// Stamped per selection because an alias stage installs a different route.
 	// The model we send, not the one upstream reports: a relabelled response is

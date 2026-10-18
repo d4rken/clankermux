@@ -1,4 +1,7 @@
-import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
+import type {
+	EffortLevel,
+	JsonSchemaOutputFormat,
+} from "@anthropic-ai/claude-agent-sdk";
 import {
 	type SdkBridgeTranslationGaps,
 	sdkBridgeRefusedField,
@@ -34,7 +37,10 @@ export interface TurnBody {
 	ignoredFields: string[];
 	/** Size of the whole request body. */
 	bodyBytes: number;
+	/** The tools' input schemas and the output format's schema, serialized. */
 	schemaBytes: number;
+	/** `output_config.format`: the reply is one JSON value matching its schema. */
+	outputFormat: JsonSchemaOutputFormat | null;
 }
 
 /** A body read as a user turn: the conversation so far and its final user message. */
@@ -143,6 +149,25 @@ function parseTools(
 		});
 	}
 	return { tools, schemaBytes };
+}
+
+/** `output_config.format`, the only format being a JSON schema. */
+function parseOutputFormat(
+	body: Record<string, unknown>,
+): { format: JsonSchemaOutputFormat | null } | BridgeError {
+	const format = isRecord(body.output_config)
+		? body.output_config.format
+		: undefined;
+	if (format === undefined || format === null) return { format: null };
+	if (
+		!isRecord(format) ||
+		format.type !== "json_schema" ||
+		!isRecord(format.schema)
+	)
+		return bridgeErrors.invalid(
+			'output_config.format must be {"type": "json_schema", "schema": {...}}',
+		);
+	return { format: { type: "json_schema", schema: format.schema } };
 }
 
 const IGNORED_FIELDS = ["temperature", "top_p"] as const;
@@ -266,6 +291,8 @@ function parseFields(
 	if ("status" in tools) return { ok: false, error: tools };
 	const fields = applyFieldPolicy(body, gaps, mode);
 	if ("status" in fields) return { ok: false, error: fields };
+	const output = parseOutputFormat(body);
+	if ("status" in output) return { ok: false, error: output };
 	return {
 		ok: true,
 		value: {
@@ -278,7 +305,10 @@ function parseFields(
 			maxOutputTokens: fields.maxOutputTokens,
 			ignoredFields: fields.ignoredFields,
 			bodyBytes,
-			schemaBytes: tools.schemaBytes,
+			schemaBytes:
+				tools.schemaBytes +
+				(output.format ? JSON.stringify(output.format.schema).length : 0),
+			outputFormat: output.format,
 		},
 	};
 }

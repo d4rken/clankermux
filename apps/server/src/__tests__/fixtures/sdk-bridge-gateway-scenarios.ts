@@ -806,7 +806,7 @@ for (const [name, status, body, headers] of [
 		const response = await fetch(`${gw.url}/wire/anthropic/v1/messages`, {
 			method: "POST",
 			headers: {
-				"x-api-key": gw.apiKey,
+				"x-api-key": gw.claudeCodeApiKey,
 				"content-type": "application/json",
 				"anthropic-version": "2023-06-01",
 				"user-agent": "claude-cli/2.1.280 (external, cli)",

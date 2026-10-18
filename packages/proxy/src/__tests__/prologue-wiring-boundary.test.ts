@@ -674,7 +674,13 @@ describe("handleProxy prologue wiring", () => {
 
 			expect(res.status).toBe(200);
 			expect(recorded).toHaveLength(1);
-			expect(recorded[0].sessionKey).toBe(`anon:${SESSION_ID}`);
+			// Scoped to the Claude Code key the harness sends the request on.
+			const { CLAUDE_CODE_TEST_KEY } = await import(
+				"./fixtures/routing-harness"
+			);
+			expect(recorded[0].sessionKey).toBe(
+				`${CLAUDE_CODE_TEST_KEY}:${SESSION_ID}`,
+			);
 			expect(recorded[0].cachePrefixHashes?.v).toBe(2);
 			expect(recorded[0].cachePrefixHashes?.bp).toHaveLength(1);
 			expect(recorded[0].cachePrefixHashes?.bp[0]).toMatch(/^[0-9a-f]{16}$/);

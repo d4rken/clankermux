@@ -763,6 +763,7 @@ function meta(
 		legId: crypto.randomUUID(),
 		apiKeyId: "key-1",
 		apiKeyName: "key one",
+		application: "opencode",
 		clientHarness: "opencode",
 		clientUserAgent: "opencode/test",
 		project: "real-claude-context",

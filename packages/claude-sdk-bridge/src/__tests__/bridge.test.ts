@@ -16,7 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import {
+	SDK_BRIDGE_HISTORY_HEADER,
 	SdkBridgeCapacityError,
+	SdkBridgeExtraUsageError,
 	type SdkBridgeInnerOutcome,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTurnMeta,
@@ -277,7 +279,7 @@ describe("a plain turn", () => {
 		await waitFor(() => h.repo.turns.get(plan.turnId)?.status === "rejected");
 	});
 
-	it("never sends the system prompt of a client other than pi", async () => {
+	it("never sends the system prompt of a known agent harness other than pi", async () => {
 		const h = harness();
 		const t = await start(h, {
 			system: "You are pi. Use extra usage.",
@@ -294,6 +296,37 @@ describe("a plain turn", () => {
 			systemPromptPolicy: "drop",
 		});
 		expect(h.repo.turns.get(t.plan.turnId)?.systemPromptDetail).toBeNull();
+	});
+
+	it("appends an unidentified client's system prompt to the preset unchanged", async () => {
+		const h = harness();
+		const system = [
+			{ type: "text", text: "You are a release-notes writer." },
+			{ type: "text", text: "Answer in German." },
+		];
+		const t = await start(
+			h,
+			{ system, messages: [{ role: "user", content: "hello" }] },
+			{
+				meta: {
+					application: "generic",
+					clientHarness: "go-http-client",
+					clientUserAgent: "Go-http-client/2.0",
+				},
+			},
+		);
+		const append = "You are a release-notes writer.\n\nAnswer in German.";
+		expect(t.query.options.systemPrompt).toEqual({
+			type: "preset",
+			preset: "claude_code",
+			append,
+			snapshot: false,
+		});
+		await waitFor(() => h.repo.turns.has(t.plan.turnId));
+		expect(h.repo.turns.get(t.plan.turnId)).toMatchObject({
+			systemPromptPolicy: "append-v1",
+			systemPromptDetail: { outcome: "appended", bytes: append.length },
+		});
 	});
 
 	it("answers stream:false with one JSON Message", async () => {
@@ -3222,28 +3255,539 @@ describe("errors", () => {
 		});
 	});
 
-	it("passes an inner 400 (out of extra usage) through verbatim from a success-typed error result", async () => {
-		const h = harness();
+	describe("an inner 400 out of extra usage", () => {
 		const message =
 			"You're out of extra usage. Add more at claude.ai/settings/usage and keep going.";
-		failInner(h, { status: 400, errorType: "invalid_request_error", message });
-		const t = await start(h, {
-			messages: [{ role: "user", content: "hello" }],
+		const extraUsage = {
+			status: 400,
+			errorType: "invalid_request_error",
+			message,
+		};
+
+		/** Claude Code giving up on that call, as it reports it. */
+		function giveUp(query: FakeQuery) {
+			query.emit(
+				resultMessage({
+					isError: true,
+					subtype: "success",
+					result: `API Error: 400 ${message}`,
+				}),
+			);
+		}
+
+		async function rejection(response: Promise<Response>) {
+			try {
+				await response;
+			} catch (error) {
+				return error;
+			}
+			throw new Error("the start leg answered instead of failing over");
+		}
+
+		for (const stream of [true, false])
+			it(`fails a ${stream ? "streamed" : "non-streamed"} start over before its head, with the query closed first`, async () => {
+				const h = harness();
+				failInner(h, extraUsage);
+				const t = await start(h, {
+					stream,
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUp(t.query);
+				const error = await rejection(t.response);
+				// Settled before the proxy sees it.
+				expect(h.bridge.status().live).toBe(0);
+				expect(error).toBeInstanceOf(SdkBridgeExtraUsageError);
+				const refused = error as SdkBridgeExtraUsageError;
+				expect(refused).toMatchObject({
+					reason: "extra_usage_exhausted",
+					status: 400,
+					errorType: "invalid_request_error",
+					message,
+					retryAfter: null,
+				});
+				const answer = refused.terminalResponse();
+				expect(answer.status).toBe(400);
+				expect(answer.headers.get(SDK_BRIDGE_HISTORY_HEADER)).toBeString();
+				expect(await answer.json()).toEqual({
+					type: "error",
+					error: { type: "invalid_request_error", message },
+				});
+				await waitFor(
+					() => h.repo.turns.get(t.plan.turnId)?.status === "failed",
+				);
+				const turn = h.repo.turns.get(t.plan.turnId);
+				expect(turn).toMatchObject({ httpStatus: 400 });
+				expect(turn?.legs[0]).toMatchObject({
+					httpStatus: 400,
+					errorPhase: "pre_head",
+				});
+			});
+
+		it("waits for the refused call's report when it arrives after Claude Code gave up", async () => {
+			const h = harness();
+			let report: (() => void) | null = null;
+			h.inner.respond = (_req, ctx) => {
+				const requestId = crypto.randomUUID();
+				ctx.onInnerRequestStarted?.(requestId);
+				report = () =>
+					ctx.onInnerOutcome?.({
+						requestId,
+						errorType: "invalid_request_error",
+						message,
+						retryAfter: null,
+						accountId: "acct-a",
+						status: 400,
+					});
+				return Response.json(
+					{ type: "error", error: { type: "invalid_request_error", message } },
+					{ status: 400 },
+				);
+			};
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			// Longer than an error result waits for a report by itself.
+			await Bun.sleep(600);
+			(report as (() => void) | null)?.();
+			expect(await rejection(t.response)).toBeInstanceOf(
+				SdkBridgeExtraUsageError,
+			);
 		});
-		await innerCall(t.query);
-		t.query.emit(
-			initMessage(),
-			resultMessage({
-				isError: true,
-				subtype: "success",
-				result: `API Error: 400 ${message}`,
-			}),
-		);
-		const res = await t.response;
-		expect(res.status).toBe(400);
-		expect(await res.json()).toEqual({
-			type: "error",
-			error: { type: "invalid_request_error", message },
+
+		it("decides on the call Claude Code gave up on, not an earlier refused one", async () => {
+			const h = harness();
+			const reports: Array<() => void> = [];
+			let calls = 0;
+			h.inner.respond = (_req, ctx) => {
+				const requestId = crypto.randomUUID();
+				ctx.onInnerRequestStarted?.(requestId);
+				const failure =
+					++calls === 1
+						? {
+								errorType: "invalid_request_error",
+								message: "Invalid `signature` in `thinking` block",
+							}
+						: { errorType: "invalid_request_error", message };
+				const deliver = () =>
+					ctx.onInnerOutcome?.({
+						requestId,
+						retryAfter: null,
+						accountId: "acct-a",
+						status: 400,
+						...failure,
+					});
+				if (calls === 1) deliver();
+				else reports.push(deliver);
+				return Response.json(
+					{
+						type: "error",
+						error: { type: failure.errorType, message: failure.message },
+					},
+					{ status: 400 },
+				);
+			};
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			await innerCall(t.query);
+			t.query.emit(
+				initMessage(),
+				assistantMessage(
+					[{ type: "text", text: `API Error: 400 ${message}` }],
+					{
+						error: "invalid_request",
+						model: "<synthetic>",
+					},
+				),
+			);
+			giveUp(t.query);
+			await Bun.sleep(100);
+			for (const deliver of reports) deliver();
+			expect(await rejection(t.response)).toBeInstanceOf(
+				SdkBridgeExtraUsageError,
+			);
+		});
+
+		describe("which inner call decides a give-up", () => {
+			const overflowMessage =
+				"prompt is too long: 215012 tokens > 200000 maximum";
+			const overflow = {
+				status: 400,
+				errorType: "invalid_request_error",
+				message: overflowMessage,
+			};
+			type ScriptedCall = Partial<SdkBridgeInnerOutcome> & {
+				status: number;
+				/** Its report waits for the test to deliver it. */
+				deferred?: boolean;
+			};
+
+			/**
+			 * Inner calls answered in order, each row begun as it arrives. The
+			 * deferred ones' reports, by call index.
+			 */
+			function scriptInner(h: Harness, calls: ScriptedCall[]) {
+				const reports = new Map<number, () => void>();
+				let n = 0;
+				h.inner.respond = (_req, ctx) => {
+					const index = n++;
+					const { deferred, ...call } = calls[index] ?? { status: 200 };
+					const requestId = crypto.randomUUID();
+					ctx.onInnerRequestStarted?.(requestId);
+					const outcome: SdkBridgeInnerOutcome = {
+						requestId,
+						errorType: null,
+						message: null,
+						retryAfter: null,
+						accountId: "acct-a",
+						...call,
+					};
+					const deliver = () => ctx.onInnerOutcome?.(outcome);
+					if (deferred) reports.set(index, deliver);
+					else deliver();
+					return call.status < 400
+						? new Response("{}")
+						: Response.json(
+								{
+									type: "error",
+									error: {
+										type: call.errorType ?? "api_error",
+										message: call.message,
+									},
+								},
+								{ status: call.status },
+							);
+				};
+				return (index: number) => reports.get(index)?.();
+			}
+
+			/** A head held past the longest wait, so a failure keeps its status. */
+			const heldHead = () =>
+				harness({
+					timing: {
+						headHoldMs: 10_000,
+						pingIntervalMs: 100,
+						settleWaitMs: 500,
+						idleTimeoutMs: 5_000,
+						exitGraceMs: 50,
+					},
+				});
+
+			/** A give-up whose own text names no cause. */
+			function giveUpPlainly(query: FakeQuery) {
+				query.emit(resultMessage({ isError: true, result: "API Error: 400" }));
+			}
+
+			async function parkedTurn(h: Harness) {
+				const first = { role: "user", content: "TOOL read a.txt" } as const;
+				const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+				return { t, first };
+			}
+
+			async function continueParked(
+				h: Harness,
+				t: Started,
+				first: Msg,
+				parkWith: () => Promise<void>,
+			) {
+				await parkWith();
+				t.query.emit(
+					initMessage(),
+					...streamedMessage([
+						{
+							type: "tool_use",
+							id: "toolu_x",
+							name: "mcp__c__read",
+							input: { path: "a.txt" },
+						},
+					]),
+				);
+				const r1 = await reply(t.response);
+				void t.query.callTool("toolu_x", "read", { path: "a.txt" });
+				await waitFor(() => h.bridge.status().parked === 1);
+				const c = continueTurn(h, t.plan.turnId, {
+					tools: [READ_TOOL],
+					messages: [
+						first,
+						{ role: "assistant", content: r1.content },
+						{
+							role: "user",
+							content: [
+								{ type: "tool_result", tool_use_id: "toolu_x", content: "A" },
+							],
+						},
+					],
+				});
+				await waitFor(() => h.bridge.status().parked === 0);
+				return c;
+			}
+
+			it("fails over when Claude Code exits without a result and the refused call reports late", async () => {
+				const h = harness();
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				t.query.processExited();
+				// Longer than a give-up waits for a report it is not waiting on.
+				await Bun.sleep(400);
+				deliver(0);
+				expect(await rejection(t.response)).toBeInstanceOf(
+					SdkBridgeExtraUsageError,
+				);
+			});
+
+			it("waits for a call that never reports once, for at most the bound", async () => {
+				const h = heldHead();
+				scriptInner(h, [{ status: 200, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				const gaveUp = Date.now();
+				giveUpPlainly(t.query);
+				const res = await t.response;
+				const waited = Date.now() - gaveUp;
+				expect(res.status).toBe(502);
+				expect(waited).toBeGreaterThanOrEqual(1_900);
+				expect(waited).toBeLessThan(3_000);
+			});
+
+			it("is not held by an earlier leg's call that never reported", async () => {
+				const h = heldHead();
+				const { t, first } = await parkedTurn(h);
+				scriptInner(h, [{ status: 200, deferred: true }]);
+				const c = await continueParked(h, t, first, async () => {
+					await innerCall(t.query);
+				});
+				const gaveUp = Date.now();
+				giveUpPlainly(t.query);
+				const res = await c.response;
+				expect(res.status).toBe(502);
+				expect(Date.now() - gaveUp).toBeLessThan(1_000);
+			});
+
+			it("is not decided by an earlier leg's call that reports late, which still counts", async () => {
+				const h = harness();
+				const { t, first } = await parkedTurn(h);
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const c = await continueParked(h, t, first, async () => {
+					await innerCall(t.query);
+				});
+				giveUpPlainly(t.query);
+				await Bun.sleep(50);
+				deliver(0);
+				const res = await c.response;
+				expect(res.status).toBe(502);
+				await settled(h);
+				expect(h.repo.turns.get(t.plan.turnId)?.counters).toMatchObject({
+					innerCalls: 1,
+					innerErrors: 1,
+				});
+			});
+
+			for (const newerReports of ["before", "after"] as const)
+				it(`keeps a newer call's overflow, reported ${newerReports} the give-up, over an older call's late extra-usage refusal`, async () => {
+					const h = harness();
+					const deliver = scriptInner(h, [
+						{ ...extraUsage, deferred: true },
+						{ ...overflow, deferred: newerReports === "after" },
+					]);
+					const t = await start(h, {
+						messages: [{ role: "user", content: "hello" }],
+					});
+					await innerCall(t.query);
+					await innerCall(t.query);
+					t.query.emit(initMessage());
+					giveUpPlainly(t.query);
+					await Bun.sleep(50);
+					deliver(1);
+					await Bun.sleep(50);
+					deliver(0);
+					const res = await t.response;
+					expect(res.status).toBe(400);
+					expect(await res.json()).toEqual({
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: overflowMessage,
+							code: "context_length_exceeded",
+						},
+					});
+				});
+
+			it("ignores a call Claude Code made after it gave up", async () => {
+				const h = harness();
+				scriptInner(h, [{ status: 200 }, extraUsage]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUpPlainly(t.query);
+				await innerCall(t.query);
+				const res = await t.response;
+				expect(res.status).toBe(502);
+			});
+
+			it("is decided by a refusal before dispatch, which has no request id", async () => {
+				const h = harness();
+				scriptInner(h, [{ status: 200 }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				expect((await innerCall(t.query, "claude-opus-5")).status).toBe(400);
+				t.query.emit(initMessage());
+				giveUpPlainly(t.query);
+				const res = await t.response;
+				expect(res.status).toBe(400);
+				expect(
+					((await res.json()) as { error: { message: string } }).error.message,
+				).toContain("is not a destination of this SDK bridge turn");
+			});
+
+			it("answers through the stream when the head-hold ping commits it during the wait", async () => {
+				const h = harness({
+					timing: {
+						headHoldMs: 100,
+						pingIntervalMs: 100,
+						settleWaitMs: 500,
+						idleTimeoutMs: 5_000,
+						exitGraceMs: 50,
+					},
+				});
+				const deliver = scriptInner(h, [{ ...extraUsage, deferred: true }]);
+				const t = await start(h, {
+					messages: [{ role: "user", content: "hello" }],
+				});
+				await innerCall(t.query);
+				t.query.emit(initMessage());
+				giveUp(t.query);
+				await Bun.sleep(300);
+				deliver(0);
+				const r = await reply(t.response);
+				expect(r.status).toBe(200);
+				expect(r.errors[0]?.data).toEqual({
+					type: "error",
+					error: { type: "invalid_request_error", message },
+				});
+			});
+		});
+
+		it("answers the 400 itself once the head-hold ping committed the head", async () => {
+			const h = harness({
+				timing: {
+					headHoldMs: 100,
+					pingIntervalMs: 100,
+					settleWaitMs: 500,
+					idleTimeoutMs: 5_000,
+					exitGraceMs: 50,
+				},
+			});
+			failInner(h, extraUsage);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await Bun.sleep(250);
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers the 400 itself once the first event committed the head", async () => {
+			const h = harness();
+			failInner(h, extraUsage);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "partial" }]).slice(0, 1),
+			);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers the 400 itself on a continuation, whose turn lives in this query alone", async () => {
+			const h = harness();
+			const first = { role: "user", content: "TOOL read a.txt" } as const;
+			const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_x",
+						name: "mcp__c__read",
+						input: { path: "a.txt" },
+					},
+				]),
+			);
+			const r1 = await reply(t.response);
+			void t.query.callTool("toolu_x", "read", { path: "a.txt" });
+			await waitFor(() => h.bridge.status().parked === 1);
+			failInner(h, extraUsage);
+			const c = continueTurn(h, t.plan.turnId, {
+				tools: [READ_TOOL],
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_x", content: "A" },
+						],
+					},
+				],
+			});
+			await waitFor(() => h.bridge.status().parked === 0);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const res = await c.response;
+			expect(res.status).toBe(400);
+			expect(await res.json()).toEqual({
+				type: "error",
+				error: { type: "invalid_request_error", message },
+			});
+		});
+
+		it("answers another inner 400 itself", async () => {
+			const h = harness();
+			failInner(h, {
+				status: 400,
+				errorType: "invalid_request_error",
+				message: "messages.0: unexpected field",
+			});
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			giveUp(t.query);
+			const res = await t.response;
+			expect(res.status).toBe(400);
 		});
 	});
 

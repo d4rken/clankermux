@@ -100,13 +100,17 @@ provider. These restrictions also apply to explicit account requests and fallbac
 
 ## Claude subscription accounts from pi, Codex and other non-Claude-Code clients
 
-A client on `/wire/openai` (pi, Codex, OpenCode in OpenAI mode) never reaches
-a Claude account (Anthropic OAuth or Claude API key) directly. When routing
-picks one for such a request, ClankerMux runs real Claude Code for that turn
+Only Claude Code reaches a Claude account (Anthropic OAuth or Claude API key)
+directly: a request on `/wire/anthropic` from a client configured as Claude
+Code that also identifies itself as Claude Code. No other request does,
+`/wire/openai` (pi, Codex, OpenCode in OpenAI mode) included. When routing
+picks a Claude account for one, ClankerMux runs real Claude Code for that turn
 through the Claude Agent SDK, and Claude Code's model calls go to the account
 through the normal pipeline. The client keeps executing its own tools: each
 tool call is handed back to it, and its results resume the same Claude Code
-run.
+run. Only Messages turns (`POST /v1/messages`) are served this way; such a
+client's `count_tokens` and other requests go to other providers, or are
+refused when the client may use no other.
 
 There is nothing to configure beyond having the Claude models in the client's
 catalogue, which follows from the client's allowed destinations. To keep a
@@ -131,9 +135,19 @@ What differs from a direct request:
   follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
   contains pi's opening line at the start of a line, or both `docs/custom-provider.md` and
   `docs/packages.md`, which subscription accounts answer with a 400
-  (`sdk_bridge_prompt_refused`). Other clients' system prompts are not sent.
-* `temperature` and `top_p` are ignored. Stop sequences (`stop`) and a
-  `tool_choice` that forces or forbids tool use are rejected with a 400 naming
+  (`sdk_bridge_prompt_refused`). OpenCode's, Codex's, oh-my-pi's and Qwen
+  Code's system prompts are not sent. A client ClankerMux does not recognize
+  (curl, an SDK, your own program), on a key whose application is generic or
+  unset, has its system prompt appended unchanged.
+* When a Claude account answers "You're out of extra usage" before any of the
+  reply went out, the request moves on to destinations that are not Claude
+  accounts (the next alias stage, or the rest of the pool), skipping the other
+  Claude accounts. With none left, you get that 400. Once the reply has
+  started streaming, the error ends the stream instead.
+* `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
+  `tool_choice` that forces or forbids tool use, server tools (any tool
+  with a `type` other than `custom`, such as Anthropic's web search) and
+  `output_config.format` together with tools are rejected with a 400 naming
   the field, unless another destination in the route can serve the request.
 * A client's auxiliary requests (pi's recap and session title) send
   `x-clankermux-side-request: session-fork-v1` with the conversation's session
@@ -167,6 +181,33 @@ Anthropic's legal and compliance terms for Claude Code state that Anthropic
 "does not permit third-party developers to … route requests through Free, Pro,
 or Max plan credentials on behalf of their users". Whether this use of your
 accounts is permitted is for you, as the operator, to judge.
+
+## Structured output on Chat Completions
+
+`/wire/openai/v1/chat/completions` accepts `response_format` with type
+`json_schema`. The answer is the JSON text in `message.content`, with
+`finish_reason` `stop`, or `length` when the backend hit its token limit. What
+the schema guarantees depends on where the request lands:
+
+| Route | What the schema does |
+| --- | --- |
+| Codex | Constrains the answer when `strict` is `true`; guides it when `strict` is `false` or absent. |
+| OpenRouter | Passed to the upstream provider. The request is routed only to providers that support it (`require_parameters`). |
+| Claude accounts through the SDK bridge | Claude Code validates the answer against the schema and retries on a mismatch. Nothing streams before the answer, which arrives whole at the end. When the last model call stopped at the token limit, the answer is 200 with `finish_reason` `length` and empty content. Any other failure to produce a matching answer (retries exhausted, a refusal, no answer at all) is an error with code `structured_output_failed`, never a 200: a 502 before the response started, an error chunk after it. Upstream errors such as rate limits keep their own status. |
+
+On Codex and OpenRouter, a refusal answers `finish_reason` `content_filter`
+with empty content. When streaming, JSON already sent before a late refusal
+stays sent.
+`json_schema` together with tools is refused with a 400, and `json_object` is
+not supported. Through the SDK bridge, a schema is also refused with a 400 on
+tool results that continue a turn, and on a side request. A schema over 64 KiB
+as JSON is not sent through the SDK bridge: the request goes to another target
+of its route, or gets a 400 when the bridge is the only one.
+
+A native Messages client on `/wire/anthropic` that sends
+`output_config.format` (`{"type": "json_schema", "schema": {...}}`) to a Claude
+account is served the same way through the SDK bridge; its answer is one text
+block holding the JSON.
 
 ## Integrations
 

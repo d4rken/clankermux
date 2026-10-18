@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES } from "@clankermux/types";
 import { parseTurnBody, parseTurnRequest } from "../turn-request";
 
 const base = {
@@ -297,5 +298,87 @@ describe("a side request's body", () => {
 				],
 			}).ok,
 		).toBe(true);
+	});
+});
+
+describe("output_config.format", () => {
+	const schema = { type: "object", properties: { a: { type: "string" } } };
+	const parse = (patch: Record<string, unknown>) =>
+		parseTurnRequest({ ...base, ...patch }, null, 1);
+
+	it("reads a JSON schema format and counts its schema with the tools'", () => {
+		const parsed = parse({
+			output_config: {
+				effort: "high",
+				format: { type: "json_schema", schema },
+			},
+		});
+		if (!parsed.ok) throw new Error(parsed.error.message);
+		expect(parsed.turn.outputFormat).toEqual({ type: "json_schema", schema });
+		expect(parsed.turn.schemaBytes).toBe(JSON.stringify(schema).length);
+		expect(parsed.turn.effort).toBe("high");
+	});
+
+	it("leaves a body without one, or with null, in prose", () => {
+		for (const patch of [
+			{},
+			{ output_config: { effort: "low" } },
+			{ output_config: { format: null } },
+		]) {
+			const parsed = parse(patch);
+			if (!parsed.ok) throw new Error(parsed.error.message);
+			expect(parsed.turn.outputFormat).toBeNull();
+			expect(parsed.turn.schemaBytes).toBe(0);
+		}
+	});
+
+	it("refuses any other format", () => {
+		for (const format of [
+			{ type: "json_object" },
+			{ type: "json_schema" },
+			{ type: "json_schema", schema: "{}" },
+			[],
+		]) {
+			const parsed = parse({ output_config: { format } });
+			expect(!parsed.ok && parsed.error.status).toBe(400);
+			expect(!parsed.ok && parsed.error.message).toContain(
+				"output_config.format",
+			);
+		}
+	});
+
+	it("refuses a format next to client tools, and takes one next to an empty list", () => {
+		const output_config = { format: { type: "json_schema", schema } };
+		const refused = parse({
+			output_config,
+			tools: [{ name: "read", input_schema: { type: "object" } }],
+		});
+		expect(!refused.ok && refused.error.status).toBe(400);
+		expect(!refused.ok && refused.error.message).toContain(
+			"cannot be combined with tools",
+		);
+		expect(parse({ output_config, tools: [] }).ok).toBe(true);
+	});
+
+	it("refuses a schema whose JSON is over the limit in UTF-8 bytes, and takes one at it", () => {
+		const padded = (bytes: number) => {
+			const pad = bytes - JSON.stringify({ description: "" }).length;
+			// Each "é" is two UTF-8 bytes and one character.
+			return {
+				description: "é".repeat(Math.floor(pad / 2)) + "x".repeat(pad % 2),
+			};
+		};
+		const at = (bytes: number) =>
+			parse({
+				output_config: {
+					format: { type: "json_schema", schema: padded(bytes) },
+				},
+			});
+		expect(at(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES).ok).toBe(true);
+		const refused = at(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES + 1);
+		expect(!refused.ok && refused.error.status).toBe(400);
+		expect(!refused.ok && refused.error.message).toContain(
+			String(SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES),
+		);
 	});
 });

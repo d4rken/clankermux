@@ -5,6 +5,7 @@ import { mock } from "bun:test";
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type {
 	Account,
+	ClientApplication,
 	SdkBridgeAvailability,
 	SdkBridgeRoutePlan,
 	SdkBridgeTransport,
@@ -108,6 +109,8 @@ export async function makeBridgeHarness(
 		model?: string;
 		upstream?: (apiKey: string) => Response | undefined;
 		pin?: { pinnedAccountId: string | null; pinnedProviders: string[] | null };
+		/** The key's `client_profiles.application`; none by default. */
+		application?: ClientApplication | null;
 	} = {},
 ): Promise<BridgeHarness> {
 	const upstreamKeys: string[] = [];
@@ -147,9 +150,11 @@ export async function makeBridgeHarness(
 			getAccount: mock(
 				async (id: string) => accounts.find((a) => a.id === id) ?? null,
 			),
-			getApiKeyPin: mock(async () =>
-				opts.pin ? opts.pin : { pinnedAccountId: null, pinnedProviders: null },
-			),
+			getApiKeyPin: mock(async () => ({
+				...(opts.pin ?? { pinnedAccountId: null, pinnedProviders: null }),
+				malformed: false,
+				application: opts.application ?? null,
+			})),
 			markAccountRateLimited: mock(async () => {}),
 			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
@@ -220,5 +225,19 @@ export function messagesRequest(
 			messages: [{ role: "user", content: "hello" }],
 			...body,
 		}),
+	});
+}
+
+/** Claude Code's user agent, the only one that reaches an official account directly. */
+export const CLAUDE_CODE_USER_AGENT = "claude-cli/2.1.280 (external, cli)";
+
+/** A Messages request from Claude Code: direct on a `claude-code` key. */
+export function claudeCodeRequest(
+	body: Record<string, unknown> = {},
+	headers: Record<string, string> = {},
+): Request {
+	return messagesRequest(body, {
+		"user-agent": CLAUDE_CODE_USER_AGENT,
+		...headers,
 	});
 }

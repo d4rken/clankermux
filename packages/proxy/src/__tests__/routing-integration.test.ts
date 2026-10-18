@@ -1818,11 +1818,72 @@ describe("Chat ingress through real route and provider conversion", () => {
 					reported_model: null,
 					status: 200,
 					error: null,
+					ignored_fields: null,
 				});
 				expect(ctx.recorder.finishTransport).toHaveBeenCalledTimes(1);
 				expect(ctx.recorder.attachUsageSummary.mock.calls.length).toBe(1);
 			});
-	it("rejects explicit Codex output caps locally with 400 and a single local audit", async () => {
+	it("sends max_tokens, temperature and top_p to Codex as accepted but not applied, per attempt", async () => {
+		const account = makeAccount({
+			provider: "codex",
+			id: "chat-sampling",
+			access_token: "test",
+			expires_at: Date.now() + 3600000,
+		});
+		const { ctx, routing } = await setup(
+			[account],
+			[rule({ target_kind: "literal", target_model: "gpt-6-astra" })],
+		);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			"gpt-6-astra",
+		]);
+		const sent: Request[] = [];
+		globalThis.fetch = mockFetch(
+			mock(async (input: Request | string | URL) => {
+				sent.push(input instanceof Request ? input : new Request(input));
+				return codexResponse();
+			}),
+		);
+		const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
+			method: "POST",
+			body: JSON.stringify({
+				model: requested,
+				max_tokens: 32,
+				temperature: 0.2,
+				top_p: 0.9,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleChatCompletionsRequest(
+			req,
+			new URL(req.url),
+			handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+			ctx,
+			"chat-key",
+		);
+		if (response.status !== 200) throw new Error(await response.text());
+		await response.json();
+		expect(sent).toHaveLength(1);
+		const outgoing = await sent[0].json();
+		expect(outgoing.max_tokens).toBeUndefined();
+		expect(outgoing.max_output_tokens).toBeUndefined();
+		expect(outgoing.temperature).toBeUndefined();
+		expect(outgoing.top_p).toBeUndefined();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(
+			dbs
+				.at(-1)
+				?.query("SELECT kind,status,ignored_fields FROM routing_attempts")
+				.all(),
+		).toEqual([
+			{
+				kind: "upstream_send",
+				status: 200,
+				ignored_fields: '["max_tokens","temperature","top_p"]',
+			},
+		]);
+	});
+	it("rejects Codex stop sequences locally with 400 and a single local audit", async () => {
 		const account = makeAccount({
 			provider: "codex",
 			id: "chat-cap",
@@ -1845,6 +1906,7 @@ describe("Chat ingress through real route and provider conversion", () => {
 			body: JSON.stringify({
 				model: requested,
 				max_tokens: 32,
+				stop: ["END"],
 				messages: [{ role: "user", content: "hello" }],
 			}),
 		});
@@ -1856,14 +1918,23 @@ describe("Chat ingress through real route and provider conversion", () => {
 			"chat-key",
 		);
 		expect(response.status).toBe(400);
-		expect((await response.json()).error.param).toBe("max_tokens");
+		expect((await response.json()).error.param).toBe("stop");
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(
 			dbs
 				.at(-1)
-				?.query("SELECT kind,status,outgoing_model FROM routing_attempts")
+				?.query(
+					"SELECT kind,status,outgoing_model,ignored_fields FROM routing_attempts",
+				)
 				.all(),
-		).toEqual([{ kind: "local_reject", status: 400, outgoing_model: null }]);
+		).toEqual([
+			{
+				kind: "local_reject",
+				status: 400,
+				outgoing_model: null,
+				ignored_fields: null,
+			},
+		]);
 	});
 });
 
@@ -2044,6 +2115,7 @@ it("retries Chat only within the frozen compatible destinations after 429", asyn
 		expect(req.url).toContain("openrouter.ai");
 		const body = await req.json();
 		expect(body.max_tokens).toBe(32);
+		expect(body.stop_sequences).toEqual(["END"]);
 		sends++;
 		if (sends === 1) {
 			await routing.saveRule(
@@ -2068,6 +2140,7 @@ it("retries Chat only within the frozen compatible destinations after 429", asyn
 		body: JSON.stringify({
 			model: "gpt-6-astra",
 			max_tokens: 32,
+			stop: ["END"],
 			messages: [{ role: "user", content: "hi" }],
 		}),
 	});
@@ -2084,18 +2157,96 @@ it("retries Chat only within the frozen compatible destinations after 429", asyn
 	const attempts = dbs
 		.at(-1)
 		?.query(
-			"SELECT a.account_id,a.status,s.content AS policy_snapshot FROM routing_attempts a JOIN routing_snapshots s ON s.id=a.route_snapshot_id ORDER BY a.account_id",
+			"SELECT a.account_id,a.status,a.ignored_fields,s.content AS policy_snapshot FROM routing_attempts a JOIN routing_snapshots s ON s.id=a.route_snapshot_id ORDER BY a.account_id",
 		)
-		.all() as { account_id: string; status: number; policy_snapshot: string }[];
+		.all() as {
+		account_id: string;
+		status: number;
+		ignored_fields: string | null;
+		policy_snapshot: string;
+	}[];
 	expect(attempts.map((a) => a.account_id)).toEqual([
 		"retry-first",
 		"retry-second",
 	]);
 	expect(attempts.map((a) => a.status)).toEqual([429, 200]);
+	expect(attempts.map((a) => a.ignored_fields)).toEqual([null, null]);
 	expect(attempts[0].policy_snapshot).toBe(attempts[1].policy_snapshot);
 	expect(
 		JSON.parse(attempts[0].policy_snapshot).chatRequirements.fields,
-	).toEqual(["max_tokens"]);
+	).toEqual(["max_tokens", "stop"]);
+});
+
+it("records the fields each attempt accepted without applying, per destination", async () => {
+	const accounts = [
+		makeAccount({
+			id: "mixed-codex",
+			provider: "codex",
+			access_token: "test",
+			expires_at: Date.now() + 3600000,
+		}),
+		makeAccount({
+			id: "mixed-openrouter",
+			provider: "openrouter",
+			api_key: "test",
+		}),
+	];
+	const { ctx, routing } = await setup(accounts, []);
+	for (const account of accounts)
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			"gpt-6-astra",
+		]);
+	let sends = 0;
+	globalThis.fetch = (async (input: Request | string | URL) => {
+		const req = input instanceof Request ? input : new Request(input);
+		sends++;
+		if (sends === 1)
+			return Response.json(
+				{ error: { type: "rate_limit_error", message: "limited" } },
+				{ status: 429, headers: { "retry-after": "1" } },
+			);
+		if (req.url.includes("chatgpt.com")) return codexResponse();
+		return new Response(
+			'event: message_start\ndata: {"type":"message_start","message":{"model":"actual","usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+			{ headers: { "content-type": "text/event-stream" } },
+		);
+	}) as typeof fetch;
+	const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
+		method: "POST",
+		body: JSON.stringify({
+			model: "gpt-6-astra",
+			max_tokens: 32,
+			temperature: 0.5,
+			messages: [{ role: "user", content: "hi" }],
+		}),
+	});
+	const response = await handleChatCompletionsRequest(
+		req,
+		new URL(req.url),
+		handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+		ctx,
+		"chat-key",
+	);
+	expect(response.status).toBe(200);
+	await response.text();
+	expect(sends).toBe(2);
+	const attempts = dbs
+		.at(-1)
+		?.query(
+			"SELECT provider,status,ignored_fields FROM routing_attempts ORDER BY provider",
+		)
+		.all() as {
+		provider: string;
+		status: number;
+		ignored_fields: string | null;
+	}[];
+	expect(
+		attempts.map(({ provider, ignored_fields }) => [provider, ignored_fields]),
+	).toEqual([
+		["codex", '["max_tokens","temperature"]'],
+		["openrouter", null],
+	]);
+	expect(attempts.map((a) => a.status).sort()).toEqual([200, 429]);
 });
 
 it("rejects reasoning history for a Codex-only pin before any send", async () => {

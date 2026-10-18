@@ -215,6 +215,26 @@ describe("SdkBridgeTurnDetails", () => {
 		);
 	});
 
+	it("shows the size of an appended system prompt, never its text", () => {
+		const base = view();
+		const html = renderToStaticMarkup(
+			<SdkBridgeTurnDetails
+				view={{
+					...base,
+					turn: {
+						...base.turn,
+						systemPromptPolicy: "append-v1",
+						systemPromptDetail: { outcome: "appended", bytes: 1_536 },
+					},
+				}}
+			/>,
+		);
+		const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+		expect(text).toContain("System prompt policy append-v1");
+		expect(text).toContain("Client prompt 1,536 bytes appended");
+		expect(text).not.toContain("Prompt layout");
+	});
+
 	it("shows a refused system prompt's reason, section and digest", () => {
 		const base = view();
 		const html = renderToStaticMarkup(
@@ -274,6 +294,7 @@ describe("SdkBridgeTurnDetails", () => {
 			"a forwarded detail without its lengths",
 			{ outcome: "forwarded", version: "0.80.1" },
 		],
+		["an appended detail without its size", { outcome: "appended" }],
 		[
 			"a refused detail without its digest",
 			{ outcome: "refused", version: null, code: "c", reason: "r" },

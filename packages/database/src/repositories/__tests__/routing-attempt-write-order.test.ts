@@ -41,6 +41,7 @@ describe("attempt reason survives either write order", () => {
 			service_tier_requested: null,
 			service_tier_sent: null,
 			service_tier_reason: null,
+			ignored_fields: null,
 		});
 	};
 

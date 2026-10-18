@@ -36,6 +36,7 @@ import { usageCache } from "@clankermux/providers";
 import {
 	type Account,
 	type RequestMeta,
+	type SdkBridgeTransport,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
@@ -50,6 +51,7 @@ import { resetOverloadHoldSlots } from "../overload-hold";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { sessionProjectCache } from "../session-project-cache";
 import { sessionPromotionTracker } from "../session-promotion";
+import { makeFakeBridge } from "./fixtures/sdk-bridge-harness";
 
 /** Unique per test so no singleton state (usage cache, buckets) leaks between cases. */
 let idCounter = 0;
@@ -78,7 +80,7 @@ async function callHandleProxy(
 	req: Request,
 	url: URL,
 	ctx: ProxyContext,
-	apiKeyId: string | null = null,
+	apiKeyId?: string | null,
 ) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(
@@ -147,6 +149,7 @@ interface ContextOptions {
 	 * cooled cache-affinity shape the storm-degrade burst hold targets.
 	 */
 	heldAccountId?: string;
+	sdkBridge?: SdkBridgeTransport;
 }
 
 /** Availability filter shared by both strategy stubs (mirrors the real one). */
@@ -167,6 +170,7 @@ function makeContext(
 		pin = null,
 		usageThrottling = false,
 		heldAccountId,
+		sdkBridge,
 	} = opts;
 	const byId = new Map(accounts.map((a) => [a.id, a]));
 	const recordedErrors: string[] = [];
@@ -255,6 +259,7 @@ function makeContext(
 			dispose: mock(() => {}),
 		} as never,
 		server: { timeout: mock(() => {}) } as never,
+		...(sdkBridge ? { sdkBridge } : {}),
 	};
 	return { ctx, recordedErrors, recordedIds };
 }
@@ -554,6 +559,8 @@ describe("zero-accounts terminal recorder labels", () => {
 	it("family-weekly cooled-sibling terminal records family_weekly_exhausted", async () => {
 		// Reachable account is Fable-exhausted; a Fable-capable sibling is cooled for
 		// 200s — beyond the 120s hold budget, so the sibling-scoped 429 fires.
+		// Keyless and bridged: the hold skips every keyed request, which routing
+		// pins to its key's destinations.
 		const exhaustedId = uniqueId("exhausted");
 		const siblingId = uniqueId("sibling");
 		seedFamilyUsage(exhaustedId, true);
@@ -564,12 +571,15 @@ describe("zero-accounts terminal recorder labels", () => {
 			name: "Backup1",
 			rate_limited_until: Date.now() + 200_000,
 		});
-		const { ctx, recordedErrors } = makeContext([exhausted, sibling]);
+		const { ctx, recordedErrors } = makeContext([exhausted, sibling], {
+			sdkBridge: makeFakeBridge(),
+		});
 
 		const res = await callHandleProxy(
 			makeRequest("claude-fable-5"),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
+			null,
 		);
 
 		expect(res.status).toBe(429);

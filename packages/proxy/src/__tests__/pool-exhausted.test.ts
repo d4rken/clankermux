@@ -29,6 +29,12 @@ function makeContext(accounts: Account[]): ProxyContext {
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
 			getActiveComboForFamily: mock(async () => null),
+			// A key with no destinations of its own: routing still records them.
+			getApiKeyPin: mock(async () => ({
+				pinnedAccountId: null,
+				pinnedProviders: null,
+				malformed: false,
+			})),
 		} as never,
 		runtime: { port: 8080, clientId: "test" } as never,
 		config: {
@@ -286,16 +292,18 @@ describe("pool exhausted — 503 response", () => {
 			paused: true,
 			pause_reason: "manual",
 		});
-		const anthropicAccount = makeAccount({
-			id: "acc-anthropic",
-			name: "anthropic-account",
-			provider: "anthropic",
+		// Not an official Anthropic account: a keyless request is never served
+		// by one directly, so its 503 would be the floor's, not this one.
+		const zaiAccount = makeAccount({
+			id: "acc-zai",
+			name: "zai-account",
+			provider: "zai",
 			paused: true,
 			pause_reason: "manual",
 		});
 
 		// Both accounts in DB, but only codex accounts should appear in response
-		const ctx = makeContext([codexAccount, anthropicAccount]);
+		const ctx = makeContext([codexAccount, zaiAccount]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -311,5 +319,21 @@ describe("pool exhausted — 503 response", () => {
 		// Only codex account should appear
 		expect(accounts.length).toBe(1);
 		expect(accounts[0].name).toBe("codex-account");
+	});
+
+	it("answers pool_exhausted to a key with no pin", async () => {
+		const ctx = makeContext([makeAccount({ paused: true })]);
+		const response = await handleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+			"key-unpinned",
+			"unpinned",
+		);
+
+		expect(response.status).toBe(503);
+		expect(response.headers.get("x-clankermux-pool-status")).toBe("exhausted");
+		const body = (await response.json()) as { error: { type: string } };
+		expect(body.error.type).toBe("pool_exhausted");
 	});
 });

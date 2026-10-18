@@ -1,30 +1,48 @@
 ---
 name: claude-sdk-bridge
-description: How ClankerMux serves non-Claude-Code clients (pi, Codex, OpenCode on /wire/openai) on official Anthropic accounts by running real Claude Code through the Agent SDK. Read this before touching packages/claude-sdk-bridge, the sdk-bridge-inner routing mode, officialAnthropicVia, the bridged attempt in proxy-operations, or the Claude Code child's options and environment.
+description: How ClankerMux serves non-Claude-Code clients (pi, Codex, OpenCode on /wire/openai, and any client but Claude Code on /wire/anthropic) on official Anthropic accounts by running real Claude Code through the Agent SDK. Read this before touching packages/claude-sdk-bridge, the sdk-bridge-inner routing mode, officialAnthropicVia, the bridged attempt in proxy-operations, or the Claude Code child's options and environment.
 ---
 
 # Claude Agent SDK bridge
 
-A Responses or Chat request (`/wire/openai`) is never sent to an official
-Anthropic account (`anthropic`, `claude-oauth`, `claude-console-api`) by a
-direct fetch. When routing lands such a request on one, ClankerMux runs real
+Only Claude Code's own requests are sent to an official Anthropic account
+(`anthropic`, `claude-oauth`, `claude-console-api`) by a direct fetch. When
+routing lands any other request on one, ClankerMux runs real
 Claude Code (`@anthropic-ai/claude-agent-sdk`, bundled CLI) for the turn, and
 Claude Code's own model calls come back through ClankerMux's normal Anthropic
 pipeline. The client keeps executing its own tools.
 
 ## Architecture map
 
-- **Floor.** The Responses and Chat adapters mark `denyDirectOfficialAnthropic`
-  in their in-process WeakMap contexts. Ingress turns that into
-  `RequestMeta.officialAnthropicVia = "sdk-bridge"`. No header can set or clear
-  it. `/wire/anthropic` is `"direct"` and never bridged.
+- **Floor.** `officialAnthropicVia` (`official-anthropic-floor.ts`) sets
+  `RequestMeta.officialAnthropicVia` after ingestion, before the
+  continuation lookup and routing, from one read of the key's destinations
+  and `client_profiles.application` (kept on `meta.pin` and
+  `meta.clientApplication`, which routing reuses). `"direct"`: a bridge
+  inner call, internal maintenance, and a `claude-code` key whose request
+  `detectHarness` reads as `claude-code`. `"sdk-bridge"`: everything else,
+  and always a Responses or Chat request (the adapters'
+  `denyDirectOfficialAnthropic` in their in-process WeakMap contexts),
+  whatever its key and user agent. A request with no key that is not
+  internal is floored. `sendAuthorizedRequest`, the last gate before the
+  wire, fails closed: without the bridge's transport it refuses (audited
+  403 `RoutingPolicyError`) a send to an official account unless
+  `officialAnthropicVia` is `"direct"`, so a request that never passed the
+  floor is not sent directly. Tests that dispatch to one directly set
+  `"direct"` themselves; nothing defaults it.
 - **Route construction** (`routing-service.ts`, `resolved-route.ts`) reads
-  `sdkBridge.availability()` once. Unavailable or shutting down: official
-  Anthropic accounts are excluded with the reason. Available: they stay
-  candidates, except when the body carries a field the bridge refuses
-  (`sdkBridgeRefusedField` in `@clankermux/types`, shared with the bridge's
-  own parse). Then they are excluded, and a route left empty by that alone
-  answers the bridge's 400 naming the field.
+  `sdkBridge.availability()` once. A floored request that is not
+  `POST /v1/messages` (`count_tokens`, any other model-bearing path) excludes
+  official Anthropic accounts whatever the availability: the bridge serves
+  Messages turns only. Unavailable or shutting down: they are excluded with
+  the reason. `meta.officialAnthropicExcluded` records the reason only when
+  it excluded an account. Available: they stay candidates, except when the
+  body carries a field the bridge refuses (`sdkBridgeRefusedField` in
+  `@clankermux/types`, shared with the bridge's own parse: `stop_sequences`,
+  a forcing `tool_choice`, a server tool, `output_config.format` next to
+  non-empty `tools` or with a schema over
+  `SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES`). Then they are excluded, and a
+  route left empty by that alone answers the bridge's 400 naming the field.
 - **Outer bridged attempt** (`handlers/sdk-bridge-attempt.ts`, branched in
   `proxyWithAccount` before cache staging and token
   resolution). It runs none of the account machinery: no cooldowns, no
@@ -32,10 +50,32 @@ pipeline. The client keeps executing its own tools.
   Its response is final. Only `SdkBridgeUnavailableError` (bridge
   infrastructure) fails over to the next outer candidate. An inner 429/529
   never relaunches Claude Code on another outer candidate. Its subclass
-  `SdkBridgeCapacityError` (process or rebuild cap) fails over too, and when
-  it was the last failure the give-up terminals answer its 529 and
-  Retry-After instead of their own 503; later official candidates of the same
-  request skip the bridge (`sdk-bridge-capacity.ts`).
+  `SdkBridgeRefusalError` fails over too, and when it was the last failure
+  the give-up terminals answer it instead of their own 503; later official
+  candidates of the same request skip the bridge (`sdk-bridge-refusal.ts`).
+  Two refusals exist: `SdkBridgeCapacityError` (process or rebuild cap, its
+  529 and Retry-After) and `SdkBridgeExtraUsageError` (below).
+- **Out of extra usage.** An inner 400 whose upstream error message says
+  "out of extra usage" (`mapInnerOutcome` marks it `failover`) fails a start
+  leg over while its head is still held: no event sent and not past
+  `headHoldMs`. The query is torn down (turn `failed`, leg 400 `pre_head`)
+  before the leg's response rejects with `SdkBridgeExtraUsageError`. The
+  proxy then skips every remaining bridged account (the rest of the stage,
+  later alias stages, the rest of a pooled route) and goes on with direct
+  destinations; the alias reason is `extra_usage_exhausted`. With none left,
+  the client gets the 400 as `mapInnerOutcome` builds it, with the history
+  header. No account changes. A continuation, a committed head (the first
+  event or the hold timer's ping) and a released park's resume answer the
+  400 themselves, as before; a continuation that had to start afresh answers
+  it through the proxy's continuation path. A give-up (an error result, or
+  an exit without one) waits up to 2 s, once per leg, for the outcomes of
+  the current leg's inner calls that began before it, then 250 ms more for
+  a refusal without a row when none failed. The newest of them by start
+  decides when it failed; when it succeeded, the newest call reported by
+  the give-up does, if it failed. A later report from an older call, a call begun
+  after the give-up, and any call of an earlier leg count toward the turn
+  and decide nothing. A head committed during the wait answers through the
+  stream.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
@@ -55,11 +95,12 @@ pipeline. The client keeps executing its own tools.
   outcome when the stream ends, from what it carried: an `error` event counts
   as its status, a missing `message_stop` as 502. `handleProxy` returns the
   wrapped response, which is the one Claude Code must read.
-- **Continuations bypass routing.** A request whose final user message (the
-  trailing user messages, merged: Chat sends text typed with tool results as
-  a user message after them) holds `tool_result` ids a live query waits on
-  *now* goes straight to that query (`continueParkedSdkBridgeTurn`), before
-  any route is built. The bridge refuses, with one `continue` leg recorded
+- **Continuations bypass routing.** A floored `POST /v1/messages` request
+  whose final user message (the trailing user messages, merged: Chat sends
+  text typed with tool results as a user message after them) holds
+  `tool_result` ids a live query waits on *now* goes straight to that query
+  (`continueParkedSdkBridgeTurn`), before any route is built. Any other path
+  is never looked up: `findContinuation` itself can tear a turn down. The bridge refuses, with one `continue` leg recorded
   each: another key's turn (409), ids that do not name every awaited call
   exactly once, name one it does not wait on, or that an earlier round
   handed out (409 "stale tool results"), shutdown (503). The same holds for
@@ -386,6 +427,51 @@ annotations from URLs in the text was declined on 2026-09-29.
   over their results. It is not the provider's
   `usage.server_tool_use.web_search_requests`, which nothing persists.
 
+## Structured output
+
+`output_config.format` (`{type: "json_schema", schema}`; Chat's
+`response_format` arrives as it) becomes `Options.outputFormat`. Claude Code
+offers the model a `StructuredOutput` tool with the schema, validates its
+input and retries on a mismatch (`MAX_STRUCTURED_OUTPUT_RETRIES`, not set);
+the tool's input is the result's `structured_output`, and the turn ends on
+it with no further model call. `real-claude.integration.test.ts` pins that
+it works with the bridge's own options (`tools: []`, `dontAsk`).
+
+- **Refused.** Next to non-empty `tools`, or with a schema whose JSON is
+  over `SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES` (64 KiB, UTF-8): Agent SDK
+  0.3.280 passes it on the child's argv as `--json-schema <json>`, and Linux
+  caps one argument at 128 KiB (`MAX_ARG_STRLEN`): past that the spawn fails
+  with E2BIG. Both are field policy, so routing excludes the bridge. The cap
+  is separate from the aggregate `maxSchemaBytes`, which counts it with the
+  tool schemas. Also refused on tool results continuing a parked or released
+  turn, whatever their `tools`, and on a side request. Each is a 400 before anything
+  runs, and a parked turn stays parked. A structured turn has no client
+  tools, so it never parks and the resume descriptor has no field for it.
+- **Reply** (`ReplyComposer` with `structuredOutput`). No model block goes
+  out and no model stop ends the leg; the `message_start` is held too, so
+  until `headHoldMs` commits the head a failure keeps its real status. Only
+  the SDK result ends it: `Object.hasOwn(result, "structured_output")` on a
+  success is the answer, falsy values included, sent as one text block of
+  `JSON.stringify(value)` in `text_delta` pieces of `INPUT_JSON_CHUNK` with
+  `stop_reason: "end_turn"`. `legContent()` is that text.
+- **No answer.** A failed inner call and a context overflow answer as for
+  any turn. Otherwise, when the last model call of the turn stopped on
+  `max_tokens` (the composer's `lastStopReason`) or Claude Code reported its
+  `max_output_tokens` assistant error, the turn is the token limit's: 200,
+  no content block, `stop_reason: "max_tokens"` (Chat: `length`, empty
+  content), status `completed`. Anything else (retries exhausted, a
+  refusal, a success without the field, an exit without a result) is 502
+  `structured_output_failed`, an SSE `error` once the head is committed;
+  never prose. Chat answers a mid-stream error as a JSON 502 when the client
+  asked for JSON. Measured on CLI 2.1.280 against the mock upstream: a
+  schema mismatch takes five model calls before the failed result; a
+  StructuredOutput input cut off at `max_tokens` is retried the same way
+  and ends as the token limit's; a complete input in a message that stopped
+  on `max_tokens` is accepted as the answer.
+- **Session.** Claude Code's transcript holds the StructuredOutput call, not
+  the text the client got, so the session is never registered: the next
+  turn rebuilds from the client's history.
+
 ## Claude Code's environment block
 
 The inner listener removes Claude Code's environment block from every
@@ -482,14 +568,24 @@ stops recovering refused thinking on its own.
 
 ## System prompt policies
 
-`system-prompt-policy.ts` picks the policy by harness, once per start turn,
+`system-prompt-policy.ts` picks the policy by harness and the key's
+application (`SdkBridgeTurnMeta.application`), once per start turn,
 and records it as `sdk_bridge_turns.system_prompt_policy` with
 `system_prompt_detail` (JSON, never the prompt text). A policy returns a
 typed outcome and never throws; a refusal goes through `reject()` before
 the conversation claim, so it supersedes no parked turn and leaves a
 `rejected` row with its `pre_head` leg.
 
-- `drop` (every harness but `pi`): the `claude_code` preset alone.
+- `append-v1`: the client's system text (text blocks joined by a blank
+  line) appended to the preset unchanged; detail
+  `{outcome: "appended", bytes}` (UTF-8). Only when `isKnownAgentHarness`
+  (`@clankermux/core`: every application's harness label, and `qwen-code`)
+  is false for the detected harness and the application is `generic` or
+  absent: curl, an SDK, a Go program on a generic key. Owner decision
+  2026-10-16: no known agent harness gets it, whatever its key.
+- `drop` (every other client but `pi`: a known agent harness, or a key
+  declaring an application other than `generic`): the `claude_code` preset
+  alone.
 - `pi-head-v1` (`clientHarness === "pi"`, `pi-prompt.ts`): when the text
   starts with pi's stock preamble followed by `<tools>`, `<rules>` and
   `<docs>`, that head and the blank line after it are removed; everything
@@ -634,7 +730,8 @@ cause changes its 502. Overflow is recognised in one place,
 | Inner 401, other 5xx | 502 `api_error` |
 | A streamed inner `error` event | the status its type stands for (`anthropicErrorStatus`), with its `code`, then as above |
 | `terminal_reason` `prompt_too_long`, `blocking_limit`, `rapid_refill_breaker`; an error assistant message, result text or SDK exception saying "Prompt is too long" | 400 `context_length_exceeded` |
-| `max_output_tokens` assistant error, `error_max_turns`, `error_max_structured_output_retries`, `error_during_execution`, exit without a result | 502 `api_error` |
+| `max_output_tokens` assistant error, `error_max_turns`, `error_during_execution`, exit without a result | 502 `api_error` |
+| A structured turn without an answer (Structured output, above) | 200 `max_tokens` with no content, or 502 `structured_output_failed` |
 
 `blocking_limit` is Claude Code refusing before any model call: with
 `DISABLE_AUTO_COMPACT` it is what an oversized history usually meets, so
@@ -670,7 +767,8 @@ still refused, and stale or partial ones keep their own 409.
   prompt reproducibly draws a 400 "out of extra usage" from subscription
   accounts (gotgenes/pi-packages#883), which is why `pi-head-v1` removes
   pi's head and checks the rest. An "out of extra usage" 400
-  from an inner call reaches the client verbatim and changes no account.
+  from an inner call changes no account, and reaches the client verbatim
+  unless the request fails over (above).
 - **"Failed to authenticate".** The CLI reports any 403 from its base URL that
   way. The inner listener rewrites a ClankerMux 403 to 400 for the child, and
   the bridge never passes the CLI's credential wording to the client

@@ -16,6 +16,7 @@ import { clearAliasAffinity } from "../model-alias-routing";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
 import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
+import { asClaudeCodeClient } from "./fixtures/routing-harness";
 
 const originalFetch = globalThis.fetch;
 const databases: Database[] = [];
@@ -154,7 +155,12 @@ it("exhausts Anthropic then applies OpenRouter's own Messages endpoint and authe
 			: messageSuccess(backupModel),
 	);
 	const req = messagesRequest();
-	const response = await handleProxy(req, new URL(req.url), ctx);
+	const response = await handleProxy(
+		req,
+		new URL(req.url),
+		ctx,
+		asClaudeCodeClient(ctx, req),
+	);
 	expect(response.status).toBe(200);
 	expect(await response.json()).toMatchObject({
 		model: backupModel,
@@ -198,6 +204,7 @@ it.each([
 			: messageSuccess(backupModel),
 	);
 	const req = messagesRequest();
+	asClaudeCodeClient(ctx, req);
 	const response = await handleProxy(
 		req,
 		new URL(req.url),
@@ -216,6 +223,7 @@ it.each([
 		}),
 	});
 	const second = messagesRequest();
+	asClaudeCodeClient(ctx, second);
 	await (
 		await handleProxy(second, new URL(second.url), ctx, "account-pinned-client")
 	).text();
@@ -310,6 +318,7 @@ it("skips an excluded primary provider and uses an allowed alias target", async 
 	});
 	const sent = mockUpstreams(() => messageSuccess(backupModel));
 	const req = messagesRequest();
+	asClaudeCodeClient(ctx, req);
 	const response = await handleProxy(
 		req,
 		new URL(req.url),

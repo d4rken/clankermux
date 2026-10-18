@@ -60,6 +60,7 @@ import {
 	type RateLimitReason,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
+	SdkBridgeExtraUsageError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	transferChatContext,
 } from "@clankermux/types";
@@ -123,8 +124,9 @@ import {
 } from "../routing-response-audit";
 import {
 	noteAttemptStarted,
-	noteSdkBridgeCapacity,
-} from "../sdk-bridge-capacity";
+	noteSdkBridgeRefusal,
+	sdkBridgeRefusalLabel,
+} from "../sdk-bridge-refusal";
 import { dispatchObservationSource } from "../should-record-request";
 import { getRoutingAffinity } from "./account-selector";
 import {
@@ -324,6 +326,11 @@ export type ProxyAttemptOutcome =
 	 * shutting down since the route was built). Nothing reached the account.
 	 */
 	| { kind: "sdk_bridge_unavailable" }
+	/**
+	 * Anthropic answered the bridged turn "out of extra usage" before anything
+	 * reached the client; the request skips every other bridged account.
+	 */
+	| { kind: "sdk_bridge_extra_usage" }
 	| { kind: "other" };
 
 /**
@@ -1479,16 +1486,17 @@ export async function proxyWithAccount(
 			});
 			if (bridged.kind === "response") return bridged.response;
 			// Answered by the give-up terminal if no later candidate serves.
-			if (bridged.capacity)
-				noteSdkBridgeCapacity(requestMeta, bridged.capacity);
+			if (bridged.refusal) noteSdkBridgeRefusal(requestMeta, bridged.refusal);
 			log.info(
 				`SDK bridge cannot serve ${account.name} (${bridged.reason}) — failing over`,
 			);
 			return await fail(
-				{ kind: "sdk_bridge_unavailable" },
+				bridged.refusal instanceof SdkBridgeExtraUsageError
+					? { kind: "sdk_bridge_extra_usage" }
+					: { kind: "sdk_bridge_unavailable" },
 				null,
 				undefined,
-				`${bridged.capacity ? "sdk_bridge_capacity" : "sdk_bridge_unavailable"}: ${bridged.reason}`,
+				`${bridged.refusal ? sdkBridgeRefusalLabel(bridged.refusal) : "sdk_bridge_unavailable"}: ${bridged.reason}`,
 			);
 		}
 
@@ -3602,7 +3610,7 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
  * @param requestModel     The Anthropic-side model name from the request
  * @param officialAnthropicExcluded Whether the floor for non-Claude-Code
  *   clients barred official Anthropic accounts from this request (the SDK
- *   bridge was unavailable). It decides WHY nothing else stepped
+ *   bridge could not serve it). It decides WHY nothing else stepped
  *   in: with the floor active they were never candidates, so reporting them as
  *   rate-limited or paused describes a condition nobody checked — and is
  *   routinely false, since the floor applies to healthy accounts too. The
@@ -3648,7 +3656,7 @@ export function createContextWindowExceededResponse(
 	// claiming they are the larger-context option would be false here.
 	const largerContextReason = officialAnthropicExcluded
 		? `Official Anthropic accounts serve this client only through the SDK ` +
-			`bridge, which is unavailable, so they were not considered.`
+			`bridge, which cannot serve this request, so they were not considered.`
 		: `Larger-context accounts are currently unavailable (rate-limited or paused).`;
 
 	const message =

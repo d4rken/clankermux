@@ -75,7 +75,7 @@ function claudeCode(gw: Gateway, model: string) {
 	return fetch(`${gw.url}/wire/anthropic/v1/messages?beta=true`, {
 		method: "POST",
 		headers: {
-			"x-api-key": gw.apiKey,
+			"x-api-key": gw.claudeCodeApiKey,
 			"content-type": "application/json",
 			"anthropic-version": "2023-06-01",
 			"user-agent": "claude-cli/2.1.280 (external, cli)",

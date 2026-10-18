@@ -165,6 +165,27 @@ describe("query options", () => {
 		);
 	});
 
+	it("passes the client's output format, and none without one", () => {
+		const outputFormat = {
+			type: "json_schema" as const,
+			schema: { type: "object", properties: { a: { type: "string" } } },
+		};
+		const options = buildQueryOptions({
+			...base,
+			toolNames: [],
+			toolServer: null,
+			outputFormat,
+		});
+		expect(options.outputFormat).toEqual(outputFormat);
+		expect(options.tools).toEqual([]);
+		expect(options.allowedTools).toEqual([]);
+		expect(options.permissionMode).toBe("dontAsk");
+		expect(buildQueryOptions(base)).not.toHaveProperty("outputFormat");
+		expect(
+			buildQueryOptions({ ...base, outputFormat: null }),
+		).not.toHaveProperty("outputFormat");
+	});
+
 	it("gives no MCP server to a turn without tools", () => {
 		const options = buildQueryOptions({
 			...base,

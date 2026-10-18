@@ -777,14 +777,15 @@ export async function resolveZeroAccountsOutcome(
 	if (req.signal.aborted) return createClientAbortResponse();
 
 	// A pin, or the floor that excluded official Anthropic accounts because the
-	// SDK bridge was unavailable, was active but post-selection gates removed
-	// every allowed candidate (and no more-specific terminal above applied).
-	// Return the pinned terminal rather than a generic pool_exhausted that
-	// reports the wrong (provider-default) accounts — and never silently fall
-	// through to other handling. With the bridge available the floor excludes
-	// nothing, so pool_exhausted describes the right accounts.
+	// SDK bridge could not serve the request, was active but post-selection
+	// gates removed every allowed candidate (and no more-specific terminal
+	// above applied). Return the pinned terminal rather than a generic
+	// pool_exhausted that reports the wrong (provider-default) accounts — and
+	// never silently fall through to other handling. When the bridge serves
+	// the request the floor excludes nothing, so pool_exhausted describes the
+	// right accounts.
 	if (
-		(requestMeta.pin || requestMeta.officialAnthropicExcluded) &&
+		(isPinActive(requestMeta.pin) || requestMeta.officialAnthropicExcluded) &&
 		!requestMeta.pinFailure
 	) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(

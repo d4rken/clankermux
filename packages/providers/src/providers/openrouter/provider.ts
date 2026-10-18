@@ -38,13 +38,24 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 			return request;
 		}
 		const chat = getChatContext(request);
-		if (chat) {
-			if (body.max_tokens === undefined) {
+		if (chat && (body.max_tokens === undefined || chat.structuredOutput)) {
+			if (body.max_tokens === undefined)
 				body.max_tokens = chat.defaultMaxTokens;
-				const headers = new Headers(request.headers);
-				headers.delete("content-length");
-				request = new Request(request, { headers, body: JSON.stringify(body) });
+			// Without it OpenRouter may pick a provider that ignores the schema.
+			if (chat.structuredOutput) {
+				const preferences = body.provider;
+				body.provider = {
+					...(preferences &&
+					typeof preferences === "object" &&
+					!Array.isArray(preferences)
+						? preferences
+						: {}),
+					require_parameters: true,
+				};
 			}
+			const headers = new Headers(request.headers);
+			headers.delete("content-length");
+			request = new Request(request, { headers, body: JSON.stringify(body) });
 		}
 		if (
 			typeof body?.model !== "string" ||

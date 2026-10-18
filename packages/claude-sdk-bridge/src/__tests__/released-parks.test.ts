@@ -159,6 +159,7 @@ async function parkTurn(
 	opts: {
 		ids?: string[];
 		meta?: Partial<SdkBridgeTurnMeta>;
+		system?: string;
 		/** false: none; "first": only the envelopes up to the first call. */
 		envelopes?: boolean | "first";
 	} = {},
@@ -167,7 +168,11 @@ async function parkTurn(
 	const plan = makePlan();
 	const meta = makeMeta(opts.meta);
 	const response = h.bridge.startTurn({
-		request: messagesRequest({ tools: [READ_TOOL], messages: [first] }),
+		request: messagesRequest({
+			tools: [READ_TOOL],
+			messages: [first],
+			...(opts.system === undefined ? {} : { system: opts.system }),
+		}),
 		plan,
 		meta,
 		signal: new AbortController().signal,
@@ -455,6 +460,32 @@ describe("resuming a released park", () => {
 		).toBeNull();
 	});
 
+	it("resumes with the system prompt the turn appended", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, {
+			system: "Answer in German.",
+			meta: {
+				application: null,
+				clientHarness: "curl",
+				clientUserAgent: "curl/8.5.0",
+			},
+		});
+		expect(p.query.options.systemPrompt).toMatchObject({
+			append: "Answer in German.",
+		});
+		await released(h, p);
+		const response = answer(h, p, results(p));
+		const q2 = await h.sdk.next();
+		expect(q2.options.resume).toBeString();
+		expect(q2.options.systemPrompt).toEqual({
+			type: "preset",
+			preset: "claude_code",
+			append: "Answer in German.",
+			snapshot: false,
+		});
+		await finishResumed(h, q2, response);
+	});
+
 	it("logs the resumed turn once, as resumed from a release, with its first call's cache use", async () => {
 		const log = capturingLog();
 		const h = await releaseHarness({ log });
@@ -544,6 +575,32 @@ describe("resuming a released park", () => {
 		]) {
 			const r = await reply(answer(h, p, results(p, ids)));
 			expect(r.status).toBe(409);
+		}
+		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
+		expect(h.sdk.queries.length).toBe(1);
+	});
+
+	it("refuses results asking for a structured answer, with or without tools, and keeps the park", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		for (const tools of [[], [READ_TOOL]]) {
+			const r = await reply(
+				h.bridge.continueTurn({
+					turnId: p.turnId,
+					request: messagesRequest({
+						tools,
+						messages: results(p),
+						output_config: {
+							format: { type: "json_schema", schema: { type: "object" } },
+						},
+					}),
+					meta: makeMeta(),
+					signal: new AbortController().signal,
+				}),
+			);
+			expect(r.status).toBe(400);
+			expect(JSON.stringify(r.body)).toContain("output_config.format");
 		}
 		expect(h.parkRepo.parks.get(p.turnId)?.state).toBe("released");
 		expect(h.sdk.queries.length).toBe(1);

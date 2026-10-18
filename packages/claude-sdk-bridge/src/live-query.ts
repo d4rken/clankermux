@@ -72,6 +72,8 @@ const TEARDOWN_STATUS: Record<TeardownReason, SdkBridgeTurnStatus> = {
 
 /** How long an error `result` waits for the proxy's report of the failed call. */
 const OUTCOME_GRACE_MS = 250;
+/** How long a give-up waits for the reports of calls whose rows began. */
+const OUTCOME_WAIT_MS = 2_000;
 /** SIGTERM to SIGKILL, for a child that ignores the polite signal. */
 const KILL_GRACE_MS = 2_000;
 /** From a prompt message's read to the tool results that must follow it. */
@@ -190,12 +192,28 @@ export interface LiveQueryInit {
 	sideRequest?: boolean;
 	/** The client's hosted web search must complete before the reply may end. */
 	webSearchRequired?: boolean;
+	/**
+	 * The client asked for `output_config.format`: Claude Code's result, not
+	 * a model stop, ends the reply, with its structured output as the answer.
+	 */
+	structuredOutput?: boolean;
 	/** The session will never be resumed; its transcript can go. */
 	discardSession: (sessionId: string) => void;
 	/** Claude Code's own copy of the session, which nothing resumes from. */
 	discardClaudeCodeTranscripts: (sessionId: string) => void;
 	onPeakRss: (bytes: number) => void;
 	onClosed: (live: LiveQuery) => void;
+}
+
+/** One of Claude Code's model calls, as the leg it belongs to sees it. */
+interface InnerCall {
+	/** Absent for a refusal before dispatch, which has no row. */
+	readonly requestId: string | null;
+	/** Its place among the query's calls, by start (or, unseen, by report). */
+	readonly ordinal: number;
+	/** Started after Claude Code gave up on the leg: never its cause. */
+	readonly afterGiveUp: boolean;
+	outcome: SdkBridgeInnerOutcome | null;
 }
 
 /**
@@ -255,12 +273,22 @@ export class LiveQuery {
 		this.deferredFinish = null;
 	}
 	private clientMessages: ClientMessage[];
-	private lastOutcome: SdkBridgeInnerOutcome | null = null;
-	private outcomeSeq = 0;
+	private callOrdinal = 0;
+	/** Counts legs, so that work begun for one never settles a later one. */
+	private legGeneration = 0;
+	/** The current leg's inner calls; an earlier leg's never decide it. */
+	private legCalls: InnerCall[] = [];
+	/** The current leg's give-up, settled once whoever waits on it. */
+	private giveUpResolution: { generation: number; done: Promise<void> } | null =
+		null;
 	private decisive: SdkBridgeInnerOutcome | null = null;
 	private gaveUp = false;
 	private claudeCodeErrorText: string | null = null;
 	private claudeCodeCause: ClaudeCodeFailureCause | null = null;
+	/** The `error` of the last error assistant message Claude Code reported. */
+	private assistantError: string | null = null;
+	/** Why a structured turn's result carried no answer. */
+	private structuredMiss: string | null = null;
 	private resultSeen = false;
 	private resultOk = false;
 	/** A side request's reply is settled; nothing Claude Code does after counts. */
@@ -432,11 +460,15 @@ export class LiveQuery {
 		this.toolUsesThisLeg = 0;
 		// A failure answers the leg it happens in; an earlier leg's inner
 		// outcome or wording must not decide it.
-		this.lastOutcome = null;
+		this.legGeneration++;
+		this.legCalls = [];
+		this.giveUpResolution = null;
 		this.decisive = null;
 		this.gaveUp = false;
 		this.claudeCodeErrorText = null;
 		this.claudeCodeCause = null;
+		this.assistantError = null;
+		this.structuredMiss = null;
 		this.init.composer.attach((event) => leg.response.send(event));
 		this.armIdle();
 	}
@@ -469,31 +501,71 @@ export class LiveQuery {
 	private noteGiveUp(): void {
 		if (this.gaveUp) return;
 		this.gaveUp = true;
-		this.decisive =
-			this.lastOutcome && this.lastOutcome.status >= 400
-				? this.lastOutcome
-				: null;
+		this.decisive = this.newestFailure(null);
+	}
+
+	/**
+	 * The failed outcome of the newest reported call Claude Code could have
+	 * given up on, or `fallback` when that call succeeded. Calls by start:
+	 *
+	 *   1 failed, 2 failed                → 2
+	 *   1 failed, 2 succeeded             → fallback
+	 *   1 failed late, 2 failed before it → 2 (arriving last decides nothing)
+	 */
+	private newestFailure(
+		fallback: SdkBridgeInnerOutcome | null,
+	): SdkBridgeInnerOutcome | null {
+		let newest: InnerCall | null = null;
+		for (const call of this.legCalls)
+			if (
+				call.outcome &&
+				!call.afterGiveUp &&
+				(!newest || call.ordinal > newest.ordinal)
+			)
+				newest = call;
+		return newest?.outcome && newest.outcome.status >= 400
+			? newest.outcome
+			: fallback;
 	}
 
 	/** An inner call's `requests` row began: that is what `inner_call_count` counts. */
 	onInnerRequestStarted(requestId: string): void {
 		if (!requestId || this.innerRequestsStarted.has(requestId)) return;
 		this.innerRequestsStarted.add(requestId);
+		this.legCalls.push({
+			requestId,
+			ordinal: ++this.callOrdinal,
+			afterGiveUp: this.gaveUp,
+			outcome: null,
+		});
 		void this.init.recorder.bump({ innerCalls: 1 });
 	}
 
 	/**
 	 * How an inner call ended. A refusal before dispatch has no request id and
-	 * no row, so it counts as an error only.
+	 * no row, so it counts as an error only. A call an earlier leg started
+	 * still counts, and decides nothing here.
 	 */
 	onInnerOutcome(outcome: SdkBridgeInnerOutcome): void {
 		if (outcome.requestId) {
 			if (this.innerOutcomesSeen.has(outcome.requestId)) return;
 			this.innerOutcomesSeen.add(outcome.requestId);
 		}
-		this.lastOutcome = outcome;
-		this.outcomeSeq++;
 		if (outcome.status >= 400) void this.init.recorder.bump({ innerErrors: 1 });
+		const call = outcome.requestId
+			? this.legCalls.find((c) => c.requestId === outcome.requestId)
+			: undefined;
+		if (call) call.outcome = outcome;
+		else if (
+			!outcome.requestId ||
+			!this.innerRequestsStarted.has(outcome.requestId)
+		)
+			this.legCalls.push({
+				requestId: outcome.requestId || null,
+				ordinal: ++this.callOrdinal,
+				afterGiveUp: false,
+				outcome,
+			});
 	}
 
 	/**
@@ -734,7 +806,11 @@ export class LiveQuery {
 			return;
 		}
 		this.state = "finishing";
-		this.register([...this.clientMessages, { role: "assistant", content }]);
+		// A structured turn's session holds Claude Code's StructuredOutput call,
+		// not the text the client got: its next turn rebuilds from the client's
+		// history.
+		if (!this.init.structuredOutput)
+			this.register([...this.clientMessages, { role: "assistant", content }]);
 		// Calls in a reply that did not end on them (a refusal after a
 		// tool_use, withheld with its message) are never answered by the
 		// client: the session holds a call and maybe a result the client
@@ -1094,6 +1170,7 @@ export class LiveQuery {
 					});
 				if (message.error) {
 					this.noteGiveUp();
+					this.assistantError = message.error;
 					const text = textOf(message.message.content as unknown as Block[]);
 					this.claudeCodeErrorText = text;
 					if (isContextOverflow({ text }))
@@ -1186,6 +1263,10 @@ export class LiveQuery {
 			this.resultOk = this.finalError === null;
 			return;
 		}
+		if (this.init.structuredOutput) {
+			this.onStructuredResult(message);
+			return;
+		}
 		const failed = message.is_error || message.subtype !== "success";
 		// A refusal reached the client as its reply; the error result that
 		// follows it is Claude Code declining to go on, not a failed turn.
@@ -1202,22 +1283,125 @@ export class LiveQuery {
 		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
 		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
 			this.claudeCodeCause ??= "context_overflow";
-		void this.failAfterGrace();
+		void this.resolveGiveUp();
 	}
 
 	/**
-	 * The proxy reports a failed call's body after handing the response back,
-	 * so a give-up can overtake its report; wait briefly for it.
+	 * A structured turn ends on its result alone: its structured output is
+	 * the answer, even a falsy one (0, false, null, ""). Anything else is a
+	 * miss, which {@link giveUp} answers once the inner outcomes are in.
 	 */
-	private async failAfterGrace(): Promise<void> {
-		if (!this.decisive) {
-			const seq = this.outcomeSeq;
-			const until = Date.now() + OUTCOME_GRACE_MS;
-			while (this.outcomeSeq === seq && Date.now() < until) await Bun.sleep(10);
-			if (this.lastOutcome && this.lastOutcome.status >= 400)
-				this.decisive = this.lastOutcome;
+	private onStructuredResult(
+		message: Extract<SDKMessage, { type: "result" }>,
+	): void {
+		const failed = message.is_error || message.subtype !== "success";
+		const value = (message as { structured_output?: unknown })
+			.structured_output;
+		if (
+			!failed &&
+			Object.hasOwn(message, "structured_output") &&
+			JSON.stringify(value) !== undefined
+		) {
+			this.resultOk = true;
+			if (this.leg && this.init.composer.structuredAnswer(value))
+				this.endLeg("end_turn");
+			return;
 		}
-		this.failTurn(this.claudeCodeFailure());
+		this.noteGiveUp();
+		const text =
+			message.subtype === "success"
+				? message.result
+				: (message.errors ?? []).join("; ") || message.subtype;
+		this.claudeCodeErrorText = this.claudeCodeErrorText ?? text;
+		if (isContextOverflow({ text, terminalReason: message.terminal_reason }))
+			this.claudeCodeCause ??= "context_overflow";
+		this.structuredMiss =
+			message.subtype === "error_max_structured_output_retries" ||
+			message.terminal_reason === "structured_output_retry_exhausted"
+				? "the model's answers did not match it within Claude Code's retries"
+				: this.init.composer.lastStopReason === "refusal"
+					? "the model refused to answer"
+					: !failed
+						? "Claude Code finished the turn without a structured answer"
+						: `Claude Code ended the turn with an error: ${sanitizeMessage(text)}`;
+		void this.resolveGiveUp();
+	}
+
+	/**
+	 * A structured turn's miss is the token limit's when the last model call
+	 * of the turn stopped on `max_tokens`, or Claude Code gave up with its
+	 * `max_output_tokens` error: whatever it did after that (retries that
+	 * ran out, a result without the answer) followed from the cut.
+	 */
+	private missedOnTokenLimit(): boolean {
+		return (
+			this.init.composer.lastStopReason === "max_tokens" ||
+			this.assistantError === "max_output_tokens"
+		);
+	}
+
+	/**
+	 * End a turn Claude Code gave up on. A failed inner call or a context
+	 * overflow answers as for any turn. A structured turn's other misses
+	 * never answer in prose: one cut by the token limit ends with no
+	 * content and `max_tokens`, anything else is `structured_output_failed`.
+	 */
+	private giveUp(fallbackText: string | null = null): void {
+		if (
+			!this.init.structuredOutput ||
+			this.decisive ||
+			this.claudeCodeCause !== null
+		) {
+			this.failTurn(this.claudeCodeFailure(fallbackText));
+			return;
+		}
+		if (this.resultSeen && this.missedOnTokenLimit()) {
+			this.resultOk = true;
+			this.endLeg("max_tokens");
+			return;
+		}
+		this.failTurn(
+			bridgeErrors.structuredOutputFailed(
+				this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
+			),
+		);
+	}
+
+	/**
+	 * End the current leg's give-up once its inner outcomes are in. The proxy
+	 * reports a call after handing its response back, so a give-up can
+	 * overtake the report of the call it gave up on. One task per leg, which
+	 * the result and the process's exit both wait on; a task outlived by its
+	 * leg settles nothing.
+	 */
+	private resolveGiveUp(fallbackText: string | null = null): Promise<void> {
+		const generation = this.legGeneration;
+		if (this.giveUpResolution?.generation === generation)
+			return this.giveUpResolution.done;
+		const done = (async () => {
+			const until = Date.now() + OUTCOME_WAIT_MS;
+			while (this.unreportedInnerCalls() && Date.now() < until)
+				await Bun.sleep(10);
+			let decisive = this.newestFailure(this.decisive);
+			if (!decisive) {
+				// A refusal before dispatch, or a call whose row never began,
+				// reports with nothing to wait for.
+				const graceUntil = Date.now() + OUTCOME_GRACE_MS;
+				while (!decisive && Date.now() < graceUntil) {
+					await Bun.sleep(10);
+					decisive = this.newestFailure(this.decisive);
+				}
+			}
+			if (this.legGeneration !== generation || this.state === "closed") return;
+			this.decisive = decisive;
+			this.giveUp(fallbackText);
+		})();
+		this.giveUpResolution = { generation, done };
+		return done;
+	}
+
+	private unreportedInnerCalls(): boolean {
+		return this.legCalls.some((call) => !call.afterGiveUp && !call.outcome);
 	}
 
 	private claudeCodeFailure(fallbackText: string | null = null): BridgeError {
@@ -1228,6 +1412,18 @@ export class LiveQuery {
 	}
 
 	private failTurn(error: BridgeError): void {
+		// Only a start leg: a continuation's turn lives in this query alone.
+		if (
+			error.failover &&
+			this.leg?.kind === "start" &&
+			!this.leg.response.committed
+		) {
+			this.init.log.info(
+				`SDK bridge turn ${this.turnId}: ${error.failover} before the head; the attempt fails over`,
+			);
+			this.teardown("error", error);
+			return;
+		}
 		this.finalError = error;
 		this.deliveredOk = false;
 		const leg = this.leg;
@@ -1301,15 +1497,16 @@ export class LiveQuery {
 			return;
 		}
 		if (!this.resultSeen) {
+			const fallbackText = "Claude Code exited without a result";
 			this.noteGiveUp();
-			this.failTurn(
-				this.claudeCodeFailure("Claude Code exited without a result"),
-			);
-		} else if (!this.resultOk) {
-			// failAfterGrace may still be waiting on the proxy's report.
-			const until = Date.now() + OUTCOME_GRACE_MS + 50;
-			while (this.leg && Date.now() < until) await Bun.sleep(10);
-			if (this.leg) this.failTurn(this.claudeCodeFailure());
+			if (!this.leg) this.giveUp(fallbackText);
+			else {
+				await this.resolveGiveUp(fallbackText);
+				if (this.leg) this.giveUp(fallbackText);
+			}
+		} else if (!this.resultOk && this.leg) {
+			await this.resolveGiveUp();
+			if (this.leg) this.giveUp();
 		}
 		this.samplePeakRss();
 		this.close(this.resultOk ? "completed" : "failed", this.resultOk);
@@ -1348,8 +1545,10 @@ export class LiveQuery {
 		const leg = this.leg;
 		if (leg) {
 			const committed = leg.response.committed;
-			// A no-op for a client that is already gone.
-			leg.response.fail(error);
+			// A no-op for a client that is already gone. A start leg's failover
+			// rejects only once this teardown has closed the query.
+			if (leg.kind !== "start" || !leg.response.failOver(error))
+				leg.response.fail(error);
 			this.finishLeg(leg, { httpStatus: error.status, error, committed });
 			this.leg = null;
 		}

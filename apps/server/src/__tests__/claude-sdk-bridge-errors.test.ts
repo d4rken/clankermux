@@ -27,7 +27,11 @@ import {
 	relay,
 	startStreaming,
 } from "./fixtures/scripted-claude-code";
-import { type Gateway, startGateway } from "./fixtures/sdk-bridge-gateway";
+import {
+	type Gateway,
+	type GatewayAccount,
+	startGateway,
+} from "./fixtures/sdk-bridge-gateway";
 
 const MODEL = "claude-sonnet-5";
 const OTHER_MODEL = "claude-opus-5";
@@ -79,6 +83,7 @@ afterEach(async () => {
 
 async function harness(
 	limits: Partial<SdkBridgeLimits> = {},
+	gatewayAccounts: GatewayAccount[] = accounts(),
 ): Promise<Harness> {
 	// A 529 opens the process-wide provider breaker; no case may inherit one.
 	clearProviderOverloadCooldown();
@@ -87,7 +92,7 @@ async function harness(
 	const gw = await startGateway({
 		root,
 		upstreamUrl: mock.url,
-		accounts: accounts(),
+		accounts: gatewayAccounts,
 		models: [MODEL, OTHER_MODEL],
 		bridge: {
 			queryFn: sdk.fn,
@@ -807,3 +812,62 @@ for (const endpoint of ["responses", "chat"] as const) {
 			});
 	});
 }
+
+describe("an inner 400 out of extra usage at /wire/openai responses", () => {
+	it("before the head: a non-bridged account serves the request instead, accounts unchanged", async () => {
+		const endpoint = "responses";
+		const official = accounts();
+		const direct: GatewayAccount = {
+			id: `acct-c-${crypto.randomUUID().slice(0, 8)}`,
+			name: "compatible",
+			token: `sk-compatible-${crypto.randomUUID().slice(0, 8)}`,
+			provider: "anthropic-compatible",
+		};
+		const h = await harness({}, [...official, direct]);
+		const from = mock.requests.length;
+		mock.failNext(
+			400,
+			{
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "You're out of extra usage.",
+				},
+			},
+			{},
+			10,
+			"sk-ant-oat01-",
+		);
+		const seen = await turn(h, endpoint);
+
+		expect(seen.status).toBe(200);
+		expect(seen.text).not.toContain("out of extra usage");
+		const calls = mock.requests
+			.slice(from)
+			.filter((r) => r.path.startsWith("/v1/messages"));
+		// One bridged call, refused; the other official account is skipped.
+		expect(
+			calls.map((r) =>
+				r.headers["x-api-key"] === direct.token
+					? "direct"
+					: r.headers.authorization?.includes(official[0]?.token ?? "?")
+						? "official-a"
+						: "other",
+			),
+		).toEqual(["official-a", "direct"]);
+		const [turnRow] = await h.gw.query<{
+			status: string;
+			http_status: number;
+		}>("SELECT status, http_status FROM sdk_bridge_turns");
+		expect(turnRow).toEqual({ status: "failed", http_status: 400 });
+		expect(
+			await h.gw.query(
+				"SELECT paused, rate_limited_until FROM accounts ORDER BY priority",
+			),
+		).toEqual([
+			{ paused: 0, rate_limited_until: null },
+			{ paused: 0, rate_limited_until: null },
+			{ paused: 0, rate_limited_until: null },
+		]);
+	});
+});
