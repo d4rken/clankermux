@@ -367,6 +367,34 @@ describe("AsyncDbWriter", () => {
 		expect(after.payloadCommitted).toBe(1);
 	});
 
+	test("compressed transport releases raw reservations without losing original-byte accounting", async () => {
+		const harness = makeWriter();
+		writer = harness.writer;
+		const json = JSON.stringify({ history: "message ".repeat(20_000) });
+		const rawBytes = Buffer.byteLength(json);
+		const reservation = writer.reservePayload(rawBytes);
+		if (!reservation) throw new Error("expected a reservation");
+		expect(writer.getHealth().payloadBytesPending).toBe(rawBytes);
+		const stored = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;
+		expect(
+			writer.enqueuePayload(reservation, {
+				requestId: "compressed",
+				ciphertext: stored,
+				timestamp: Date.now(),
+				payloadBytes: rawBytes,
+			}),
+		).toBe(true);
+		expect(writer.getHealth().payloadBytesPending).toBe(
+			Buffer.byteLength(stored),
+		);
+		expect(writer.getHealth().payloadInFlightOriginalBytes).toBe(rawBytes);
+		expect(harness.fake().published[0].payloadBytes).toBe(rawBytes);
+		harness.fake().settle(0, "committed");
+		expect(writer.getHealth().payloadBytesPending).toBe(0);
+		expect(writer.getHealth().payloadInFlightOriginalBytes).toBe(0);
+		expect(writer.reservePayload(MAX_PAYLOAD_ENTRY_BYTES + 1)).toBeNull();
+	});
+
 	test("a second publish on the same reservation is rejected", () => {
 		const harness = makeWriter();
 		writer = harness.writer;

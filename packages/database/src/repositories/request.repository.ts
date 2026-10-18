@@ -12,7 +12,7 @@ import type {
 import { type CostSource, resolveCostSource } from "@clankermux/types";
 import {
 	decodePayloadFromStorage,
-	encryptPayload,
+	encodePayloadForStorage,
 } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 import {
@@ -783,10 +783,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	// This repository has NO request_payloads write path: every payload row is
 	// inserted by the off-thread payload-write worker (see
 	// payload-write-worker.ts), which owns its own SQLite connection. The main
-	// thread only produces the STORED FORM of the payload here — encryption is
-	// Web Crypto and therefore async, and the worker needs no key.
+	// thread only produces the STORED FORM here. Native zstd and crypto work
+	// runs asynchronously; UTF-8/base64 conversion stays here. The writer needs no key.
 	async encryptPayloadForStorage(json: string): Promise<string> {
-		return encryptPayload(json);
+		return encodePayloadForStorage(json);
 	}
 
 	async getPayload(id: string): Promise<unknown | null> {

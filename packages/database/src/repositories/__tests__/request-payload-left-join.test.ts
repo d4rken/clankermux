@@ -110,6 +110,17 @@ describe("RequestRepository.listPayloadsWithAccountNames", () => {
 		expect(results[0].json).not.toBeNull();
 	});
 
+	it("encodes the production writer's stored form with compression", async () => {
+		const json = JSON.stringify({
+			history: "repeated message ".repeat(10_000),
+		});
+		const stored = await repo.encryptPayloadForStorage(json);
+		expect(Buffer.byteLength(stored)).toBeLessThan(Buffer.byteLength(json));
+		insertRequestWithPayload(db, "encoded", Date.now(), stored);
+		expect(await repo.getPayload("encoded")).toEqual(JSON.parse(json));
+		expect((await repo.listPayloads())[0].json).toBe(json);
+	});
+
 	it("decodes compressed rows in single and both list readers", async () => {
 		const json = JSON.stringify({ messages: ["history ".repeat(1000)] });
 		const stored = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;

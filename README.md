@@ -232,12 +232,18 @@ block holding the JSON.
 
 ### Stored payload compatibility
 
-Version 2026.10.2 adds support for reading zstd-compressed payloads, including
-payloads compressed before encryption. It still writes the previous format and
-can serve as a rollback target for releases that enable compression. Once
-compressed rows have been written, do not roll back to a version older than
-2026.10.2: those versions cannot read them. Existing plaintext and encrypted
-rows remain readable without a migration.
+From 2026.10.3, new stored payloads use zstd compression before optional
+encryption. Payloads below 512 bytes or that would grow are stored uncompressed.
+Native zstd work runs off the JavaScript thread; UTF-8/base64 conversions do not.
+Storage and retention byte counts measure the stored size; admission still
+reserves the uncompressed payload.
+Existing rows are not rewritten, and the database file does not shrink
+immediately.
+
+Version 2026.10.2 reads compressed payloads but writes the previous format,
+so it is a compatible rollback target. Once compressed rows have been written,
+do not roll back to an older version: it cannot read them. Existing plaintext
+and encrypted rows remain readable without a migration.
 
 ## Project notes
 

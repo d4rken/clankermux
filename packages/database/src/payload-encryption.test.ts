@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { randomBytes } from "node:crypto";
 
 // We deliberately re-import the module fresh per test so module-level state
 // (encryptionKey, initPromise) doesn't leak between cases. The dynamic import
@@ -166,6 +167,85 @@ describe("payload encryption", () => {
 		await expect(dec.decodePayloadFromStorage(stored)).rejects.toThrow(
 			"not configured",
 		);
+	});
+
+	for (const encrypted of [false, true]) {
+		it(`compresses before optional encryption (encrypted=${encrypted})`, async () => {
+			if (encrypted) process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+			const mod = await loadFreshModule();
+			const json = JSON.stringify({
+				history: "日本語 message ".repeat(10_000),
+			});
+			const stored = await mod.encodePayloadForStorage(json);
+			expect(stored.startsWith(encrypted ? "enc:" : "zst:")).toBe(true);
+			expect((await mod.decryptPayload(stored)).startsWith("zst:")).toBe(true);
+			expect(Buffer.byteLength(stored)).toBeLessThan(Buffer.byteLength(json));
+			expect(await mod.decodePayloadFromStorage(stored)).toBe(json);
+		});
+	}
+
+	it("skips payloads below 512 UTF-8 bytes without calling zstd", async () => {
+		const mod = await loadFreshModule();
+		const compress = spyOn(Bun, "zstdCompress");
+		try {
+			const json = JSON.stringify("x".repeat(509));
+			expect(Buffer.byteLength(json)).toBe(511);
+			expect(await mod.encodePayloadForStorage(json)).toBe(json);
+			expect(compress).not.toHaveBeenCalled();
+		} finally {
+			compress.mockRestore();
+		}
+	});
+
+	it("uses UTF-8 bytes, not string length, for the compression threshold", async () => {
+		const mod = await loadFreshModule();
+		const json = JSON.stringify("語".repeat(200));
+		expect(json.length).toBeLessThan(512);
+		expect(Buffer.byteLength(json)).toBeGreaterThan(512);
+		expect((await mod.encodePayloadForStorage(json)).startsWith("zst:")).toBe(
+			true,
+		);
+	});
+
+	it("keeps incompressible data when the encoded format would be larger", async () => {
+		const mod = await loadFreshModule();
+		const json = JSON.stringify({ noise: randomBytes(384).toString("base64") });
+		const candidate = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;
+		expect(candidate.length).toBeGreaterThanOrEqual(Buffer.byteLength(json));
+		expect(await mod.encodePayloadForStorage(json)).toBe(json);
+	});
+
+	it("falls back to uncompressed encryption if compression fails", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const mod = await loadFreshModule();
+		const compress = spyOn(Bun, "zstdCompress").mockRejectedValue(
+			new Error("compression unavailable"),
+		);
+		try {
+			const json = JSON.stringify({ text: "x".repeat(2000) });
+			const stored = await mod.encodePayloadForStorage(json);
+			expect(stored.startsWith("enc:")).toBe(true);
+			expect(await mod.decryptPayload(stored)).toBe(json);
+			expect(await mod.decodePayloadFromStorage(stored)).toBe(json);
+		} finally {
+			compress.mockRestore();
+		}
+	});
+
+	it("does not swallow encryption errors after successful compression", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const mod = await loadFreshModule();
+		await mod.initPayloadEncryption();
+		const encrypt = spyOn(crypto.subtle, "encrypt").mockRejectedValue(
+			new Error("encrypt failed"),
+		);
+		try {
+			await expect(
+				mod.encodePayloadForStorage("x".repeat(2000)),
+			).rejects.toThrow("encrypt failed");
+		} finally {
+			encrypt.mockRestore();
+		}
 	});
 
 	it("init is idempotent — concurrent calls share the same promise", async () => {
