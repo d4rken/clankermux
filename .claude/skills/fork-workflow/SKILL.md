@@ -44,7 +44,8 @@ git merge --no-ff fix/<name> -m "Merge fix/<name>"
 git push origin refs/heads/main:refs/heads/main
 ```
 
-Ask Codex to review each commit's diff before merging, not just at plan time.
+Run the independent review (`devtools:review-changes`) on each commit's diff
+before merging, not just at plan time.
 
 If Greptile leaves fewer than 5 findings on a branch, fix them on that same
 branch before merging.
