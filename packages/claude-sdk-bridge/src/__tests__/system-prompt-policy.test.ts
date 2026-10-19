@@ -120,6 +120,34 @@ describe("append-v1", () => {
 });
 
 describe("fixtures", () => {
+	it("records only defined section names from release and extension exports", () => {
+		for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
+			for (const f of loadPiPromptFixtures(version))
+				expect(Object.keys(f.sections ?? {})).not.toContain("undefined");
+	});
+
+	it("covers current extension hooks and generic updates without the retired hook", () => {
+		const fixtures = loadPiPromptFixtures("1.3");
+		const names = fixtures.map((f) => f.name);
+		expect(names).not.toContain("claude-context-section");
+		for (const name of [
+			"forced-claude-context",
+			"forced-claude-context-and-agents",
+		]) {
+			const f = loadPiPromptFixture("1.3", name);
+			expect(f.sections).toBeNull();
+			expect(expectedAppend(f)).toContain(
+				"## Claude supplemental guidance (claude-context)\n",
+			);
+		}
+		for (const name of [
+			"stock-extension-section",
+			"collapsed-section-update",
+			"collapsed-extension-section-update",
+		])
+			expect(names).toContain(name);
+	});
+
 	it("cover a head for exactly the versions discovery publishes", () => {
 		expect([...PI_PROMPT_HEAD_VERSIONS].sort()).toEqual(
 			[...SUPPORTED_PI_PROMPT_VERSIONS].sort(),
@@ -473,6 +501,20 @@ describe("the version gate", () => {
 			reason: "unsupported_version",
 		});
 	});
+
+	for (const version of ["1.2", "1.3"])
+		it(`serves ${version} with the same projection for the unchanged prompt grammar`, () => {
+			const f = loadPiPromptFixture(version, "stock-all");
+			expect(appendOf(decide(f.system, version))).toBe(expectedAppend(f));
+		});
+
+	for (const version of ["1.3.0", "v1.3", "1.3, 1.2", "1.4", "2.0"])
+		it(`refuses unregistered layout ${version} instead of guessing compatibility`, () => {
+			expect(refusalOf(decide(system, version)).error).toMatchObject({
+				status: 400,
+				code: "sdk_bridge_prompt_unsupported",
+			});
+		});
 
 	it("serves 1.2 and still refuses 1.1, which sits between served layouts", () => {
 		expect(appendOf(decide(system, "1.2"))).toBe(

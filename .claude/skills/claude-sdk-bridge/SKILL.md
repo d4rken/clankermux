@@ -594,9 +594,8 @@ the conversation claim, so it supersedes no parked turn and leaves a
   appended whole.
 
 It strips rather than selects because pi's extensions append to the
-prompt: claude-context appends its fixed guidance block after `<cwd>` (a
-forced prompt on runs it forces, a trailing `claude-context` section on
-the others), pi-subagents appends `<advertised_subagents>` as a forced
+prompt: claude-context appends its fixed guidance block after `<cwd>` as a
+forced prompt, pi-subagents appends `<advertised_subagents>` as a forced
 prompt, and a herdr child's boundary text, agent tag and persona follow
 pi's prompt. Removing the head removes pi's stock harness text; what
 remains still goes through the trigger checks below. pi's stock
@@ -607,13 +606,17 @@ pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 `SdkBridgeTurnMeta.piPromptVersion`). Layouts are keyed by head
 (`HEADS` in `pi-prompt.ts`): releases with the same stock preamble and the
 same head sections in the same order share an entry, whatever the sections
-hold. 0.99, 1.0 and 1.2 share 0.87's; the `<docs>` "When asked about" list
-gained an MCP servers entry in 0.99 and a codemode entry in 1.0, and 1.2
-renders exactly 1.0's text. A version is supported only while it has fixtures under
+hold. 0.99, 1.0, 1.2 and 1.3 share 0.87's; the `<docs>` "When asked about" list
+gained an MCP servers entry in 0.99 and a codemode entry in 1.0. Both 1.2
+and 1.3 render exactly 1.0's text. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
-prompt. Regenerate and review the fixtures when a pi release changes the
+prompt. Historical layouts through 1.2 retain section-hook fixtures generated
+with their matching older extension source and generator; this upgrade does
+not regenerate them. The 1.3 fixtures use the current `before_agent_start`
+forced-prompt hook instead of the retired claude-context section hook, while
+retaining generic section-update coverage. Regenerate and review the fixtures when a pi release changes the
 head, pi-ai's system-message collapse, or the rendering of the extensions
 above. For a pi release newer than `~/.pi`'s, never install it: unpack its
 pi-coding-agent and pi-ai tarballs, and the few packages their prompt

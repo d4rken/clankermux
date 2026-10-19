@@ -210,6 +210,7 @@ export const SUPPORTED_PI_PROMPT_VERSIONS: readonly string[] = [
 	"0.99",
 	"1.0",
 	"1.2",
+	"1.3",
 ];
 
 /**
