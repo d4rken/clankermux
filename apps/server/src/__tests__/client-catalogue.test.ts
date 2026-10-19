@@ -85,6 +85,27 @@ describe("client catalogue serving", () => {
 			);
 		}
 	});
+	it("does not copy Codex effort transport capabilities into Pi discovery", async () => {
+		const model = {
+			...catalogue.models[0],
+			codexMetadata: {
+				...catalogue.models[0]?.codexMetadata,
+				supportsMidConvoEffort: true,
+				compat: { supportsMidConvoEffort: true },
+			},
+		};
+		const body = await renderClientCatalogue(
+			{ defaultModel: null, models: [model] },
+			"openai",
+			{ friendly: { reasoning: true, supportedReasoningEfforts: ["high"] } },
+		).json();
+		expect(body.data[0]).not.toHaveProperty("compat");
+		expect(body.data[0]).not.toHaveProperty("supportsMidConvoEffort");
+		expect(body.data[0].clankermux).toEqual({
+			reasoning: true,
+			supportedReasoningEfforts: ["high"],
+		});
+	});
 	it("renders the three wire shapes without mixing metadata", async () => {
 		expect(
 			await renderClientCatalogue(catalogue, "openai").json(),
@@ -134,7 +155,7 @@ describe("client catalogue serving", () => {
 			// The OpenAI shape, pi's, also names the pi prompt layouts the SDK bridge serves.
 			expect(enriched.clankermux).toEqual(
 				format === "openai"
-					? { piPromptVersions: ["0.87", "0.99", "1.0", "1.2"] }
+					? { piPromptVersions: ["0.87", "0.99", "1.0", "1.2", "1.3"] }
 					: undefined,
 			);
 			delete enriched.clankermux;

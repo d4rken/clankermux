@@ -151,11 +151,13 @@ for (const endpoint of ["responses", "chat"] as const)
 				"subagent-append",
 				"forced-prompt",
 				"stock-extension-section",
+				"forced-claude-context",
 				"forced-claude-context-and-agents",
-				"claude-context-section",
+				...(version === "1.3" ? [] : ["claude-context-section"]),
 				"herdr-child",
 				"collapsed-tools-change",
 				"collapsed-section-update",
+				"collapsed-extension-section-update",
 			])
 				it(`pi ${version} ${name}: Claude Code starts with pi's prompt minus its head appended, byte for byte`, async () => {
 					const h = await harness();
@@ -209,6 +211,19 @@ for (const endpoint of ["responses", "chat"] as const)
 			});
 			expect(row?.system_prompt_detail).not.toContain("expert coding");
 		});
+
+		for (const version of ["1.3.0", "v1.3", "1.3, 1.2", "1.4", "1.1"])
+			it(`refuses layout header ${version} before starting the SDK`, async () => {
+				const h = await harness();
+				const response = await send(h.gw, endpoint, byName("stock-all"), {
+					"x-clankermux-pi-prompt": version,
+				});
+				expect(response.status).toBe(400);
+				expect(
+					((await response.json()) as { error: { code: string } }).error.code,
+				).toBe("sdk_bridge_prompt_unsupported");
+				expect(h.sdk.queries).toEqual([]);
+			});
 
 		it("refuses a malformed pi prompt with its code", async () => {
 			const h = await harness();

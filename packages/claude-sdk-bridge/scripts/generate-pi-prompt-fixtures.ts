@@ -49,17 +49,10 @@ interface TranscriptModule {
 	collapseSystemMessages(context: { messages: unknown[] }): {
 		messages: Array<{ sections?: Sections }>;
 	};
-	getCurrentSystemMessage(
-		messages: unknown[],
-	): { sections?: Sections } | undefined;
 }
 
 interface ClaudeContextCoreModule {
 	SYSTEM_BLOCK: string;
-}
-
-interface ClaudeContextAdapterModule {
-	SUPPLEMENT_SECTION: string;
 }
 
 interface SubagentPromptModule {
@@ -126,8 +119,6 @@ interface Case {
 	next?: Record<string, unknown>;
 	/** An extension's `before_agent_start` rewrite, which pi sends as a forced prompt. */
 	force?: (rendered: string) => string;
-	/** An extension's `context_with_system` rewrite of the folded system message's sections. */
-	withSystem?: (sections: Sections) => Sections;
 	expect: Expected;
 }
 
@@ -208,9 +199,11 @@ const transcript = (await import(
 	join(aiDir, "dist/utils/transcript.js")
 )) as TranscriptModule;
 const claudeContext = (await import(CLAUDE_CONTEXT)) as ClaudeContextCoreModule;
-const claudeContextAdapter = (await import(
-	CLAUDE_CONTEXT_ADAPTER
-)) as ClaudeContextAdapterModule;
+if (
+	typeof claudeContext.SYSTEM_BLOCK !== "string" ||
+	!claudeContext.SYSTEM_BLOCK
+)
+	throw new Error("claude-context must export a nonempty SYSTEM_BLOCK");
 const advertisedAgents = (await import(
 	ADVERTISED_AGENTS
 )) as AdvertisedAgentsModule;
@@ -286,16 +279,6 @@ function childPrompt(persona: string): string {
 /** What claude-context's `before_agent_start` returns (install.mjs): pi's prompt plus its fixed block. */
 function withClaudeContext(rendered: string): string {
 	return `${rendered}\n\n${claudeContext.SYSTEM_BLOCK}`;
-}
-
-/** What claude-context's `context_with_system` makes of pi's sections (install.mjs): its block as the last section. */
-function withClaudeContextSection(sections: Sections): Sections {
-	const { [claudeContextAdapter.SUPPLEMENT_SECTION]: _previous, ...rest } =
-		sections;
-	return {
-		...rest,
-		[claudeContextAdapter.SUPPLEMENT_SECTION]: claudeContext.SYSTEM_BLOCK,
-	};
 }
 
 /** What pi-subagents' `before_agent_start` returns while the subagent tool is active (extension/index.ts). */
@@ -598,20 +581,6 @@ const ALL_CASES: Case[] = [
 		expect: forwarded,
 	},
 	{
-		name: "claude-context-section",
-		description:
-			"claude-context on a run it did not force, after skills changed and an extension section arrived mid-session: its guidance block stays the last section of pi's leading message.",
-		input: { ...BASE, contextFiles: [AGENTS_MD], skills: SKILLS },
-		next: {
-			...BASE,
-			contextFiles: [AGENTS_MD],
-			skills: [...SKILLS, DEPLOY_SKILL],
-			sections: { todo_list: "- [ ] deploy" },
-		},
-		withSystem: withClaudeContextSection,
-		expect: forwarded,
-	},
-	{
 		name: "collapsed-tools-change",
 		description:
 			"What pi sends after a tool snippet changes mid-session: one leading message whose tools section changed in place. The head is still first and is stripped.",
@@ -772,24 +741,12 @@ function render(c: Case) {
 			? [updateMessage, { role: "user", content: "again", timestamp: 3 }]
 			: []),
 	];
-	// A `context_with_system` handler sees pi's messages before the provider
-	// does, and replaces their system messages with one head folded by pi-ai.
-	const messages = c.withSystem
-		? (() => {
-				const current = transcript.getCurrentSystemMessage(context);
-				return [
-					{
-						...current,
-						sections: c.withSystem(current?.sections ?? {}),
-					},
-					...context.filter((message) => message.role !== "system"),
-				];
-			})()
-		: context;
 	// What pi's clankermux provider sends: pi-ai's resolveTranscript without
 	// mid-conversation system messages replays every system message into one
 	// leading message, patching sections in place and appending new ones.
-	const [collapsed] = transcript.collapseSystemMessages({ messages }).messages;
+	const [collapsed] = transcript.collapseSystemMessages({
+		messages: context,
+	}).messages;
 	const sections = collapsed?.sections ?? {};
 	const system = text.getSystemMessageText({ ...collapsed });
 	const names = Object.keys(sections);
@@ -867,13 +824,22 @@ mkdirSync(outDir, { recursive: true });
 for (const file of readdirSync(outDir))
 	if (file.endsWith(".json")) rmSync(join(outDir, file));
 for (const [file, content] of files) writeFileSync(join(outDir, file), content);
-// In the repository's own JSON style, so `bun run lint` leaves them as written.
+// Use the repository's JSON style without requiring a .gitignore in scratch.
 const formatted = Bun.spawnSync(
-	["bunx", "biome", "format", "--write", outDir],
+	[
+		"bunx",
+		"--no-install",
+		"biome",
+		"format",
+		"--vcs-enabled=false",
+		"--write",
+		outDir,
+	],
 	{ cwd: join(import.meta.dir, "../../.."), stdout: "ignore" },
 );
 if (formatted.exitCode !== 0) {
-	console.error(`biome format failed on ${outDir}`);
+	console.error(`biome format failed on ${outDir}: exit ${formatted.exitCode}`);
+	console.error(formatted.stderr.toString());
 	process.exit(1);
 }
 console.log(`${CASES.length} fixtures for pi ${piVersion} in ${outDir}`);

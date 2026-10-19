@@ -2220,7 +2220,7 @@ describe("client service integration", () => {
 			}
 			delete enriched.data[0].clankermux;
 			expect(enriched.clankermux).toEqual({
-				piPromptVersions: ["0.87", "0.99", "1.0", "1.2"],
+				piPromptVersions: ["0.87", "0.99", "1.0", "1.2", "1.3"],
 			});
 			delete enriched.clankermux;
 			expect(enriched).toEqual(plain);
