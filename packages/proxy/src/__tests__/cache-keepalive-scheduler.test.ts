@@ -5,9 +5,9 @@
  *   1. mock.module("@clankermux/core") intercepts registerHeartbeat so we
  *      can capture the registered callback and trigger sendKeepalives() without
  *      waiting for real timers.
- *   2. mock.module("../dispatch") intercepts dispatchProxyRequest so we can
- *      verify the scheduler dispatches the replay request through the in-process
- *      proxy pipeline (and assert on the synthetic Request it constructs).
+ *   2. A locally injected dispatch double captures each replay without replacing
+ *      the shared dispatch module, so we can assert on the synthetic Request
+ *      and the arguments forwarded to the in-process proxy pipeline.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Config } from "@clankermux/config";
@@ -66,10 +66,6 @@ const mockDispatchProxyRequest = mock(async (req: Request, url: URL) => {
 	});
 });
 
-mock.module("../dispatch", () => ({
-	dispatchProxyRequest: mockDispatchProxyRequest,
-}));
-
 import {
 	KEEPALIVE_REFRESH_1H_MS,
 	KEEPALIVE_REFRESH_MS,
@@ -77,8 +73,7 @@ import {
 } from "../bridge-policy";
 import { bridgeStats } from "../bridge-stats";
 import { cacheBodyStore } from "../cache-body-store";
-// Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
-// and dispatchProxyRequest.
+// Import AFTER the core mock so the scheduler gets the mocked registerHeartbeat.
 import {
 	CacheKeepaliveScheduler,
 	extractCacheCreationTokens,
@@ -93,6 +88,14 @@ import { sessionPromotionTracker } from "../session-promotion";
 /** Minimal ProxyContext — scheduler only reads runtime.port. */
 function makeProxyContext(port = 8081): ProxyContext {
 	return { runtime: { port } } as unknown as ProxyContext;
+}
+
+function makeScheduler(proxyContext: ProxyContext, config: Config) {
+	return new CacheKeepaliveScheduler(
+		proxyContext,
+		config,
+		mockDispatchProxyRequest,
+	);
 }
 
 type ConfigChangeListener = (evt: { key: string; newValue: unknown }) => void;
@@ -282,7 +285,7 @@ describe("CacheKeepaliveScheduler", () => {
 	describe("start()", () => {
 		it("disabled — does NOT register a heartbeat and leaves the stores disabled", () => {
 			const { config } = makeConfig(false);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
@@ -294,7 +297,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("enabled — registers heartbeat with a 60s tick and enables stores", () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
@@ -311,7 +314,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("propagates the configured min-token threshold to the session store", () => {
 			const { config } = makeConfig(true, 200_000);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 
@@ -330,7 +333,7 @@ describe("CacheKeepaliveScheduler", () => {
 	describe("stop()", () => {
 		it("calls the unregister function returned by registerHeartbeat", () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 
 			scheduler.start();
 			expect(mockUnregister).not.toHaveBeenCalled();
@@ -341,7 +344,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("stop() when disabled (no interval registered) does not throw", () => {
 			const { config } = makeConfig(false);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(() => scheduler.stop()).not.toThrow();
@@ -356,7 +359,7 @@ describe("CacheKeepaliveScheduler", () => {
 	describe("config 'change' events", () => {
 		it("disable — unregisters the interval and disables the stores", () => {
 			const { config, fireEnabledChange } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
@@ -375,7 +378,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("enable after disabled — registers a new interval and enables stores", () => {
 			const { config, fireEnabledChange } = makeConfig(false);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).not.toHaveBeenCalled();
@@ -393,7 +396,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("same enabled value — does NOT restart (no-op)", () => {
 			const { config, fireEnabledChange } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
@@ -408,7 +411,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("min-token change propagates to the session store", () => {
 			const { config, fireMinTokensChange } = makeConfig(true, 100_000);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			// 150k clears the initial 100k threshold.
@@ -428,7 +431,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("risk-factor change propagates to the session store budgets", () => {
 			const { config, fireRiskFactorChange } = makeConfig(true, 100_000);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-rf", "session-rf", { cachedTokens: 200_000 });
@@ -460,7 +463,7 @@ describe("CacheKeepaliveScheduler", () => {
 				off: () => {},
 			} as unknown as Config;
 
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			expect(mockRegisterHeartbeat).toHaveBeenCalledTimes(1);
@@ -496,7 +499,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("with no eligible sessions — dispatchProxyRequest is NOT called", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			await capturedCallback?.();
@@ -508,7 +511,8 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("dispatches an eligible session force-routed to its account with max_tokens=1", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const proxyContext = makeProxyContext();
+			const scheduler = makeScheduler(proxyContext, config);
 			scheduler.start();
 
 			seedSessionEntry("acc-sess", "session-1");
@@ -517,6 +521,18 @@ describe("CacheKeepaliveScheduler", () => {
 
 			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
 			const { req, url } = capturedDispatchCalls[0];
+			expect(req).toBeInstanceOf(Request);
+			expect(url).toBeInstanceOf(URL);
+			expect(url.href).toBe("http://internal.clankermux/v1/messages");
+			expect(req.url).toBe(url.href);
+			expect(mockDispatchProxyRequest).toHaveBeenCalledWith(
+				req,
+				url,
+				proxyContext,
+				null,
+				null,
+				true,
+			);
 			expect(url.pathname).toBe("/v1/messages");
 			expect(req.method).toBe("POST");
 			expect(req.headers.get("x-clankermux-account-id")).toBe("acc-sess");
@@ -532,7 +548,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("drops a budget-thinking slot instead of replaying it", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-think", "session-thinking", {
@@ -556,7 +572,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("replays a slot whose thinking carries no token budget", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-adaptive", "session-adaptive", {
@@ -575,7 +591,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("stops an unknown replay without claiming a hit or resume saving", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 			seedSessionEntry("unknown", "unknown");
 			mockDispatchProxyRequest.mockImplementation(
@@ -606,7 +622,7 @@ describe("CacheKeepaliveScheduler", () => {
 			);
 
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-hit", "session-hit");
@@ -641,7 +657,7 @@ describe("CacheKeepaliveScheduler", () => {
 			);
 
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-miss", "session-miss");
@@ -669,7 +685,7 @@ describe("CacheKeepaliveScheduler", () => {
 			);
 
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-429", "session-429");
@@ -697,7 +713,7 @@ describe("CacheKeepaliveScheduler", () => {
 			);
 
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-zombie", "session-zombie");
@@ -732,7 +748,7 @@ describe("CacheKeepaliveScheduler", () => {
 			});
 
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedSessionEntry("acc-conn-error", "session-conn-error");
@@ -753,7 +769,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("caps dispatches at MAX_BRIDGE_KEEPALIVES_PER_TICK, highest-priority first", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			// 25 eligible sessions; priority scales with cachedTokens so we can
@@ -787,7 +803,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("dispatches more sessions than KEEPALIVE_CONCURRENCY via chunked concurrency, recording each result", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			// 10 eligible sessions — well above KEEPALIVE_CONCURRENCY (4) but under
@@ -820,7 +836,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("does not dispatch sessions that are not idle long enough", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			// Fresh lastActivityTs (register stamps Date.now()) → not yet due.
@@ -863,7 +879,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("a promoted slot is NOT dispatched on the 3-min cadence (only ~50 min)", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			// Seed a 1h slot (body carries ttl:"1h"), then backdate only past the
@@ -891,7 +907,7 @@ describe("CacheKeepaliveScheduler", () => {
 
 		it("a promoted slot IS dispatched once its ~50-min window elapses", async () => {
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedPromotedSessionEntry("acc-1h", "session-1h");
@@ -912,7 +928,7 @@ describe("CacheKeepaliveScheduler", () => {
 			// 1h window so it is due, then fire — counting how many hourly refreshes the
 			// budget supports before exhaustion.
 			const { config } = makeConfig(true);
-			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			const scheduler = makeScheduler(makeProxyContext(), config);
 			scheduler.start();
 
 			seedPromotedSessionEntry("acc-hours", "session-hours", {

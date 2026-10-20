@@ -2,10 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 
 /**
- * Spawner for `dispatch-retry-after.guard.ts`. A fresh process is the only
- * place the real `../dispatch` module is reachable: this suite installs a
- * process-wide module stub for it, so an in-process test of the dispatcher
- * would assert against that stub instead of the code under test.
+ * Spawner for `dispatch-retry-after.guard.ts`. Keep these dispatcher checks in
+ * a fresh process to isolate them from shared-suite state. Scheduler tests now
+ * inject local dispatch doubles rather than replacing the dispatch module.
  */
 
 // packages/proxy/src/__tests__ -> repo root is four directories up.

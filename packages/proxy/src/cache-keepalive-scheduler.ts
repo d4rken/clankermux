@@ -77,15 +77,21 @@ export function extractCacheCreationTokens(text: string): number | null {
 export class CacheKeepaliveScheduler {
 	private proxyContext: ProxyContext;
 	private config: Config;
+	private readonly dispatch: typeof dispatchProxyRequest;
 	private unregisterInterval: (() => void) | null = null;
 	private enabled = false;
 	private boundConfigChangeHandler:
 		| ((event: { key: string; newValue: unknown }) => void)
 		| null = null;
 
-	constructor(proxyContext: ProxyContext, config: Config) {
+	constructor(
+		proxyContext: ProxyContext,
+		config: Config,
+		dispatch: typeof dispatchProxyRequest = dispatchProxyRequest,
+	) {
 		this.proxyContext = proxyContext;
 		this.config = config;
+		this.dispatch = dispatch;
 	}
 
 	start(): void {
@@ -349,7 +355,7 @@ export class CacheKeepaliveScheduler {
 			headers: replayHeaders,
 			body: bodyToSend,
 		});
-		const response = await dispatchProxyRequest(
+		const response = await this.dispatch(
 			req,
 			url,
 			this.proxyContext,
