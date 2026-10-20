@@ -5,7 +5,8 @@ import { stripVTControlCharacters } from "node:util";
 // Each child shares one module registry across its files, but not with this
 // spawner or either other child. Never discover tests here: that would recurse.
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..", "..");
-const CACHE = "./packages/proxy/src/__tests__/cache-keepalive-scheduler.test.ts";
+const CACHE =
+	"./packages/proxy/src/__tests__/cache-keepalive-scheduler.test.ts";
 const AUTO = "./packages/proxy/src/__tests__/auto-refresh-race-guard.test.ts";
 const INNER = "./packages/proxy/src/__tests__/sdk-bridge-inner.test.ts";
 const SUBSTITUTION =
@@ -51,7 +52,9 @@ function parseOutput(output: string) {
 			}
 		}
 		if (/^\d+ tests? failed:$/.test(line)) recap = true;
-		const test = line.match(/^\((pass|fail|skip|todo)\) (.+?)(?: \[[\d.]+ms\])?$/);
+		const test = line.match(
+			/^\((pass|fail|skip|todo)\) (.+?)(?: \[[\d.]+ms\])?$/,
+		);
 		if (test && !recap) {
 			const [, status, name] = test;
 			if (!currentFile) {
@@ -76,7 +79,9 @@ function parseOutput(output: string) {
 			summaryFiles = Number(runSummary[2]);
 		}
 		if (
-			/Unhandled error between tests|Cannot find module|ModuleNotFound/.test(line)
+			/Unhandled error between tests|Cannot find module|ModuleNotFound/.test(
+				line,
+			)
 		) {
 			problems.push(`load/unhandled error: ${line}`);
 		}
@@ -134,7 +139,9 @@ function runCase(testCase: (typeof CASES)[number]) {
 
 	// Emit every case before asserting, including both producer-first failures
 	// and the control on an unfixed checkout. Keep the original child diagnostics.
-	console.error(`scheduler isolation ${testCase.name} child output:\n${output}`);
+	console.error(
+		`scheduler isolation ${testCase.name} child output:\n${output}`,
+	);
 	console.log(
 		`scheduler-isolation-result ${JSON.stringify({
 			case: testCase.name,
@@ -148,45 +155,43 @@ function runCase(testCase: (typeof CASES)[number]) {
 	return { ...parsed, testCase };
 }
 
-it(
-	"scheduler tests leave the real dispatcher usable in either file order",
-	() => {
-		const results = CASES.map(runCase);
-		const control = results.find(
-			(result) => result.testCase.name === "consumers-first",
-		);
-		const problems: string[] = [];
-		for (const result of results) {
-			const expectedFiles = result.testCase.files.map((file) => file.slice(2));
-			if (JSON.stringify(result.files) !== JSON.stringify(expectedFiles)) {
-				result.problems.push(
-					`wrong observed file order: ${JSON.stringify(result.files)}; expected ${JSON.stringify(expectedFiles)}`,
-				);
-			}
-			for (const file of expectedFiles) {
-				const tests = result.testsByFile.get(file) ?? [];
-				if (!tests.some(({ status }) => status === "pass" || status === "fail")) {
-					result.problems.push(`no executed test identities for ${file}`);
-				}
-				if (result !== control) {
-					// Compare multisets, not just totals: a different/missing test must
-					// fail even when counts match. Failed identities count during red.
-					const identities = tests.map(({ name }) => name).sort();
-					const controlIdentities = (control?.testsByFile.get(file) ?? [])
-						.map(({ name }) => name)
-						.sort();
-					if (JSON.stringify(identities) !== JSON.stringify(controlIdentities)) {
-						result.problems.push(
-							`test identities/count differ from consumers-first for ${file}: ${JSON.stringify(identities)} versus ${JSON.stringify(controlIdentities)}`,
-						);
-					}
-				}
-			}
-			problems.push(
-				...result.problems.map((problem) => `${result.testCase.name}: ${problem}`),
+it("scheduler tests leave the real dispatcher usable in either file order", () => {
+	const results = CASES.map(runCase);
+	const control = results.find(
+		(result) => result.testCase.name === "consumers-first",
+	);
+	const problems: string[] = [];
+	for (const result of results) {
+		const expectedFiles = result.testCase.files.map((file) => file.slice(2));
+		if (JSON.stringify(result.files) !== JSON.stringify(expectedFiles)) {
+			result.problems.push(
+				`wrong observed file order: ${JSON.stringify(result.files)}; expected ${JSON.stringify(expectedFiles)}`,
 			);
 		}
-		expect(problems).toEqual([]);
-	},
-	600_000,
-);
+		for (const file of expectedFiles) {
+			const tests = result.testsByFile.get(file) ?? [];
+			if (!tests.some(({ status }) => status === "pass" || status === "fail")) {
+				result.problems.push(`no executed test identities for ${file}`);
+			}
+			if (result !== control) {
+				// Compare multisets, not just totals: a different/missing test must
+				// fail even when counts match. Failed identities count during red.
+				const identities = tests.map(({ name }) => name).sort();
+				const controlIdentities = (control?.testsByFile.get(file) ?? [])
+					.map(({ name }) => name)
+					.sort();
+				if (JSON.stringify(identities) !== JSON.stringify(controlIdentities)) {
+					result.problems.push(
+						`test identities/count differ from consumers-first for ${file}: ${JSON.stringify(identities)} versus ${JSON.stringify(controlIdentities)}`,
+					);
+				}
+			}
+		}
+		problems.push(
+			...result.problems.map(
+				(problem) => `${result.testCase.name}: ${problem}`,
+			),
+		);
+	}
+	expect(problems).toEqual([]);
+}, 600_000);
