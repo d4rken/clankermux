@@ -1,4 +1,8 @@
 import { BUFFER_SIZES } from "@clankermux/core";
+import {
+	buildPayloadFrame,
+	payloadFrameBytes,
+} from "@clankermux/database/payload-frame";
 import { Logger } from "@clankermux/logger";
 import {
 	isCodexOnCredits,
@@ -20,7 +24,6 @@ import {
 	type ToolCallStat,
 	type UsageSource,
 } from "@clankermux/types";
-
 import { extractCorrelationTag } from "./correlation-tag";
 import { extractGatewayHints } from "./gateway-hint-headers";
 
@@ -42,7 +45,7 @@ export { NO_ACCOUNT_ID };
  *   - the per-request lifecycle state machine + terminal outcomes,
  *   - billingType derivation + account side-effects (auto-pause-on-overage,
  *     updateAccountUsage) fired IMMEDIATELY in begin() (invariant 4),
- *   - the payload JSON envelope (stable shape the Request History reader reads),
+ *   - the payload frame (skeleton envelope plus raw bodies; see payload-frame.ts),
  *   - FK-ordered persistence (request row → routing row → payload),
  *   - payload-drop policy that never takes the metadata row with it,
  *   - dedupe (persist at most once per requestId),
@@ -250,7 +253,7 @@ export interface RequestRecorderConfig {
 	RECORD_MAX_AGE_MS: number;
 	/** How long a persisted no-usage record is kept for a late patch. */
 	PATCH_RECORD_TTL_MS: number;
-	/** Stored request body cap (base64-encoded into the envelope). */
+	/** Stored request body cap (stored raw in the payload frame). */
 	MAX_REQUEST_BODY_BYTES: number;
 	/** Stored response body cap. */
 	MAX_RESPONSE_BODY_BYTES: number;
@@ -379,11 +382,13 @@ interface DbOpsLike {
 	saveRequestHeaders(data: SaveHeadersData): Promise<void>;
 	saveRequestToolCalls(requestId: string, stats: ToolCallStat[]): Promise<void>;
 	/**
-	 * Encrypt-only: produces the STORED FORM of the payload envelope. The insert
+	 * Encode-only: produces the STORED FORM of the payload frame. The insert
 	 * itself happens off-thread in the payload-write worker, so there is no
 	 * main-thread payload write for the recorder to call.
 	 */
-	encryptPayloadForStorage(json: string): Promise<string>;
+	encodePayloadForStorage(
+		frame: Uint8Array<ArrayBuffer>,
+	): Promise<Uint8Array<ArrayBuffer>>;
 	updateRequestUsage(
 		requestId: string,
 		usage: unknown,
@@ -433,7 +438,7 @@ interface AsyncWriterLike {
 		reservation: PayloadReservationLike,
 		entry: {
 			requestId: string;
-			ciphertext: string;
+			payload: Uint8Array<ArrayBuffer>;
 			timestamp: number;
 			payloadBytes: number;
 		},
@@ -518,7 +523,7 @@ interface InternalRecord {
 	correlationTag: string | null;
 	meta: RecordMeta;
 	billingType: string;
-	/** Captured request body bytes (base64-encodable), null when discarded. */
+	/** Captured request body bytes, null when discarded. */
 	reqBytes: Uint8Array | null;
 	/** Captured (capped) response body bytes. */
 	respChunks: Uint8Array[];
@@ -1165,8 +1170,9 @@ export class RequestRecorder {
 	 * off-thread writer), so the two writes are genuinely concurrent — the
 	 * payload may only be published once `saveRequest` has SPECIFICALLY
 	 * succeeded, which is tracked apart from the optional routing/tool-call
-	 * writes. And capacity is reserved BEFORE the metadata job is enqueued, so
-	 * we never serialize + encrypt an envelope only to find there is no room.
+	 * writes. And capacity is reserved BEFORE the metadata job is enqueued,
+	 * before framing and encoding, so entries rejected at admission skip that
+	 * work; the stored size is checked again at publication.
 	 */
 	private persistOrdered(
 		record: InternalRecord,
@@ -1198,20 +1204,38 @@ export class RequestRecorder {
 		// the long-range series has no holes during the heaviest traffic.
 		const storeHeaders = this.getStoreHeaders();
 
-		// Stage 1: estimate BEFORE serializing, and reserve before enqueuing.
+		// Stage 1: size the frame exactly and reserve before enqueuing. Only the
+		// small skeleton is serialized ahead of admission; the bodies are copied
+		// once there is room for them.
 		let reservation: PayloadReservationLike | null = null;
 		let estimatedBytes = 0;
+		let skeleton: string | null = null;
 		if (storePayloads && !record.bodyDiscarded) {
-			estimatedBytes = this.estimatePayloadBytes(record);
-			reservation = this.asyncWriter.reservePayload(estimatedBytes);
-			if (!reservation) this.asyncWriter.recordPayloadDrop(estimatedBytes);
+			try {
+				skeleton = this.buildPayloadSkeleton(record, success === true);
+				estimatedBytes = payloadFrameBytes(
+					skeleton,
+					record.reqBytes,
+					record.respChunks,
+				);
+				reservation = this.asyncWriter.reservePayload(estimatedBytes);
+				if (!reservation) this.asyncWriter.recordPayloadDrop(estimatedBytes);
+			} catch (error) {
+				log.error(
+					`Failed to build payload envelope for ${meta.requestId}:`,
+					error,
+				);
+				this.asyncWriter.recordPayloadDrop(
+					(record.reqBytes?.byteLength ?? 0) + record.respBytes,
+				);
+			}
 		}
 
-		// Stage 2: serialize while the bodies are still held (Stage 4 frees them).
-		let json: string | null = null;
-		if (reservation) {
+		// Stage 2: frame the bodies while they are still held (Stage 4 frees them).
+		let frame: Uint8Array<ArrayBuffer> | null = null;
+		if (reservation && skeleton !== null) {
 			try {
-				json = this.buildEnvelope(record, success === true);
+				frame = buildPayloadFrame(skeleton, record.reqBytes, record.respChunks);
 			} catch (error) {
 				log.error(
 					`Failed to build payload envelope for ${meta.requestId}:`,
@@ -1225,8 +1249,8 @@ export class RequestRecorder {
 
 		// Stage 3: snapshot every field the queued job reads. The job must close
 		// over neither `record` nor `meta`, so that the raw bodies released below
-		// are unreachable the moment this method returns — the serialized
-		// envelope, whose bytes a reservation already covers, is the only capture
+		// are unreachable the moment this method returns — the payload
+		// frame, whose bytes a reservation already covers, is the only capture
 		// allowed to outlive the call.
 		const requestId = meta.requestId;
 		const timestamp = meta.timestamp;
@@ -1272,7 +1296,7 @@ export class RequestRecorder {
 			correlationTag: record.correlationTag,
 			usageSource,
 		};
-		const payloadJson = json;
+		const payloadFrame = frame;
 		const payloadReservation = reservation;
 
 		// Stage 4: the raw bodies have served their two purposes (the estimate and
@@ -1334,7 +1358,7 @@ export class RequestRecorder {
 				}
 			}
 
-			if (!payloadReservation || !payloadJson) return;
+			if (!payloadReservation || !payloadFrame) return;
 
 			if (!requestRowSaved) {
 				// The request row was NOT written — publishing the payload now would
@@ -1344,11 +1368,11 @@ export class RequestRecorder {
 				return;
 			}
 
-			let stored: string;
+			let stored: Uint8Array<ArrayBuffer>;
 			try {
-				stored = await this.dbOps.encryptPayloadForStorage(payloadJson);
+				stored = await this.dbOps.encodePayloadForStorage(payloadFrame);
 			} catch (error) {
-				log.error(`Failed to encrypt payload for ${requestId}:`, error);
+				log.error(`Failed to encode payload for ${requestId}:`, error);
 				payloadReservation.release();
 				this.asyncWriter.recordPayloadDrop(estimatedBytes);
 				return;
@@ -1356,9 +1380,9 @@ export class RequestRecorder {
 
 			const published = this.asyncWriter.enqueuePayload(payloadReservation, {
 				requestId,
-				ciphertext: stored,
+				payload: stored,
 				timestamp: this.now(),
-				payloadBytes: Buffer.byteLength(payloadJson),
+				payloadBytes: payloadFrame.byteLength,
 			});
 			if (!published) {
 				// enqueuePayload already released the reservation and counted the drop.
@@ -1573,42 +1597,23 @@ export class RequestRecorder {
 	}
 
 	/**
-	 * Build the payload envelope: base64 request/response bodies + the meta block.
-	 * Shape is stable so the Request History reader is unchanged.
+	 * The envelope JSON with both bodies null; the payload frame carries the
+	 * bodies as raw bytes beside it.
 	 */
-	private buildEnvelope(record: InternalRecord, success: boolean): string {
+	private buildPayloadSkeleton(
+		record: InternalRecord,
+		success: boolean,
+	): string {
 		const meta = record.meta;
-		let requestBody: string | null = null;
-		if (record.reqBytes && record.reqBytes.byteLength > 0) {
-			// Buffer.from(uint8array) COPIES the contents; the (buffer, offset,
-			// length) overload wraps the same memory. Both encode to identical
-			// base64, so the copy bought nothing — and it is a copy of the whole
-			// captured body, up to MAX_REQUEST_BODY_BYTES (4 MiB), on every stored
-			// request. Safe to share because the wrap is only ever read and never
-			// outlives this expression: toString() does not mutate and returns an
-			// independent string, so the alias is gone before the next event-loop
-			// turn.
-			requestBody = Buffer.from(
-				record.reqBytes.buffer,
-				record.reqBytes.byteOffset,
-				record.reqBytes.byteLength,
-			).toString("base64");
-		}
-		let responseBody: string | null = null;
-		if (record.respBytes > 0) {
-			const combined = this.combineChunks(record.respChunks, record.respBytes);
-			responseBody = combined.toString("base64");
-		}
-
 		return JSON.stringify({
 			request: {
 				headers: meta.requestHeaders,
-				body: requestBody,
+				body: null,
 			},
 			response: {
 				status: meta.responseStatus,
 				headers: meta.responseHeaders,
-				body: responseBody,
+				body: null,
 			},
 			meta: {
 				accountId: meta.accountId || NO_ACCOUNT_ID,
@@ -1625,18 +1630,6 @@ export class RequestRecorder {
 				failureSource: meta.failureSource ?? undefined,
 			},
 		});
-	}
-
-	/** Estimate the serialized payload byte budget before building the envelope. */
-	private estimatePayloadBytes(record: InternalRecord): number {
-		// Request body stored as base64 (~4/3× raw bytes).
-		const reqLen = record.reqBytes?.byteLength ?? 0;
-		const estimatedRequestBytes = reqLen ? Math.ceil(reqLen / 3) * 4 : 0;
-		// Response body stored as base64.
-		const estimatedResponseBytes = record.respBytes
-			? Math.ceil(record.respBytes / 3) * 4
-			: 0;
-		return estimatedRequestBytes + estimatedResponseBytes + 2048;
 	}
 
 	/**

@@ -8,6 +8,11 @@ import {
 	applyProjectRepairs,
 	planMissingProjects,
 } from "./backfill-missing-projects";
+import {
+	encodePayloadBlob,
+	PayloadDecryptError,
+} from "../packages/database/src/payload-encryption";
+import { buildPayloadFrame } from "../packages/database/src/payload-frame";
 
 test("CLI previews read-only and opens an existing database for audited writes", () => {
 	const dir = mkdtempSync(join(tmpdir(), "project-backfill-"));
@@ -45,12 +50,14 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 	db.exec(`
 		CREATE TABLE requests (id TEXT PRIMARY KEY, timestamp INTEGER, method TEXT,
 		 path TEXT, project TEXT, project_attribution_source TEXT);
-		CREATE TABLE request_payloads (id TEXT PRIMARY KEY, json TEXT);
+		CREATE TABLE request_payloads (id TEXT PRIMARY KEY, json TEXT, payload BLOB);
 	`);
 	const insert = db.query(
 		"INSERT INTO requests VALUES (?, ?, 'POST', '/v1/messages', ?, ?)",
 	);
-	const save = db.query("INSERT INTO request_payloads VALUES (?, ?)");
+	const save = db.query(
+		"INSERT INTO request_payloads (id, json, payload) VALUES (?, ?, ?)",
+	);
 	const body = {
 		messages: [
 			{ role: "system", content: "Primary working directory: /home/u/repo" },
@@ -69,6 +76,7 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 		"no-payload",
 		"capped",
 		"invalid",
+		"corrupt-blob",
 		"unknown",
 	]) {
 		insert.run(
@@ -77,12 +85,22 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 			id === "existing" ? "keep" : null,
 			"none",
 		);
-		if (id !== "no-payload") {
+		if (id === "corrupt-blob") {
+			save.run(id, "", Uint8Array.of(0, 1, 2));
+		} else if (id === "concurrent") {
+			// A binary-form row beside the legacy text rows.
+			const frame = buildPayloadFrame(
+				JSON.stringify({ request: { body: null }, response: { body: null } }),
+				new TextEncoder().encode(JSON.stringify(body)),
+				[],
+			);
+			save.run(id, "", await encodePayloadBlob(frame));
+		} else if (id !== "no-payload") {
 			const json = envelope(body);
 			const stored = id === "repair"
 				? `zst:${(await Bun.zstdCompress(json)).toString("base64")}`
 				: json;
-			save.run(id, stored);
+			save.run(id, stored, null);
 		}
 	}
 	db.query("UPDATE request_payloads SET json = ? WHERE id = ?").run(
@@ -107,7 +125,7 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 			"source-changed",
 		]);
 		expect(plan.missingBody).toBe(1);
-		expect(plan.invalidBody).toBe(1);
+		expect(plan.invalidBody).toBe(2);
 		expect(plan.unresolved).toBe(1);
 		// Changes made since the preview must not be overwritten.
 		db.exec("UPDATE requests SET project = 'manual' WHERE id = 'concurrent'");
@@ -129,6 +147,27 @@ test("backfill fills supported missing projects, preserves other rows, and is id
 		expect(
 			db.query("SELECT project FROM requests WHERE id = 'future'").get(),
 		).toEqual({ project: null });
+	} finally {
+		db.close();
+	}
+});
+
+test("an undecryptable payload aborts the plan instead of counting as invalid", async () => {
+	const db = new Database(":memory:");
+	db.exec(`
+		CREATE TABLE requests (id TEXT PRIMARY KEY, timestamp INTEGER, method TEXT,
+		 path TEXT, project TEXT, project_attribution_source TEXT);
+		CREATE TABLE request_payloads (id TEXT PRIMARY KEY, json TEXT, payload BLOB);
+		INSERT INTO requests VALUES ('sealed', 100, 'POST', '/v1/messages', NULL, 'none');
+	`);
+	// Encrypted flag set; the test environment configures no key.
+	db.query("INSERT INTO request_payloads VALUES ('sealed', '', ?)").run(
+		Uint8Array.of(0b10, ...new Uint8Array(32)),
+	);
+	try {
+		await expect(
+			planMissingProjects(db, defaultProjectRules(), 200),
+		).rejects.toBeInstanceOf(PayloadDecryptError);
 	} finally {
 		db.close();
 	}

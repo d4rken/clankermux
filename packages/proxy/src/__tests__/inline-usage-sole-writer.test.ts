@@ -63,8 +63,10 @@ class FakeDbOps {
 	async saveRequestRouting(): Promise<void> {}
 	async saveRequestHeaders(): Promise<void> {}
 	async saveRequestToolCalls(): Promise<void> {}
-	async encryptPayloadForStorage(json: string): Promise<string> {
-		return json;
+	async encodePayloadForStorage(
+		frame: Uint8Array<ArrayBuffer>,
+	): Promise<Uint8Array<ArrayBuffer>> {
+		return frame;
 	}
 	/** The LATE-PATCH path. Every test here asserts it never runs. */
 	async updateRequestUsage(requestId: string, usage: unknown): Promise<void> {

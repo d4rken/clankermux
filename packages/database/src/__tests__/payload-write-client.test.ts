@@ -214,7 +214,7 @@ function makeHarness(options: { rotationByteBudget?: number } = {}): Harness {
 		n++;
 		const entry: PayloadEntryInput = {
 			requestId: `req-${n}`,
-			ciphertext: `payload-${n}`,
+			payload: new TextEncoder().encode(`payload-${n}`),
 			timestamp: clock.now(),
 			transportBytes: 1024,
 			payloadBytes: 900,
@@ -399,7 +399,7 @@ describe("PayloadWriteClient — writer-fatal", () => {
 		expect(
 			h.client.publishReserved({
 				requestId: "reserved",
-				ciphertext: "x",
+				payload: Uint8Array.of(0x78),
 				timestamp: h.clock.now(),
 				transportBytes: 1,
 				payloadBytes: 1,
@@ -717,7 +717,7 @@ describe("PayloadWriteClient — fenced no-progress watchdog", () => {
 		expect(
 			h.client.publish({
 				requestId: "blocked",
-				ciphertext: "x",
+				payload: Uint8Array.of(0x78),
 				timestamp: h.clock.now(),
 				transportBytes: 1,
 				payloadBytes: 1,
@@ -764,7 +764,7 @@ describe("PayloadWriteClient — fenced no-progress watchdog", () => {
 		expect(
 			h.client.publishReserved({
 				requestId: "reserved",
-				ciphertext: "x",
+				payload: Uint8Array.of(0x78),
 				timestamp: h.clock.now(),
 				transportBytes: 1,
 				payloadBytes: 1,
@@ -889,7 +889,7 @@ describe("PayloadWriteClient — lifecycle", () => {
 		expect(
 			h.client.publishReserved({
 				requestId: "req-drain",
-				ciphertext: "payload-drain",
+				payload: new TextEncoder().encode("payload-drain"),
 				timestamp: h.clock.now(),
 				transportBytes: 1024,
 				payloadBytes: 900,
@@ -919,7 +919,7 @@ describe("PayloadWriteClient — lifecycle", () => {
 		expect(
 			h.client.publishReserved({
 				requestId: "req-first",
-				ciphertext: "payload-first",
+				payload: new TextEncoder().encode("payload-first"),
 				timestamp: h.clock.now(),
 				transportBytes: 1024,
 				payloadBytes: 900,

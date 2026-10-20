@@ -200,13 +200,15 @@ function publish(
 	writer: AsyncDbWriter,
 	reservation: PayloadReservation,
 	id: string,
-	ciphertext: string,
+	body: string | Uint8Array<ArrayBuffer>,
 ): boolean {
+	const payload =
+		typeof body === "string" ? new TextEncoder().encode(body) : body;
 	return writer.enqueuePayload(reservation, {
 		requestId: id,
-		ciphertext,
+		payload,
 		timestamp: Date.now(),
-		payloadBytes: ciphertext.length,
+		payloadBytes: payload.byteLength,
 	});
 }
 
@@ -345,12 +347,12 @@ describe("AsyncDbWriter", () => {
 	test("publishing transfers the reservation to in-flight accounting", () => {
 		const harness = makeWriter();
 		writer = harness.writer;
-		// Estimate is deliberately wrong — the exact ciphertext size is what
-		// gets charged (base64 expands the plaintext by ~1/3).
+		// Estimate is deliberately wrong — the exact stored size is what
+		// gets charged.
 		const reservation = writer.reservePayload(300);
 		if (!reservation) throw new Error("expected a reservation");
-		const ciphertext = "e".repeat(400);
-		expect(publish(writer, reservation, "req-1", ciphertext)).toBe(true);
+		const payload = new Uint8Array(400);
+		expect(publish(writer, reservation, "req-1", payload)).toBe(true);
 
 		const h = writer.getHealth();
 		expect(h.payloadQueuedJobs).toBe(0); // no longer reserved
@@ -375,18 +377,16 @@ describe("AsyncDbWriter", () => {
 		const reservation = writer.reservePayload(rawBytes);
 		if (!reservation) throw new Error("expected a reservation");
 		expect(writer.getHealth().payloadBytesPending).toBe(rawBytes);
-		const stored = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;
+		const stored = new Uint8Array(await Bun.zstdCompress(json));
 		expect(
 			writer.enqueuePayload(reservation, {
 				requestId: "compressed",
-				ciphertext: stored,
+				payload: stored,
 				timestamp: Date.now(),
 				payloadBytes: rawBytes,
 			}),
 		).toBe(true);
-		expect(writer.getHealth().payloadBytesPending).toBe(
-			Buffer.byteLength(stored),
-		);
+		expect(writer.getHealth().payloadBytesPending).toBe(stored.byteLength);
 		expect(writer.getHealth().payloadInFlightOriginalBytes).toBe(rawBytes);
 		expect(harness.fake().published[0].payloadBytes).toBe(rawBytes);
 		harness.fake().settle(0, "committed");

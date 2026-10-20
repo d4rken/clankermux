@@ -179,13 +179,14 @@ describe("payload writer records the size", () => {
 			generation: 1,
 			seq: 1,
 			id: "req-1",
-			ciphertext: "{}",
+			payload: Uint8Array.of(0),
 			timestamp: Date.now(),
 			...overrides,
 		};
 	}
+	const bytes = (text: string) => new TextEncoder().encode(text);
 
-	it("stores the UTF-8 byte length, not the character count", () => {
+	it("stores the blob's byte length", () => {
 		const schemaDb = new Database(dbPath, { create: true });
 		runMigrations(schemaDb);
 		schemaDb.run(
@@ -194,10 +195,7 @@ describe("payload writer records the size", () => {
 		);
 		schemaDb.close();
 
-		// Multi-byte content: character count ≠ byte count, and the budget is in
-		// BYTES — a String.length here would under-count by ~3x on such payloads.
-		const ciphertext = JSON.stringify({ text: "héllo → wörld ✓" });
-		expect(ciphertext.length).not.toBe(Buffer.byteLength(ciphertext));
+		const payload = bytes(JSON.stringify({ text: "héllo → wörld ✓" }));
 
 		const db = openPayloadWriteDatabase(dbPath, 1000);
 		try {
@@ -206,7 +204,7 @@ describe("payload writer records the size", () => {
 				generation: 1,
 				post: () => {},
 			});
-			engine.accept(row({ ciphertext }));
+			engine.accept(row({ payload }));
 			engine.flush();
 		} finally {
 			db.close();
@@ -214,7 +212,7 @@ describe("payload writer records the size", () => {
 
 		const reader = open();
 		try {
-			expect(storedBytes(reader, "req-1")).toBe(Buffer.byteLength(ciphertext));
+			expect(storedBytes(reader, "req-1")).toBe(payload.byteLength);
 		} finally {
 			reader.close();
 		}
@@ -232,8 +230,8 @@ describe("payload writer records the size", () => {
 		);
 		schemaDb.close();
 
-		const small = JSON.stringify({ a: 1 });
-		const large = JSON.stringify({ a: "x".repeat(500) });
+		const small = bytes(JSON.stringify({ a: 1 }));
+		const large = bytes(JSON.stringify({ a: "x".repeat(500) }));
 
 		const db = openPayloadWriteDatabase(dbPath, 1000);
 		try {
@@ -242,9 +240,9 @@ describe("payload writer records the size", () => {
 				generation: 1,
 				post: () => {},
 			});
-			engine.accept(row({ seq: 1, ciphertext: small }));
+			engine.accept(row({ seq: 1, payload: small }));
 			engine.flush();
-			engine.accept(row({ seq: 2, ciphertext: large }));
+			engine.accept(row({ seq: 2, payload: large }));
 			engine.flush();
 		} finally {
 			db.close();
@@ -252,7 +250,7 @@ describe("payload writer records the size", () => {
 
 		const reader = open();
 		try {
-			expect(storedBytes(reader, "req-1")).toBe(Buffer.byteLength(large));
+			expect(storedBytes(reader, "req-1")).toBe(large.byteLength);
 		} finally {
 			reader.close();
 		}

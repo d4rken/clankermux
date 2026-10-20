@@ -161,7 +161,7 @@ async function main(): Promise<number> {
 		insertRequest.run(id, Date.now());
 		client.publish({
 			requestId: id,
-			ciphertext: "p".repeat(size),
+			payload: new Uint8Array(size).fill(0x70),
 			timestamp: Date.now(),
 			transportBytes: size,
 			payloadBytes: size,
@@ -188,7 +188,7 @@ async function main(): Promise<number> {
 			// GC so what remains is genuinely retained.
 			await drain(client);
 			await Bun.sleep(SETTLE_MS);
-			// Twice: the first pass releases the large ciphertext strings, the
+			// Twice: the first pass releases the large payload buffers, the
 			// second collects what that pass made unreachable.
 			Bun.gc(true);
 			await Bun.sleep(50);

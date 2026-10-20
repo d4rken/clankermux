@@ -230,21 +230,6 @@ block holding the JSON.
 * [Caddy front proxy](deploy/caddy/README.md), which holds new connections across
   app restarts while in-flight agent streams drain.
 
-### Stored payload compatibility
-
-From 2026.10.3, new stored payloads use zstd compression before optional
-encryption. Payloads below 512 bytes or that would grow are stored uncompressed.
-Native zstd work runs off the JavaScript thread; UTF-8/base64 conversions do not.
-Storage and retention byte counts measure the stored size; admission still
-reserves the uncompressed payload.
-Existing rows are not rewritten, and the database file does not shrink
-immediately.
-
-Version 2026.10.2 reads compressed payloads but writes the previous format,
-so it is a compatible rollback target. Once compressed rows have been written,
-do not roll back to an older version: it cannot read them. Existing plaintext
-and encrypted rows remain readable without a migration.
-
 ## Project notes
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare),

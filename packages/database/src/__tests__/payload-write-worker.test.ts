@@ -26,6 +26,8 @@ let dir: string;
 let dbPath: string;
 let db: Database;
 
+const bytes = (text: string) => new TextEncoder().encode(text);
+
 function row(
 	overrides: Partial<PayloadWriteRowMessage> = {},
 ): PayloadWriteRowMessage {
@@ -34,7 +36,7 @@ function row(
 		generation: 1,
 		seq: 1,
 		id: "req-1",
-		ciphertext: '{"hello":"world"}',
+		payload: bytes('{"hello":"world"}'),
 		timestamp: Date.now(),
 		...overrides,
 	};
@@ -146,14 +148,14 @@ describe("payload write engine — batching and acks", () => {
 			maxBatchBytes: 16,
 			maxBatchRows: 10,
 		});
-		engine.accept(row({ id: "big", ciphertext: "x".repeat(1024) }));
+		engine.accept(row({ id: "big", payload: bytes("x".repeat(1024)) }));
 		const ack = posted[0];
 		if (ack?.type !== "ack") throw new Error("expected ack");
 		expect(ack.results).toHaveLength(1);
 		expect(ack.results[0].status).toBe("committed");
 	});
 
-	test("the batch byte budget counts UTF-8 bytes, not UTF-16 code units", () => {
+	test("the batch byte budget counts stored bytes", () => {
 		seedRequest("multibyte");
 		const posted: PayloadWriteResponse[] = [];
 		const engine = createPayloadWriteEngine({
@@ -164,9 +166,8 @@ describe("payload write engine — batching and acks", () => {
 			maxBatchRows: 100,
 		});
 
-		// 8 "€" = 8 UTF-16 code units but 24 UTF-8 bytes, i.e. over the 16-byte
-		// budget. Counting code units left it at 8 and never tripped the flush.
-		engine.accept(row({ id: "multibyte", ciphertext: "€".repeat(8) }));
+		// 8 "€" = 24 bytes, over the 16-byte budget.
+		engine.accept(row({ id: "multibyte", payload: bytes("€".repeat(8)) }));
 		expect(posted).toHaveLength(1);
 	});
 
@@ -184,8 +185,8 @@ describe("payload write engine — batching and acks", () => {
 
 		// 12 bytes each: two rows exceed the 16-byte budget, so they must land in
 		// two separate transactions rather than one 24-byte batch.
-		engine.accept(row({ seq: 1, id: "a", ciphertext: "€".repeat(4) }));
-		engine.accept(row({ seq: 2, id: "b", ciphertext: "€".repeat(4) }));
+		engine.accept(row({ seq: 1, id: "a", payload: bytes("€".repeat(4)) }));
+		engine.accept(row({ seq: 2, id: "b", payload: bytes("€".repeat(4)) }));
 		engine.flush();
 
 		expect(posted).toHaveLength(2);
@@ -205,17 +206,42 @@ describe("payload write engine — batching and acks", () => {
 			post: (m) => posted.push(m),
 			maxBatchRows: 1,
 		});
-		engine.accept(row({ id: "a", ciphertext: "first", timestamp: 1000 }));
+		engine.accept(row({ id: "a", payload: bytes("first"), timestamp: 1000 }));
 		engine.accept(
-			row({ seq: 2, id: "a", ciphertext: "second", timestamp: 2000 }),
+			row({ seq: 2, id: "a", payload: bytes("second"), timestamp: 2000 }),
 		);
 
 		const stored = db
-			.query("SELECT id, json, timestamp FROM request_payloads")
-			.all() as Array<{ id: string; json: string; timestamp: number }>;
+			.query("SELECT id, json, payload, timestamp FROM request_payloads")
+			.all() as Array<{
+			id: string;
+			json: string;
+			payload: Uint8Array;
+			timestamp: number;
+		}>;
 		expect(stored).toHaveLength(1);
-		expect(stored[0].json).toBe("second");
+		expect(stored[0].payload).toEqual(bytes("second"));
+		expect(stored[0].json).toBe("");
 		expect(stored[0].timestamp).toBe(2000);
+	});
+
+	test("rewriting a legacy text row clears its text form", () => {
+		seedRequest("a");
+		db.run(
+			"INSERT INTO request_payloads (id, json, timestamp, bytes) VALUES ('a', 'zst:legacy', 1, 10)",
+		);
+		const engine = createPayloadWriteEngine({
+			db,
+			generation: 1,
+			post: () => {},
+			maxBatchRows: 1,
+		});
+		engine.accept(row({ id: "a", payload: bytes("binary") }));
+
+		const stored = db
+			.query("SELECT json, payload, bytes FROM request_payloads WHERE id = 'a'")
+			.get() as { json: string; payload: Uint8Array; bytes: number };
+		expect(stored).toEqual({ json: "", payload: bytes("binary"), bytes: 6 });
 	});
 
 	test("close() flushes pending rows, posts closed and closes the handle", () => {

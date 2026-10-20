@@ -17,11 +17,10 @@ type MetadataJob = {
 };
 
 /**
- * Hard ceiling for a single stored payload. Encryption's base64 layer expands
- * the plaintext envelope by ~1/3, so the reserved estimate and the real
- * transport size differ; this bounds the reconciliation, keeps one pathological
- * request from monopolising the 100 MiB budget, and stays well above the
- * largest realistic envelope.
+ * Hard ceiling for a single payload at admission and publication. Admission
+ * checks the plaintext frame size; publication checks the stored blob size,
+ * which reflects compression and flags/encryption overhead. This keeps one
+ * pathological request from monopolising the 100 MiB budget.
  */
 export const MAX_PAYLOAD_ENTRY_BYTES = 16 * 1024 * 1024;
 
@@ -35,8 +34,9 @@ export const PAYLOAD_FLUSH_DEADLINE_MS = 15_000;
 /**
  * A reserved slice of the payload budget.
  *
- * Payload capacity is reserved BEFORE the metadata job is enqueued, so we never
- * serialize and encrypt an envelope only to discover there is no room for it.
+ * Payload capacity is reserved BEFORE the metadata job is enqueued, before
+ * framing and encoding, so entries rejected at admission skip that work. The
+ * stored size is reconciled and checked again at publication.
  * Every path must either release the token or transfer it via
  * {@link AsyncDbWriter.enqueuePayload}: metadata-enqueue rejection, serialization
  * failure, encryption failure, a failed saveRequest, client disposal, worker
@@ -53,11 +53,11 @@ export interface PayloadReservation {
 
 export interface PayloadEnqueueInput {
 	requestId: string;
-	/** Stored form — ciphertext when encryption is on, plaintext JSON otherwise. */
-	ciphertext: string;
+	/** Binary stored form (see encodePayloadBlob). Never mutated once enqueued. */
+	payload: Uint8Array<ArrayBuffer>;
 	/** Epoch ms for `request_payloads.timestamp`. */
 	timestamp: number;
-	/** Plaintext envelope size, reported through health only. */
+	/** Plaintext frame size, reported through health only. */
 	payloadBytes: number;
 }
 
@@ -389,7 +389,7 @@ export class AsyncDbWriter implements Disposable {
 		const token = reservation as ReservationToken;
 		if (!token.consume()) return false;
 
-		const transportBytes = Buffer.byteLength(entry.ciphertext);
+		const transportBytes = entry.payload.byteLength;
 
 		if (transportBytes > MAX_PAYLOAD_ENTRY_BYTES) {
 			logger.warn(
@@ -426,7 +426,7 @@ export class AsyncDbWriter implements Disposable {
 			// hand it back as an ordinary drop.
 			published = writer.publishReserved({
 				requestId: entry.requestId,
-				ciphertext: entry.ciphertext,
+				payload: entry.payload,
 				timestamp: entry.timestamp,
 				transportBytes,
 				payloadBytes: entry.payloadBytes,
