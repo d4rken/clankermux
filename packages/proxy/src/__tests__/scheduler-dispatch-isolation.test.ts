@@ -40,7 +40,7 @@ function parseOutput(output: string) {
 	// as more tests or assign its identities to the last executed file.
 	for (const line of stripVTControlCharacters(output).split(/\r?\n/)) {
 		const header = line.match(
-			/^(?:##\[group\])?((?:\.\/)?packages\/.*\.test\.ts):$/,
+			/^(?:##\[group\]|::group::)?((?:\.\/)?packages\/.*\.test\.ts):$/,
 		);
 		if (header) {
 			currentFile = header[1].replace(/^\.\//, "");
@@ -195,3 +195,30 @@ it("scheduler tests leave the real dispatcher usable in either file order", () =
 	}
 	expect(problems).toEqual([]);
 }, 600_000);
+
+it("parses plain and CI-grouped Bun file headers", () => {
+	const parsed = parseOutput(
+		[
+			"::group::packages/a.test.ts:",
+			"(pass) x [1.00ms]",
+			"::endgroup::",
+			"##[group]packages/b.test.ts:",
+			"(pass) y",
+			"./packages/c.test.ts:",
+			"(pass) z",
+			"",
+			" 3 pass",
+			" 0 fail",
+			"Ran 3 tests across 3 files. [5.00ms]",
+		].join("\n"),
+	);
+	expect(parsed.files).toEqual([
+		"packages/a.test.ts",
+		"packages/b.test.ts",
+		"packages/c.test.ts",
+	]);
+	expect(parsed.testsByFile.get("packages/a.test.ts")).toEqual([
+		{ name: "x", status: "pass" },
+	]);
+	expect(parsed.problems).toEqual([]);
+});
