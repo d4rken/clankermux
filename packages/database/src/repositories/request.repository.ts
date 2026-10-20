@@ -11,8 +11,10 @@ import type {
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
 import {
-	decodePayloadFromStorage,
-	encodePayloadForStorage,
+	decodeStoredPayload,
+	decodeStoredPayloadText,
+	encodePayloadBlob,
+	type StoredPayloadRow,
 } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 import {
@@ -35,9 +37,12 @@ const log = new Logger("RequestRepository");
  * Single-row reads (`getPayload`) MUST stay strict and let the error
  * propagate — there's no fallback that makes sense for a single row.
  */
-async function decodeForList(id: string, json: string): Promise<string> {
+async function decodeForList(
+	id: string,
+	row: StoredPayloadRow,
+): Promise<string | null> {
 	try {
-		return await decodePayloadFromStorage(json);
+		return await decodeStoredPayloadText(row);
 	} catch (err) {
 		log.error(`Failed to decode payload ${id}:`, err);
 		return JSON.stringify({
@@ -784,34 +789,33 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	// inserted by the off-thread payload-write worker (see
 	// payload-write-worker.ts), which owns its own SQLite connection. The main
 	// thread only produces the STORED FORM here. Native zstd and crypto work
-	// runs asynchronously; UTF-8/base64 conversion stays here. The writer needs no key.
-	async encryptPayloadForStorage(json: string): Promise<string> {
-		return encodePayloadForStorage(json);
+	// runs asynchronously. The writer needs no key.
+	async encodePayloadForStorage(
+		frame: Uint8Array<ArrayBuffer>,
+	): Promise<Uint8Array<ArrayBuffer>> {
+		return encodePayloadBlob(frame);
 	}
 
 	async getPayload(id: string): Promise<unknown | null> {
-		const row = await this.get<{ json: string }>(
-			`SELECT json FROM request_payloads WHERE id = ?`,
+		const row = await this.get<StoredPayloadRow>(
+			`SELECT json, payload FROM request_payloads WHERE id = ?`,
 			[id],
 		);
 
 		if (!row) return null;
 
 		// Decode errors must propagate: wrong/missing keys, tampering and corrupt
-		// compressed rows must not look like absent data. Historical malformed
-		// JSON remains tolerated.
-		const decoded = await decodePayloadFromStorage(row.json);
-		try {
-			return JSON.parse(decoded);
-		} catch {
-			return null;
-		}
+		// blobs or compressed rows must not look like absent data. Historical
+		// malformed JSON remains tolerated.
+		return decodeStoredPayload(row);
 	}
 
-	async listPayloads(limit = 50): Promise<Array<{ id: string; json: string }>> {
-		const rows = await this.query<{ id: string; json: string }>(
+	async listPayloads(
+		limit = 50,
+	): Promise<Array<{ id: string; json: string | null }>> {
+		const rows = await this.query<{ id: string } & StoredPayloadRow>(
 			`
-			SELECT rp.id, rp.json
+			SELECT rp.id, rp.json, rp.payload
 			FROM request_payloads rp
 			JOIN requests r ON rp.id = r.id
 			ORDER BY r.timestamp DESC
@@ -822,7 +826,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		return Promise.all(
 			rows.map(async (row) => ({
 				id: row.id,
-				json: await decodeForList(row.id, row.json),
+				json: await decodeForList(row.id, row),
 			})),
 		);
 	}
@@ -835,14 +839,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			account_name: string | null;
 		}>
 	> {
-		const rows = await this.query<{
-			id: string;
-			json: string | null;
-			timestamp: number;
-			account_name: string | null;
-		}>(
+		const rows = await this.query<
+			{
+				id: string;
+				timestamp: number;
+				account_name: string | null;
+			} & StoredPayloadRow
+		>(
 			`
-			SELECT r.id, r.timestamp, rp.json, a.name as account_name
+			SELECT r.id, r.timestamp, rp.json, rp.payload, a.name as account_name
 			FROM requests r
 			LEFT JOIN request_payloads rp ON rp.id = r.id
 			LEFT JOIN accounts a ON r.account_used = a.id
@@ -855,7 +860,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			rows.map(async (row) => ({
 				id: row.id,
 				timestamp: row.timestamp,
-				json: row.json ? await decodeForList(row.id, row.json) : null,
+				json: await decodeForList(row.id, row),
 				account_name: row.account_name,
 			})),
 		);

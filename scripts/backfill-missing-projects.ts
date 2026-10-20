@@ -16,7 +16,12 @@ import { closeSync, fsyncSync, openSync, writeFileSync } from "node:fs";
 import type { ProjectRules } from "@clankermux/types";
 import { Config } from "../packages/config/src/index";
 import { resolveDbPath } from "../packages/database/src/paths";
-import { decodePayloadFromStorage } from "../packages/database/src/payload-encryption";
+import {
+	decodeStoredPayloadText,
+	PayloadDecryptError,
+	payloadColumnSql,
+	type StoredPayloadRow,
+} from "../packages/database/src/payload-encryption";
 import { extractProjectFromRequest } from "../packages/proxy/src/project-extraction";
 
 interface Candidate {
@@ -52,8 +57,8 @@ export async function planMissingProjects(
 		ORDER BY r.timestamp, r.id
 	`)
 		.all(before);
-	const payload = db.query<{ json: string }, [string]>(
-		"SELECT json FROM request_payloads WHERE id = ?",
+	const payload = db.query<StoredPayloadRow, [string]>(
+		`SELECT json, ${payloadColumnSql(db, "payload")} AS payload FROM request_payloads WHERE id = ?`,
 	);
 	const repairs: ProjectRepair[] = [];
 	let missingBody = 0;
@@ -61,11 +66,20 @@ export async function planMissingProjects(
 	let unresolved = 0;
 	for (const row of candidates) {
 		const stored = payload.get(row.id);
-		if (!stored) {
+		let plaintext: string | null = null;
+		if (stored) {
+			try {
+				plaintext = await decodeStoredPayloadText(stored);
+			} catch (error) {
+				if (error instanceof PayloadDecryptError) throw error;
+				invalidBody++;
+				continue;
+			}
+		}
+		if (plaintext === null) {
 			missingBody++;
 			continue;
 		}
-		const plaintext = await decodePayloadFromStorage(stored.json);
 		let envelope;
 		let body;
 		try {

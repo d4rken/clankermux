@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../migrations";
+import { buildPayloadFrame, envelopeFromPayloadFrame } from "../payload-frame";
 import {
 	createWorkerTransport,
 	type PayloadSettlement,
@@ -60,12 +61,24 @@ function seedRequest(id: string): void {
 	);
 }
 
-function storedPayload(id: string): string | null {
+function storedBlob(id: string): Uint8Array | null {
 	const row = db
-		.query("SELECT json FROM request_payloads WHERE id = ?")
-		.get(id) as { json: string } | null;
-	return row?.json ?? null;
+		.query("SELECT payload FROM request_payloads WHERE id = ?")
+		.get(id) as { payload: Uint8Array | null } | null;
+	return row?.payload ?? null;
 }
+
+/** The stored blob as UTF-8 text, for rows published from plain strings. */
+function storedPayload(id: string): string | null {
+	const blob = storedBlob(id);
+	return blob ? new TextDecoder().decode(blob) : null;
+}
+
+const bytes = (text: string) => new TextEncoder().encode(text);
+const skeleton = JSON.stringify({
+	request: { headers: {}, body: null },
+	response: { status: 200, headers: {}, body: null },
+});
 
 function payloadCount(): number {
 	return (
@@ -107,14 +120,15 @@ function makeClient(options: {
 function publish(
 	client: PayloadWriteClient,
 	id: string,
-	ciphertext: string,
+	body: string | Uint8Array<ArrayBuffer>,
 ): boolean {
+	const payload = typeof body === "string" ? bytes(body) : body;
 	return client.publish({
 		requestId: id,
-		ciphertext,
+		payload,
 		timestamp: Date.now(),
-		transportBytes: Buffer.byteLength(ciphertext),
-		payloadBytes: Buffer.byteLength(ciphertext),
+		transportBytes: payload.byteLength,
+		payloadBytes: payload.byteLength,
 	});
 }
 
@@ -165,21 +179,23 @@ test(
 test(
 	"writes encrypted payloads the reader can decrypt",
 	async () => {
-		const { encryptPayload, decryptPayload } =
+		const { encodePayloadBlob, decodePayloadBlob } =
 			await loadPayloadEncryptionWithTestKey();
 		const settlements: PayloadSettlement[] = [];
 		const client = makeClient({ settlements });
 
 		seedRequest("enc-1");
-		const envelope = JSON.stringify({ secret: "hunter2" });
-		const ciphertext = await encryptPayload(envelope);
-		expect(ciphertext.startsWith("enc:")).toBe(true);
-		expect(publish(client, "enc-1", ciphertext)).toBe(true);
+		const frame = buildPayloadFrame(skeleton, bytes("hunter2"), []);
+		const blob = await encodePayloadBlob(frame);
+		expect(blob[0]).toBe(0b10);
+		expect(publish(client, "enc-1", blob)).toBe(true);
 
 		await waitFor(() => settlements.length === 1, "settlement");
-		const stored = storedPayload("enc-1");
-		expect(stored).toBe(ciphertext);
-		expect(await decryptPayload(stored ?? "")).toBe(envelope);
+		const stored = storedBlob("enc-1");
+		expect(stored).toEqual(blob);
+		expect(await decodePayloadBlob(stored ?? new Uint8Array(0))).toEqual(
+			envelopeFromPayloadFrame(frame),
+		);
 	},
 	TEST_TIMEOUT_MS,
 );
@@ -191,32 +207,36 @@ test(
 		const settlements: PayloadSettlement[] = [];
 		const client = makeClient({ settlements });
 		seedRequest("compressed-enc");
-		const json = JSON.stringify({ history: "message content ".repeat(20_000) });
-		const stored = await codec.encodePayloadForStorage(json);
-		expect((await codec.decryptPayload(stored)).startsWith("zst:")).toBe(true);
+		const frame = buildPayloadFrame(
+			skeleton,
+			bytes("message content ".repeat(20_000)),
+			[],
+		);
+		const stored = await codec.encodePayloadBlob(frame);
+		expect(stored[0]).toBe(0b11);
 		expect(
 			client.publish({
 				requestId: "compressed-enc",
-				ciphertext: stored,
+				payload: stored,
 				timestamp: Date.now(),
-				transportBytes: Buffer.byteLength(stored),
-				payloadBytes: Buffer.byteLength(json),
+				transportBytes: stored.byteLength,
+				payloadBytes: frame.byteLength,
 			}),
 		).toBe(true);
 		await waitFor(() => settlements.length === 1, "compressed settlement");
 		expect(settlements[0].outcome).toBe("committed");
-		expect(settlements[0].transportBytes).toBe(Buffer.byteLength(stored));
-		expect(settlements[0].payloadBytes).toBe(Buffer.byteLength(json));
+		expect(settlements[0].transportBytes).toBe(stored.byteLength);
+		expect(settlements[0].payloadBytes).toBe(frame.byteLength);
 		expect(
-			await codec.decodePayloadFromStorage(
-				storedPayload("compressed-enc") ?? "",
+			await codec.decodePayloadBlob(
+				storedBlob("compressed-enc") ?? new Uint8Array(0),
 			),
-		).toBe(json);
+		).toEqual(envelopeFromPayloadFrame(frame));
 		expect(
 			db
-				.query("SELECT bytes FROM request_payloads WHERE id = ?")
+				.query("SELECT json, bytes FROM request_payloads WHERE id = ?")
 				.get("compressed-enc"),
-		).toEqual({ bytes: Buffer.byteLength(stored) });
+		).toEqual({ json: "", bytes: stored.byteLength });
 	},
 	TEST_TIMEOUT_MS,
 );

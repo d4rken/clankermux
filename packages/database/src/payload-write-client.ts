@@ -96,13 +96,13 @@ export type PayloadWriteTransportFactory = (
 
 export interface PayloadEntryInput {
 	requestId: string;
-	/** Stored form (ciphertext or plaintext JSON) as handed to the worker. */
-	ciphertext: string;
+	/** Binary stored form as handed to the worker; never mutated or transferred. */
+	payload: Uint8Array<ArrayBuffer>;
 	/** Epoch ms stored in `request_payloads.timestamp`; the retention basis. */
 	timestamp: number;
-	/** Byte size of `ciphertext` — what crosses the postMessage boundary. */
+	/** Byte size of `payload` — what crosses the postMessage boundary. */
 	transportBytes: number;
-	/** Byte size of the plaintext envelope, for reporting only. */
+	/** Byte size of the plaintext payload frame, for reporting only. */
 	payloadBytes: number;
 }
 
@@ -127,9 +127,9 @@ export interface PayloadSettlement {
 export interface PayloadWriterStats {
 	/** Entries published but not yet settled. */
 	unackedEntries: number;
-	/** Transport (ciphertext) bytes of unacked entries. */
+	/** Transport (stored payload) bytes of unacked entries. */
 	unackedTransportBytes: number;
-	/** Original (plaintext envelope) bytes of unacked entries. */
+	/** Original (plaintext frame) bytes of unacked entries. */
 	unackedPayloadBytes: number;
 	/** Age of the oldest UNACKNOWLEDGED entry, ms. */
 	oldestUnackedAgeMs: number;
@@ -479,7 +479,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				generation: generation.id,
 				seq: entry.seq,
 				id: entry.requestId,
-				ciphertext: entry.ciphertext,
+				payload: entry.payload,
 				timestamp: entry.timestamp,
 			});
 		} catch (err) {
@@ -1199,7 +1199,7 @@ export class PayloadWriteClient implements PayloadWriterLike {
 				generation: generation.id,
 				seq: entry.seq,
 				id: entry.requestId,
-				ciphertext: entry.ciphertext,
+				payload: entry.payload,
 				timestamp: entry.timestamp,
 			});
 		} catch {

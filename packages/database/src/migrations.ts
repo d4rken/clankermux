@@ -401,15 +401,18 @@ export function ensureSchema(db: Database): void {
 	`);
 
 	// Create request_payloads table for storing full request/response data.
-	// `bytes` is the stored payload's UTF-8 length, recorded at write time so the
-	// byte-budget cleanup pass can sum sizes from an index instead of scanning
-	// the blobs (SUM(LENGTH(json)) measured 1.29 s per GiB — unusable per tick).
+	// `payload` holds the binary stored form; `json` holds the legacy text form
+	// and is empty on binary rows. `bytes` is the stored payload's length,
+	// recorded at write time so the byte-budget cleanup pass can sum sizes from
+	// an index instead of scanning the blobs (SUM(LENGTH(json)) measured 1.29 s
+	// per GiB — unusable per tick).
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_payloads (
 			id TEXT PRIMARY KEY,
 			json TEXT NOT NULL,
 			timestamp INTEGER,
 			bytes INTEGER,
+			payload BLOB,
 			FOREIGN KEY (id) REFERENCES requests(id) ON DELETE CASCADE
 		)
 	`);
@@ -2140,6 +2143,13 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "routing_attempts",
 		column: "ignored_fields",
 		ddl: "ALTER TABLE routing_attempts ADD COLUMN ignored_fields TEXT",
+	},
+	// Binary stored payload. Rows written before it keep their text form in
+	// `json` and are read from there until retention removes them.
+	{
+		table: "request_payloads",
+		column: "payload",
+		ddl: "ALTER TABLE request_payloads ADD COLUMN payload BLOB",
 	},
 ];
 

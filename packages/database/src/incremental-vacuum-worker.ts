@@ -445,15 +445,15 @@ export async function deleteBatched(
  * the pass. A NULL `bytes` counts as the full cap, so such a row goes alone.
  *
  * Each batch is ONE statement with the predicate inside it. A concurrent upsert
- * can rewrite a row's json/bytes/timestamp at any moment, and the byte-budget
+ * can rewrite a row's json/payload/bytes/timestamp at any moment, and the byte-budget
  * pass targets recent rows, so selecting ids first and deleting them in a
  * second statement would delete a freshly written payload. `.changes` is an
  * exact count only because `request_payloads` has no FK children.
  *
  * The window orders by (timestamp, bytes) so it runs on the covering
- * idx_request_payloads_size. `bytes` sits after the `json` blob in the row, so
- * reading it from the table walks that payload's overflow pages; the plan is
- * pinned in payload-size-eviction.test.ts.
+ * idx_request_payloads_size; reading `bytes` from the table can require walking
+ * a large legacy row's `json` overflow pages. The plan is pinned in
+ * payload-size-eviction.test.ts.
  *
  * Lock handling matches {@link deleteBatched}. Exported for the eviction tests,
  * which drive it against a wrapped handle.

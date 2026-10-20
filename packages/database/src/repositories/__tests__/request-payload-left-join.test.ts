@@ -10,6 +10,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { ensureSchema } from "../../migrations";
+import { buildPayloadFrame } from "../../payload-frame";
 import { RequestRepository } from "../request.repository";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,19 @@ function insertRequestWithPayload(
 	db.run(
 		`INSERT INTO request_payloads (id, json, timestamp) VALUES (?, ?, ?)`,
 		[id, json, timestamp],
+	);
+}
+
+function insertRequestWithBlob(
+	db: Database,
+	id: string,
+	timestamp: number,
+	payload: Uint8Array,
+): void {
+	insertRequest(db, id, timestamp);
+	db.run(
+		`INSERT INTO request_payloads (id, json, payload, timestamp) VALUES (?, '', ?, ?)`,
+		[id, payload, timestamp],
 	);
 }
 
@@ -110,15 +124,44 @@ describe("RequestRepository.listPayloadsWithAccountNames", () => {
 		expect(results[0].json).not.toBeNull();
 	});
 
-	it("encodes the production writer's stored form with compression", async () => {
-		const json = JSON.stringify({
-			history: "repeated message ".repeat(10_000),
+	it("reads the production writer's binary form in single and both list readers", async () => {
+		const skeleton = JSON.stringify({
+			request: { headers: {}, body: null },
+			response: { status: 200, headers: {}, body: null },
 		});
-		const stored = await repo.encryptPayloadForStorage(json);
-		expect(Buffer.byteLength(stored)).toBeLessThan(Buffer.byteLength(json));
-		insertRequestWithPayload(db, "encoded", Date.now(), stored);
-		expect(await repo.getPayload("encoded")).toEqual(JSON.parse(json));
-		expect((await repo.listPayloads())[0].json).toBe(json);
+		const requestBody = new TextEncoder().encode(
+			"repeated message ".repeat(10_000),
+		);
+		const frame = buildPayloadFrame(skeleton, requestBody, []);
+		const stored = await repo.encodePayloadForStorage(frame);
+		expect(stored.byteLength).toBeLessThan(frame.byteLength);
+		insertRequestWithBlob(db, "encoded", Date.now(), stored);
+
+		const envelope = {
+			request: {
+				headers: {},
+				body: Buffer.from(requestBody).toString("base64"),
+			},
+			response: { status: 200, headers: {}, body: null },
+		};
+		expect(await repo.getPayload("encoded")).toEqual(envelope);
+		expect((await repo.listPayloads())[0].json).toBe(JSON.stringify(envelope));
+		expect((await repo.listPayloadsWithAccountNames())[0].json).toBe(
+			JSON.stringify(envelope),
+		);
+	});
+
+	it("throws on a corrupt blob in strict reads but isolates list failures", async () => {
+		insertRequestWithBlob(db, "corrupt", Date.now(), Uint8Array.of(0, 1, 2));
+		await expect(repo.getPayload("corrupt")).rejects.toThrow();
+		for (const rows of [
+			await repo.listPayloads(),
+			await repo.listPayloadsWithAccountNames(),
+		]) {
+			expect(JSON.parse(rows[0]?.json ?? "null").error).toBe(
+				"Payload could not be decoded",
+			);
+		}
 	});
 
 	it("decodes compressed rows in single and both list readers", async () => {

@@ -9,7 +9,7 @@ import { isCorruptionError, isTransientLockError } from "./sqlite-error";
  * largest rows we write (hundreds of KiB on average, several MiB at the tail),
  * which made them the dominant contributor to event-loop freezes. This worker
  * owns its own SQLite connection and performs every payload write off the main
- * thread; the main thread only encrypts and hands the ciphertext over.
+ * thread; the main thread only encodes and hands the stored bytes over.
  *
  * Protocol (see the message types below):
  *   client → worker:  init → write* → close
@@ -62,8 +62,8 @@ export interface PayloadWriteRowMessage {
 	generation: number;
 	seq: number;
 	id: string;
-	/** Stored form of the payload: ciphertext when encryption is on, else JSON. */
-	ciphertext: string;
+	/** Binary stored form of the payload (see encodePayloadBlob). */
+	payload: Uint8Array;
 	/** Epoch ms written to `request_payloads.timestamp` (retention basis). */
 	timestamp: number;
 }
@@ -143,14 +143,18 @@ export const PAYLOAD_BATCH_MAX_ROWS = 32;
 export const PAYLOAD_BATCH_MAX_DELAY_MS = 25;
 
 /**
- * `bytes` is the row's UTF-8 length, recorded so the retention pass can enforce
+ * `bytes` is the stored blob length, recorded so the retention pass can enforce
  * a byte budget by summing an integer column off an index instead of scanning
  * the blobs. `bytes = EXCLUDED.bytes` on conflict is REQUIRED: the replay path
  * re-sends entries and a payload may be rewritten with different content, so a
  * stale size would otherwise survive indefinitely and mis-drive eviction.
+ *
+ * Binary rows write the legacy text column `json` as ''; the upsert clears it
+ * so a rewrite never leaves both forms (__tests__/payload-write-worker.test.ts:
+ * "rewriting a legacy text row clears its text form").
  */
-const INSERT_SQL = `INSERT INTO request_payloads (id, json, timestamp, bytes) VALUES (?, ?, ?, ?)
-	 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, timestamp = EXCLUDED.timestamp, bytes = EXCLUDED.bytes`;
+const INSERT_SQL = `INSERT INTO request_payloads (id, json, payload, timestamp, bytes) VALUES (?, '', ?, ?, ?)
+	 ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, payload = EXCLUDED.payload, timestamp = EXCLUDED.timestamp, bytes = EXCLUDED.bytes`;
 
 /**
  * SQLite primary result codes that are database-wide failures: the write path
@@ -259,7 +263,7 @@ export function classifyCommitError(err: unknown): PayloadWriteErrorClass {
 export interface PayloadWriteDb {
 	exec(sql: string): void;
 	prepare(sql: string): {
-		run(id: string, json: string, ts: number, bytes: number): unknown;
+		run(id: string, payload: Uint8Array, ts: number, bytes: number): unknown;
 	};
 	close(): void;
 }
@@ -275,7 +279,7 @@ export interface PayloadWriteEngineOptions {
 	clearTimer?: (handle: unknown) => void;
 }
 
-/** A queued row plus its UTF-8 size, carried together from accept to insert. */
+/** A queued row plus its stored size, carried together from accept to insert. */
 interface PendingRow {
 	row: PayloadWriteRowMessage;
 	bytes: number;
@@ -331,10 +335,7 @@ export function createPayloadWriteEngine(
 	} = options;
 
 	const insert = db.prepare(INSERT_SQL);
-	// Rows are queued with their UTF-8 byte size, computed once on accept. The
-	// budget must be in BYTES: `String.length` counts UTF-16 code units, so a
-	// plaintext (unencrypted) payload of multibyte text would let a batch hold
-	// up to ~3x the byte budget and hold the WAL writer slot that much longer.
+	// Rows are queued with their stored byte size, computed once on accept.
 	// The same figure is written to request_payloads.bytes — computed once here
 	// and threaded through the batch rather than recomputed at insert time, so
 	// the stored size and the batch budget can never drift apart.
@@ -435,7 +436,7 @@ export function createPayloadWriteEngine(
 		for (const { row, bytes } of batch) {
 			try {
 				db.exec("SAVEPOINT payload_row");
-				insert.run(row.id, row.ciphertext, row.timestamp, bytes);
+				insert.run(row.id, row.payload, row.timestamp, bytes);
 				db.exec("RELEASE payload_row");
 				results.push({ seq: row.seq, id: row.id, status: "committed" });
 			} catch (err) {
@@ -500,7 +501,7 @@ export function createPayloadWriteEngine(
 	return {
 		accept(row: PayloadWriteRowMessage): void {
 			if (closed) return;
-			const bytes = Buffer.byteLength(row.ciphertext);
+			const bytes = row.payload.byteLength;
 			pending.push({ row, bytes });
 			pendingBytes += bytes;
 			if (pending.length >= maxBatchRows || pendingBytes >= maxBatchBytes) {

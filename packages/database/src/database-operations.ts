@@ -1912,13 +1912,15 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
-	 * Produce the stored form of a payload envelope (ciphertext when
-	 * PAYLOAD_ENCRYPTION_KEY is set, plaintext otherwise). The INSERT itself
-	 * happens off-thread in the payload-write worker — there is deliberately no
-	 * main-thread request_payloads write path any more.
+	 * Produce the binary stored form of a payload frame (encrypted when
+	 * PAYLOAD_ENCRYPTION_KEY is set). The INSERT itself happens off-thread in
+	 * the payload-write worker — there is deliberately no main-thread
+	 * request_payloads write path any more.
 	 */
-	async encryptPayloadForStorage(json: string): Promise<string> {
-		return this.requests.encryptPayloadForStorage(json);
+	async encodePayloadForStorage(
+		frame: Uint8Array<ArrayBuffer>,
+	): Promise<Uint8Array<ArrayBuffer>> {
+		return this.requests.encodePayloadForStorage(frame);
 	}
 
 	async getRequestPayload(id: string): Promise<unknown | null> {
@@ -1927,7 +1929,7 @@ OAuth tokens will need to be re-authenticated.
 
 	async listRequestPayloads(
 		limit = 50,
-	): Promise<Array<{ id: string; json: string }>> {
+	): Promise<Array<{ id: string; json: string | null }>> {
 		return this.requests.listPayloads(limit);
 	}
 
@@ -2294,7 +2296,7 @@ OAuth tokens will need to be re-authenticated.
 					// Measure actual data bytes for tables with known large text/blob columns
 					if (name === "request_payloads") {
 						const sizeRow = await this.adapter.get<{ dataBytes: number }>(
-							`SELECT SUM(LENGTH(json)) AS dataBytes FROM "${name}"`,
+							`SELECT SUM(LENGTH(json) + COALESCE(LENGTH(payload), 0)) AS dataBytes FROM "${name}"`,
 						);
 						return { name, rowCount, dataBytes: sizeRow?.dataBytes ?? 0 };
 					}

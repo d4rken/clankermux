@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { randomBytes } from "node:crypto";
+import { buildPayloadFrame, envelopeFromPayloadFrame } from "./payload-frame";
 
 // We deliberately re-import the module fresh per test so module-level state
 // (encryptionKey, initPromise) doesn't leak between cases. The dynamic import
@@ -169,70 +170,79 @@ describe("payload encryption", () => {
 		);
 	});
 
+	const skeleton = JSON.stringify({
+		request: { headers: { "x-k": "日本語" }, body: null },
+		response: { status: 200, headers: {}, body: null },
+		meta: { accountId: "acc" },
+	});
+	const bigFrame = () =>
+		buildPayloadFrame(
+			skeleton,
+			new TextEncoder().encode("日本語 message ".repeat(10_000)),
+			[new TextEncoder().encode("data: done\n\n")],
+		);
+
 	for (const encrypted of [false, true]) {
-		it(`compresses before optional encryption (encrypted=${encrypted})`, async () => {
+		it(`blob: compresses before optional encryption (encrypted=${encrypted})`, async () => {
 			if (encrypted) process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
 			const mod = await loadFreshModule();
-			const json = JSON.stringify({
-				history: "日本語 message ".repeat(10_000),
-			});
-			const stored = await mod.encodePayloadForStorage(json);
-			expect(stored.startsWith(encrypted ? "enc:" : "zst:")).toBe(true);
-			expect((await mod.decryptPayload(stored)).startsWith("zst:")).toBe(true);
-			expect(Buffer.byteLength(stored)).toBeLessThan(Buffer.byteLength(json));
-			expect(await mod.decodePayloadFromStorage(stored)).toBe(json);
+			const frame = bigFrame();
+			const blob = await mod.encodePayloadBlob(frame);
+			expect(blob[0]).toBe(encrypted ? 0b11 : 0b01);
+			expect(blob.byteLength).toBeLessThan(frame.byteLength);
+			expect(blob.byteOffset).toBe(0);
+			expect(blob.buffer.byteLength).toBe(blob.byteLength);
+			expect(mod.isStoredPayloadEncrypted({ payload: blob, json: "" })).toBe(
+				encrypted,
+			);
+			expect(await mod.decodePayloadBlob(blob)).toEqual(
+				envelopeFromPayloadFrame(frame),
+			);
 		});
 	}
 
-	it("skips payloads below 512 UTF-8 bytes without calling zstd", async () => {
+	it("blob: skips frames below 512 bytes without calling zstd", async () => {
 		const mod = await loadFreshModule();
 		const compress = spyOn(Bun, "zstdCompress");
 		try {
-			const json = JSON.stringify("x".repeat(509));
-			expect(Buffer.byteLength(json)).toBe(511);
-			expect(await mod.encodePayloadForStorage(json)).toBe(json);
+			const frame = buildPayloadFrame(skeleton, null, []);
+			expect(frame.byteLength).toBeLessThan(512);
+			const blob = await mod.encodePayloadBlob(frame);
+			expect(blob[0]).toBe(0);
+			expect(blob.subarray(1)).toEqual(frame);
 			expect(compress).not.toHaveBeenCalled();
 		} finally {
 			compress.mockRestore();
 		}
 	});
 
-	it("uses UTF-8 bytes, not string length, for the compression threshold", async () => {
+	it("blob: keeps incompressible frames uncompressed", async () => {
 		const mod = await loadFreshModule();
-		const json = JSON.stringify("語".repeat(200));
-		expect(json.length).toBeLessThan(512);
-		expect(Buffer.byteLength(json)).toBeGreaterThan(512);
-		expect((await mod.encodePayloadForStorage(json)).startsWith("zst:")).toBe(
-			true,
-		);
+		const frame = buildPayloadFrame(skeleton, randomBytes(2048), []);
+		const blob = await mod.encodePayloadBlob(frame);
+		expect(blob[0]).toBe(0);
+		expect(blob.byteLength).toBe(frame.byteLength + 1);
 	});
 
-	it("keeps incompressible data when the encoded format would be larger", async () => {
-		const mod = await loadFreshModule();
-		const json = JSON.stringify({ noise: randomBytes(384).toString("base64") });
-		const candidate = `zst:${(await Bun.zstdCompress(json)).toString("base64")}`;
-		expect(candidate.length).toBeGreaterThanOrEqual(Buffer.byteLength(json));
-		expect(await mod.encodePayloadForStorage(json)).toBe(json);
-	});
-
-	it("falls back to uncompressed encryption if compression fails", async () => {
+	it("blob: falls back to uncompressed encryption if compression fails", async () => {
 		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
 		const mod = await loadFreshModule();
 		const compress = spyOn(Bun, "zstdCompress").mockRejectedValue(
 			new Error("compression unavailable"),
 		);
 		try {
-			const json = JSON.stringify({ text: "x".repeat(2000) });
-			const stored = await mod.encodePayloadForStorage(json);
-			expect(stored.startsWith("enc:")).toBe(true);
-			expect(await mod.decryptPayload(stored)).toBe(json);
-			expect(await mod.decodePayloadFromStorage(stored)).toBe(json);
+			const frame = bigFrame();
+			const blob = await mod.encodePayloadBlob(frame);
+			expect(blob[0]).toBe(0b10);
+			expect(await mod.decodePayloadBlob(blob)).toEqual(
+				envelopeFromPayloadFrame(frame),
+			);
 		} finally {
 			compress.mockRestore();
 		}
 	});
 
-	it("does not swallow encryption errors after successful compression", async () => {
+	it("blob: does not swallow encryption errors after successful compression", async () => {
 		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
 		const mod = await loadFreshModule();
 		await mod.initPayloadEncryption();
@@ -240,12 +250,131 @@ describe("payload encryption", () => {
 			new Error("encrypt failed"),
 		);
 		try {
-			await expect(
-				mod.encodePayloadForStorage("x".repeat(2000)),
-			).rejects.toThrow("encrypt failed");
+			await expect(mod.encodePayloadBlob(bigFrame())).rejects.toThrow(
+				"encrypt failed",
+			);
 		} finally {
 			encrypt.mockRestore();
 		}
+	});
+
+	it("blob: reading an encrypted blob without a key throws", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const enc = await loadFreshModule();
+		const blob = await enc.encodePayloadBlob(bigFrame());
+		delete process.env.PAYLOAD_ENCRYPTION_KEY;
+		const dec = await loadFreshModule();
+		await expect(dec.decodePayloadBlob(blob)).rejects.toThrow("not configured");
+	});
+
+	it("blob: rejects tampering, unknown flags and an empty blob", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const mod = await loadFreshModule();
+		const blob = await mod.encodePayloadBlob(bigFrame());
+		const tampered = blob.slice();
+		tampered[tampered.length - 1] ^= 0xff;
+		await expect(mod.decodePayloadBlob(tampered)).rejects.toThrow();
+
+		const unknown = blob.slice();
+		unknown[0] |= 0b100;
+		await expect(mod.decodePayloadBlob(unknown)).rejects.toThrow(
+			"unknown flags",
+		);
+		await expect(mod.decodePayloadBlob(new Uint8Array(0))).rejects.toThrow(
+			"empty",
+		);
+	});
+
+	it("blob: key and GCM failures are PayloadDecryptError, corrupt rows are not", async () => {
+		process.env.PAYLOAD_ENCRYPTION_KEY = VALID_HEX_KEY;
+		const mod = await loadFreshModule();
+		const blob = await mod.encodePayloadBlob(bigFrame());
+		const tampered = blob.slice();
+		tampered[tampered.length - 1] ^= 0xff;
+		const gcm = await mod.decodePayloadBlob(tampered).catch((e: unknown) => e);
+		expect(gcm).toBeInstanceOf(mod.PayloadDecryptError);
+		expect((gcm as Error).cause).toBeDefined();
+		const short = await mod
+			.decodePayloadBlob(Uint8Array.of(0b10, 1, 2, 3))
+			.catch((e: unknown) => e);
+		expect(short).toBeInstanceOf(mod.PayloadDecryptError);
+
+		for (const corrupt of [Uint8Array.of(0b01, 1, 2, 3), Uint8Array.of(0, 1)]) {
+			const error = await mod
+				.decodePayloadBlob(corrupt)
+				.catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(Error);
+			expect(error).not.toBeInstanceOf(mod.PayloadDecryptError);
+		}
+
+		delete process.env.PAYLOAD_ENCRYPTION_KEY;
+		const keyless = await loadFreshModule();
+		const missingKey = await keyless
+			.decodePayloadBlob(blob)
+			.catch((e: unknown) => e);
+		expect(missingKey).toBeInstanceOf(keyless.PayloadDecryptError);
+	});
+
+	describe("stored rows", () => {
+		const legacyJson = JSON.stringify({
+			request: { headers: {}, body: "aGk=" },
+			response: { status: 200, headers: {}, body: null },
+		});
+
+		it("prefers the blob and rebuilds the envelope object and text", async () => {
+			const mod = await loadFreshModule();
+			const frame = buildPayloadFrame(
+				skeleton,
+				new TextEncoder().encode("hi"),
+				[],
+			);
+			const row = { payload: await mod.encodePayloadBlob(frame), json: "" };
+			const envelope = envelopeFromPayloadFrame(frame);
+			expect(await mod.decodeStoredPayload(row)).toEqual(envelope);
+			expect(await mod.decodeStoredPayloadText(row)).toBe(
+				JSON.stringify(envelope),
+			);
+		});
+
+		it("falls back to the legacy text form", async () => {
+			const mod = await loadFreshModule();
+			const compressed = `zst:${(await Bun.zstdCompress(legacyJson)).toString("base64")}`;
+			const row = { payload: null, json: compressed };
+			expect(await mod.decodeStoredPayload(row)).toEqual(
+				JSON.parse(legacyJson),
+			);
+			expect(await mod.decodeStoredPayloadText(row)).toBe(legacyJson);
+		});
+
+		it("reads absent payloads as null and malformed legacy JSON as null or raw text", async () => {
+			const mod = await loadFreshModule();
+			expect(await mod.decodeStoredPayload({ payload: null, json: "" })).toBe(
+				null,
+			);
+			expect(
+				await mod.decodeStoredPayloadText({ payload: null, json: null }),
+			).toBe(null);
+			const malformed = { payload: null, json: "{not json" };
+			expect(await mod.decodeStoredPayload(malformed)).toBe(null);
+			expect(await mod.decodeStoredPayloadText(malformed)).toBe("{not json");
+		});
+
+		it("does not treat a corrupt blob as malformed legacy JSON", async () => {
+			const mod = await loadFreshModule();
+			const row = { payload: Uint8Array.of(0, 1, 2), json: legacyJson };
+			await expect(mod.decodeStoredPayload(row)).rejects.toThrow();
+			await expect(mod.decodeStoredPayloadText(row)).rejects.toThrow();
+		});
+
+		it("detects encryption on legacy rows", async () => {
+			const mod = await loadFreshModule();
+			expect(
+				mod.isStoredPayloadEncrypted({ payload: null, json: "enc:abc" }),
+			).toBe(true);
+			expect(
+				mod.isStoredPayloadEncrypted({ payload: null, json: legacyJson }),
+			).toBe(false);
+		});
 	});
 
 	it("init is idempotent — concurrent calls share the same promise", async () => {

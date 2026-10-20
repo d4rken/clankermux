@@ -29,7 +29,7 @@
  *            that happens to equal a junk entry is authoritative, e.g. a
  *            genuine cwd of /workspace/projects).
  *
- * Deep imports below are intentional: `decodePayloadFromStorage` is deliberately not
+ * Deep imports below are intentional: `decodeStoredPayloadText` is deliberately not
  * exported from the @clankermux/database package barrel (it is an internal
  * concern of payload storage), and the extractor/sanitizer live in
  * packages/proxy/src. A one-off script importing source files directly is
@@ -48,9 +48,12 @@ import { Database } from "bun:sqlite";
 import { Config } from "../packages/config/src/index";
 import { resolveDbPath } from "../packages/database/src/paths";
 import {
-	decodePayloadFromStorage,
+	decodeStoredPayloadText,
 	initPayloadEncryption,
 	isEncryptionEnabled,
+	isStoredPayloadEncrypted,
+	PayloadDecryptError,
+	payloadColumnSql,
 } from "../packages/database/src/payload-encryption";
 import { extractProjectFromRequest } from "../packages/proxy/src/project-extraction";
 import { sanitizeProjectName } from "../packages/proxy/src/project-name";
@@ -109,6 +112,7 @@ function parseArgs(argv: string[]): CliOptions {
 interface PassARow {
 	id: string;
 	json: string;
+	payload: Uint8Array | null;
 	ts_key: number;
 	method: string | null;
 	path: string | null;
@@ -288,7 +292,7 @@ async function runPassA(
 	}
 
 	const pageStmt = db.query<PassARow, [number, string, number, string, number]>(
-		`SELECT p.id AS id, p.json AS json,
+		`SELECT p.id AS id, p.json AS json, ${payloadColumnSql(db, "p.payload")} AS payload,
 		        COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) AS ts_key,
 		        r.method AS method, r.path AS path, r.project AS project,
 		        r.project_attribution_source AS source
@@ -336,9 +340,9 @@ async function runPassA(
 
 			// Encrypted history without a key is a hard abort — silently skipping
 			// would leave an unexplained partial repair.
-			if (row.json.startsWith("enc:") && !isEncryptionEnabled()) {
+			if (isStoredPayloadEncrypted(row) && !isEncryptionEnabled()) {
 				console.error(
-					`\nABORT: payload ${row.id} is encrypted ('enc:' prefix) but ` +
+					`\nABORT: payload ${row.id} is encrypted but ` +
 						"PAYLOAD_ENCRYPTION_KEY is not set. Set the key and re-run. " +
 						"Pass A stops here and Pass C was not run; Pass B (conservative " +
 						"string repair) may already be applied — it is idempotent and safe.",
@@ -348,15 +352,17 @@ async function runPassA(
 
 			let envelope: PayloadEnvelope;
 			try {
-				const plaintext = await decodePayloadFromStorage(row.json);
+				const plaintext = (await decodeStoredPayloadText(row)) ?? "";
 				try {
 					envelope = JSON.parse(plaintext) as PayloadEnvelope;
 				} catch {
 					counters.failEnvelopeJson++;
 					continue;
 				}
-			} catch {
-				counters.failDecrypt++;
+			} catch (error) {
+				// A corrupt row (zstd, frame) is a parse failure, not a key problem.
+				if (error instanceof PayloadDecryptError) counters.failDecrypt++;
+				else counters.failEnvelopeJson++;
 				continue;
 			}
 

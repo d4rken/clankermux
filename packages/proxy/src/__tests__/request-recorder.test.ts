@@ -3,6 +3,8 @@ import { describe, expect, it, spyOn } from "bun:test";
 // ordinary metadata-queue capacity rejection, which a fake `enqueue` switch
 // cannot reproduce.
 import { AsyncDbWriter } from "@clankermux/database";
+import * as payloadFrame from "@clankermux/database/payload-frame";
+import { envelopeFromPayloadFrame } from "@clankermux/database/payload-frame";
 import { Logger } from "@clankermux/logger";
 import type {
 	CachePrefixCapture,
@@ -88,8 +90,8 @@ class FakeDbOps {
 	failSaveRequest = false;
 	/** Make the optional routing write reject; must not block the payload. */
 	failRouting = false;
-	/** Make encrypt-only reject — no ciphertext, so nothing may be published. */
-	failEncrypt = false;
+	/** Make encode-only reject — no stored form, so nothing may be published. */
+	failEncode = false;
 
 	constructor(order: EnqueuedKind[]) {
 		this.order = order;
@@ -181,17 +183,19 @@ class FakeDbOps {
 		this.saveToolCallsCalls.push({ requestId, stats });
 	}
 
-	encryptCalls: string[] = [];
+	encodeCalls: Uint8Array[] = [];
 
 	/**
-	 * Encrypt-only stand-in. Returns the envelope unchanged so payload
-	 * assertions can still read the JSON, and records that it ran — the recorder
-	 * must only reach this once `saveRequest` has succeeded.
+	 * Encode-only stand-in. Returns the frame unchanged so payload assertions
+	 * can decode it, and records that it ran — the recorder must only reach
+	 * this once `saveRequest` has succeeded.
 	 */
-	async encryptPayloadForStorage(json: string): Promise<string> {
-		this.encryptCalls.push(json);
-		if (this.failEncrypt) throw new Error("encrypt failed");
-		return json;
+	async encodePayloadForStorage(
+		frame: Uint8Array<ArrayBuffer>,
+	): Promise<Uint8Array<ArrayBuffer>> {
+		this.encodeCalls.push(frame);
+		if (this.failEncode) throw new Error("encode failed");
+		return frame;
 	}
 
 	async updateRequestUsage(
@@ -267,7 +271,7 @@ class FakeAsyncWriter {
 	outstandingReservations = 0;
 	published: Array<{
 		id: string;
-		ciphertext: string;
+		payload: Uint8Array<ArrayBuffer>;
 		timestamp: number;
 		payloadBytes: number;
 	}> = [];
@@ -325,7 +329,7 @@ class FakeAsyncWriter {
 		reservation: FakeReservation,
 		entry: {
 			requestId: string;
-			ciphertext: string;
+			payload: Uint8Array<ArrayBuffer>;
 			timestamp: number;
 			payloadBytes: number;
 		},
@@ -342,12 +346,15 @@ class FakeAsyncWriter {
 		});
 		this.published.push({
 			id: entry.requestId,
-			ciphertext: entry.ciphertext,
+			payload: entry.payload,
 			timestamp: entry.timestamp,
 			payloadBytes: entry.payloadBytes,
 		});
 		// Mirror the real writer's savePayload bookkeeping for the assertions.
-		this.savePayloadSink.push({ id: entry.requestId, json: entry.ciphertext });
+		this.savePayloadSink.push({
+			id: entry.requestId,
+			json: JSON.stringify(envelopeFromPayloadFrame(entry.payload)),
+		});
 		return true;
 	}
 
@@ -2363,6 +2370,99 @@ describe("RequestRecorder — payload ordering and reservation", () => {
 		expect(h.writer.outstandingReservations).toBe(0);
 	});
 
+	it("reserves the exact frame size, large headers included", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({ requestHeaders: { "x-large": "語".repeat(20_000) } }),
+		);
+		h.recorder.captureResponseChunk("req-1", new TextEncoder().encode("resp"));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.writer.reserveCalls[0]).toBeGreaterThan(60_000);
+		expect(h.writer.published[0]?.payloadBytes).toBe(h.writer.reserveCalls[0]);
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("builds no frame and counts a drop when the reservation is refused", async () => {
+		const build = spyOn(payloadFrame, "buildPayloadFrame");
+		try {
+			// Control: an admitted request goes through the spy, so a zero count
+			// below means the frame was skipped, not that the spy missed it.
+			const admitted = makeHarness();
+			admitted.recorder.begin(makeMeta());
+			admitted.recorder.attachUsageSummary("req-1", makeSummary());
+			admitted.recorder.finishTransport("req-1", "success");
+			await admitted.flush();
+			expect(build).toHaveBeenCalledTimes(1);
+			build.mockClear();
+
+			const h = makeHarness();
+			h.writer.acceptPayload = false;
+			h.recorder.begin(makeMeta());
+			h.recorder.attachUsageSummary("req-1", makeSummary());
+			h.recorder.finishTransport("req-1", "success");
+			await h.flush();
+
+			expect(build).not.toHaveBeenCalled();
+			expect(h.writer.recordedDrops).toEqual(h.writer.reserveCalls);
+			expect(h.writer.published).toHaveLength(0);
+			expect(h.writer.outstandingReservations).toBe(0);
+		} finally {
+			build.mockRestore();
+		}
+	});
+
+	it("saves the request row and counts a drop when the skeleton cannot be serialized", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				requestHeaders: { "x-test-bigint": 1n } as unknown as Record<
+					string,
+					string
+				>,
+			}),
+		);
+		h.recorder.captureResponseChunk("req-1", new TextEncoder().encode("resp"));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.writer.reserveCalls).toHaveLength(0);
+		// The default meta's request body plus the 4-byte response.
+		expect(h.writer.recordedDrops).toEqual([
+			Buffer.byteLength('{"model":"claude"}') + 4,
+		]);
+		expect(h.writer.published).toHaveLength(0);
+		expect(h.writer.outstandingReservations).toBe(0);
+	});
+
+	it("releases the reservation and counts a drop when framing throws", async () => {
+		const build = spyOn(payloadFrame, "buildPayloadFrame").mockImplementation(
+			() => {
+				throw new Error("frame failed");
+			},
+		);
+		try {
+			const h = makeHarness();
+			h.recorder.begin(makeMeta());
+			h.recorder.attachUsageSummary("req-1", makeSummary());
+			h.recorder.finishTransport("req-1", "success");
+			await h.flush();
+
+			expect(build).toHaveBeenCalledTimes(1);
+			expect(h.writer.reserveCalls).toHaveLength(1);
+			expect(h.writer.recordedDrops).toEqual(h.writer.reserveCalls);
+			expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+			expect(h.writer.published).toHaveLength(0);
+			expect(h.writer.outstandingReservations).toBe(0);
+		} finally {
+			build.mockRestore();
+		}
+	});
+
 	it("publishes nothing and releases the reservation when saveRequest fails", async () => {
 		const h = makeHarness();
 		h.dbOps.failSaveRequest = true;
@@ -2373,7 +2473,7 @@ describe("RequestRecorder — payload ordering and reservation", () => {
 
 		expect(h.dbOps.saveRequestCalls).toHaveLength(0);
 		expect(h.writer.published).toHaveLength(0);
-		expect(h.dbOps.encryptCalls).toHaveLength(0);
+		expect(h.dbOps.encodeCalls).toHaveLength(0);
 		// Reservation released exactly once, and the drop is counted.
 		expect(h.writer.outstandingReservations).toBe(0);
 		expect(h.writer.recordedDrops).toHaveLength(1);
@@ -2392,9 +2492,9 @@ describe("RequestRecorder — payload ordering and reservation", () => {
 		expect(h.writer.outstandingReservations).toBe(0);
 	});
 
-	it("releases the reservation when encryption fails", async () => {
+	it("releases the reservation when encoding fails", async () => {
 		const h = makeHarness();
-		h.dbOps.failEncrypt = true;
+		h.dbOps.failEncode = true;
 		h.recorder.begin(makeMeta());
 		h.recorder.attachUsageSummary("req-1", makeSummary());
 		h.recorder.finishTransport("req-1", "success");

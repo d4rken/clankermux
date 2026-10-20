@@ -26,7 +26,7 @@
  * stored as 0, never coerced to NULL. Only `context_largest_tool_name` may be
  * NULL within an otherwise-recorded row.
  *
- * Deep imports below are intentional: `decodePayloadFromStorage` is deliberately not
+ * Deep imports below are intentional: `decodeStoredPayloadText` is deliberately not
  * exported from the @clankermux/database package barrel (it is an internal
  * concern of payload storage), and the composition walk lives in
  * packages/proxy/src. A one-off script importing source files directly is
@@ -39,9 +39,12 @@
 
 import { Database } from "bun:sqlite";
 import {
-	decodePayloadFromStorage,
+	decodeStoredPayloadText,
 	initPayloadEncryption,
 	isEncryptionEnabled,
+	isStoredPayloadEncrypted,
+	PayloadDecryptError,
+	payloadColumnSql,
 } from "../packages/database/src/payload-encryption";
 import { resolveDbPath } from "../packages/database/src/paths";
 import { computeContextComposition } from "../packages/proxy/src/context-composition";
@@ -92,6 +95,7 @@ function parseArgs(argv: string[]): CliOptions {
 interface BackfillRow {
 	id: string;
 	json: string;
+	payload: Uint8Array | null;
 	ts_key: number;
 }
 
@@ -173,7 +177,7 @@ async function runBackfill(
 		BackfillRow,
 		[number, string, number, string, number]
 	>(
-		`SELECT p.id AS id, p.json AS json,
+		`SELECT p.id AS id, p.json AS json, ${payloadColumnSql(db, "p.payload")} AS payload,
 		        COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) AS ts_key
 		 FROM request_payloads p
 		 JOIN requests r ON r.id = p.id
@@ -225,9 +229,9 @@ async function runBackfill(
 
 			// Encrypted history without a key is a hard abort — silently skipping
 			// would leave an unexplained partial backfill.
-			if (row.json.startsWith("enc:") && !isEncryptionEnabled()) {
+			if (isStoredPayloadEncrypted(row) && !isEncryptionEnabled()) {
 				console.error(
-					`\nABORT: payload ${row.id} is encrypted ('enc:' prefix) but ` +
+					`\nABORT: payload ${row.id} is encrypted but ` +
 						"PAYLOAD_ENCRYPTION_KEY is not set. Set the key and re-run. " +
 						"Rows updated so far stay updated — the script is idempotent " +
 						"(it only targets rows whose context columns are still NULL).",
@@ -237,7 +241,7 @@ async function runBackfill(
 
 			let envelope: PayloadEnvelope;
 			try {
-				const plaintext = await decodePayloadFromStorage(row.json);
+				const plaintext = (await decodeStoredPayloadText(row)) ?? "";
 				try {
 					envelope = JSON.parse(plaintext) as PayloadEnvelope;
 				} catch {
@@ -245,8 +249,10 @@ async function runBackfill(
 					counters.skippedParseFailure++;
 					continue;
 				}
-			} catch {
-				counters.failDecrypt++;
+			} catch (error) {
+				// A corrupt row (zstd, frame) is a parse failure, not a key problem.
+				if (error instanceof PayloadDecryptError) counters.failDecrypt++;
+				else counters.failEnvelopeJson++;
 				counters.skippedParseFailure++;
 				continue;
 			}
