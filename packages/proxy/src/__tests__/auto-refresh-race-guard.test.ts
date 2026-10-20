@@ -13,15 +13,16 @@
  * The single guard covers BOTH callers (the 5h refresh loop and the
  * weekly-dormant prime) because both route through sendTranslatedClaudePrime.
  *
- * Strategy: mock.module("../dispatch") so we can observe whether the scheduler
- * dispatched, then call sendTranslatedClaudePrime directly (private, reached via
- * cast) with a mock db whose re-check query returns 0 / 1 / [] per scenario.
+ * Strategy: inject a local dispatch double to observe whether the scheduler
+ * dispatched without replacing the shared dispatch module, then call
+ * sendTranslatedClaudePrime directly (private, reached via cast) with a mock db
+ * whose re-check query returns 0 / 1 / [] per scenario.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 // ---------------------------------------------------------------------------
-// Module mock — declared before importing the scheduler so bun's resolution
-// picks up the mocked dispatchProxyRequest.
+// Local dispatch double — injected into each scheduler by makeScheduler.
 // ---------------------------------------------------------------------------
 
 const dispatchCalls: Array<{ req: Request; url: URL }> = [];
@@ -30,13 +31,6 @@ const mockDispatchProxyRequest = mock(async (req: Request, url: URL) => {
 	dispatchCalls.push({ req, url });
 	return new Response("", { status: nextDispatchStatus });
 });
-
-mock.module("../dispatch", () => ({
-	dispatchProxyRequest: mockDispatchProxyRequest,
-}));
-
-// Import AFTER mock.module so the scheduler binds the mocked dispatch.
-import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,10 +81,15 @@ type SchedulerInternals = {
 	sendTranslatedClaudePrime(row: AccountRow): Promise<boolean>;
 };
 
-function makeScheduler(db: ReturnType<typeof makeDb>): SchedulerInternals {
+function makeScheduler(
+	db: ReturnType<typeof makeDb>,
+	proxyContext = makeProxyContext(),
+): SchedulerInternals {
 	return new AutoRefreshScheduler(
 		db as never,
-		makeProxyContext() as never,
+		proxyContext as never,
+		undefined,
+		mockDispatchProxyRequest,
 	) as never as SchedulerInternals;
 }
 
@@ -153,7 +152,8 @@ describe("AutoRefreshScheduler — query-to-dispatch race guard", () => {
 
 	it("proceeds to dispatch when the re-read flag is still 1", async () => {
 		const db = makeDb([{ auto_refresh_enabled: 1 }]);
-		const scheduler = makeScheduler(db);
+		const proxyContext = makeProxyContext();
+		const scheduler = makeScheduler(db, proxyContext);
 
 		// Dispatch stub returns 500, so the method ultimately takes the failure
 		// path and returns false — but the point under test is that it DISPATCHED
@@ -162,5 +162,19 @@ describe("AutoRefreshScheduler — query-to-dispatch race guard", () => {
 
 		expect(mockDispatchProxyRequest).toHaveBeenCalled();
 		expect(dispatchCalls.length).toBeGreaterThanOrEqual(1);
+		const { req, url } = dispatchCalls[0];
+		expect(req).toBeInstanceOf(Request);
+		expect(url).toBeInstanceOf(URL);
+		expect(url.href).toBe("http://internal.clankermux/v1/messages");
+		expect(req.url).toBe(url.href);
+		expect(req.method).toBe("POST");
+		expect(mockDispatchProxyRequest).toHaveBeenCalledWith(
+			req,
+			url,
+			proxyContext,
+			null,
+			null,
+			true,
+		);
 	});
 });

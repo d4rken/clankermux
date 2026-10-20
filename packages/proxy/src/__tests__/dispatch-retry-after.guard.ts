@@ -2,12 +2,11 @@
  * The dispatcher's half of the give-up pacing: `handleProxy` throws, and
  * `dispatchProxyRequest` is what turns that throw into the client's 503.
  *
- * Runs in its OWN bun process, spawned by `dispatch-retry-after.test.ts`. The
- * main suite installs a `mock.module("../dispatch", …)` stub that answers every
- * call with an empty 500, which is process-wide and order-independent, so the
- * real dispatcher cannot be reached there at all. The filename deliberately
- * does not match bun's default discovery: it must only ever run when that
- * spawner names it explicitly.
+ * Runs in its OWN bun process, spawned by `dispatch-retry-after.test.ts`, to
+ * retain isolation from shared-suite state. Scheduler tests now inject local
+ * dispatch doubles rather than replacing the dispatch module. The filename
+ * deliberately does not match bun's default discovery: it must only ever run
+ * when that spawner names it explicitly.
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
