@@ -18,6 +18,7 @@ import {
 } from "../codex-observation-fence";
 import { resolveLiveAccountQuota429 } from "./anthropic-account-quota";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
+import { resolveLiveCodexAccountQuota429 } from "./codex-account-quota";
 import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
 import {
@@ -332,7 +333,9 @@ export async function processProxyResponse(
 		const isKeepalive =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
-		const liveAccountQuota = resolveLiveAccountQuota429(account, response);
+		const liveAccountQuota =
+			resolveLiveAccountQuota429(account, response) ??
+			resolveLiveCodexAccountQuota429(account, response);
 		const scopedOnlyRejection =
 			response.status === 429 &&
 			account.provider === "anthropic" &&

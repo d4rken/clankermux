@@ -67,6 +67,16 @@ function readUntil(db: Database, id: string): number | null {
 	);
 }
 
+function readStreak(db: Database, id: string): number | null {
+	return (
+		db
+			.query<{ consecutive_rate_limits: number | null }, [string]>(
+				"SELECT consecutive_rate_limits FROM accounts WHERE id = ?",
+			)
+			.get(id)?.consecutive_rate_limits ?? null
+	);
+}
+
 describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-and-clear)", () => {
 	let db: Database;
 	let repo: AccountRepository;
@@ -133,6 +143,45 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 
 		expect(changed).toBe(false);
 		expect(readUntil(db, "acc-1")).toBe(NEW_UNTIL);
+	});
+
+	it("resets the backoff streak with the release, so the next 429 starts a new episode", async () => {
+		seedLock(db, "acc-1", { until: UNTIL, at: AT, reason: REASON });
+		db.run("UPDATE accounts SET consecutive_rate_limits = 4 WHERE id = ?", [
+			"acc-1",
+		]);
+
+		const changed = await repo.clearRateLimitOnCapacityRestore(
+			"acc-1",
+			UNTIL,
+			AT,
+			REASON,
+			FETCH_STARTED_AT,
+		);
+
+		expect(changed).toBe(true);
+		expect(readStreak(db, "acc-1")).toBe(0);
+		expect(
+			await repo.setRateLimited("acc-1", UNTIL, "weekly_exhausted_429"),
+		).toBe(1);
+	});
+
+	it("leaves the current streak alone when the compare-and-clear misses", async () => {
+		seedLock(db, "acc-1", { until: UNTIL + 60_000, at: AT, reason: REASON });
+		db.run("UPDATE accounts SET consecutive_rate_limits = 4 WHERE id = ?", [
+			"acc-1",
+		]);
+
+		const changed = await repo.clearRateLimitOnCapacityRestore(
+			"acc-1",
+			UNTIL,
+			AT,
+			REASON,
+			FETCH_STARTED_AT,
+		);
+
+		expect(changed).toBe(false);
+		expect(readStreak(db, "acc-1")).toBe(4);
 	});
 
 	it("does NOT clear when rate_limited_at changed but the deadline is the SAME (reused upstream reset)", async () => {

@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { EMBEDDED_INTEGRITY_CHECK_WORKER_CODE } from "./inline-integrity-check-worker";
 import type { IntegrityCheckKind } from "./integrity-check-worker";
+import { spawnEmbeddedWorker } from "./worker-spawn";
 
 export type { IntegrityCheckKind } from "./integrity-check-worker";
 
@@ -75,19 +76,10 @@ export async function runIntegrityCheckInWorker(
 	| { ok: true }
 	| { ok: false; verdict: "corrupt" | "error" | "timeout"; error: string }
 > {
-	let worker: Worker;
-	if (EMBEDDED_INTEGRITY_CHECK_WORKER_CODE) {
-		const workerCode = Buffer.from(
-			EMBEDDED_INTEGRITY_CHECK_WORKER_CODE,
-			"base64",
-		).toString("utf8");
-		const blob = new Blob([workerCode], { type: "text/javascript" });
-		worker = new Worker(URL.createObjectURL(blob), { smol: true });
-	} else {
-		worker = new Worker(
-			new URL("./integrity-check-worker.ts", import.meta.url).href,
-		);
-	}
+	const { worker, dispose } = spawnEmbeddedWorker(
+		EMBEDDED_INTEGRITY_CHECK_WORKER_CODE,
+		new URL("./integrity-check-worker.ts", import.meta.url).href,
+	);
 
 	const timeoutMs = resolveTimeoutMs(options.timeoutMs, options.kind, dbPath);
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -120,7 +112,7 @@ export async function runIntegrityCheckInWorker(
 		return result;
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-		worker.terminate();
+		dispose();
 	}
 }
 

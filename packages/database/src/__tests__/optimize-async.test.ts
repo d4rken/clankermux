@@ -18,11 +18,12 @@
  *     when maintenance contends.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
+import { EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE } from "../inline-incremental-vacuum-worker";
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-optimize-test-"));
@@ -102,6 +103,39 @@ describe("DatabaseOperations.optimizeAsync", () => {
 				// Transaction may already be gone; closing is what matters.
 			}
 			holder.close();
+		}
+	});
+
+	it("revokes the worker blob URL after every tick", async () => {
+		const created: string[] = [];
+		const revoked: string[] = [];
+		const realCreate = URL.createObjectURL.bind(URL);
+		const realRevoke = URL.revokeObjectURL.bind(URL);
+		const createSpy = spyOn(URL, "createObjectURL").mockImplementation(
+			(blob: Blob) => {
+				const url = realCreate(blob);
+				created.push(url);
+				return url;
+			},
+		);
+		const revokeSpy = spyOn(URL, "revokeObjectURL").mockImplementation(
+			(url: string) => {
+				revoked.push(url);
+				realRevoke(url);
+			},
+		);
+		try {
+			await dbOps.optimizeAsync();
+			await dbOps.optimizeAsync();
+			expect(revoked).toEqual(created);
+			// A source-mode run (placeholder bundle) builds no blob at all, so the
+			// equality above only claims something when one was built.
+			if (EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE) {
+				expect(created).toHaveLength(2);
+			}
+		} finally {
+			createSpy.mockRestore();
+			revokeSpy.mockRestore();
 		}
 	});
 

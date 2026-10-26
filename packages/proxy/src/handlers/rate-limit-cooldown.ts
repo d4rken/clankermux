@@ -225,14 +225,15 @@ export function markCapacityRestoredProbePending(
 }
 
 /**
- * Arm the single-flight gate for a reset-bearing burst cooldown, stamped with
+ * Arm the single-flight gate for a `model_fallback_429` cooldown, stamped with
  * the deadline the cooldown just wrote.
  *
- * The burst path writes a server-directed deadline WITHOUT escalating
- * `consecutive_rate_limits`, so the account comes back at streak 0 with an
- * expired deadline — the shape neither half of the mature-streak gate engages
- * on. Every concurrent request would then reach the just-throttled account at
- * the same instant and re-trip the same burst window.
+ * Such a cooldown leaves the account below the mature streak the gate
+ * otherwise requires: a server-directed deadline never escalates
+ * `consecutive_rate_limits`, and the no-reset ramp needs
+ * MATURE_COOLDOWN_STREAK expiries in a row. Every concurrent request would
+ * then reach the just-throttled account at the same instant and re-trip the
+ * same burst window.
  *
  * Armed with NO predecessor: an account that keeps bursting would otherwise
  * grow a linked reservation chain, one node per 429, and nothing ever rolls a
@@ -377,7 +378,7 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
  * The two triggers are separate on purpose: the mature-streak condition
  * requires `consecutive_rate_limits >= MATURE_COOLDOWN_STREAK` and an
  * expired-but-present deadline, and an early release satisfies NEITHER (the
- * quota reasons run at streak 0, and the clear removes the deadline entirely) —
+ * release resets the streak to 0 and removes the deadline entirely) —
  * which is why it needs its own marker rather than a relaxed deadline check.
  *
  * Returns:
@@ -456,11 +457,11 @@ type ProbeOutcome = "recovered" | "cooldown_reapplied" | "abandoned";
  * The capacity-restored marker has a NARROWER lifecycle than the lease:
  *   - `recovered` clears it — but only when the admitted generation still
  *     matches, so an older probe can never clear a newer restore's marker.
- *   - `cooldown_reapplied` RETAINS it. The probe got another reset-bearing 429,
- *     which leaves `consecutive_rate_limits` at 0 and a deadline that may be the
- *     synthesized 60s one — i.e. it can expire before the next 90s poll, and the
- *     mature-streak gate would then return "not_required" for every concurrent
- *     request. Clearing here would defeat the marker after the first
+ *   - `cooldown_reapplied` RETAINS it: another 429 does not prove recovery. A
+ *     reset-bearing 429 leaves the streak unchanged, and a no-reset 429 may
+ *     leave it below maturity. Retaining the marker keeps recovery
+ *     single-flighted even when the mature-streak gate would not engage.
+ *     Clearing here would defeat the marker after the first
  *     unsuccessful probe. While the reapplied cooldown is active the marker is
  *     dormant (the account is unselectable); when it expires the marker again
  *     forces exactly one probe.
@@ -809,6 +810,9 @@ export function applyRateLimitCooldown(
 	account.rate_limited_reason = reason;
 	account.rate_limited_at = now;
 	account.consecutive_rate_limits = nextCount;
+	if (reason === "model_fallback_429" && isOAuthAnthropicAccount(account)) {
+		armBurstRecoveryProbe(account, cooldownUntil);
+	}
 
 	ctx.asyncWriter.enqueue(async () => {
 		const persistedCount = await ctx.dbOps.markAccountRateLimited(

@@ -286,7 +286,8 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 
 	it("sets the burst marker on a mid-stream rate_limit_error for an OAuth-Anthropic account", async () => {
 		const account = makeAccount(); // anthropic + refresh_token
-		const ctx = makeStreamCtx();
+		const markCalls: Array<{ accountId: string; reason: string }> = [];
+		const ctx = makeStreamCtx(markCalls);
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 
 		const response = await forwardToClient(
@@ -310,6 +311,14 @@ describe("forwardToClient — mid-stream burst marker (Part 1)", () => {
 		// Drain so the single-reader pass-through runs the inline analytics + sniffer.
 		await response.text();
 		expect(isAnthropicBurstThrottleActive()).toBe(true);
+		// The error frame names no reset, so the cooldown is the no-reset kind.
+		await new Promise((r) => setTimeout(r, 10));
+		expect(markCalls).toEqual([
+			{
+				accountId: account.id,
+				reason: "upstream_429_no_reset_probe_cooldown",
+			},
+		]);
 	});
 
 	it("does NOT set the burst marker on a mid-stream overloaded_error (trips the family breaker instead)", async () => {

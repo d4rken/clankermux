@@ -66,7 +66,10 @@ import {
 } from "@clankermux/types";
 import { bindAnthropicAccountUuid } from "../anthropic-account-uuid";
 import { cacheBodyStore } from "../cache-body-store";
-import { getCodexObservationEpoch } from "../codex-observation-fence";
+import {
+	getCodexObservationEpoch,
+	isCodexObservationCurrent,
+} from "../codex-observation-fence";
 import { recordCodexTransientFailure } from "../codex-transient-health";
 import {
 	CODEX_TRANSIENT_MAX_RETRY,
@@ -137,6 +140,7 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // Direct leaf import (not via the `handlers` barrel, which re-exports this
 // module) — see the module comment.
 import { createClientAbortResponse } from "./client-abort-response";
+import { resolveLiveCodexAccountQuota429 } from "./codex-account-quota";
 import { applyCodexObservation } from "./codex-observation";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
@@ -484,16 +488,21 @@ export function isTrustedSyntheticProbe(
 }
 
 /**
- * Determines the absolute epoch timestamp (ms since epoch) until which an account
- * should be marked rate-limited after model exhaustion. Priority:
+ * Where an {@link extractCooldownUntil} deadline came from. Only `"header"` is
+ * the upstream naming when this 429's limit lifts; the other two are local
+ * fallbacks and must not be written as a server-directed reset.
+ */
+export type CooldownSource = "header" | "usage-throttle" | "default";
+
+/**
+ * A candidate cooldown deadline (epoch ms) for a 429, and where it came from.
+ * Callers that only write server-directed resets use `until` when `source` is
+ * `"header"` and otherwise let the adaptive no-reset backoff pick the deadline.
+ * Priority:
  *   1. retry-after / x-ratelimit-reset response header (actual upstream backoff)
- *   2. getRateLimitedUntil — usage-window reset time if known
+ *   2. getRateLimitedUntil — the usage endpoint's own throttle deadline
  *   3. probe-cooldown default (TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS,
- *      60s) as last resort. Was a 1-hour ban prior to v3.5.x — that locked accounts
- *      out unnecessarily when upstream returned a transient 429 without a
- *      reset hint, draining small pools to zero routable accounts on a
- *      single burst. Aligns with the same default used in
- *      response-processor.ts when 429s arrive without a reset header.
+ *      60s) as last resort.
  *
  * The result is always clamped to at least 60 seconds in the future to avoid a
  * zero or negative value when a parsed timestamp is already in the past.
@@ -506,7 +515,7 @@ export function extractCooldownUntil(
 	response: Response,
 	accountId: string,
 	getRateLimitedUntil: (accountId: string) => number | null,
-): number {
+): { until: number; source: CooldownSource } {
 	const MIN_COOLDOWN_MS = 60 * 1000; // 60 seconds floor
 	const DEFAULT_COOLDOWN_MS =
 		TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
@@ -523,27 +532,36 @@ export function extractCooldownUntil(
 			const isUnixTimestamp = parsed > 1_000_000_000;
 			const epochMs = isUnixTimestamp ? parsed * 1000 : now + parsed * 1000;
 			if (epochMs > now) {
-				return Math.max(epochMs, now + MIN_COOLDOWN_MS);
+				return {
+					until: Math.max(epochMs, now + MIN_COOLDOWN_MS),
+					source: "header",
+				};
 			}
 			// epochMs <= now: stale/already-past timestamp — fall through to next priority
 		} else {
 			// Try HTTP-date format (RFC 7231), e.g. "Wed, 21 Oct 2026 07:28:00 GMT"
 			const dateMs = new Date(retryAfter).getTime();
 			if (!Number.isNaN(dateMs) && dateMs > now) {
-				return Math.max(dateMs, now + MIN_COOLDOWN_MS);
+				return {
+					until: Math.max(dateMs, now + MIN_COOLDOWN_MS),
+					source: "header",
+				};
 			}
 			// Invalid or past date — fall through to next priority
 		}
 	}
 
-	// 2. Fall back to usage-window reset time if available
+	// 2. Fall back to the usage endpoint's throttle deadline if one is live
 	const rateLimitedUntil = getRateLimitedUntil(accountId);
 	if (rateLimitedUntil !== null && rateLimitedUntil > now) {
-		return Math.max(rateLimitedUntil, now + MIN_COOLDOWN_MS);
+		return {
+			until: Math.max(rateLimitedUntil, now + MIN_COOLDOWN_MS),
+			source: "usage-throttle",
+		};
 	}
 
-	// 3. Last resort: 1 hour
-	return now + DEFAULT_COOLDOWN_MS;
+	// 3. Last resort: the probe-cooldown default
+	return { until: now + DEFAULT_COOLDOWN_MS, source: "default" };
 }
 
 /**
@@ -2060,28 +2078,67 @@ export async function proxyWithAccount(
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
+			// A Codex 429 cooldown goes through the shared observation owner
+			// (cooldown + usage-cache/credits/window-roll). requestAccounting
+			// "none": these short-circuits never reach updateAccountMetadata. A
+			// reset generation that began after this attempt was sent drops the
+			// whole observation, so the result is the deadline actually written,
+			// or undefined when none was.
+			const applyCodex429Cooldown = (
+				response: Response,
+				reason: RateLimitReason,
+				resetTime: number | undefined,
+			): number | undefined => {
+				const current = isCodexObservationCurrent(
+					account.id,
+					codexObservationEpoch,
+				);
+				applyCodexObservation(account, response, ctx, {
+					source: "real-traffic",
+					observationEpoch: codexObservationEpoch,
+					rateLimitInfo: provider.parseRateLimit(response),
+					requestAccounting: "none",
+					rateLimitAction:
+						resetTime === undefined
+							? { kind: "apply", reason, noReset: true }
+							: { kind: "apply", reason, cooldownUntil: resetTime },
+					successRecovery: "standard",
+				});
+				return current ? (account.rate_limited_until ?? undefined) : undefined;
+			};
+
 			const finishQuotaRejection = async (
 				response: Response,
 				quota: AccountQuota429,
 				_model: string | null,
 				source: "claims" | "usage",
 			): Promise<Response | null> => {
-				applyRateLimitCooldown(account, quota, ctx, {
-					probeLease: heldProbeLease(),
-				});
-				// The helper sets this synchronously, including adaptive no-reset
-				// backoff. Outcomes must report the applied deadline, not a default.
-				const cooldownUntil = account.rate_limited_until as number;
-				// Persist the 429's unified-status header so the dashboard chip
-				// reflects the live value rather than the last success.
-				persistRateLimitStatusMeta(account, response, ctx, provider);
+				let cooldownUntil: number | undefined;
+				if (account.provider === "codex") {
+					cooldownUntil = applyCodex429Cooldown(
+						response,
+						quota.reason,
+						quota.resetTime,
+					);
+				} else {
+					applyRateLimitCooldown(account, quota, ctx, {
+						probeLease: heldProbeLease(),
+					});
+					// The helper sets this synchronously, including adaptive no-reset
+					// backoff. Outcomes must report the applied deadline, not a default.
+					cooldownUntil = account.rate_limited_until as number;
+					// Persist the 429's unified-status header so the dashboard chip
+					// reflects the live value rather than the last success.
+					persistRateLimitStatusMeta(account, response, ctx, provider);
+				}
 				log.warn(
-					`Account ${account.name} ${quota.binding}-exhausted (429, evidence=${source}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
+					`Account ${account.name} ${quota.binding}-exhausted (429, evidence=${source}) — ${cooldownUntil === undefined ? "observation superseded by a newer reset, no cooldown" : `cooldown until ${new Date(cooldownUntil).toISOString()}`}, failing over (no burst-retry)`,
 				);
 				return await fail({ kind: "hard_429", cooldownUntil }, response);
 			};
 			const liveAccountQuota = !isTrustedProbe("keepalive")
-				? resolveLiveAccountQuota429(account, rawResponse)
+				? (resolveLiveAccountQuota429(account, rawResponse) ??
+					resolveLiveCodexAccountQuota429(account, rawResponse))
 				: null;
 
 			// Live scoped rejection is newer than even a freshly polled snapshot.
@@ -2142,7 +2199,7 @@ export async function proxyWithAccount(
 						rawResponse,
 						account.id,
 						usageCache.getRateLimitedUntil.bind(usageCache),
-					),
+					).until,
 					Date.now() + BURST_RETRY_COOLDOWN_CAP_MS,
 				);
 				if (!classification.retryable) {
@@ -2316,7 +2373,8 @@ export async function proxyWithAccount(
 			// weekly window is spent this behaves exactly as it did when the block
 			// was weekly-only; the session-only case is the new behaviour.
 			//
-			// Cache-only classification retains its existing retry-after deadline.
+			// Cache-only classification keeps the 429's own retry-after when it
+			// names one; otherwise the quota reason takes the adaptive backoff.
 			// Explicit live 5h/7d rejections were handled above using those claims'
 			// own validated resets; a scoped summary cannot override them here.
 			//
@@ -2363,7 +2421,7 @@ export async function proxyWithAccount(
 						exhaustion.binding === "weekly"
 							? "weekly_exhausted_429"
 							: "session_exhausted_429";
-					const cooldownUntil = extractCooldownUntil(
+					const extracted = extractCooldownUntil(
 						rawResponse,
 						account.id,
 						usageCache.getRateLimitedUntil.bind(usageCache),
@@ -2373,7 +2431,8 @@ export async function proxyWithAccount(
 						{
 							binding: exhaustion.binding === "weekly" ? "weekly" : "session",
 							reason,
-							resetTime: cooldownUntil,
+							resetTime:
+								extracted.source === "header" ? extracted.until : undefined,
 						},
 						requestedModel,
 						"usage",
@@ -2564,7 +2623,7 @@ export async function proxyWithAccount(
 							rawResponse,
 							account.id,
 							usageCache.getRateLimitedUntil.bind(usageCache),
-						),
+						).until,
 						now + BURST_RETRY_COOLDOWN_CAP_MS,
 					);
 					// Mark the cache account rate-limited via the normal (non-reprobe)
@@ -2633,34 +2692,32 @@ export async function proxyWithAccount(
 				// capped (see capResidualRung429Cooldown) — a claim-scoped 429
 				// that slipped past the family rung must not become a multi-day
 				// account-wide lock under a non-releasable reason.
-				const cooldownUntil = capResidualRung429Cooldown(
+				const extracted = extractCooldownUntil(
+					rawResponse,
+					account.id,
+					usageCache.getRateLimitedUntil.bind(usageCache),
+				);
+				const cappedUntil = capResidualRung429Cooldown(
 					account,
 					rawResponse,
-					extractCooldownUntil(
-						rawResponse,
-						account.id,
-						usageCache.getRateLimitedUntil.bind(usageCache),
-					),
+					extracted.until,
 					Date.now(),
 				);
 				const reason: RateLimitReason = "model_fallback_429";
 				// Route through shared helper so the consecutive_rate_limits
 				// counter and the audit reason are applied uniformly across all
-				// 429 paths. A future cooldownUntil is written as a
+				// 429 paths. A 429 that names its own reset is written as a
 				// server-directed deadline (Lever B) — bounded by the cap above,
-				// never the raw multi-day retry-after. The audit reason is
-				// preserved so saveRequest + DB rate_limited_reason both record
-				// the failure-mode-specific tag.
-				//
-				// Codex accounts route through the single shared observation
-				// applicator (cooldown + status-meta + usage-cache/credits/
-				// window-roll share one owner). requestAccounting "none": this
-				// short-circuit never reached updateAccountMetadata, so no
-				// per-request accounting runs here. cooldownUntil drives the
-				// cooldown deadline; rateLimitInfo drives the header-only
-				// status-meta persistence (a no-op for Codex, which has no
-				// unified-status header).
-				if (cooldownUntil === null) {
+				// never the raw multi-day retry-after. A local fallback is not a
+				// reset, so it takes the adaptive ramp instead. The audit reason
+				// is preserved so saveRequest + DB rate_limited_reason both
+				// record the failure-mode-specific tag.
+				const resetTime =
+					extracted.source === "header"
+						? (cappedUntil ?? undefined)
+						: undefined;
+				let cooldownUntil: number | undefined;
+				if (cappedUntil === null) {
 					completeRateLimitProbe(
 						account,
 						"abandoned",
@@ -2668,21 +2725,12 @@ export async function proxyWithAccount(
 					);
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 				} else if (account.provider === "codex") {
-					applyCodexObservation(account, rawResponse, ctx, {
-						source: "real-traffic",
-						observationEpoch: codexObservationEpoch,
-						rateLimitInfo: provider.parseRateLimit(rawResponse),
-						requestAccounting: "none",
-						rateLimitAction: { kind: "apply", reason, cooldownUntil },
-						successRecovery: "standard",
-					});
+					cooldownUntil = applyCodex429Cooldown(rawResponse, reason, resetTime);
 				} else {
-					applyRateLimitCooldown(
-						account,
-						{ resetTime: cooldownUntil, reason },
-						ctx,
-						{ probeLease: heldProbeLease() },
-					);
+					applyRateLimitCooldown(account, { resetTime, reason }, ctx, {
+						probeLease: heldProbeLease(),
+					});
+					cooldownUntil = account.rate_limited_until as number;
 					// Persist the 429's unified-status header (status/reset/remaining).
 					// This short-circuit never reaches processProxyResponse /
 					// updateAccountMetadata, so without this the dashboard's
@@ -2692,7 +2740,7 @@ export async function proxyWithAccount(
 				}
 
 				return await fail(
-					cooldownUntil === null
+					cappedUntil === null
 						? { kind: "model_quota_exhausted" }
 						: { kind: "hard_429", cooldownUntil },
 					rawResponse,

@@ -172,7 +172,9 @@ export type CodexRequestAccounting = "session" | "count-only" | "none";
  *     status-meta reset persisted from `rateLimitInfo` — the proxy-operations
  *     429 sites derive that deadline from `extractCooldownUntil(...)`, which is
  *     distinct from the provider-parsed window reset. When omitted the cooldown
- *     uses `rateLimitInfo.resetTime`.
+ *     uses `rateLimitInfo.resetTime`, unless `noReset` says the 429 named no
+ *     reset: the parser's fallbacks (another window's reset, a local hour) are
+ *     not one, so the cooldown takes the adaptive no-reset ramp.
  *   - `{ kind: "skip" }`: never touch the cooldown (the caller — e.g.
  *     processProxyResponse on the real-traffic main path — already applied it,
  *     or the response is a success).
@@ -184,6 +186,7 @@ export type CodexRateLimitAction =
 			floorUntil?: number;
 			reprobe?: boolean;
 			cooldownUntil?: number;
+			noReset?: true;
 	  }
 	| { kind: "skip" };
 
@@ -505,7 +508,9 @@ export function applyCodexObservation(
 		applyRateLimitCooldown(
 			account,
 			{
-				resetTime: action.cooldownUntil ?? rateLimitInfo.resetTime,
+				resetTime: action.noReset
+					? undefined
+					: (action.cooldownUntil ?? rateLimitInfo.resetTime),
 				remaining: rateLimitInfo.remaining,
 				reason: action.reason,
 				floorUntil: action.floorUntil,
