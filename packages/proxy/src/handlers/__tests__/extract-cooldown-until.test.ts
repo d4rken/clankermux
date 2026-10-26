@@ -14,88 +14,115 @@ function makeResponse(headers: Record<string, string> = {}): Response {
 const noCache = (_id: string): number | null => null;
 
 describe("extractCooldownUntil", () => {
+	it("labels only a header deadline as upstream-named", () => {
+		// The usage-endpoint throttle and the local default say nothing about
+		// when THIS 429's limit lifts.
+		expect(
+			extractCooldownUntil(
+				makeResponse(),
+				ACCOUNT_ID,
+				() => Date.now() + 600_000,
+			).source,
+		).toBe("usage-throttle");
+		expect(
+			extractCooldownUntil(makeResponse(), ACCOUNT_ID, noCache).source,
+		).toBe("default");
+	});
+
 	it("uses retry-after seconds header", () => {
 		const before = Date.now();
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "retry-after": "300" }),
 			ACCOUNT_ID,
 			noCache,
 		);
 		expect(result).toBeGreaterThanOrEqual(before + 300 * 1000);
 		expect(result).toBeLessThan(before + 300 * 1000 + 5000);
+		expect(source).toBe("header");
 	});
 
 	it("uses x-ratelimit-reset unix timestamp", () => {
 		const future = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "x-ratelimit-reset": String(future) }),
 			ACCOUNT_ID,
 			noCache,
 		);
 		expect(result).toBe(future * 1000);
+		expect(source).toBe("header");
 	});
 
 	it("uses HTTP-date retry-after", () => {
 		const futureDate = new Date(Date.now() + 5 * 60 * 1000);
 		// toUTCString() truncates to seconds — compare against second-precision floor
 		const futureDateSec = Math.floor(futureDate.getTime() / 1000) * 1000;
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "retry-after": futureDate.toUTCString() }),
 			ACCOUNT_ID,
 			noCache,
 		);
 		expect(result).toBeGreaterThanOrEqual(futureDateSec);
+		expect(source).toBe("header");
 	});
 
 	it("falls through stale unix timestamp to usageCache", () => {
 		const staleTs = Math.floor((Date.now() - 60 * 1000) / 1000);
 		const cacheReset = Date.now() + 30 * 60 * 1000;
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "retry-after": String(staleTs) }),
 			ACCOUNT_ID,
 			() => cacheReset,
 		);
 		expect(result).toBe(cacheReset);
+		expect(source).toBe("usage-throttle");
 	});
 
 	it("falls through stale HTTP-date to usageCache", () => {
 		const pastDate = new Date(Date.now() - 60 * 1000).toUTCString();
 		const cacheReset = Date.now() + 20 * 60 * 1000;
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "retry-after": pastDate }),
 			ACCOUNT_ID,
 			() => cacheReset,
 		);
 		expect(result).toBe(cacheReset);
+		expect(source).toBe("usage-throttle");
 	});
 
 	it("falls back to probe-cooldown default when no headers and no cache", () => {
 		const before = Date.now();
-		const result = extractCooldownUntil(makeResponse(), ACCOUNT_ID, noCache);
+		const { until: result, source } = extractCooldownUntil(
+			makeResponse(),
+			ACCOUNT_ID,
+			noCache,
+		);
 		// Floor is the larger of MIN_COOLDOWN_MS and the configured default.
 		const expected = Math.max(PROBE_COOLDOWN_MS, MIN_COOLDOWN_MS);
 		expect(result).toBeGreaterThanOrEqual(before + expected);
 		expect(result).toBeLessThan(before + expected + 5000);
+		expect(source).toBe("default");
 	});
 
 	it("clamps small retry-after to MIN_COOLDOWN_MS", () => {
 		const before = Date.now();
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse({ "retry-after": "1" }),
 			ACCOUNT_ID,
 			noCache,
 		);
 		expect(result).toBeGreaterThanOrEqual(before + MIN_COOLDOWN_MS);
+		expect(source).toBe("header");
 	});
 
 	it("clamps imminent usageCache reset to MIN_COOLDOWN_MS", () => {
 		const before = Date.now();
 		const almostNow = Date.now() + 1000;
-		const result = extractCooldownUntil(
+		const { until: result, source } = extractCooldownUntil(
 			makeResponse(),
 			ACCOUNT_ID,
 			() => almostNow,
 		);
 		expect(result).toBeGreaterThanOrEqual(before + MIN_COOLDOWN_MS);
+		expect(source).toBe("usage-throttle");
 	});
 });

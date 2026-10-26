@@ -255,6 +255,23 @@ describe("capacity-restored single-flight marker", () => {
 		expect(admittedOutOf(account, 6)).toBe(1);
 	});
 
+	it("single-flights recovery from a no-reset model_fallback_429 cooldown", () => {
+		// The no-reset ramp escalates the streak, but stays below the mature
+		// streak for its first four expiries.
+		Date.now = () => NOW;
+		const account = makeAccount();
+		const { ctx } = makeCtx();
+
+		applyRateLimitCooldown(account, { reason: "model_fallback_429" }, ctx);
+		expect(account.consecutive_rate_limits).toBe(1);
+		const until = account.rate_limited_until as number;
+		expect(until).toBe(NOW + 30_000);
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
+
+		Date.now = () => until + 1;
+		expect(admittedOutOf(account, 8)).toBe(1);
+	});
+
 	it("arms only for an OAuth-Anthropic burst, not for every reset-bearing 429", () => {
 		Date.now = () => NOW;
 		const { ctx } = makeCtx();
@@ -273,6 +290,10 @@ describe("capacity-restored single-flight marker", () => {
 			ctx,
 		);
 		expect(hasCapacityRestoredProbePending(otherProvider.id)).toBe(false);
+
+		const otherReasonNoReset = makeAccount({ id: "acc-other-no-reset" });
+		applyRateLimitCooldown(otherReasonNoReset, {}, ctx);
+		expect(hasCapacityRestoredProbePending(otherReasonNoReset.id)).toBe(false);
 	});
 
 	it("keeps the marker pending indefinitely while the account is never probed", () => {

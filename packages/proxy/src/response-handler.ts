@@ -103,11 +103,9 @@ function streamErrorToOutcome(
 	return "error";
 }
 
-// Default cooldown for rate-limit errors detected mid-stream. SSE error
-// frames don't carry reset headers (HTTP headers were sent before the
-// error occurred), so we fall back to the same probe-friendly default
-// (TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS) that
-// response-processor.ts uses for headerless 429 responses.
+// Overload-breaker deadline for an `overloaded_error` detected mid-stream.
+// SSE error frames don't carry reset headers (HTTP headers were sent before
+// the error occurred), so this is the probe-friendly default.
 const MID_STREAM_RATE_LIMIT_COOLDOWN_MS =
 	TIME_CONSTANTS.DEFAULT_RATE_LIMIT_NO_RESET_COOLDOWN_MS;
 
@@ -1218,14 +1216,11 @@ async function forwardToClientInner(
 							"keepalive",
 						);
 
-						// Mid-stream `rate_limit_error` is a per-account 429: apply the
-						// per-account cooldown (auto-derived reason).
+						// Mid-stream `rate_limit_error` is a per-account 429 that names no
+						// reset: apply the per-account no-reset cooldown (auto-derived
+						// reason).
 						if (!isKeepalive) {
-							applyRateLimitCooldown(
-								account,
-								{ resetTime: Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS },
-								ctx,
-							);
+							applyRateLimitCooldown(account, {}, ctx);
 						}
 						// A mid-stream rate_limit_error is a per-ACCOUNT signal, not an
 						// overload-health verdict for the family — release the probe

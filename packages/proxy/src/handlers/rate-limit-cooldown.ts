@@ -225,14 +225,15 @@ export function markCapacityRestoredProbePending(
 }
 
 /**
- * Arm the single-flight gate for a reset-bearing burst cooldown, stamped with
+ * Arm the single-flight gate for a `model_fallback_429` cooldown, stamped with
  * the deadline the cooldown just wrote.
  *
- * The burst path writes a server-directed deadline WITHOUT escalating
- * `consecutive_rate_limits`, so the account comes back at streak 0 with an
- * expired deadline — the shape neither half of the mature-streak gate engages
- * on. Every concurrent request would then reach the just-throttled account at
- * the same instant and re-trip the same burst window.
+ * Such a cooldown leaves the account below the mature streak the gate
+ * otherwise requires: a server-directed deadline never escalates
+ * `consecutive_rate_limits`, and the no-reset ramp needs
+ * MATURE_COOLDOWN_STREAK expiries in a row. Every concurrent request would
+ * then reach the just-throttled account at the same instant and re-trip the
+ * same burst window.
  *
  * Armed with NO predecessor: an account that keeps bursting would otherwise
  * grow a linked reservation chain, one node per 429, and nothing ever rolls a
@@ -809,6 +810,9 @@ export function applyRateLimitCooldown(
 	account.rate_limited_reason = reason;
 	account.rate_limited_at = now;
 	account.consecutive_rate_limits = nextCount;
+	if (reason === "model_fallback_429" && isOAuthAnthropicAccount(account)) {
+		armBurstRecoveryProbe(account, cooldownUntil);
+	}
 
 	ctx.asyncWriter.enqueue(async () => {
 		const persistedCount = await ctx.dbOps.markAccountRateLimited(

@@ -195,7 +195,7 @@ function makeRequest(body: ArrayBuffer, headers: Record<string, string> = {}) {
 }
 
 /** A 429 exactly as Anthropic sends it on a spent weekly window. */
-function rejected429() {
+function rejected429(retryAfter: string | null = String(RETRY_AFTER_S)) {
 	return new Response(
 		JSON.stringify({
 			type: "error",
@@ -207,7 +207,7 @@ function rejected429() {
 				"content-type": "application/json",
 				"anthropic-ratelimit-unified-status": "rejected",
 				"x-should-retry": "true",
-				"retry-after": String(RETRY_AFTER_S),
+				...(retryAfter === null ? {} : { "retry-after": retryAfter }),
 			},
 		},
 	);
@@ -274,6 +274,37 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		expect(until).toBeLessThan(before + (RETRY_AFTER_S + 5) * 1000);
 		// The persisted cooldown carries the same reason (server-directed reset ⇒
 		// the non-incrementing deadline-only write).
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until, reason: "weekly_exhausted_429" },
+		]);
+	});
+
+	it("takes the adaptive backoff under the weekly reason when the 429 names no reset", async () => {
+		globalThis.fetch = mockFetch(mock(async () => rejected429(null)));
+		seedWeeklyExhausted();
+
+		const { ctx, markCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const bodyBuffer = makeRequestBody("claude-opus-4-8");
+		const before = Date.now();
+
+		await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+		);
+
+		// Our own 60s default is not a reset: the first ramp tier applies and
+		// the streak escalates.
+		expect(account.consecutive_rate_limits).toBe(1);
+		const until = account.rate_limited_until as number;
+		expect(until).toBeGreaterThanOrEqual(before + 30_000);
+		expect(until).toBeLessThan(before + 35_000);
 		expect(markCalls).toEqual([
 			{ id: ACCOUNT_ID, until, reason: "weekly_exhausted_429" },
 		]);

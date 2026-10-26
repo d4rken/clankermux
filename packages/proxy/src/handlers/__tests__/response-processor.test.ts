@@ -1409,3 +1409,53 @@ it("requires a successful messages request to clear an organization restriction"
 	expect(acc.rate_limited_reason).toBeNull();
 	expect(acc.rate_limited_until).toBeNull();
 });
+
+describe("processProxyResponse — Codex live quota 429", () => {
+	it("cools a weekly-exhausted Codex 429 until its weekly reset, not the parser's fallback", async () => {
+		const account = makeAccount({ id: "codex-weekly-429", provider: "codex" });
+		const weeklyResetSec = Math.floor(
+			(Date.now() + 5 * 24 * 60 * 60 * 1000) / 1000,
+		);
+		const marks: Array<{ until: number; reason: string }> = [];
+		const record = async (_id: string, until: number, reason: string) => {
+			marks.push({ until, reason });
+			return 1;
+		};
+		const { ctx } = makeCodexCtx();
+		const codexCtx = ctx as unknown as {
+			provider: { parseRateLimit: () => unknown };
+			dbOps: Record<string, unknown>;
+		};
+		codexCtx.provider.parseRateLimit = () => ({
+			isRateLimited: true,
+			resetTime: Date.now() + 60 * 60 * 1000,
+			statusHeader: undefined,
+			remaining: undefined,
+		});
+		codexCtx.dbOps.markAccountRateLimitedDeadlineOnly = record;
+		codexCtx.dbOps.markAccountRateLimited = record;
+		codexCtx.dbOps.saveCodexWindowObservations = async () => {};
+
+		await processProxyResponse(
+			new Response("{}", {
+				status: 429,
+				headers: {
+					"content-type": "application/json",
+					"x-codex-primary-used-percent": "100",
+					"x-codex-primary-window-minutes": "10080",
+					"x-codex-primary-reset-at": String(weeklyResetSec),
+				},
+			}),
+			account,
+			ctx,
+		);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(account.rate_limited_reason).toBe("weekly_exhausted_429");
+		expect(account.rate_limited_until).toBe(weeklyResetSec * 1000);
+		expect(marks).toEqual([
+			{ until: weeklyResetSec * 1000, reason: "weekly_exhausted_429" },
+		]);
+		usageCache.delete(account.id);
+	});
+});
