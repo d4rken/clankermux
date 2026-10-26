@@ -121,6 +121,7 @@ import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snaps
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
 import { runStorageUsageScanInWorker } from "./storage-usage-runner";
+import { type EmbeddedWorker, spawnEmbeddedWorker } from "./worker-spawn";
 
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
@@ -2226,7 +2227,7 @@ OAuth tokens will need to be re-authenticated.
 			removedOpenAiBucketObservations: 0,
 		};
 
-		const worker = this.spawnIncrementalVacuumWorker();
+		const { worker, dispose } = this.spawnIncrementalVacuumWorker();
 		try {
 			const result = await new Promise<
 				{ ok: true; cleanup: CleanupCounts } | { ok: false; error: string }
@@ -2264,7 +2265,7 @@ OAuth tokens will need to be re-authenticated.
 			console.warn(`[cleanupOldRequests] worker cleanup error: ${err}`);
 			return empty;
 		} finally {
-			worker.terminate();
+			dispose();
 			// Row counts/sizes may have changed (even a partial/failed run), so
 			// drop every route by which the next read could still be answered
 			// from before this cleanup: the generation bump keeps a still-running
@@ -2376,7 +2377,7 @@ OAuth tokens will need to be re-authenticated.
 		error?: string;
 	}> {
 		const start = Date.now();
-		const worker = this.spawnIncrementalVacuumWorker();
+		const { worker, dispose } = this.spawnIncrementalVacuumWorker();
 		try {
 			const result = await new Promise<
 				| { ok: true; skipped: boolean }
@@ -2405,7 +2406,7 @@ OAuth tokens will need to be re-authenticated.
 				error: err instanceof Error ? err.message : String(err),
 			};
 		} finally {
-			worker.terminate();
+			dispose();
 		}
 	}
 
@@ -2570,17 +2571,10 @@ OAuth tokens will need to be re-authenticated.
 		// so the main Bun event loop stays free to serve health checks and other
 		// requests during what can be a minutes-long exclusive DB operation.
 		const dbPath = this.resolvedDbPath;
-		let worker: Worker;
-		if (EMBEDDED_VACUUM_WORKER_CODE) {
-			const workerCode = Buffer.from(
-				EMBEDDED_VACUUM_WORKER_CODE,
-				"base64",
-			).toString("utf8");
-			const blob = new Blob([workerCode], { type: "text/javascript" });
-			worker = new Worker(URL.createObjectURL(blob), { smol: true });
-		} else {
-			worker = new Worker(new URL("./vacuum-worker.ts", import.meta.url).href);
-		}
+		const { worker, dispose } = spawnEmbeddedWorker(
+			EMBEDDED_VACUUM_WORKER_CODE,
+			new URL("./vacuum-worker.ts", import.meta.url).href,
+		);
 		this.compacting = true;
 
 		try {
@@ -2623,27 +2617,18 @@ OAuth tokens will need to be re-authenticated.
 			};
 		} finally {
 			this.compacting = false;
-			worker.terminate();
+			dispose();
 		}
 	}
 
 	/**
 	 * Spawn the incremental-vacuum worker (shared by `incrementalVacuum()`
-	 * — kind "vacuum" — and `optimizeAsync()` — kind "optimize"). Uses the
-	 * embedded base64 bundle when available (production build), falling back
-	 * to the on-disk worker source (tests / fresh worktrees where the inline
-	 * file is an empty placeholder).
+	 * — kind "vacuum" — `optimizeAsync()` — kind "optimize" — and
+	 * `cleanupOldRequests()` — kind "cleanup"). Release it with `dispose()`.
 	 */
-	private spawnIncrementalVacuumWorker(): Worker {
-		if (EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE) {
-			const workerCode = Buffer.from(
-				EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE,
-				"base64",
-			).toString("utf8");
-			const blob = new Blob([workerCode], { type: "text/javascript" });
-			return new Worker(URL.createObjectURL(blob), { smol: true });
-		}
-		return new Worker(
+	private spawnIncrementalVacuumWorker(): EmbeddedWorker {
+		return spawnEmbeddedWorker(
+			EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE,
 			new URL("./incremental-vacuum-worker.ts", import.meta.url).href,
 		);
 	}
@@ -2702,7 +2687,7 @@ OAuth tokens will need to be re-authenticated.
 		}
 
 		const dbPath = this.resolvedDbPath;
-		const worker = this.spawnIncrementalVacuumWorker();
+		const { worker, dispose } = this.spawnIncrementalVacuumWorker();
 
 		try {
 			const result = await new Promise<
@@ -2736,7 +2721,7 @@ OAuth tokens will need to be re-authenticated.
 				}
 			}
 		} finally {
-			worker.terminate();
+			dispose();
 		}
 	}
 
