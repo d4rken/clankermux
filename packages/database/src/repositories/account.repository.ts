@@ -881,6 +881,10 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * The value that was there is the binding window's reset from the last
 	 * response headers, which stays true after the lock goes. When it is STALE,
 	 * {@link stampObservedRateLimitReset} corrects it on its own evidence.
+	 *
+	 * The release also resets the backoff streak; clearing its timestamp without
+	 * clearing the count would prevent stability-based success recovery from
+	 * resetting that count.
 	 */
 	async clearRateLimitOnCapacityRestore(
 		accountId: string,
@@ -895,6 +899,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				rate_limited_until = NULL,
 				rate_limited_reason = NULL,
 				rate_limited_at = NULL,
+				consecutive_rate_limits = 0,
 				rate_limit_status = NULL,
 				rate_limit_remaining = NULL
 			WHERE id = ?

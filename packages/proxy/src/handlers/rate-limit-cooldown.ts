@@ -378,7 +378,7 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
  * The two triggers are separate on purpose: the mature-streak condition
  * requires `consecutive_rate_limits >= MATURE_COOLDOWN_STREAK` and an
  * expired-but-present deadline, and an early release satisfies NEITHER (the
- * quota reasons run at streak 0, and the clear removes the deadline entirely) —
+ * release resets the streak to 0 and removes the deadline entirely) —
  * which is why it needs its own marker rather than a relaxed deadline check.
  *
  * Returns:
@@ -457,11 +457,11 @@ type ProbeOutcome = "recovered" | "cooldown_reapplied" | "abandoned";
  * The capacity-restored marker has a NARROWER lifecycle than the lease:
  *   - `recovered` clears it — but only when the admitted generation still
  *     matches, so an older probe can never clear a newer restore's marker.
- *   - `cooldown_reapplied` RETAINS it. The probe got another reset-bearing 429,
- *     which leaves `consecutive_rate_limits` at 0 and a deadline that may be the
- *     synthesized 60s one — i.e. it can expire before the next 90s poll, and the
- *     mature-streak gate would then return "not_required" for every concurrent
- *     request. Clearing here would defeat the marker after the first
+ *   - `cooldown_reapplied` RETAINS it: another 429 does not prove recovery. A
+ *     reset-bearing 429 leaves the streak unchanged, and a no-reset 429 may
+ *     leave it below maturity. Retaining the marker keeps recovery
+ *     single-flighted even when the mature-streak gate would not engage.
+ *     Clearing here would defeat the marker after the first
  *     unsuccessful probe. While the reapplied cooldown is active the marker is
  *     dormant (the account is unselectable); when it expires the marker again
  *     forces exactly one probe.

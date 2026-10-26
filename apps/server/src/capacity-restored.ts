@@ -244,7 +244,7 @@ async function releaseQuotaLockPredating(
 	//
 	// The single-flight marker is reserved BEFORE the CAS and rolled back if it
 	// fails or throws. An early release makes the account selectable in one step
-	// with `consecutive_rate_limits` still 0 and no deadline left behind, so
+	// with `consecutive_rate_limits` reset to 0 and no deadline left behind, so
 	// nothing else would gate the fan-in; arming only after the await resolves
 	// would leave a window in which the account is unlocked and unmarked.
 	const reservation = marker.markPending(acc.id);

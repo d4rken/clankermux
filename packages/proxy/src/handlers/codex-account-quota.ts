@@ -1,4 +1,5 @@
 import {
+	parseCodexCreditsHeaders,
 	parseCodexUsageHeaders,
 	targetsChatGptCodexBackend,
 } from "@clankermux/providers";
@@ -17,6 +18,8 @@ const RESET_TOLERANCE_MS = 60_000;
  * Only a reported percentage counts. A window without one is unknown, never
  * spent, so this reads the headers without `defaultUtilization`. Per-model
  * family limits (`x-codex-<family>-*`) are not account-wide and never bind.
+ * When this response reports available or unlimited credits, weekly
+ * utilization alone does not establish an account-wide quota wall.
  */
 export function resolveLiveCodexAccountQuota429(
 	account: Pick<Account, "provider" | "custom_endpoint">,
@@ -33,6 +36,10 @@ export function resolveLiveCodexAccountQuota429(
 	const usage = parseCodexUsageHeaders(response.headers, { baseTimeMs: now });
 	if (!usage) return null;
 
+	const credits = parseCodexCreditsHeaders(response.headers);
+	const weeklyCovered =
+		credits !== null && (credits.hasCredits || credits.unlimited);
+
 	let binding: AccountQuota429["binding"] | null = null;
 	let latestReset: number | null = null;
 	for (const [window, kind, horizon] of [
@@ -40,6 +47,7 @@ export function resolveLiveCodexAccountQuota429(
 		[usage.seven_day, "weekly", 7 * 24 * HOUR_MS],
 	] as const) {
 		if (!window || window.utilization < 100) continue;
+		if (kind === "weekly" && weeklyCovered) continue;
 		if (kind === "weekly") binding = "weekly";
 		else binding ??= "session";
 

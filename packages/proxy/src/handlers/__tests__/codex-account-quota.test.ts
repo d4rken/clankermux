@@ -121,6 +121,62 @@ describe("resolveLiveCodexAccountQuota429", () => {
 		).toBeNull();
 	});
 
+	it("binds a spent weekly window on an account without credits", () => {
+		expect(
+			resolveLiveCodexAccountQuota429(
+				account,
+				codex429({
+					"x-codex-credits-has-credits": "False",
+					"x-codex-credits-balance": "0",
+					"x-codex-credits-unlimited": "False",
+				}),
+				NOW,
+			),
+		).toEqual({
+			binding: "weekly",
+			reason: "weekly_exhausted_429",
+			resetTime: WEEKLY_RESET,
+		});
+	});
+
+	it.each([
+		["available credits", { has: "True", unlimited: "False" }],
+		["unlimited credits", { has: "False", unlimited: "True" }],
+	])("never binds the weekly window on %s", (_label, credits) => {
+		expect(
+			resolveLiveCodexAccountQuota429(
+				account,
+				codex429({
+					"x-codex-credits-has-credits": credits.has,
+					"x-codex-credits-balance": "12.5",
+					"x-codex-credits-unlimited": credits.unlimited,
+				}),
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("still binds a spent five-hour window on an account with credits", () => {
+		const sessionReset = NOW + 2 * HOUR;
+		expect(
+			resolveLiveCodexAccountQuota429(
+				account,
+				codex429({
+					"x-codex-credits-has-credits": "True",
+					"x-codex-credits-balance": "12.5",
+					"x-codex-secondary-used-percent": "100",
+					"x-codex-secondary-window-minutes": "300",
+					"x-codex-secondary-reset-at": String(sessionReset / 1000),
+				}),
+				NOW,
+			),
+		).toEqual({
+			binding: "session",
+			reason: "session_exhausted_429",
+			resetTime: sessionReset,
+		});
+	});
+
 	it("ignores a spent per-model family limit", () => {
 		expect(
 			resolveLiveCodexAccountQuota429(
