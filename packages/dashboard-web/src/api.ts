@@ -2182,41 +2182,49 @@ class API extends HttpClient {
 	private async tokenHealthRequest<T>(
 		url: string,
 		_description: string,
+		signal?: AbortSignal,
 	): Promise<T> {
 		const startTime = Date.now();
 
 		this.logger.debug(`→ GET ${url}`);
 
 		try {
-			const response = await this.get<T>(url);
+			const response = await this.get<T>(url, { signal });
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
 		} catch (error) {
 			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
+			if (!signal?.aborted) {
+				this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+					error: error instanceof Error ? error.message : String(error),
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
 			throw error;
 		}
 	}
 
-	async getTokenHealth(): Promise<TokenHealthGlobalResponse> {
+	async getTokenHealth(
+		signal?: AbortSignal,
+	): Promise<TokenHealthGlobalResponse> {
 		const url = "/api/token-health";
 		return this.tokenHealthRequest<TokenHealthGlobalResponse>(
 			url,
 			"token health",
+			signal,
 		);
 	}
 
 	async getAccountTokenHealth(
 		accountName: string,
+		signal?: AbortSignal,
 	): Promise<TokenHealthAccountResponse> {
 		const url = `/api/token-health/account/${accountName}`;
 		return this.tokenHealthRequest<TokenHealthAccountResponse>(
 			url,
 			"account token health",
+			signal,
 		);
 	}
 

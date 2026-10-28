@@ -32,7 +32,7 @@ export function OAuthTokenStatus({
 			return;
 		}
 
-		let cancelled = false;
+		const controller = new AbortController();
 		let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 		// Try the per-account endpoint, then the global fallback. On total
@@ -40,14 +40,16 @@ export function OAuthTokenStatus({
 		// bounded interval so the indicator self-heals when the backend recovers
 		// — without ever flashing the loading spinner again.
 		const attempt = async () => {
-			if (cancelled) return;
+			if (controller.signal.aborted) return;
 
 			const result = await fetchAccountTokenStatus({
 				accountName,
-				getAccountHealth: (name) => api.getAccountTokenHealth(name),
-				getGlobalHealth: () => api.getTokenHealth(),
+				signal: controller.signal,
+				getAccountHealth: (name) =>
+					api.getAccountTokenHealth(name, controller.signal),
+				getGlobalHealth: () => api.getTokenHealth(controller.signal),
 			});
-			if (cancelled) return;
+			if (controller.signal.aborted) return;
 
 			if (result) {
 				setStatus(result.status);
@@ -62,7 +64,7 @@ export function OAuthTokenStatus({
 		void attempt();
 
 		return () => {
-			cancelled = true;
+			controller.abort();
 			if (retryTimer !== undefined) {
 				clearTimeout(retryTimer);
 			}

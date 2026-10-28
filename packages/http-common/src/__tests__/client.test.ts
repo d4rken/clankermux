@@ -111,3 +111,18 @@ it("propagates caller cancellation to fetch without retrying", async () => {
 	expect(await result).toBeInstanceOf(HttpError);
 	expect(calls).toBe(1);
 });
+
+it("starts no retry once the caller has cancelled during the backoff", async () => {
+	const controller = new AbortController();
+	let calls = 0;
+	globalThis.fetch = (async () => {
+		calls++;
+		controller.abort();
+		throw new TypeError("Failed to fetch");
+	}) as unknown as typeof fetch;
+	const error = await new HttpClient({ retries: 1, retryDelay: 0 })
+		.get("/api/token-health", { signal: controller.signal })
+		.catch((e) => e);
+	expect(error).toBeInstanceOf(HttpError);
+	expect(calls).toBe(1);
+});
