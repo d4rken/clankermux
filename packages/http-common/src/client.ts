@@ -68,6 +68,10 @@ export class HttpClient {
 		let lastError: Error | null = null;
 
 		for (let attempt = 0; attempt <= retries; attempt++) {
+			// A caller that cancelled during the retry backoff gets no new request.
+			if (fetchOptions.signal?.aborted) {
+				throw new HttpError(408, "Request timeout");
+			}
 			let timeoutId: Timer | undefined;
 			try {
 				const controller = new AbortController();

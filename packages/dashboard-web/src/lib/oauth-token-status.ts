@@ -131,6 +131,8 @@ interface AccountHealthEntry {
 /** Injected data sources so this orchestration is testable without `api`. */
 export interface FetchAccountTokenStatusDeps {
 	accountName: string;
+	/** Once aborted, no further request is started. */
+	signal?: AbortSignal;
 	/** Per-account endpoint (`api.getAccountTokenHealth`). */
 	getAccountHealth: (
 		name: string,
@@ -151,7 +153,9 @@ export interface FetchAccountTokenStatusDeps {
 export async function fetchAccountTokenStatus(
 	deps: FetchAccountTokenStatusDeps,
 ): Promise<{ status: TokenStatus; message: string } | null> {
-	const { accountName, getAccountHealth, getGlobalHealth } = deps;
+	const { accountName, signal, getAccountHealth, getGlobalHealth } = deps;
+
+	if (signal?.aborted) return null;
 
 	// Primary: per-account endpoint.
 	try {
@@ -162,6 +166,8 @@ export async function fetchAccountTokenStatus(
 	} catch {
 		// fall through to the global endpoint
 	}
+
+	if (signal?.aborted) return null;
 
 	// Fallback: global endpoint, find this account in the list.
 	try {

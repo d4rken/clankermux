@@ -315,6 +315,8 @@ it("keeps the bulk panel open on the committed catalogues, then closes with the 
 			listRequests += 1;
 			return new Promise(() => {});
 		}
+		// The apply also invalidates the accounts query; held open like the list.
+		if (path.endsWith("/api/accounts")) return new Promise(() => {});
 		throw new Error(`Unexpected request ${path}`);
 	}) as unknown as typeof fetch);
 	query = new QueryClient({

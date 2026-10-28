@@ -184,6 +184,45 @@ describe("fetchAccountTokenStatus", () => {
 		expect(globalCalled).toBe(true);
 		expect(result).toEqual({ status: "critical", message: "bad" });
 	});
+
+	it("(f) skips the global fallback once aborted during the primary request", async () => {
+		const controller = new AbortController();
+		let globalCalled = false;
+		const result = await fetchAccountTokenStatus({
+			accountName: "acct-1",
+			signal: controller.signal,
+			getAccountHealth: async () => {
+				controller.abort();
+				throw new Error("primary down");
+			},
+			getGlobalHealth: async () => {
+				globalCalled = true;
+				return { success: true, data: { accounts: [] } };
+			},
+		});
+		expect(globalCalled).toBe(false);
+		expect(result).toBeNull();
+	});
+
+	it("(g) starts no request when the signal is already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let calls = 0;
+		const result = await fetchAccountTokenStatus({
+			accountName: "acct-1",
+			signal: controller.signal,
+			getAccountHealth: async () => {
+				calls++;
+				return null;
+			},
+			getGlobalHealth: async () => {
+				calls++;
+				return null;
+			},
+		});
+		expect(calls).toBe(0);
+		expect(result).toBeNull();
+	});
 });
 
 describe("resolveTokenChip", () => {
