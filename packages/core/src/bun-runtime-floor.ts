@@ -17,7 +17,7 @@
  * it, or degrade around it. The process dies, the supervisor restarts it, and
  * the next abort kills it again, with no in-process trace explaining any of it.
  *
- * ## Why the floor is 1.4.0
+ * ## Why the floor is 1.4.4
  *
  * Bun 1.4.0 was released 2026-08-20. GitHub's compare API places #32120's merge
  * commit (`8dd1b617`) as an ancestor of the `bun-v1.4.0` tag with `behind_by:
@@ -26,22 +26,32 @@
  * 1.4.0 superseded that, and the manifest states the stable floor rather than a
  * canary nobody can install by version number.
  *
+ * 1.4.4 (2026-10-22) raised it for security: it is the first release fixing
+ * three high-severity advisories with no backport to any earlier line.
+ * GHSA-663w-cv8g-jj2p is an out-of-bounds write in the bundled brotli decoder,
+ * which default `fetch` decompression exposes to any upstream answering with
+ * `Content-Encoding: br`;
+ * GHSA-26q8-h657-pf84 is a root store that still trusts revoked emSign CAs,
+ * which every upstream TLS connection relies on; GHSA-cf8x-9m69-3gg3 is an
+ * HTTP/3 QPACK amplification, not reachable here since this server does not
+ * speak HTTP/3.
+ *
  * ## Why the check is fail-closed, and what that costs
  *
  * Refusing to boot is not free, and the honest framing is a trade rather than a
  * free win. A segfault under load is traffic-dependent: an affected process may
  * serve for hours between crashes. A version refusal is deterministic and
- * immediate, and under `Restart=always` it will walk the unit into its
- * `StartLimitBurst` in about five attempts while Caddy holds new requests for
- * `lb_try_duration 330s` before returning 502. So this deliberately converts
- * "intermittently crashing, cause invisible" into "stopped, cause stated".
+ * immediate, and under `Restart=always` it repeats on every restart while
+ * Caddy holds new requests for `lb_try_duration 330s` before returning 502.
+ * So this deliberately converts "intermittently crashing, cause invisible"
+ * into "stopped, cause stated".
  * That is the right trade for an uncatchable native crash in a request path,
  * but it is a trade.
  *
  * The mitigation for the deterministic part is on the systemd side:
  * `deploy/systemd/clankermux.service.d/runtime-floor.conf` sets
  * `RestartPreventExitStatus=78` so a known-bad runtime fails once, loudly,
- * instead of five times.
+ * instead of on every restart.
  *
  * The comparator must not become the outage it exists to prevent, so refusal
  * requires a positive reading: the version string parses AND its release triple
@@ -74,7 +84,7 @@
  * consistency tests in `bun-runtime-floor.test.ts` — change it here and those
  * tests name every other place that has to move.
  */
-export const MIN_BUN_VERSION = "1.4.0";
+export const MIN_BUN_VERSION = "1.4.4";
 
 /**
  * Exit status used when the runtime is below the floor. 78 is `EX_CONFIG` from
@@ -188,9 +198,9 @@ export function evaluateBunRuntime(
 			floor,
 			message:
 				`Cannot determine the Bun version this process is running on. ` +
-				`ClankerMux requires Bun ${floor} or newer (oven-sh/bun#32111: on older ` +
-				`runtimes a client aborting a streaming response segfaults the process). ` +
-				`Starting anyway — verify the runtime with \`bun --revision\`.`,
+				`ClankerMux requires Bun ${floor} or newer (older runtimes segfault on ` +
+				`client aborts, oven-sh/bun#32111, or carry unpatched high-severity ` +
+				`advisories). Starting anyway — verify the runtime with \`bun --revision\`.`,
 		};
 	}
 
@@ -202,7 +212,7 @@ export function evaluateBunRuntime(
 			floor,
 			message:
 				`Unrecognised Bun version string "${raw}" — cannot compare it against the ` +
-				`required floor of ${floor} (oven-sh/bun#32111). Starting anyway; verify ` +
+				`required floor of ${floor}. Starting anyway; verify ` +
 				`the runtime with \`bun --revision\`.`,
 		};
 	}
@@ -215,10 +225,14 @@ export function evaluateBunRuntime(
 			message:
 				`Refusing to start on Bun ${raw}: ClankerMux requires Bun ${floor} or newer.\n` +
 				`  Reason: since v2026.8.21 the proxy disposes a cloned response body while ` +
-				`extracting usage. On Bun below ${floor} that path hits oven-sh/bun#32111 — a ` +
+				`extracting usage. Below Bun 1.4.0 that path hits oven-sh/bun#32111 — a ` +
 				`NATIVE segfault whenever a client aborts a streaming response, which is ` +
 				`routine traffic for a proxy. It cannot be caught or logged; the process ` +
 				`simply dies. Fixed upstream by oven-sh/bun#32120, shipped in Bun 1.4.0.\n` +
+				`  Below Bun 1.4.4 the runtime also carries high-severity advisories on the ` +
+				`proxy's upstream path: GHSA-663w-cv8g-jj2p (out-of-bounds write in the ` +
+				`brotli decoder that fetch decompression uses) and GHSA-26q8-h657-pf84 ` +
+				`(revoked emSign CAs still trusted for TLS).\n` +
 				`  Fix: upgrade the runtime (\`bun upgrade\`, or reinstall from https://bun.sh) ` +
 				`and check with \`bun --revision\` that the binary systemd actually launches ` +
 				`is the upgraded one.`,
@@ -237,9 +251,9 @@ export function evaluateBunRuntime(
 			message:
 				`Bun ${raw} is a prerelease build. Its version number is at or above the ` +
 				`required floor of ${floor}, but a prerelease is not proof that it contains ` +
-				`the oven-sh/bun#32120 fix for the streaming-abort segfault (#32111) — ` +
-				`1.4.0 canaries were cut both before and after that fix landed on ` +
-				`2026-06-21. Starting anyway; prefer a stable release of ${floor} or newer.`,
+				`the fixes that release carries — 1.4.0 canaries, for one, were cut both ` +
+				`before and after the oven-sh/bun#32120 segfault fix landed on 2026-06-21. ` +
+				`Starting anyway; prefer a stable release of ${floor} or newer.`,
 		};
 	}
 

@@ -671,10 +671,9 @@ export default async function startServer(options?: {
 		};
 	}
 
-	// Refuse an unsupported runtime before anything else runs. Below the floor
-	// the proxy segfaults natively whenever a client aborts a streaming
-	// response (oven-sh/bun#32111) — uncatchable, so this string comparison is
-	// the only chance to say why. See packages/core/src/bun-runtime-floor.ts
+	// Refuse an unsupported runtime before anything else runs: older runtimes
+	// segfault natively on client aborts (oven-sh/bun#32111, uncatchable) or
+	// carry unpatched security advisories. See packages/core/src/bun-runtime-floor.ts
 	// for the trade this makes and why only a positively-parsed low version
 	// refuses.
 	//

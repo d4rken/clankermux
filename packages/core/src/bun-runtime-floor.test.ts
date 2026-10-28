@@ -11,22 +11,22 @@ const REPO_ROOT = new URL("../../../", import.meta.url);
 
 describe("evaluateBunRuntime — versions at or above the floor", () => {
 	test("the exact floor, released, is ok", () => {
-		const check = evaluateBunRuntime("1.4.0");
+		const check = evaluateBunRuntime("1.4.4");
 		expect(check.verdict).toBe("ok");
 		expect(check.message).toBeNull();
-		expect(check.version).toBe("1.4.0");
+		expect(check.version).toBe("1.4.4");
 		expect(check.floor).toBe(MIN_BUN_VERSION);
 	});
 
 	test("build metadata alone does not make a release a prerelease", () => {
-		// SemVer §10: build metadata is ignored for precedence. `1.4.0+vendor`
-		// IS the 1.4.0 release, just rebuilt, so it must not be downgraded to
+		// SemVer §10: build metadata is ignored for precedence. `1.4.4+vendor`
+		// IS the 1.4.4 release, just rebuilt, so it must not be downgraded to
 		// "unverified" the way a `-prerelease` tag is.
-		expect(evaluateBunRuntime("1.4.0+vendor.3").verdict).toBe("ok");
+		expect(evaluateBunRuntime("1.4.4+vendor.3").verdict).toBe("ok");
 	});
 
 	test("higher patch, minor and major releases are ok", () => {
-		expect(evaluateBunRuntime("1.4.1").verdict).toBe("ok");
+		expect(evaluateBunRuntime("1.4.5").verdict).toBe("ok");
 		expect(evaluateBunRuntime("1.5.0").verdict).toBe("ok");
 		expect(evaluateBunRuntime("2.0.0").verdict).toBe("ok");
 	});
@@ -42,7 +42,7 @@ describe("evaluateBunRuntime — versions at or above the floor", () => {
 	});
 
 	test("whitespace around an otherwise valid version is tolerated", () => {
-		expect(evaluateBunRuntime("  1.4.0\n").verdict).toBe("ok");
+		expect(evaluateBunRuntime("  1.4.4\n").verdict).toBe("ok");
 	});
 });
 
@@ -54,12 +54,19 @@ describe("evaluateBunRuntime — versions below the floor", () => {
 		// The operator must be able to act on the message alone: it names the
 		// upstream issue, the symptom and the remedy.
 		expect(check.message).toContain("1.3.14");
-		expect(check.message).toContain("1.4.0");
+		expect(check.message).toContain(`requires Bun ${MIN_BUN_VERSION} or newer`);
 		expect(check.message).toContain("32111");
 	});
 
+	test("a 1.4 release without the security fixes is refused, and says why", () => {
+		const check = evaluateBunRuntime("1.4.2");
+		expect(check.verdict).toBe("below-floor");
+		expect(check.message).toContain("GHSA-663w-cv8g-jj2p");
+		expect(check.message).toContain("GHSA-26q8-h657-pf84");
+	});
+
 	test("one patch below the floor is still below the floor", () => {
-		expect(evaluateBunRuntime("1.3.99").verdict).toBe("below-floor");
+		expect(evaluateBunRuntime("1.4.3").verdict).toBe("below-floor");
 	});
 
 	test("a prerelease suffix does not rescue a lower release line", () => {
@@ -68,6 +75,7 @@ describe("evaluateBunRuntime — versions below the floor", () => {
 		expect(evaluateBunRuntime("1.3.15-canary.20260601.1").verdict).toBe(
 			"below-floor",
 		);
+		expect(evaluateBunRuntime("1.4.3-canary.1").verdict).toBe("below-floor");
 		expect(evaluateBunRuntime("0.9.0-rc.1").verdict).toBe("below-floor");
 	});
 });
@@ -125,7 +133,7 @@ describe("evaluateBunRuntime — unverifiable inputs never refuse", () => {
 		// The triple in front of a malformed tail parses fine, so a loose tail
 		// pattern would classify these as "below-floor" and refuse to boot on a
 		// string the module cannot actually read. Deliberately built on a
-		// below-floor triple: on `1.4.0-…` these would land on "unverified"
+		// below-floor triple: on `1.4.4-…` these would land on "unverified"
 		// anyway and hide the bug.
 		for (const input of [
 			"1.3.14-.", // empty identifier
@@ -147,7 +155,7 @@ describe("evaluateBunRuntime — unverifiable inputs never refuse", () => {
 		expect(evaluateBunRuntime("1.3.14-0.alpha-1+build.007").verdict).toBe(
 			"below-floor",
 		);
-		expect(evaluateBunRuntime("1.4.0+build.007").verdict).toBe("ok");
+		expect(evaluateBunRuntime("1.4.4+build.007").verdict).toBe("ok");
 	});
 
 	test("an unparseable floor is unverified, never a refusal", () => {
@@ -170,13 +178,13 @@ describe("evaluateBunRuntime — unverifiable inputs never refuse", () => {
 
 describe("evaluateBunRuntime — prereleases of the floor line", () => {
 	// Bun's own canaries are the reason this branch exists. `--revision` on the
-	// binary this repo is deployed on prints `1.4.0-canary.1+8326d1bd3`, and
+	// binary this repo was once deployed on printed `1.4.0-canary.1+8326d1bd3`, and
 	// #32120 merged 2026-06-21 while 1.4.0 was released 2026-08-20, so a
 	// 1.4.0-canary from before that merge would NOT carry the fix. We cannot
 	// tell those apart from the version string, so they boot with a warning.
 
 	test("a prerelease of the floor version is unverified, not ok and not refused", () => {
-		const check = evaluateBunRuntime("1.4.0-canary.20260501.1");
+		const check = evaluateBunRuntime(`${MIN_BUN_VERSION}-canary.20260501.1`);
 		expect(check.verdict).toBe("unverified");
 		expect(check.message).toContain("prerelease");
 	});
@@ -200,7 +208,7 @@ describe("evaluateBunRuntime — prereleases of the floor line", () => {
 			"1.4.0-beta.2",
 			"1.4.0-rc.1",
 		]) {
-			expect(evaluateBunRuntime(input).verdict).toBe("unverified");
+			expect(evaluateBunRuntime(input, "1.4.0").verdict).toBe("unverified");
 		}
 	});
 });
@@ -223,7 +231,7 @@ describe("assertBunRuntimeFloor", () => {
 	test("does not warn or throw on a satisfied floor", () => {
 		const warnings: string[] = [];
 		const check = assertBunRuntimeFloor({
-			version: "1.4.0",
+			version: MIN_BUN_VERSION,
 			warn: (m) => warnings.push(m),
 		});
 		expect(check.verdict).toBe("ok");
@@ -233,7 +241,7 @@ describe("assertBunRuntimeFloor", () => {
 	test("warns once, and does not throw, when the runtime is unverifiable", () => {
 		const warnings: string[] = [];
 		const check = assertBunRuntimeFloor({
-			version: "1.4.0-canary.1",
+			version: `${MIN_BUN_VERSION}-canary.1`,
 			revision: "8326d1bd3",
 			warn: (m) => warnings.push(m),
 		});
@@ -380,6 +388,6 @@ describe("the refusal reaches the operator as a process exit", () => {
 		expect(proc.exitCode).toBe(UNSUPPORTED_RUNTIME_EXIT_CODE);
 		const stderr = new TextDecoder().decode(proc.stderr);
 		expect(stderr).toContain("32111");
-		expect(stderr).toContain(MIN_BUN_VERSION);
+		expect(stderr).toContain(`requires Bun ${MIN_BUN_VERSION} or newer`);
 	});
 });
