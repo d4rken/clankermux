@@ -201,6 +201,12 @@ Published reference material only: the public API contract
 (`docs/public-api/`) and end-user product documentation. README media lives
 in `.assets/`.
 
+The root README covers what ClankerMux is, how to install and run it, and
+links. Wire behaviour a client author needs (headers, error codes, what each
+route does with a field) goes in a page under `docs/client-api/`, linked from
+the README in one line. A feature commit does not grow the README by more than
+that line.
+
 Implementation records, handovers between agents, backtest output and
 investigation reports do **not** get committed there. A durable finding goes
 to `.claude/CLAUDE.md` or a skill under `.claude/skills/`; everything else
