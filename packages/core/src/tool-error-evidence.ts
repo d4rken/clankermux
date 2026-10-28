@@ -45,8 +45,21 @@ export function truncateToolEvidence(
 	};
 }
 
-/** Encode the WTF-8 text bytes used for SQLite bindings, including lone surrogates. */
-export function toolErrorStorageHex(text: string): string {
+/**
+ * Every byte form a stored sample of `text` can have. A UTF-16 slice can end
+ * on half of a surrogate pair, and bun:sqlite has bound that lone surrogate
+ * two ways: as WTF-8 (`ED A0 BD`) on Bun 1.4.2 and earlier, and as U+FFFD
+ * (`EF BF BD`) since 1.4.4. Rows written by either runtime coexist.
+ */
+export function toolErrorStorageHexes(text: string): string[] {
+	const legacy = legacyWtf8Hex(text);
+	const current = Buffer.from(new TextEncoder().encode(text))
+		.toString("hex")
+		.toUpperCase();
+	return legacy === current ? [current] : [legacy, current];
+}
+
+function legacyWtf8Hex(text: string): string {
 	const bytes: number[] = [];
 	for (const character of text) {
 		const point = character.codePointAt(0) ?? 0;
@@ -116,8 +129,9 @@ export function extractToolErrorEvidence(
 			if (
 				(use?.name ?? "unknown") !== toolName ||
 				(storedTextHex !== undefined
-					? toolErrorStorageHex(extractToolErrorText(block.content)) !==
-						storedTextHex
+					? !toolErrorStorageHexes(
+							extractToolErrorText(block.content),
+						).includes(storedTextHex)
 					: extractToolErrorText(block.content) !== errorText)
 			)
 				continue;

@@ -230,115 +230,133 @@ it("serves details through the actual background worker and keeps cache scopes s
 		clearAnalyticsCachesForTests();
 	}
 });
-it("matches stored samples when the UTF16 capture boundary splits an emoji", async () => {
-	const { extractToolErrorText } = await import("@clankermux/core");
-	const text = `${"a".repeat(499)}😀tail`;
-	await dbOps
-		.getAdapter()
-		.run("DELETE FROM request_tool_errors WHERE request_id=?", ["a"]);
+
+// A 500-unit sample of this text ends on the emoji's high surrogate alone.
+const SPLIT_EMOJI = `${"a".repeat(499)}😀tail`;
+const LITERAL_FFFD = `${"a".repeat(499)}\uFFFD`;
+
+async function storageHexes(text: string) {
+	const { extractToolErrorText, toolErrorStorageHexes } = await import(
+		"@clankermux/core"
+	);
+	const hexes = toolErrorStorageHexes(extractToolErrorText(text));
+	expect(hexes).toHaveLength(2);
+	const [legacy, current] = hexes as [string, string];
+	return { legacy, current };
+}
+
+/** Stores a sample as the given bytes, the way an older Bun's binding did. */
+async function insertRawSample(requestId: string, hex: string) {
 	await dbOps
 		.getAdapter()
 		.run(
-			"INSERT INTO request_tool_errors(request_id,tool_name,error_text) VALUES ('a','Bash',?)",
-			[extractToolErrorText(text)],
+			`INSERT INTO request_tool_errors(request_id,tool_name,error_text) VALUES (?,'Bash',CAST(X'${hex}' AS TEXT))`,
+			[requestId],
 		);
+}
+
+async function insertBoundSample(requestId: string, text: string) {
+	const { extractToolErrorText } = await import("@clankermux/core");
+	await dbOps
+		.getAdapter()
+		.run(
+			"INSERT INTO request_tool_errors(request_id,tool_name,error_text) VALUES (?,'Bash',?)",
+			[requestId, extractToolErrorText(text)],
+		);
+}
+
+async function storedHex(requestId: string) {
+	const rows = await dbOps
+		.getAdapter()
+		.query<{ hex: string }>(
+			"SELECT hex(error_text) hex FROM request_tool_errors WHERE request_id=?",
+			[requestId],
+		);
+	return rows.map((row) => row.hex);
+}
+
+async function insertPayload(requestId: string, results: string[]) {
 	const body = {
 		messages: [
 			{
-				content: [
-					{
-						type: "tool_use",
-						id: "x",
-						name: "Bash",
-						input: { command: "unicode" },
-					},
-				],
+				content: results.map((_, index) => ({
+					type: "tool_use",
+					id: `x${index}`,
+					name: "Bash",
+					input: { command: `${requestId}-${index}` },
+				})),
 			},
 			{
-				content: [
-					{
-						type: "tool_result",
-						tool_use_id: "x",
-						is_error: true,
-						content: text,
-					},
-				],
+				content: results.map((content, index) => ({
+					type: "tool_result",
+					tool_use_id: `x${index}`,
+					is_error: true,
+					content,
+				})),
 			},
 		],
 	};
 	await dbOps
 		.getAdapter()
 		.run("INSERT INTO request_payloads(id,json) VALUES (?,?)", [
-			"a",
+			requestId,
 			JSON.stringify({
 				request: { body: Buffer.from(JSON.stringify(body)).toString("base64") },
 			}),
 		]);
-	const list = await (
-		await createToolErrorsHandler(context())(params({ projects: "alpha" }))
-	).json();
-	const evidence = await (
+}
+
+async function evidenceFor(sampleId: number, requestId: string) {
+	return await (
 		await createToolErrorExampleHandler(context())(
-			params({ sampleId: String(list.groups[0].sampleId), requestId: "a" }),
+			params({ sampleId: String(sampleId), requestId }),
 		)
 	).json();
-	expect(evidence.state).toBe("matched");
-	expect(evidence.matches[0].result).toBe(text);
-});
-it("keeps a split-surrogate sample distinct from literal replacement characters", async () => {
-	const { extractToolErrorText, toolErrorStorageHex } = await import(
-		"@clankermux/core"
-	);
-	const texts = [`${"a".repeat(499)}😀tail`, `${"a".repeat(499)}�`];
+}
+
+async function clearSamples() {
 	await dbOps
 		.getAdapter()
 		.run("DELETE FROM request_tool_errors WHERE request_id IN ('a','b')");
-	for (const [index, id] of ["a", "b"].entries()) {
-		const text = texts[index] ?? "";
-		const sample = extractToolErrorText(text);
-		await dbOps
-			.getAdapter()
-			.run(
-				"INSERT INTO request_tool_errors(request_id,tool_name,error_text) VALUES (?,'Bash',?)",
-				[id, sample],
-			);
-		const stored = await dbOps
-			.getAdapter()
-			.query<{ hex: string }>(
-				"SELECT hex(error_text) hex FROM request_tool_errors WHERE request_id=?",
-				[id],
-			);
-		expect(stored[0]?.hex).toBe(toolErrorStorageHex(sample));
-		const body = {
-			messages: [
-				{
-					content: [
-						{ type: "tool_use", id: "x", name: "Bash", input: { command: id } },
-					],
-				},
-				{
-					content: [
-						{
-							type: "tool_result",
-							tool_use_id: "x",
-							is_error: true,
-							content: text,
-						},
-					],
-				},
-			],
-		};
-		await dbOps
-			.getAdapter()
-			.run("INSERT INTO request_payloads(id,json) VALUES (?,?)", [
-				id,
-				JSON.stringify({
-					request: {
-						body: Buffer.from(JSON.stringify(body)).toString("base64"),
-					},
-				}),
-			]);
-	}
+}
+
+it("matches a split-emoji sample stored by the current runtime", async () => {
+	await clearSamples();
+	await insertBoundSample("a", SPLIT_EMOJI);
+	const { current } = await storageHexes(SPLIT_EMOJI);
+	expect(await storedHex("a")).toEqual([current]);
+	await insertPayload("a", [SPLIT_EMOJI]);
+	const list = await (
+		await createToolErrorsHandler(context())(params({ projects: "alpha" }))
+	).json();
+	const evidence = await evidenceFor(list.groups[0].sampleId, "a");
+	expect(evidence.state).toBe("matched");
+	expect(evidence.matches[0].result).toBe(SPLIT_EMOJI);
+});
+
+it("still matches a split-emoji sample stored as WTF-8 by an older runtime", async () => {
+	await clearSamples();
+	const { legacy } = await storageHexes(SPLIT_EMOJI);
+	await insertRawSample("a", legacy);
+	expect(await storedHex("a")).toEqual([legacy]);
+	await insertPayload("a", [SPLIT_EMOJI]);
+	const list = await (
+		await createToolErrorsHandler(context())(params({ projects: "alpha" }))
+	).json();
+	const evidence = await evidenceFor(list.groups[0].sampleId, "a");
+	expect(evidence.state).toBe("matched");
+	expect(evidence.matches[0].result).toBe(SPLIT_EMOJI);
+});
+
+it("groups samples by stored bytes across runtime eras", async () => {
+	// Legacy split (WTF-8) and literal U+FFFD differ in storage; a split stored
+	// by the current runtime is byte-identical to the literal one.
+	await clearSamples();
+	const { legacy } = await storageHexes(SPLIT_EMOJI);
+	await insertRawSample("a", legacy);
+	await insertBoundSample("b", LITERAL_FFFD);
+	await insertPayload("a", [SPLIT_EMOJI]);
+	await insertPayload("b", [LITERAL_FFFD]);
 	const h = createToolErrorsHandler(context());
 	const list = await (await h(params())).json();
 	expect(list.distinctGroups).toBe(2);
@@ -348,12 +366,40 @@ it("keeps a split-surrogate sample distinct from literal replacement characters"
 		).json();
 		expect(detail.detail.distinctRequests).toBe(1);
 		const requestId = detail.detail.requests[0].requestId;
-		const result = await (
-			await createToolErrorExampleHandler(context())(
-				params({ sampleId: String(group.sampleId), requestId }),
-			)
-		).json();
-		expect(result.state).toBe("matched");
-		expect(result.matches[0].input).toContain(requestId);
+		const evidence = await evidenceFor(group.sampleId, requestId);
+		expect(evidence.state).toBe("matched");
+		expect(evidence.matches[0].input).toContain(requestId);
 	}
+
+	await clearSamples();
+	await insertBoundSample("a", SPLIT_EMOJI);
+	await insertBoundSample("b", LITERAL_FFFD);
+	expect(await storedHex("a")).toEqual(await storedHex("b"));
+	expect((await (await h(params())).json()).distinctGroups).toBe(1);
+});
+
+it("offers both calls when a legacy literal-U+FFFD sample shares a request with a split emoji", async () => {
+	// Stored U+FFFD bytes cannot say whether they came from a literal character
+	// or a newer runtime's split surrogate, so both calls are candidates. The
+	// legacy WTF-8 sample can only be the split one.
+	await clearSamples();
+	const { legacy, current } = await storageHexes(SPLIT_EMOJI);
+	await insertRawSample("a", legacy);
+	await insertRawSample("a", current);
+	await insertPayload("a", [SPLIT_EMOJI, LITERAL_FFFD]);
+	const rows = await dbOps
+		.getAdapter()
+		.query<{ id: number; hex: string }>(
+			"SELECT id, hex(error_text) hex FROM request_tool_errors WHERE request_id='a'",
+		);
+	const idFor = (hex: string) => rows.find((row) => row.hex === hex)?.id ?? -1;
+
+	const split = await evidenceFor(idFor(legacy), "a");
+	expect(split.state).toBe("matched");
+	expect(split.matches).toHaveLength(1);
+	expect(split.matches[0].result).toBe(SPLIT_EMOJI);
+
+	const replacement = await evidenceFor(idFor(current), "a");
+	expect(replacement.state).toBe("ambiguous");
+	expect(replacement.totalMatches).toBe(2);
 });

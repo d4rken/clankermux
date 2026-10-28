@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import {
 	extractToolErrorEvidence,
 	extractToolErrorText,
+	toolErrorStorageHexes,
 	truncateToolEvidence,
 } from "./tool-error-evidence";
 
@@ -123,4 +124,9 @@ it("reports prefix collisions and bounds returned candidates and UTF8 excerpts",
 		);
 		expect(match.resultTruncated).toBe(true);
 	}
+});
+
+it("lists both stored byte forms only for text with a lone surrogate", () => {
+	expect(toolErrorStorageHexes("a\uD83D")).toEqual(["61EDA0BD", "61EFBFBD"]);
+	expect(toolErrorStorageHexes("aé😀")).toEqual(["61C3A9F09F9880"]);
 });

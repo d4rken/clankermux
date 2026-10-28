@@ -121,6 +121,22 @@ else
 	git -C "$ROOT" worktree add --detach "$RELEASE" "$SHA"
 fi
 
+# The snapshot's boot guard refuses a Bun below its floor with exit 78, which
+# runtime-floor.conf keeps down. Refuse here instead, while the old release is
+# still serving. Snapshots older than the guard have no module to ask.
+FLOOR_MODULE="$RELEASE/packages/core/src/bun-runtime-floor.ts"
+if [ -f "$FLOOR_MODULE" ]; then
+	"$BUN" -e '
+		const { evaluateBunRuntime } = await import(process.argv[1]);
+		const check = evaluateBunRuntime(Bun.version);
+		if (check.verdict === "below-floor") {
+			console.error(check.message);
+			process.exit(1);
+		}
+	' "$FLOOR_MODULE" ||
+		die "$BUN is below the Bun floor of $SHA; upgrade it first (nothing was restarted)"
+fi
+
 # Build in the snapshot while the old release is still serving. These are the
 # same guarded commands systemd runs, so they leave the content-hash markers
 # behind and ExecStartPre finds nothing to do.

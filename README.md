@@ -14,7 +14,7 @@
 <h1><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/banner-dark.svg"><img src=".assets/banner-light.svg" width="400" alt="ClankerMux: a self-hosted gateway for coding agents" /></picture></h1>
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
-[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.4-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](./LICENSE)
 
@@ -71,8 +71,8 @@ bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
-Requires [Bun](https://bun.sh) 1.4.0 or newer
-([why](https://github.com/oven-sh/bun/issues/32111)).
+Requires [Bun](https://bun.sh) 1.4.4 or newer
+([why](packages/core/src/bun-runtime-floor.ts)).
 
 It binds `0.0.0.0` by default; set `CLANKERMUX_HOST=127.0.0.1` for loopback
 only, since the management API stays open until a dashboard password exists.
