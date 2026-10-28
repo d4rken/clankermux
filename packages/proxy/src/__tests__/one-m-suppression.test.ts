@@ -53,6 +53,7 @@ async function setup() {
 	});
 	ctx.sdkBridge = {
 		availability: () => ({ state: "available" }),
+		versionFloor: () => null,
 	} as unknown as typeof ctx.sdkBridge;
 	const [, suppressed] = accounts;
 	return { ctx, routing, suppressed };

@@ -67,6 +67,17 @@ export function SdkBridgeStatusLine({ status }: { status: SdkBridgeStatus }) {
 					Not releasing parked turns: {status.releaseBlocked}
 				</span>
 			)}
+			{status.versionFloors.length > 0 && (
+				<span className="text-warning-strong">
+					Needs a newer Claude Code:{" "}
+					{status.versionFloors
+						.map(
+							(f) =>
+								`${f.model} (${f.requiredVersion}+, bridge runs ${f.rejectedVersion})`,
+						)
+						.join(", ")}
+				</span>
+			)}
 		</div>
 	);
 }

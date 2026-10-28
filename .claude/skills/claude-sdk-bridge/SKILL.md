@@ -76,6 +76,29 @@ pipeline. The client keeps executing its own tools.
   after the give-up, and any call of an earlier leg count toward the turn
   and decide nothing. A head committed during the wait answers through the
   stream.
+- **Claude Code too old.** Anthropic gates new models on a minimum Claude
+  Code version and answers an inner call below it with a 400 whose
+  `details.error_code` is `claude_code_version_too_old` ("Claude Code 2.1.280
+  does not support this model; version 2.1.290 or newer is required"). The
+  bridge never raises the version it reports; the fix is bumping the SDK pin.
+  `mapInnerOutcome` rewrites the answer to name the gateway as the cause
+  (`code: claude_code_version_too_old`) and marks it for failover under the
+  same start-leg, uncommitted-head rules as extra usage
+  (`SdkBridgeVersionTooOldError`, alias reason `claude_code_version_too_old`):
+  the request skips every remaining bridged account. Separately, every inner
+  outcome feeds `version-floors.ts`, which learns a per-model floor (bare
+  upstream id) only when the message names both versions and the required one
+  is newer. For an hour (a repeated rejection restarts it), routes built from
+  then on leave official accounts out of bridged routes to that model, and a
+  route left empty by that alone answers `SdkBridgeVersionRouteError` (the
+  same 400). Routes built before the floor was learned, and continuations,
+  which bypass route construction, still run Claude Code and take the
+  rejection path above. The route records the exclusion
+  (`ResolvedRoute.officialAnthropicExcluded`, `sdkBridgeVersionFloor` in its
+  snapshot), so the zero-accounts terminals explain it like the floor's own.
+  The floors show in `/api/system/status` and on the dashboard's bridge line.
+  Claude Code's own direct requests are untouched: the 400 is about that
+  client's version and is forwarded as it came.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner

@@ -358,6 +358,9 @@ describe("fields the SDK bridge refuses", () => {
 		expect(JSON.parse(route.snapshot).sdkBridgeRefusedField).toBe(
 			"stop_sequences",
 		);
+		expect(route.officialAnthropicExcluded).toContain(
+			'cannot honor field "stop_sequences"',
+		);
 	});
 
 	it("raise the bridge's 400 when nothing else remains", () => {
@@ -395,6 +398,76 @@ describe("fields the SDK bridge refuses", () => {
 				}).accountIds(),
 			].sort(),
 		).toEqual(["a", "o"]);
+	});
+});
+
+describe("the SDK bridge's version floors", () => {
+	const floor = {
+		model: "claude-fable-5-1",
+		requiredVersion: "2.1.290",
+		rejectedVersion: "2.1.280",
+		learnedAt: 0,
+		expiresAt: 1,
+	};
+	const floored = (model: string) =>
+		model === "claude-fable-5-1[1m]" || model === "claude-fable-5-1"
+			? floor
+			: null;
+	const mixed = {
+		rules: [],
+		pin: { accountId: null, providers: ["openrouter", "anthropic"] },
+	};
+
+	it("leave a bridged account out of a route to the floored model, and say so", () => {
+		const route = build({
+			...mixed,
+			bridgesOfficialAnthropic: true,
+			sdkBridgeVersionFloor: floored,
+		});
+		expect(route.accountIds()).toEqual(["o"]);
+		expect(route.officialAnthropicExcluded).toContain(
+			"below the 2.1.290 Anthropic requires",
+		);
+		expect(JSON.parse(route.snapshot).sdkBridgeVersionFloor).toEqual({
+			model: "claude-fable-5-1",
+			requiredVersion: "2.1.290",
+			rejectedVersion: "2.1.280",
+		});
+	});
+
+	it("raise the bridge's version 400 when nothing else remains", () => {
+		expect(() =>
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				bridgesOfficialAnthropic: true,
+				sdkBridgeVersionFloor: floored,
+			}),
+		).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "invalid_request_error",
+				errorCode: "claude_code_version_too_old",
+			}),
+		);
+	});
+
+	it("change nothing for another model, or without a bridge serving the account", () => {
+		const route = build({
+			...mixed,
+			bridgesOfficialAnthropic: true,
+			sdkBridgeVersionFloor: (model) =>
+				model === "claude-sonnet-5" ? { ...floor, model } : null,
+		});
+		expect([...route.accountIds()].sort()).toEqual(["a", "o"]);
+		expect(route.officialAnthropicExcluded).toBeNull();
+		expect(
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				sdkBridgeVersionFloor: floored,
+			}).accountIds(),
+		).toEqual(["a"]);
 	});
 });
 

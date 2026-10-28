@@ -69,7 +69,10 @@ function setup(
 			}),
 			refreshMisses: async () => {},
 		},
-		sdkBridge: { availability: () => ({ state: "available" }) },
+		sdkBridge: {
+			availability: () => ({ state: "available" }),
+			versionFloor: () => null,
+		},
 	} as unknown as ProxyContext;
 	const meta = {
 		id: crypto.randomUUID(),

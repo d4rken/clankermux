@@ -55,6 +55,25 @@ export interface SdkBridgeStatus {
 	sessionBytes: number | null;
 	/** Why parked queries are not being released now; null while they are. */
 	releaseBlocked: string | null;
+	/** Models Anthropic currently refuses this bridge's Claude Code for. */
+	versionFloors: SdkBridgeVersionFloor[];
+}
+
+/**
+ * Anthropic's minimum Claude Code version for one model, learned from a
+ * `claude_code_version_too_old` rejection of a bridge inner call. While it
+ * holds, official Anthropic accounts are left out of bridged routes to that
+ * model.
+ */
+export interface SdkBridgeVersionFloor {
+	/** The bare upstream model id (see {@link sdkBridgeWireModel}). */
+	model: string;
+	/** The version Anthropic says Claude Code must be at least. */
+	requiredVersion: string;
+	/** The version Anthropic says the bridge's Claude Code sent. */
+	rejectedVersion: string;
+	learnedAt: number;
+	expiresAt: number;
 }
 
 export interface SdkBridgeRouteCandidate {
@@ -268,6 +287,12 @@ export interface SdkBridgeContinuationUnavailable {
 export interface SdkBridgeTransport {
 	availability(): SdkBridgeAvailability;
 	/**
+	 * The version floor that keeps the bridge from serving this upstream
+	 * model now, or null when it can. Takes the route's upstream model, `[1m]`
+	 * suffix and all.
+	 */
+	versionFloor(upstreamModel: string): SdkBridgeVersionFloor | null;
+	/**
 	 * Start a new user turn. Resolves with an Anthropic Messages response (SSE
 	 * or JSON). Inference failures are error Responses; it throws
 	 * {@link SdkBridgeUnavailableError} only when the bridge itself cannot run,
@@ -322,6 +347,8 @@ export class SdkBridgeRefusalError extends SdkBridgeUnavailableError {
 	readonly errorType: string;
 	readonly retryAfter: string | null;
 	readonly reason: string;
+	/** The answer's `error.code`, when it carries one. */
+	readonly code: string | null;
 	/** Headers the bridge's own answer would have carried. */
 	readonly headers: Readonly<Record<string, string>>;
 
@@ -331,6 +358,7 @@ export class SdkBridgeRefusalError extends SdkBridgeUnavailableError {
 		type: string;
 		message: string;
 		retryAfter: string | null;
+		code?: string | null;
 		headers?: Record<string, string>;
 	}) {
 		super(input.message);
@@ -339,6 +367,7 @@ export class SdkBridgeRefusalError extends SdkBridgeUnavailableError {
 		this.status = input.status;
 		this.errorType = input.type;
 		this.retryAfter = input.retryAfter;
+		this.code = input.code ?? null;
 		this.headers = { ...input.headers };
 	}
 
@@ -353,7 +382,11 @@ export class SdkBridgeRefusalError extends SdkBridgeUnavailableError {
 		return new Response(
 			JSON.stringify({
 				type: "error",
-				error: { type: this.errorType, message: this.message },
+				error: {
+					type: this.errorType,
+					message: this.message,
+					...(this.code ? { code: this.code } : {}),
+				},
 			}),
 			{ status: this.status, headers: out },
 		);
@@ -390,13 +423,62 @@ export class SdkBridgeExtraUsageError extends SdkBridgeRefusalError {
 	}
 }
 
+/** Also the `error.code` of the bridge's answer. */
+export const SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD =
+	"claude_code_version_too_old";
+
+/**
+ * Anthropic answered the start leg's model call that the bridge's Claude Code
+ * is too old for the model, before anything reached the client.
+ */
+export class SdkBridgeVersionTooOldError extends SdkBridgeRefusalError {
+	constructor(
+		input: Omit<
+			ConstructorParameters<typeof SdkBridgeRefusalError>[0],
+			"reason"
+		>,
+	) {
+		super({ ...input, reason: SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD });
+		this.name = "SdkBridgeVersionTooOldError";
+	}
+}
+
+/**
+ * What the client is told when the bridge's Claude Code is too old for a
+ * model: the fix is the gateway operator's, not the client's.
+ */
+export function sdkBridgeVersionTooOldMessage(input: {
+	model: string | null;
+	requiredVersion: string | null;
+	rejectedVersion: string | null;
+}): string {
+	const subject = input.model ? `model "${input.model}"` : "this model";
+	const required = input.requiredVersion
+		? `Claude Code ${input.requiredVersion} or newer`
+		: "a newer Claude Code";
+	const running = input.rejectedVersion
+		? `, and this gateway's SDK bridge runs ${input.rejectedVersion}`
+		: " than this gateway's SDK bridge runs";
+	return `Anthropic requires ${required} for ${subject}${running}. The gateway operator has to update the bridge's Claude Agent SDK.`;
+}
+
+/** A bridge refusal the outer attempt fails over on, by its `reason`. */
+export type SdkBridgeFailoverReason =
+	| typeof SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED
+	| typeof SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD;
+
 export interface SdkBridgeInnerOutcome {
 	requestId: string;
 	status: number;
 	errorType: string | null;
-	/** The error's `code`, when it had one: a nonblank string, capped. */
+	/**
+	 * The error's `code`, or Anthropic's `details.error_code`, when it had
+	 * one: a nonblank string, capped.
+	 */
 	errorCode?: string | null;
 	message: string | null;
+	/** The model Claude Code asked for. */
+	model?: string | null;
 	retryAfter: string | null;
 	accountId: string | null;
 }

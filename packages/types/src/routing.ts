@@ -69,6 +69,9 @@ export const ATTEMPT_SDK_BRIDGE_AT_CAPACITY = "SDK bridge at capacity: ";
 export const ATTEMPT_SDK_BRIDGE_UNAVAILABLE = "SDK bridge unavailable: ";
 /** A bridged turn Anthropic refused "out of extra usage" before its head. */
 export const ATTEMPT_SDK_BRIDGE_EXTRA_USAGE = "SDK bridge out of extra usage: ";
+/** A bridged turn Anthropic refused for the bridge's Claude Code version. */
+export const ATTEMPT_SDK_BRIDGE_VERSION_TOO_OLD =
+	"SDK bridge Claude Code too old: ";
 export const ATTEMPT_TRANSPORT_ENDINGS: readonly string[] = [
 	ATTEMPT_TRANSPORT_FAILED,
 	ATTEMPT_STREAM_FAILED,

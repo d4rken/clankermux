@@ -89,6 +89,66 @@ describe("error mapping", () => {
 		).toBeUndefined();
 	});
 
+	describe("a claude_code_version_too_old rejection", () => {
+		const ANTHROPIC_TEXT =
+			"Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required.";
+
+		it("names the gateway's Claude Code as the cause and fails over", () => {
+			const mapped = mapInnerOutcome(
+				outcome(400, {
+					errorType: "invalid_request_error",
+					errorCode: "claude_code_version_too_old",
+					message: ANTHROPIC_TEXT,
+					model: "claude-opus-6",
+				}),
+			);
+			expect(mapped).toEqual({
+				status: 400,
+				type: "invalid_request_error",
+				code: "claude_code_version_too_old",
+				message:
+					"Anthropic requires Claude Code 2.1.290 or newer for model \"claude-opus-6\", and this gateway's SDK bridge runs 2.1.280. The gateway operator has to update the bridge's Claude Agent SDK.",
+				retryAfter: null,
+				failover: "claude_code_version_too_old",
+			});
+			expect(errorBody(mapped).error).toEqual({
+				type: "invalid_request_error",
+				message: mapped.message,
+				code: "claude_code_version_too_old",
+			});
+		});
+
+		it("is recognized by its wording when the body carries no error code", () => {
+			expect(
+				mapInnerOutcome(outcome(400, { message: ANTHROPIC_TEXT })).failover,
+			).toBe("claude_code_version_too_old");
+		});
+
+		it("still fails over when the message names no versions", () => {
+			const mapped = mapInnerOutcome(
+				outcome(400, {
+					errorCode: "claude_code_version_too_old",
+					message: "This model needs a newer client.",
+				}),
+			);
+			expect(mapped.failover).toBe("claude_code_version_too_old");
+			expect(mapped.message).toBe(
+				"Anthropic requires a newer Claude Code for this model than this gateway's SDK bridge runs. The gateway operator has to update the bridge's Claude Agent SDK.",
+			);
+		});
+
+		it("is only a 400", () => {
+			expect(
+				mapInnerOutcome(
+					outcome(403, {
+						errorCode: "claude_code_version_too_old",
+						message: ANTHROPIC_TEXT,
+					}),
+				).failover,
+			).toBeUndefined();
+		});
+	});
+
 	it("never sends the failover mark to the client", () => {
 		const mapped = mapInnerOutcome(
 			outcome(400, { message: "You're out of extra usage." }),

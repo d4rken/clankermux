@@ -12,6 +12,7 @@ import {
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	SdkBridgeVersionTooOldError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	sdkBridgeHeaderToken,
 	sdkBridgeSideRequestMode,
@@ -346,7 +347,10 @@ export async function continueParkedSdkBridgeTurn(input: {
 	} catch (error) {
 		if (req.signal.aborted) return createClientAbortResponse();
 		// A continuation that fell back to a fresh start has no other route.
-		if (error instanceof SdkBridgeExtraUsageError)
+		if (
+			error instanceof SdkBridgeExtraUsageError ||
+			error instanceof SdkBridgeVersionTooOldError
+		)
 			return error.terminalResponse();
 		if (error instanceof SdkBridgeUnavailableError)
 			return errorResponse(

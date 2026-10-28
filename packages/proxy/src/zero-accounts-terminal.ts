@@ -1,5 +1,5 @@
 import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
-import { getAttemptTarget } from "./resolved-route";
+import { getAttemptTarget, getResolvedRoute } from "./resolved-route";
 import { eligibleRouteAccounts } from "./routing-service";
 /**
  * The ZERO-ACCOUNTS TERMINAL: everything `handleProxy` does once every gate has
@@ -79,6 +79,20 @@ import { retryAfterFromDeadlines } from "./retry-after";
 // Same channel name as handleProxy's own logger: this module was carved out of
 // it, and the log lines below must keep their historical prefix.
 const log = new Logger("Proxy");
+
+/**
+ * Why official Anthropic accounts were not candidates of the route being
+ * served: the floor's request-wide exclusion, or the route's own SDK bridge
+ * checks (a refused field, a version floor), which differ per alias stage.
+ */
+function officialAnthropicExclusion(meta: RequestMeta): string | null {
+	if (meta.officialAnthropicExcluded) return meta.officialAnthropicExcluded;
+	try {
+		return getResolvedRoute(meta).officialAnthropicExcluded;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Everything the zero-accounts cascade needs from the request that produced it.
@@ -580,7 +594,7 @@ export async function resolveZeroAccountsOutcome(
 					gateTokenEstimate,
 					[...gates.contextExcludedAccounts],
 					effectiveRequestModel ?? "unknown",
-					!!requestMeta.officialAnthropicExcluded,
+					!!officialAnthropicExclusion(requestMeta),
 				);
 			} else if (!relaxAttempted && relaxSuppressed > 0) {
 				log.info(
@@ -776,23 +790,23 @@ export async function resolveZeroAccountsOutcome(
 	// this point or already discarded its staged body.
 	if (req.signal.aborted) return createClientAbortResponse();
 
-	// A pin, or the floor that excluded official Anthropic accounts because the
-	// SDK bridge could not serve the request, was active but post-selection
-	// gates removed every allowed candidate (and no more-specific terminal
-	// above applied). Return the pinned terminal rather than a generic
-	// pool_exhausted that reports the wrong (provider-default) accounts — and
-	// never silently fall through to other handling. When the bridge serves
-	// the request the floor excludes nothing, so pool_exhausted describes the
-	// right accounts.
-	if (
-		(isPinActive(requestMeta.pin) || requestMeta.officialAnthropicExcluded) &&
-		!requestMeta.pinFailure
-	) {
+	// A pin was active, or official Anthropic accounts were left out of the
+	// route because the SDK bridge cannot serve it (unavailable, a refused
+	// field, a version floor), but post-selection gates removed every allowed
+	// candidate (and no more-specific terminal above applied). Return the
+	// pinned terminal rather than a generic pool_exhausted that reports the
+	// wrong (provider-default) accounts — and never silently fall through to
+	// other handling. With neither an active pin nor an official-account
+	// exclusion, fall through to pool_exhausted.
+	const officialExclusion = officialAnthropicExclusion(requestMeta);
+	const pinned = isPinActive(requestMeta.pin);
+	if ((pinned || officialExclusion) && !requestMeta.pinFailure) {
 		const pinnedResponse = createPinnedTargetUnavailableResponse(
 			{
 				code: "pinned_target_unavailable",
-				message:
-					"The account/provider pinned to this API key has no available account for this request.",
+				message: pinned
+					? "The account/provider pinned to this API key has no available account for this request."
+					: `No account can serve this request. Official Anthropic accounts were left out: ${officialExclusion}.`,
 			},
 			pinnedRetryAfterSeconds(),
 		);

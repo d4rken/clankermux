@@ -1,4 +1,8 @@
-import { SdkBridgeExtraUsageError } from "@clankermux/types";
+import {
+	SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
+	SdkBridgeExtraUsageError,
+	SdkBridgeVersionTooOldError,
+} from "@clankermux/types";
 import {
 	type BridgeError,
 	bridgeErrors,
@@ -270,14 +274,18 @@ export class LegResponse {
 		if (this.state !== "holding" || !error.failover) return false;
 		this.state = "done";
 		this.cleanup();
+		const refusal = {
+			status: error.status,
+			type: error.type,
+			message: error.message,
+			retryAfter: error.retryAfter,
+			code: error.code ?? null,
+			headers: this.opts.headers,
+		};
 		this.rejectResponse(
-			new SdkBridgeExtraUsageError({
-				status: error.status,
-				type: error.type,
-				message: error.message,
-				retryAfter: error.retryAfter,
-				headers: this.opts.headers,
-			}),
+			error.failover === SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD
+				? new SdkBridgeVersionTooOldError(refusal)
+				: new SdkBridgeExtraUsageError(refusal),
 		);
 		return true;
 	}

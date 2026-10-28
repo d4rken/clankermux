@@ -3,6 +3,7 @@ import {
 	SdkBridgeCapacityError,
 	SdkBridgeExtraUsageError,
 	type SdkBridgeRefusalError,
+	SdkBridgeVersionTooOldError,
 } from "@clankermux/types";
 
 interface RefusalState {
@@ -30,7 +31,9 @@ export function noteSdkBridgeRefusal(
 /**
  * A refusal this request already had; every later official candidate skips
  * the bridge. Capacity belongs to the one bridge, and an extra-usage refusal
- * is taken as the request's, not one account's. A second refusal would also
+ * is taken as the request's, not one account's. Every bridged account uses
+ * the same Claude Code version, so switching accounts cannot resolve a
+ * version refusal for the same model. A later bridged attempt would also
  * write a second turn under the same leg id.
  */
 export function priorSdkBridgeRefusal(
@@ -55,5 +58,7 @@ export function sdkBridgeRefusalLabel(refusal: SdkBridgeRefusalError): string {
 	if (refusal instanceof SdkBridgeCapacityError) return "sdk_bridge_capacity";
 	if (refusal instanceof SdkBridgeExtraUsageError)
 		return "sdk_bridge_extra_usage";
+	if (refusal instanceof SdkBridgeVersionTooOldError)
+		return "sdk_bridge_version_too_old";
 	return "sdk_bridge_refused";
 }

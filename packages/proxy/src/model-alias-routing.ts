@@ -82,6 +82,8 @@ export function aliasFallbackReason(
 			return "temporarily_unavailable";
 		case "sdk_bridge_extra_usage":
 			return "extra_usage_exhausted";
+		case "sdk_bridge_version_too_old":
+			return "claude_code_version_too_old";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";
 		default:
