@@ -1271,6 +1271,127 @@ describe("Anthropic organization access denial", () => {
 	});
 });
 
+describe("Anthropic 404 on a server-side thread continuation", () => {
+	const originalFetch = globalThis.fetch;
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		cacheBodyStore.discardStaged("req-1");
+	});
+
+	function threadBody(thread?: object) {
+		return new TextEncoder().encode(
+			JSON.stringify({
+				model: "claude-opus-5-5",
+				messages: [{ role: "user", content: "next turn" }],
+				max_tokens: 10,
+				...(thread ? { thread } : {}),
+			}),
+		).buffer;
+	}
+
+	async function attempt(
+		reqBody: ArrayBuffer,
+		message: string | undefined,
+		headers: Record<string, string> = {},
+	) {
+		globalThis.fetch = mock(async () =>
+			Response.json(
+				{ type: "error", error: { type: "not_found_error", message } },
+				{ status: 404, headers },
+			),
+		) as never;
+		const acc = makeAccount({ provider: "anthropic", custom_endpoint: null });
+		const ctx = makeProxyContextWithAsyncExec();
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const res = await proxyWithAccount(
+			makeRequest(reqBody),
+			new URL("https://proxy.local/v1/messages"),
+			acc,
+			makeRequestMeta(),
+			reqBody,
+			() => {},
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ onOutcome: (o) => outcomes.push(o) },
+		);
+		return { res, ctx, outcomes, acc };
+	}
+
+	const CONTINUE = {
+		type: "continue",
+		previous_message_id: "msg_011CgUiEc2EwmA39TUiDRiVH",
+	};
+
+	it("forwards the upstream 404 without failing over", async () => {
+		const { res, ctx, outcomes, acc } = await attempt(
+			threadBody(CONTINUE),
+			"previous_message_id msg_011CgUiEc2EwmA39TUiDRiVH not found",
+		);
+		expect(res?.status).toBe(404);
+		expect(await res?.json()).toEqual({
+			type: "error",
+			error: {
+				type: "not_found_error",
+				message: "previous_message_id msg_011CgUiEc2EwmA39TUiDRiVH not found",
+			},
+		});
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(outcomes).toEqual([]);
+		expect(acc.rate_limited_until ?? null).toBeNull();
+		expect(routingAttempts(ctx)).toContainEqual(
+			expect.objectContaining({
+				status: 404,
+				error: "thread_continuation_not_found",
+				account_id: acc.id,
+			}),
+		);
+	});
+
+	it.each([
+		["names the model", "model: claude-opus-5-5"],
+		["has no message", undefined],
+	])("forwards a continuation 404 whose message %s", async (_label, message) => {
+		const { res, outcomes, acc } = await attempt(threadBody(CONTINUE), message);
+		expect(res?.status).toBe(404);
+		await res?.text();
+		expect(outcomes).toEqual([]);
+		expect(acc.rate_limited_until ?? null).toBeNull();
+	});
+
+	it("still benches the account when the 404 carries a hard account-wide status", async () => {
+		const { res, outcomes, acc } = await attempt(
+			threadBody(CONTINUE),
+			"previous_message_id msg_x not found",
+			{
+				"anthropic-ratelimit-unified-status": "blocked",
+				"anthropic-ratelimit-unified-reset": String(
+					Math.floor(Date.now() / 1000) + 3600,
+				),
+			},
+		);
+		expect(res).toBeNull();
+		expect(outcomes).toEqual([expect.objectContaining({ kind: "hard_429" })]);
+		expect(acc.rate_limited_until).toBeGreaterThan(Date.now());
+	});
+
+	it.each([
+		["no thread", undefined],
+		["a thread being created", { type: "create" }],
+	])("still fails over on a not_found_error with %s", async (_label, thread) => {
+		const { res, outcomes } = await attempt(
+			threadBody(thread),
+			"previous_message_id msg_x not found",
+		);
+		expect(res).toBeNull();
+		expect(outcomes).toEqual([{ kind: "model_not_found" }]);
+	});
+});
+
 describe("Devin binary proxy integration", () => {
 	it("uses the actual daily reset for a synthetic quota rejection without network traffic", async () => {
 		const original = globalThis.fetch;

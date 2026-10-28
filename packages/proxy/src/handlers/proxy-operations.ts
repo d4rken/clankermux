@@ -809,6 +809,33 @@ async function thinkingSignatureError(
 }
 
 /**
+ * Whether a `not_found_error` 404 answers a server-side thread continuation,
+ * which names an earlier response held by this account's organization:
+ *
+ *   {"thread": {"type": "continue", "previous_message_id": "msg_011C..."}}
+ *
+ * Whatever was not found, another account cannot continue that thread.
+ */
+async function isThreadContinuationNotFound(
+	response: Response,
+	body: Readonly<Record<string, unknown>>,
+): Promise<boolean> {
+	if (response.status !== 404) return false;
+	const thread = body.thread as { type?: unknown } | null | undefined;
+	if (thread?.type !== "continue") return false;
+	try {
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		const json = await response.clone().json();
+		return json?.error?.type === "not_found_error";
+	} catch {
+		return false;
+	}
+}
+
+/**
  * In-memory set of (accountId, model) pairs known to reject cache_control.
  * Populated on first 400 rejection; cleared on server restart (fast re-learn).
  */
@@ -2053,7 +2080,36 @@ export async function proxyWithAccount(
 			);
 			return await fail({ kind: "auth" }, rawResponse);
 		}
-		if (!routeRestricted && (await isModelUnavailableError(rawResponse))) {
+		// A failover can only be refused again, so the client gets the upstream
+		// 404 instead. A hard account-wide status header on the same response
+		// still benches the account further down.
+		const threadNotFound =
+			isClaudeProvider &&
+			(await isThreadContinuationNotFound(rawResponse, originalBody));
+		if (threadNotFound) {
+			log.info(
+				`Account ${account.name} answered a thread continuation with 404 not_found_error — forwarding without failover`,
+			);
+			const id = attemptAudit.id;
+			try {
+				await recordLocalRoutingOutcome(
+					attemptAudit,
+					requestMeta,
+					account,
+					ctx,
+					"thread_continuation_not_found",
+					rawResponse.status,
+				);
+				if (id) attemptAudit.judged = id;
+			} catch (error) {
+				log.warn("Could not persist the thread continuation 404", error);
+			}
+		}
+		if (
+			!routeRestricted &&
+			!threadNotFound &&
+			(await isModelUnavailableError(rawResponse))
+		) {
 			// Log 429 response headers for debugging upstream rate-limit info
 			if (rawResponse.status === 429) {
 				const rlHeaders: Record<string, string> = {};
@@ -2776,7 +2832,11 @@ export async function proxyWithAccount(
 		// a refusal. The routeRestricted guard is the same one the branch above
 		// carries: an OpenRouter provider-policy rejection is account/provider
 		// policy, not a verdict on the model.
-		if (!routeRestricted && (await isDefinitiveModelRejection(rawResponse))) {
+		if (
+			!routeRestricted &&
+			!threadNotFound &&
+			(await isDefinitiveModelRejection(rawResponse))
+		) {
 			log.warn(
 				`Account ${account.name} definitively rejected model ${resolvedTargetModel} (HTTP ${rawResponse.status}) — failing over to the next account`,
 			);
