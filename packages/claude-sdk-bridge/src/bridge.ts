@@ -108,6 +108,7 @@ import {
 	type SdkBridgeLimits,
 	type SdkBridgeTurnHistory,
 } from "./types";
+import { createVersionFloors, VERSION_FLOOR_TTL_MS } from "./version-floors";
 import {
 	claimGeneration,
 	ensurePrivateDir,
@@ -208,6 +209,7 @@ export function createClaudeSdkBridge(
 ): ClaudeSdkBridge {
 	const log: BridgeLog = deps.log ?? new Logger("ClaudeSdkBridge");
 	const now = deps.now ?? Date.now;
+	const versionFloors = createVersionFloors(now);
 	const randomId = deps.randomId ?? (() => crypto.randomUUID());
 	const timing = { ...DEFAULT_SDK_BRIDGE_TIMING, ...deps.timing };
 	const limits = (): SdkBridgeLimits => ({
@@ -1025,7 +1027,14 @@ export function createClaudeSdkBridge(
 			deadlineAt: input.startedAt + limits().turnDeadlineMs,
 			onInnerRequestStarted: (requestId) =>
 				live?.onInnerRequestStarted(requestId),
-			onInnerOutcome: (outcome) => live?.onInnerOutcome(outcome),
+			onInnerOutcome: (outcome) => {
+				const floor = versionFloors.observe(outcome);
+				if (floor)
+					log.warn(
+						`Anthropic requires Claude Code ${floor.requiredVersion} for ${floor.model}; the bridge's Claude Code is ${floor.rejectedVersion}. New bridged routes to it leave official Anthropic accounts out for the next ${Math.round(VERSION_FLOOR_TTL_MS / 60_000)} minutes; update the Claude Agent SDK to serve it`,
+					);
+				live?.onInnerOutcome(outcome);
+			},
 		};
 		const resumed = input.resume?.entry;
 		const registration = listener.register(
@@ -2303,12 +2312,14 @@ export function createClaudeSdkBridge(
 				parks?.all().filter((e) => e.state === "released").length ?? 0,
 			sessionBytes,
 			releaseBlocked: releaseRefusal(),
+			versionFloors: versionFloors.all(),
 		};
 	}
 
 	return {
 		ready: () => ready,
 		availability,
+		versionFloor: versionFloors.get,
 		startTurn,
 		continueTurn,
 		findContinuation,

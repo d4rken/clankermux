@@ -16,6 +16,7 @@ import {
 	SdkBridgeCapacityError,
 	SdkBridgeExtraUsageError,
 	SdkBridgeUnavailableError,
+	SdkBridgeVersionTooOldError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	setChatContext,
 	setNativeResponsesRequestContext,
@@ -532,6 +533,207 @@ describe("SDK bridge floor with a bridge", () => {
 			expect(response.status).toBe(400);
 			expect(JSON.parse(text).error.message).toBe(MESSAGE);
 		});
+	});
+
+	describe("when Anthropic refuses the bridge's Claude Code version", () => {
+		const MESSAGE =
+			"Anthropic requires Claude Code 2.1.290 or newer for model \"claude-sonnet-4-5\", and this gateway's SDK bridge runs 2.1.280. The gateway operator has to update the bridge's Claude Agent SDK.";
+		const tooOld = () =>
+			makeFakeBridge(() => {
+				throw new SdkBridgeVersionTooOldError({
+					status: 400,
+					type: "invalid_request_error",
+					message: MESSAGE,
+					retryAfter: null,
+					code: "claude_code_version_too_old",
+				});
+			});
+		const FLOOR = {
+			model: MODEL,
+			requiredVersion: "2.1.290",
+			rejectedVersion: "2.1.280",
+			learnedAt: 0,
+			expiresAt: Number.MAX_SAFE_INTEGER,
+		};
+
+		it("skips every other official account and is served by the non-bridged one", async () => {
+			const bridge = tooOld();
+			harness = await makeBridgeHarness([claudeA(), claudeB(), other()], {
+				bridge,
+			});
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			const rows = sends(harness);
+			expect(rows.map((r) => r.account_id)).toEqual(["claude-a", "other"]);
+			expect(rows[0].error).toBe(`sdk_bridge_version_too_old: ${MESSAGE}`);
+			expect(harness.ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+		});
+
+		it("answers the bridge's 400, code included, when no other destination remains", async () => {
+			const bridge = tooOld();
+			harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+			const { response, text } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(400);
+			expect(JSON.parse(text)).toEqual({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: MESSAGE,
+					code: "claude_code_version_too_old",
+				},
+			});
+			expect(bridge.starts).toHaveLength(1);
+			const recorded = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof spyOn>;
+			expect(recorded.mock.calls[0]?.[2]).toBe("sdk_bridge_version_too_old");
+		});
+
+		it("moves on to the next alias stage", async () => {
+			const bridge = tooOld();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([a, o], {
+				bridge,
+				model: "alias:mixed",
+			});
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: {
+					get: async (): Promise<ModelAlias> => ({
+						id: "alias:mixed",
+						displayName: "Mixed",
+						revision: 0,
+						targets: [
+							{ model: MODEL, accountIds: [a.id] },
+							{ model: "gpt-x", accountIds: [o.id] },
+						],
+					}),
+				},
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(200);
+			expect(sends(harness).map((r) => r.account_id)).toEqual([
+				"claude-a",
+				"other",
+			]);
+		});
+
+		describe("once the bridge has learned the model's floor", () => {
+			it("leaves official accounts out before any turn starts", async () => {
+				const bridge = makeFakeBridge();
+				bridge.floors.set(MODEL, FLOOR);
+				harness = await makeBridgeHarness([claudeA(), other()], { bridge });
+
+				const { response } = await run(flooredRequest(), harness.ctx);
+
+				expect(response.status).toBe(200);
+				expect(bridge.starts).toEqual([]);
+				expect(sends(harness).map((r) => r.account_id)).toEqual(["other"]);
+			});
+
+			it("answers the version 400 when only official accounts remain", async () => {
+				const bridge = makeFakeBridge();
+				bridge.floors.set(MODEL, FLOOR);
+				harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+				const { response, text } = await run(flooredRequest(), harness.ctx);
+
+				expect(response.status).toBe(400);
+				expect(JSON.parse(text)).toEqual({
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: MESSAGE,
+						code: "claude_code_version_too_old",
+					},
+				});
+				expect(bridge.starts).toEqual([]);
+				expect(harness.upstreamKeys).toEqual([]);
+			});
+
+			it("still bridges an alias stage to another model", async () => {
+				const bridge = makeFakeBridge();
+				bridge.floors.set(MODEL, FLOOR);
+				const a = claudeA();
+				harness = await makeBridgeHarness([a], {
+					bridge,
+					model: "alias:claude",
+				});
+				Object.assign(harness.ctx.dbOps, {
+					modelAliases: {
+						get: async (): Promise<ModelAlias> => ({
+							id: "alias:claude",
+							displayName: "Claude",
+							revision: 0,
+							targets: [
+								{ model: MODEL, accountIds: [a.id] },
+								{ model: "claude-haiku-4-5", accountIds: [a.id] },
+							],
+						}),
+					},
+				});
+				await provisionRouting(harness.ctx, MODEL);
+				await provisionRouting(harness.ctx, "claude-haiku-4-5");
+
+				const { response } = await run(
+					flooredRequest({ model: "alias:claude" }),
+					harness.ctx,
+				);
+
+				expect(response.status).toBe(200);
+				expect(bridge.starts.map((s) => s.body.model)).toEqual([
+					"claude-haiku-4-5",
+				]);
+			});
+
+			it("does not hold back Claude Code itself, which goes direct", async () => {
+				const bridge = makeFakeBridge();
+				bridge.floors.set(MODEL, FLOOR);
+				harness = await makeBridgeHarness([claudeA()], {
+					bridge,
+					application: "claude-code",
+				});
+
+				const { response } = await run(claudeCodeRequest(), harness.ctx);
+
+				expect(response.status).toBe(200);
+				expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
+			});
+		});
+	});
+
+	it("forwards Claude Code's own version rejection unchanged, trying no other account", async () => {
+		const rejection = {
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message:
+					"Claude Code 2.1.260 does not support this model; version 2.1.280 or newer is required.",
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		};
+		harness = await makeBridgeHarness([claudeA(), claudeB()], {
+			bridge: makeFakeBridge(),
+			application: "claude-code",
+			upstream: () => Response.json(rejection, { status: 400 }),
+		});
+
+		const { response, text } = await run(claudeCodeRequest(), harness.ctx);
+
+		expect(response.status).toBe(400);
+		expect(JSON.parse(text)).toEqual(rejection);
+		expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
 	});
 
 	it("bridges an alias stage that lands on Claude, planning that stage only", async () => {
@@ -1280,6 +1482,28 @@ describe("SDK bridge continuations", () => {
 				type: "invalid_request_error",
 				message: "You're out of extra usage.",
 			},
+		});
+	});
+
+	it("answer the version 400 when the turn had to start afresh, not a 503", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+		bridge.continueTurn = async () => {
+			throw new SdkBridgeVersionTooOldError({
+				status: 400,
+				type: "invalid_request_error",
+				message: "Anthropic requires a newer Claude Code.",
+				retryAfter: null,
+				code: "claude_code_version_too_old",
+			});
+		};
+
+		const { response, text } = await run(flooredRequest(toolResults), h.ctx);
+
+		expect(response.status).toBe(400);
+		expect(JSON.parse(text).error).toEqual({
+			type: "invalid_request_error",
+			message: "Anthropic requires a newer Claude Code.",
+			code: "claude_code_version_too_old",
 		});
 	});
 

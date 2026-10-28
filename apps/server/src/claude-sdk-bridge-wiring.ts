@@ -113,6 +113,7 @@ function unavailableWiring(
 	return {
 		transport: {
 			availability,
+			versionFloor: () => null,
 			startTurn: refuse,
 			continueTurn: refuse,
 			findContinuation: () => null,
@@ -141,6 +142,7 @@ function unavailableWiring(
 			releasedParks: 0,
 			sessionBytes: null,
 			releaseBlocked: reason,
+			versionFloors: [],
 		}),
 		beginShutdown: () => {
 			shuttingDown = true;

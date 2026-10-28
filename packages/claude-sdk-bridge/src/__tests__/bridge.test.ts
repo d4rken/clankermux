@@ -23,6 +23,7 @@ import {
 	type SdkBridgeRoutePlan,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
+	SdkBridgeVersionTooOldError,
 } from "@clankermux/types";
 import { FileSessionStore } from "../session-store";
 import {
@@ -3788,6 +3789,134 @@ describe("errors", () => {
 			giveUp(t.query);
 			const res = await t.response;
 			expect(res.status).toBe(400);
+		});
+	});
+
+	describe("an inner 400 claude_code_version_too_old", () => {
+		const anthropicText =
+			"Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required.";
+		const tooOld = {
+			status: 400,
+			errorType: "invalid_request_error",
+			errorCode: "claude_code_version_too_old",
+			message: anthropicText,
+			model: "claude-opus-6",
+		};
+
+		it("fails the start over before its head with the gateway named as the cause, and learns the floor", async () => {
+			const h = harness();
+			failInner(h, tooOld);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			await innerCall(t.query);
+			t.query.emit(initMessage());
+			t.query.emit(
+				resultMessage({
+					isError: true,
+					subtype: "success",
+					result: `API Error: 400 ${anthropicText}`,
+				}),
+			);
+			let error: unknown = null;
+			try {
+				await t.response;
+			} catch (caught) {
+				error = caught;
+			}
+			expect(error).toBeInstanceOf(SdkBridgeVersionTooOldError);
+			const refused = error as SdkBridgeVersionTooOldError;
+			expect(refused).toMatchObject({
+				reason: "claude_code_version_too_old",
+				status: 400,
+				code: "claude_code_version_too_old",
+			});
+			expect(await refused.terminalResponse().json()).toEqual({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message:
+						"Anthropic requires Claude Code 2.1.290 or newer for model \"claude-opus-6\", and this gateway's SDK bridge runs 2.1.280. The gateway operator has to update the bridge's Claude Agent SDK.",
+					code: "claude_code_version_too_old",
+				},
+			});
+			expect(h.bridge.versionFloor("claude-opus-6[1m]")).toMatchObject({
+				model: "claude-opus-6",
+				requiredVersion: "2.1.290",
+				rejectedVersion: "2.1.280",
+			});
+			expect(h.bridge.versionFloor("claude-sonnet-5")).toBeNull();
+			expect(h.bridge.status().versionFloors).toHaveLength(1);
+		});
+
+		const giveUp = (query: FakeQuery) =>
+			query.emit(
+				resultMessage({
+					isError: true,
+					subtype: "success",
+					result: `API Error: 400 ${anthropicText}`,
+				}),
+			);
+
+		it("answers through the stream once the first event committed the head, and still learns the floor", async () => {
+			const h = harness();
+			failInner(h, tooOld);
+			const t = await start(h, {
+				messages: [{ role: "user", content: "hello" }],
+			});
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "partial" }]).slice(0, 1),
+			);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data).toMatchObject({
+				error: { code: "claude_code_version_too_old" },
+			});
+			expect(h.bridge.versionFloor("claude-opus-6")).not.toBeNull();
+		});
+
+		it("answers a continuation itself, and still learns the floor", async () => {
+			const h = harness();
+			const first = { role: "user", content: "TOOL read a.txt" } as const;
+			const t = await start(h, { tools: [READ_TOOL], messages: [first] });
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([
+					{
+						type: "tool_use",
+						id: "toolu_x",
+						name: "mcp__c__read",
+						input: { path: "a.txt" },
+					},
+				]),
+			);
+			const r1 = await reply(t.response);
+			void t.query.callTool("toolu_x", "read", { path: "a.txt" });
+			await waitFor(() => h.bridge.status().parked === 1);
+			failInner(h, tooOld);
+			const c = continueTurn(h, t.plan.turnId, {
+				tools: [READ_TOOL],
+				messages: [
+					first,
+					{ role: "assistant", content: r1.content },
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_x", content: "A" },
+						],
+					},
+				],
+			});
+			await waitFor(() => h.bridge.status().parked === 0);
+			await innerCall(t.query);
+			giveUp(t.query);
+			const res = await c.response;
+			expect(res.status).toBe(400);
+			expect((await res.json()).error.code).toBe("claude_code_version_too_old");
+			expect(h.bridge.versionFloor("claude-opus-6")).not.toBeNull();
 		});
 	});
 

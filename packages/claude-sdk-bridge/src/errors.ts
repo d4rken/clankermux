@@ -1,9 +1,12 @@
 import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
 import {
+	SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
 	SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED,
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	SDK_BRIDGE_SIDE_REQUEST_HEADER,
+	type SdkBridgeFailoverReason,
 	type SdkBridgeInnerOutcome,
+	sdkBridgeVersionTooOldMessage,
 } from "@clankermux/types";
 
 /** An error the bridge answers the client with, as JSON or as an SSE `error`. */
@@ -18,7 +21,7 @@ export interface BridgeError {
 	 * Set when the outer attempt may fail over on this error, as long as the
 	 * start leg it ends has sent nothing yet. Never sent to the client.
 	 */
-	failover?: typeof SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED;
+	failover?: SdkBridgeFailoverReason;
 }
 
 /** Retry-After for a 429/503/529 whose cause named none. */
@@ -75,6 +78,63 @@ const OVERFLOW_TERMINAL_REASONS: ReadonlySet<string> = new Set<TerminalReason>([
 const OVERFLOW_CODE = "context_length_exceeded";
 /** Anthropic's 400 for a subscription account with no extra usage to spend. */
 const EXTRA_USAGE_EXHAUSTED = /\bout of extra usage\b/i;
+
+/**
+ * Anthropic's 400 for a model gated on a newer Claude Code, when the body
+ * lacks its `details.error_code`:
+ *
+ *   "Claude Code 2.1.260 does not support this model; version 2.1.280 or
+ *    newer is required."
+ */
+const VERSION_TOO_OLD_TEXT =
+	/\bclaude code\b[^\n]{0,40}\bdoes not support this model\b/i;
+const REJECTED_VERSION = /\bclaude code (\d+\.\d+\.\d+)\b/i;
+const REQUIRED_VERSION = /\bversion (\d+\.\d+\.\d+) or newer is required\b/i;
+
+/** What a `claude_code_version_too_old` rejection says, where it says it. */
+export interface ClaudeCodeVersionRejection {
+	/** The version Anthropic says the request carried. */
+	rejectedVersion: string | null;
+	/** The version Anthropic requires for the model. */
+	requiredVersion: string | null;
+}
+
+/**
+ * Whether an inner call's failure is Anthropic refusing the bridge's Claude
+ * Code version for the model, and the two versions its message names.
+ */
+export function claudeCodeVersionRejection(
+	outcome: Pick<SdkBridgeInnerOutcome, "status" | "errorCode" | "message">,
+): ClaudeCodeVersionRejection | null {
+	if (outcome.status !== 400) return null;
+	const text = outcome.message ?? "";
+	if (
+		outcome.errorCode !== SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD &&
+		!VERSION_TOO_OLD_TEXT.test(text)
+	)
+		return null;
+	return {
+		rejectedVersion: REJECTED_VERSION.exec(text)?.[1] ?? null,
+		requiredVersion: REQUIRED_VERSION.exec(text)?.[1] ?? null,
+	};
+}
+
+function claudeCodeVersionTooOld(
+	rejection: ClaudeCodeVersionRejection,
+	model: string | null | undefined,
+): BridgeError {
+	return {
+		status: 400,
+		type: "invalid_request_error",
+		code: SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
+		message: sdkBridgeVersionTooOldMessage({
+			...rejection,
+			model: model ?? null,
+		}),
+		retryAfter: null,
+		failover: SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
+	};
+}
 
 /**
  * Whether a failure is the conversation outgrowing the model's context:
@@ -157,6 +217,8 @@ export function mapInnerOutcome(outcome: SdkBridgeInnerOutcome): BridgeError {
 		isContextOverflow({ text: outcome.message, code: outcome.errorCode })
 	)
 		return contextOverflow(outcome.message);
+	const tooOld = claudeCodeVersionRejection(outcome);
+	if (tooOld) return claudeCodeVersionTooOld(tooOld, outcome.model);
 	if (status === 400)
 		return {
 			status,

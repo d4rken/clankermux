@@ -407,6 +407,51 @@ describe("SDK bridge inner calls", () => {
 		expect(outcomes[0].errorCode).toBe("context_length_exceeded");
 		expect(outcomes[0].message).toBe("bad");
 		expect(outcomes[0].accountId).toBe(a.id);
+		expect(outcomes[0].model).toBe(MODEL);
+	});
+
+	it("report Anthropic's details.error_code when the error has no code", async () => {
+		harness = await makeBridgeHarness([a, b], {
+			upstream: () =>
+				Response.json(
+					{
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message:
+								"Claude Code 2.1.280 does not support this model; version 2.1.290 or newer is required.",
+							details: { error_code: "claude_code_version_too_old" },
+						},
+					},
+					{ status: 400 },
+				),
+		});
+		const reported = new Promise<SdkBridgeInnerOutcome>((resolve) => {
+			const ctx = innerContext({
+				plan: plan({
+					candidates: [
+						{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
+						{ accountId: b.id, provider: "anthropic", upstreamModel: MODEL },
+					],
+					preferredAccountId: a.id,
+				}),
+				onInnerOutcome: resolve,
+			});
+			void dispatchProxyRequest(
+				innerRequest(ctx),
+				new URL("https://proxy.local/v1/messages"),
+				harness?.ctx as BridgeHarness["ctx"],
+				KEY,
+				"outer",
+			).then((res) => res.text());
+		});
+
+		expect(await reported).toMatchObject({
+			status: 400,
+			errorCode: "claude_code_version_too_old",
+			model: MODEL,
+		});
+		expect(harness?.upstreamKeys).toHaveLength(1);
 	});
 
 	describe("a streamed reply", () => {
@@ -523,6 +568,27 @@ describe("SDK bridge inner calls", () => {
 				]);
 				harness?.restore();
 			}
+		});
+
+		it("carries the error event's details.error_code when it has no code", async () => {
+			const { res, outcomes } = await streamed(
+				sse(start, {
+					type: "error",
+					error: {
+						type: "invalid_request_error",
+						message: "gated",
+						details: { error_code: "claude_code_version_too_old" },
+					},
+				}),
+			);
+			await res.text();
+			await Bun.sleep(0);
+			expect(outcomes).toEqual([
+				expect.objectContaining({
+					status: 400,
+					errorCode: "claude_code_version_too_old",
+				}),
+			]);
 		});
 
 		it("counts a stream that ends without message_stop as a 502", async () => {

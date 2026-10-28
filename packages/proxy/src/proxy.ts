@@ -366,6 +366,7 @@ export async function handleProxy(
 						type: error.code,
 						message: error.message,
 						...(error.param ? { param: error.param } : {}),
+						...(error.errorCode ? { code: error.errorCode } : {}),
 					},
 				},
 				{ status: error.statusCode },

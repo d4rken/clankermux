@@ -28,6 +28,7 @@ function status(over: Partial<SdkBridgeStatus> = {}): SdkBridgeStatus {
 		releasedParks: 0,
 		sessionBytes: null,
 		releaseBlocked: null,
+		versionFloors: [],
 		...over,
 	};
 }
@@ -59,6 +60,26 @@ describe("SdkBridgeStatusLine", () => {
 			"Not releasing parked turns: session files have reached sdk_bridge_session_bytes_ceiling",
 		);
 		expect(text(status())).not.toContain("released");
+	});
+
+	it("names each model Anthropic refuses the bridge's Claude Code for", () => {
+		const line = text(
+			status({
+				versionFloors: [
+					{
+						model: "claude-opus-6",
+						requiredVersion: "2.1.290",
+						rejectedVersion: "2.1.280",
+						learnedAt: 0,
+						expiresAt: 1,
+					},
+				],
+			}),
+		);
+		expect(line).toContain(
+			"Needs a newer Claude Code: claude-opus-6 (2.1.290+, bridge runs 2.1.280)",
+		);
+		expect(text(status())).not.toContain("Needs a newer Claude Code");
 	});
 
 	it("counts turns not completed, rejections and rebuilds since restart", () => {

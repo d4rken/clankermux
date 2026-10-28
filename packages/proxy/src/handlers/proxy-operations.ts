@@ -61,6 +61,7 @@ import {
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	SdkBridgeExtraUsageError,
+	SdkBridgeVersionTooOldError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	transferChatContext,
 } from "@clankermux/types";
@@ -335,6 +336,12 @@ export type ProxyAttemptOutcome =
 	 * reached the client; the request skips every other bridged account.
 	 */
 	| { kind: "sdk_bridge_extra_usage" }
+	/**
+	 * Anthropic refused the bridged turn's model for the bridge's Claude Code
+	 * version before anything reached the client; the request skips every
+	 * other bridged account.
+	 */
+	| { kind: "sdk_bridge_version_too_old" }
 	| { kind: "other" };
 
 /**
@@ -1538,7 +1545,9 @@ export async function proxyWithAccount(
 			return await fail(
 				bridged.refusal instanceof SdkBridgeExtraUsageError
 					? { kind: "sdk_bridge_extra_usage" }
-					: { kind: "sdk_bridge_unavailable" },
+					: bridged.refusal instanceof SdkBridgeVersionTooOldError
+						? { kind: "sdk_bridge_version_too_old" }
+						: { kind: "sdk_bridge_unavailable" },
 				null,
 				undefined,
 				`${bridged.refusal ? sdkBridgeRefusalLabel(bridged.refusal) : "sdk_bridge_unavailable"}: ${bridged.reason}`,

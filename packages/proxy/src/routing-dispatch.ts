@@ -12,6 +12,7 @@ import {
 	ATTEMPT_SDK_BRIDGE_AT_CAPACITY,
 	ATTEMPT_SDK_BRIDGE_EXTRA_USAGE,
 	ATTEMPT_SDK_BRIDGE_UNAVAILABLE,
+	ATTEMPT_SDK_BRIDGE_VERSION_TOO_OLD,
 	ATTEMPT_TRANSPORT_FAILED,
 	FAST_MODE_SERVICE_TIER,
 	getChatContext,
@@ -22,6 +23,7 @@ import {
 	SdkBridgeExtraUsageError,
 	SdkBridgeRefusalError,
 	SdkBridgeUnavailableError,
+	SdkBridgeVersionTooOldError,
 	type ServiceTierGroup,
 } from "@clankermux/types";
 import { AccountIdentityChangedError } from "./account-model-permissions";
@@ -418,9 +420,11 @@ export async function sendAuthorizedRequest(
 					? `${ATTEMPT_SDK_BRIDGE_AT_CAPACITY}${error.message}`
 					: error instanceof SdkBridgeExtraUsageError
 						? `${ATTEMPT_SDK_BRIDGE_EXTRA_USAGE}${error.message}`
-						: error instanceof SdkBridgeUnavailableError
-							? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
-							: ATTEMPT_TRANSPORT_FAILED;
+						: error instanceof SdkBridgeVersionTooOldError
+							? `${ATTEMPT_SDK_BRIDGE_VERSION_TOO_OLD}${error.message}`
+							: error instanceof SdkBridgeUnavailableError
+								? `${ATTEMPT_SDK_BRIDGE_UNAVAILABLE}${error.message}`
+								: ATTEMPT_TRANSPORT_FAILED;
 		try {
 			if (!recorded) await ctx.dbOps.routing.recordAttempt(attempt);
 			else

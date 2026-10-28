@@ -10,6 +10,7 @@ import type {
 	SdkBridgeRoutePlan,
 	SdkBridgeTransport,
 	SdkBridgeTurnMeta,
+	SdkBridgeVersionFloor,
 } from "@clankermux/types";
 import type { ProxyContext } from "../../handlers";
 import { provisionRouting } from "./routing-harness";
@@ -42,6 +43,8 @@ export interface FakeBridge extends SdkBridgeTransport {
 	continuation: ReturnType<SdkBridgeTransport["findContinuation"]>;
 	lookups: string[][];
 	lookupCallers: Array<{ apiKeyId: string | null; model: string }>;
+	/** What versionFloor answers, by upstream model. */
+	floors: Map<string, SdkBridgeVersionFloor>;
 }
 
 export function makeFakeBridge(
@@ -64,7 +67,9 @@ export function makeFakeBridge(
 		continuation: null,
 		lookups: [],
 		lookupCallers: [],
+		floors: new Map(),
 		availability: () => bridge.state,
+		versionFloor: (upstreamModel) => bridge.floors.get(upstreamModel) ?? null,
 		async startTurn({ request, plan, meta }) {
 			bridge.starts.push({
 				request,

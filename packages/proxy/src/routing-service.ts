@@ -285,14 +285,20 @@ export async function initializeRequestRoute(
 		meta.officialAnthropicVia === "sdk-bridge"
 			? sdkBridgeExclusionReason(ctx, meta)
 			: null;
+	const bridgesOfficialAnthropic =
+		meta.officialAnthropicVia === "sdk-bridge" &&
+		officialAnthropicExclusion === null;
+	const bridge = ctx.sdkBridge;
 	const restrictions = {
 		pin: meta.pin ?? null,
 		headerAccountId,
 		officialAnthropicExclusion,
-		bridgesOfficialAnthropic:
-			meta.officialAnthropicVia === "sdk-bridge" &&
-			officialAnthropicExclusion === null,
+		bridgesOfficialAnthropic,
 		sdkBridgeRefusal: meta.sdkBridgeRefusedField ?? null,
+		sdkBridgeVersionFloor:
+			bridgesOfficialAnthropic && bridge
+				? (upstreamModel: string) => bridge.versionFloor(upstreamModel)
+				: undefined,
 		maintenance,
 	};
 	/** The model the routing table decides for; the requested one stays on record. */

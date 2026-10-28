@@ -2,6 +2,7 @@ import { resolveRoutingTarget } from "@clankermux/core";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { modelPermissionScope } from "../../account-model-permissions";
 import {
+	type BridgeRouteExclusion,
 	getResolvedRoute,
 	installResolvedRoute,
 	ResolvedRoute,
@@ -12,6 +13,7 @@ export function installGateRoute(
 	accounts: Account[],
 	model: string,
 	targets: ReadonlyMap<string, string> = new Map(),
+	bridgeExclusion: BridgeRouteExclusion | null = null,
 ) {
 	try {
 		getResolvedRoute(meta);
@@ -42,6 +44,8 @@ export function installGateRoute(
 					},
 				]),
 			),
+			undefined,
+			bridgeExclusion,
 		),
 	);
 }

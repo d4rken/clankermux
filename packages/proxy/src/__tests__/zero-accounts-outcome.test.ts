@@ -37,6 +37,7 @@ import {
 	clearProviderOverloadCooldown,
 } from "../provider-overload-cooldown";
 import type { RecoveryHolds } from "../recovery-holds";
+import type { BridgeRouteExclusion } from "../resolved-route";
 import { sessionProjectCache } from "../session-project-cache";
 import { sessionPromotionTracker } from "../session-promotion";
 import {
@@ -90,6 +91,8 @@ interface HarnessOptions {
 	pinFailure?: { code: string; message: string } | null;
 	/** Why the floor kept official Anthropic accounts out of the route. */
 	officialAnthropicExcluded?: string | null;
+	/** Why the route's own SDK bridge checks kept them out. */
+	bridgeExclusion?: BridgeRouteExclusion | null;
 	gateTokenEstimate?: number;
 	contextExcludedAccounts?: Array<{ account: Account; model: string }>;
 	familyWeeklyExcludedAccounts?: Array<{
@@ -125,6 +128,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		pin = null,
 		pinFailure = null,
 		officialAnthropicExcluded = null,
+		bridgeExclusion = null,
 		gateTokenEstimate = 100,
 		contextExcludedAccounts = [],
 		familyWeeklyExcludedAccounts = [],
@@ -242,6 +246,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		[...accounts, ...contextExcludedAccounts.map((e) => e.account)],
 		MODEL,
 		targets,
+		bridgeExclusion,
 	);
 	installGatePermissions(deps.ctx, accounts, MODEL, targets);
 
@@ -688,6 +693,26 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 		expect(cacheBodyStore.getStagingSize()).toBe(baseline);
 	});
 
+	it("names the SDK bridge in the context-window 400 when the route's own checks left official accounts out", async () => {
+		const excluded = makeAccount({ id: uniqueId("acc"), provider: "codex" });
+		const harness = makeHarness({
+			gateTokenEstimate: 5_000_000,
+			contextExcludedAccounts: [{ account: excluded, model: "gpt-5.6-sol" }],
+			bridgeExclusion: {
+				reason:
+					"served only through the SDK bridge, whose Claude Code 2.1.280 is below the 2.1.290 Anthropic requires",
+				versionFloor: null,
+			},
+		});
+
+		const res = await resolveZeroAccountsOutcome(harness.deps);
+
+		expect(res.status).toBe(400);
+		const { error } = (await res.json()) as { error: { message: string } };
+		expect(error.message).toContain("only through the SDK bridge");
+		expect(error.message).not.toContain("rate-limited or paused");
+	});
+
 	// Routing records a pin for every key, destinations or none, so only an
 	// active pin, or the floor's exclusion, may answer with the pinned terminal.
 	describe("the pinned terminal after every other terminal declined", () => {
@@ -754,6 +779,28 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 			expect(res.status).toBe(503);
 			expect(await errorType(res)).toBe("pinned_target_unavailable");
 			expect(harness.recorded).toEqual(["pinned_target_unavailable"]);
+		});
+
+		it("answers the pinned terminal when the served route's own bridge checks excluded official accounts", async () => {
+			const harness = makeHarness({
+				accounts: [paused()],
+				bridgeExclusion: {
+					reason:
+						"served only through the SDK bridge, whose Claude Code 2.1.280 is below the 2.1.290 Anthropic requires",
+					versionFloor: null,
+				},
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(503);
+			const { error } = (await res.json()) as {
+				error: { type: string; message: string };
+			};
+			expect(error.type).toBe("pinned_target_unavailable");
+			expect(error.message).toContain(
+				"Official Anthropic accounts were left out: served only through the SDK bridge",
+			);
 		});
 	});
 

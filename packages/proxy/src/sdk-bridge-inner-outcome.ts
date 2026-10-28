@@ -52,11 +52,28 @@ function streamErrorStatus(type: string | null): number {
 
 const MAX_ERROR_CODE_CHARS = 128;
 
-/** An error body's `code`: a nonblank string, trimmed and capped. */
-function errorCode(value: unknown): string | null {
+function codeString(value: unknown): string | null {
 	return typeof value === "string" && value.trim()
 		? value.trim().slice(0, MAX_ERROR_CODE_CHARS)
 		: null;
+}
+
+/**
+ * An error object's `code`, else Anthropic's `details.error_code`: a nonblank
+ * string, trimmed and capped.
+ *
+ *   { code: "context_length_exceeded" }                         → that code
+ *   { details: { error_code: "claude_code_version_too_old" } }  → that code
+ */
+function errorCode(error: unknown): string | null {
+	if (!error || typeof error !== "object") return null;
+	const { code, details } = error as { code?: unknown; details?: unknown };
+	return (
+		codeString(code) ??
+		(details && typeof details === "object"
+			? codeString((details as { error_code?: unknown }).error_code)
+			: null)
+	);
 }
 
 /** Frames larger than this are skipped, never buffered whole. */
@@ -116,7 +133,7 @@ function reportWhenStreamEnds(
 			streamError = {
 				status: streamErrorStatus(type),
 				type: type ?? "api_error",
-				code: errorCode(event.error?.code),
+				code: errorCode(event.error),
 				message:
 					typeof event.error?.message === "string"
 						? event.error.message
@@ -229,6 +246,7 @@ export function reportSdkBridgeInnerResponse(
 		requestId: meta.id,
 		retryAfter: response.headers.get("retry-after"),
 		accountId: lastSentAccount.get(meta) ?? null,
+		model: meta.requestedModel ?? null,
 	};
 	const contentType = response.headers.get("content-type") ?? "";
 	if (response.ok && contentType.includes("text/event-stream"))
@@ -251,7 +269,7 @@ export function reportSdkBridgeInnerResponse(
 			}) => ({
 				errorType:
 					typeof body?.error?.type === "string" ? body.error.type : null,
-				errorCode: errorCode(body?.error?.code),
+				errorCode: errorCode(body?.error),
 				message:
 					typeof body?.error?.message === "string" ? body.error.message : null,
 			}),
@@ -284,5 +302,6 @@ export function reportSdkBridgeInnerFailure(
 				? String(failure.retryAfterSeconds)
 				: null,
 		accountId: lastSentAccount.get(meta) ?? null,
+		model: meta.requestedModel ?? null,
 	});
 }
