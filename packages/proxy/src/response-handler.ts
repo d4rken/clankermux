@@ -3,6 +3,7 @@ import {
 	BUFFER_SIZES,
 	buildAnthropicUnifiedRewrite,
 	buildCodexWeeklyRewrite,
+	classifyFiveHourClaimShape,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
 	hashRoutingAffinityKey,
@@ -450,7 +451,9 @@ function createProbeSpendSink(
  *
  * The same claim readings, at the same `observedAt`, also go to
  * `usageCache.recordUsageHeaders` under the epoch the attempt captured before
- * sending.
+ * sending, with the response's 5h claim shape. A known shape goes even when
+ * no claim line parses (a lone `5h-utilization` header is still presence),
+ * and writes no row.
  */
 function captureUnifiedClaimObservations(
 	args: {
@@ -470,20 +473,24 @@ function captureUnifiedClaimObservations(
 
 	const readings = extractUnifiedClaimReadings(args.response.headers);
 	const summary = extractUnifiedSummaryReading(args.response.headers);
-	if (readings.length === 0 && summary === null) return;
+	const fiveHourShape = classifyFiveHourClaimShape(args.response.headers);
+	if (readings.length === 0 && summary === null && fiveHourShape === "unknown")
+		return;
 
 	// Headers-arrival time, captured HERE: the row must say when the reading was
 	// true, not when the queued write happened to run. Shared by both sides so a
 	// joined read never has to reconcile two clocks for one response.
 	const observedAt = Date.now();
-	if (readings.length > 0) {
+	if (readings.length > 0 || fiveHourShape !== "unknown") {
 		usageCache.recordUsageHeaders(
 			account.id,
 			args.usageHeaderEpoch,
 			readings,
 			observedAt,
+			fiveHourShape,
 		);
 	}
+	if (readings.length === 0 && summary === null) return;
 	const source = claimObservationSource(args.requestHeaders, args.internal);
 	const rows: UnifiedClaimObservationRow[] = readings.map((reading) => ({
 		requestId: args.requestId,

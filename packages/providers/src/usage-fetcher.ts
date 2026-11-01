@@ -2,6 +2,7 @@ import {
 	claudeUsageReadHeaders,
 	collectObservedWindows,
 	type ExtractedClaimReading,
+	type FiveHourClaimShape,
 	normalizeAnthropicUsage,
 	type ObservedWindow,
 } from "@clankermux/core";
@@ -43,7 +44,6 @@ import {
 } from "./providers/devin/client";
 import {
 	buildUsageView,
-	type HeaderWindowReading,
 	type HeaderWindows,
 	headerWindowsFromClaims,
 	isUsageViewFresh,
@@ -1732,11 +1732,12 @@ class UsageCache {
 
 	/**
 	 * Whether the account's routing view stays fresh from its own responses'
-	 * headers without this poll: 5h and 7d both taken from a header reading
-	 * observed within the routing bound (twice the active cadence, as for
-	 * `usage_poll_interval_ms`, capped at {@link ROUTING_USAGE_MAX_AGE_MS}), and
-	 * no poll-only axis reported that would still need the poll inside that
-	 * bound. The view's base is read as routing reads it.
+	 * headers without this poll: 5h (a reading, or a response with no 5h claim
+	 * at all) and 7d both taken from headers observed within the routing bound
+	 * (twice the active cadence, as for `usage_poll_interval_ms`, capped at
+	 * {@link ROUTING_USAGE_MAX_AGE_MS}), and no poll-only axis reported that
+	 * would still need the poll inside that bound. The view's base is read as
+	 * routing reads it.
 	 */
 	private isHeaderFed(
 		accountId: string,
@@ -1744,10 +1745,13 @@ class UsageCache {
 		now: number,
 	): boolean {
 		const stored = this.headerWindows.get(accountId);
-		if (!stored?.fiveHour || !stored.sevenDay) return false;
+		const fiveHour =
+			stored?.fiveHour ??
+			(stored?.fiveHourShape?.kind === "absent" ? stored.fiveHourShape : null);
+		if (!fiveHour || !stored?.sevenDay) return false;
 		const boundMs = Math.min(2 * activeBaseMs, ROUTING_USAGE_MAX_AGE_MS);
 		if (
-			now - stored.fiveHour.observedAtMs > boundMs ||
+			now - fiveHour.observedAtMs > boundMs ||
 			now - stored.sevenDay.observedAtMs > boundMs
 		) {
 			return false;
@@ -3310,20 +3314,32 @@ class UsageCache {
 	}
 
 	/**
-	 * Take the account-wide 5h/7d readings of one Anthropic response. Dropped
-	 * unless `epoch` is still the account's, so a response sent before the poller
-	 * stopped, restarted or was fenced cannot repopulate the store afterwards. Per
-	 * axis the later-observed reading wins. Writes nothing to the database.
+	 * Take the account-wide 5h/7d readings of one Anthropic response, and
+	 * whether it carried the 5h claim at all (`classifyFiveHourClaimShape`).
+	 * Dropped unless `epoch` is still the account's, so a response sent before
+	 * the poller stopped, restarted or was fenced cannot repopulate the store
+	 * afterwards. Merged as `mergeHeaderWindows` says. Writes nothing to the
+	 * database.
 	 */
 	recordUsageHeaders(
 		accountId: string,
 		epoch: number | null,
 		claims: readonly ExtractedClaimReading[],
 		observedAtMs: number,
+		fiveHourShape: FiveHourClaimShape = "unknown",
 	): void {
 		if (epoch === null || this.headerEpochs.get(accountId) !== epoch) return;
-		const incoming = headerWindowsFromClaims(claims, observedAtMs);
-		if (incoming.fiveHour === null && incoming.sevenDay === null) return;
+		const incoming = headerWindowsFromClaims(
+			claims,
+			observedAtMs,
+			fiveHourShape,
+		);
+		if (
+			incoming.fiveHour === null &&
+			incoming.sevenDay === null &&
+			incoming.fiveHourShape === null
+		)
+			return;
 		this.headerWindows.set(
 			accountId,
 			mergeHeaderWindows(this.headerWindows.get(accountId), incoming),
@@ -3339,8 +3355,9 @@ class UsageCache {
 	/**
 	 * Non-evicting read of the poll reading with its 5h/7d windows brought up to
 	 * date from recorded headers (Anthropic only; see `buildUsageView`), or null
-	 * without a poll reading written within `horizonMs`. Header readings observed
-	 * longer ago than `horizonMs` are left out. Freshness is the caller's to
+	 * without a poll reading written within `horizonMs`. Header readings and 5h
+	 * shape evidence observed longer ago than `horizonMs` are left out. Freshness
+	 * is the caller's to
 	 * judge, per axis; {@link getFreshRoutingUsage} is the routing gate.
 	 */
 	peekUsageView(
@@ -3353,12 +3370,16 @@ class UsageCache {
 		if (!cached || now - cached.timestamp > horizonMs) return null;
 		const stored =
 			provider === "anthropic" ? this.headerWindows.get(accountId) : undefined;
-		const within = (reading: HeaderWindowReading | null) =>
+		const within = <T extends { observedAtMs: number }>(reading: T | null) =>
 			reading !== null && now - reading.observedAtMs <= horizonMs
 				? reading
 				: null;
 		const fiveHour = within(stored?.fiveHour ?? null);
 		const sevenDay = within(stored?.sevenDay ?? null);
+		const fiveHourShape = within(stored?.fiveHourShape ?? null);
+		const absentAtMs = stored?.fiveHourAbsentAtMs ?? null;
+		const fiveHourAbsentAtMs =
+			absentAtMs !== null && now - absentAtMs <= horizonMs ? absentAtMs : null;
 		return buildUsageView(
 			{
 				data: cached.data,
@@ -3366,7 +3387,9 @@ class UsageCache {
 				observedAtMs: cached.observedAtMs,
 				freshAtMs: this.pollFreshAtMs(accountId, cached, now),
 			},
-			fiveHour || sevenDay ? { fiveHour, sevenDay } : null,
+			fiveHour || sevenDay || fiveHourShape || fiveHourAbsentAtMs !== null
+				? { fiveHour, sevenDay, fiveHourShape, fiveHourAbsentAtMs }
+				: null,
 			now,
 		);
 	}
