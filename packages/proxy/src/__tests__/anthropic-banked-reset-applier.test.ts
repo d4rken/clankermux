@@ -1295,6 +1295,17 @@ function usageWith(windows: Record<string, number>): UsageData {
 	return data as UsageData;
 }
 
+/** A verified Ultra reading: no 5-hour window, the weekly at `weekly`%. */
+function weeklyOnlyUsage(weekly: number): UsageData {
+	return {
+		five_hour: null,
+		seven_day: {
+			utilization: weekly,
+			resets_at: new Date(NOW + 4 * DAY).toISOString(),
+		},
+	} as UsageData;
+}
+
 /** What getRestoringAnthropicBankedResetEventsSince selects in SQL. */
 function restoringSince(
 	ledger: AnthropicBankedResetEventRow[],
@@ -1537,6 +1548,42 @@ describe("createAnthropicBankedResetApplyScheduler pool gate", () => {
 			expect(h.dispatched).toHaveLength(1);
 		});
 	}
+
+	it("conserves an account-wide grant while a weekly-only account has weekly headroom", async () => {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [{ account: {}, usage: weeklyOnlyUsage(50) }],
+		});
+		await scheduler.tick();
+		expect(dispatched).toEqual([]);
+	});
+
+	it("claims when the only alternative is a weekly-only account at its weekly limit", async () => {
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [{ account: {}, usage: weeklyOnlyUsage(100) }],
+		});
+		await scheduler.tick();
+		expect(dispatched).toHaveLength(1);
+	});
+
+	it("reads a spent weekly window as exhaustion even when the 5-hour reading is missing", async () => {
+		const spent = {
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 4 * DAY).toISOString(),
+			},
+		} as UsageData;
+		const { scheduler, dispatched } = poolScheduler({
+			exhausted: ["seven_day"],
+			clears: ["seven_day"],
+			others: [{ account: {}, usage: spent, usageAfterRefresh: spent }],
+		});
+		await scheduler.tick();
+		expect(dispatched).toHaveLength(1);
+	});
 
 	it("conserves an account-wide grant while another account has weekly headroom", async () => {
 		const { scheduler, dispatched } = poolScheduler({
@@ -2234,6 +2281,39 @@ describe("owed overage-pause verdicts", () => {
 		expect(h.resumed).toEqual([]);
 		expect(h.cleared).toEqual([]);
 		expect(h.usageRefreshes).toEqual(["acct-owed"]);
+	});
+
+	it("lifts the pause from a weekly-only reading with headroom (no 5-hour window)", async () => {
+		const h = await run({
+			recovery: [owed()],
+			observation: { data: weeklyOnlyUsage(20), observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([`acct-owed@${EPOCH}`]);
+		expect(h.cleared).toEqual(["owed-row"]);
+	});
+
+	it("keeps the pause but settles the verdict when a weekly-only reading is at its limit", async () => {
+		const h = await run({
+			recovery: [owed()],
+			observation: { data: weeklyOnlyUsage(100), observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
+	});
+
+	it("settles on a spent weekly window even when the 5-hour reading is missing", async () => {
+		const spent = {
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + DAY).toISOString(),
+			},
+		} as UsageData;
+		const h = await run({
+			recovery: [owed()],
+			observation: { data: spent, observedAtMs: NOW - 1_000 },
+		});
+		expect(h.resumed).toEqual([]);
+		expect(h.cleared).toEqual(["owed-row"]);
 	});
 
 	it("keeps the pause but settles the verdict when the reading is at a limit", async () => {

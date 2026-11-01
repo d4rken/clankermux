@@ -39,6 +39,7 @@ import {
 	type ModelFamily,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
+	reportsNoSessionWindow,
 } from "@clankermux/core";
 import type {
 	AccountPauseMarker,
@@ -1074,9 +1075,11 @@ export class AnthropicBankedResetApplyScheduler {
 
 /**
  * Whether `usage` shows an account able to serve `window`: the account-wide
- * 5-hour and weekly windows below their limits and, for another window, that
- * window below its limit too (a scoped window the reading omits is not a
- * limit). Null when either account-wide window is missing or stale.
+ * 5-hour (unless the account has none) and weekly windows below their limits
+ * and, for another window, that window below its limit too (a scoped window
+ * the reading omits is not a limit). False when a current account-wide window
+ * is at its limit, even if the other is unknown; null when one is missing or
+ * stale and nothing current is spent.
  */
 function servesWindow(
 	accountId: string,
@@ -1084,12 +1087,22 @@ function servesWindow(
 	window: AnthropicBankedResetWindow,
 	now: number,
 ): boolean | null {
-	const session = readUsageWindow(usage, "five_hour", now);
-	const weekly = readUsageWindow(usage, "seven_day", now);
-	const stale = (reading: { resetMs: number | null }) =>
-		reading.resetMs !== null && reading.resetMs <= now;
-	if (!session || !weekly || stale(session) || stale(weekly)) return null;
-	if (session.utilization >= 100 || weekly.utilization >= 100) return false;
+	const current = (reading: ReturnType<typeof readUsageWindow>) =>
+		reading && (reading.resetMs === null || reading.resetMs > now)
+			? reading
+			: null;
+	const session = current(readUsageWindow(usage, "five_hour", now));
+	const weekly = current(readUsageWindow(usage, "seven_day", now));
+	if (
+		(session && session.utilization >= 100) ||
+		(weekly && weekly.utilization >= 100)
+	) {
+		return false;
+	}
+	const noSessionWindow = reportsNoSessionWindow(
+		usage as unknown as AnthropicUsageData | null,
+	);
+	if (!weekly || (!session && !noSessionWindow)) return null;
 	if (window === "seven_day") return true;
 	const family = bankedResetWindowFamily(window);
 	if (
