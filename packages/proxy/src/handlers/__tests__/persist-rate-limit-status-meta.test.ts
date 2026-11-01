@@ -286,6 +286,55 @@ describe("persistRateLimitStatusMeta scoped projection", () => {
 		expect(metaCalls[0].resetTime).toBeNull();
 	});
 
+	/** The incident as a verified Ultra account sends it: no 5h claim at all. */
+	function weeklyOnlyIncidentHeaders(): Record<string, string> {
+		const headers = incidentHeaders();
+		delete headers["anthropic-ratelimit-unified-5h-reset"];
+		delete headers["anthropic-ratelimit-unified-5h-status"];
+		delete headers["anthropic-ratelimit-unified-5h-utilization"];
+		return headers;
+	}
+
+	it("projects the 7d claim's status+reset when the account has no 5h window", () => {
+		const { ctx, metaCalls } = makeCtx();
+
+		persistRateLimitStatusMeta(
+			makeAccount(),
+			make429(weeklyOnlyIncidentHeaders()),
+			ctx,
+		);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("allowed_warning");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
+	});
+
+	it("REJECTS a 7d claim reset beyond a week — garbled evidence on the weekly path too", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-7d-reset"] = String(
+			Math.floor((INCIDENT_NOW + 30 * 24 * 60 * 60 * 1000) / 1000),
+		);
+
+		persistRateLimitStatusMeta(makeAccount(), make429(headers), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("allowed_warning");
+		expect(metaCalls[0].resetTime).toBeNull();
+	});
+
+	it("keeps the raw summary when a partial 5h claim leaves headroom unproven", () => {
+		const { ctx, metaCalls } = makeCtx();
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-5h-utilization"] = "0.1";
+
+		persistRateLimitStatusMeta(makeAccount(), make429(headers), ctx);
+
+		expect(metaCalls).toHaveLength(1);
+		expect(metaCalls[0].status).toBe("rejected");
+		expect(metaCalls[0].resetTime).toBe(INCIDENT_WEEKLY_RESET_MS);
+	});
+
 	it("does not project a non-429 response even with scoped-looking headers", () => {
 		const { ctx, metaCalls } = makeCtx();
 		const response = new Response("{}", {

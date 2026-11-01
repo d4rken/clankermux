@@ -8,6 +8,7 @@ import {
 	getRepresentativeUtilization,
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
+	reportsNoSessionWindow,
 } from "../usage-normalizer";
 
 const NOW = 1_000_000_000_000; // fixed reference "now" (ms)
@@ -420,5 +421,50 @@ describe("normalizeAnthropicUsage — weeklyScopedIdle", () => {
 		for (const d of [null, undefined, {} as AnthropicUsageData]) {
 			expect(normalizeAnthropicUsage(d, NOW).weeklyScopedIdle).toEqual([]);
 		}
+	});
+});
+
+describe("reportsNoSessionWindow", () => {
+	const weekly = { utilization: 21, resets_at: FUTURE_ISO };
+
+	it("is true for the verified-Ultra shape: five_hour present and null", () => {
+		expect(
+			reportsNoSessionWindow({
+				five_hour: null,
+				seven_day: weekly,
+			} as AnthropicUsageData),
+		).toBe(true);
+	});
+
+	it("is false when the five_hour key is missing (unknown, not absent)", () => {
+		expect(
+			reportsNoSessionWindow({ seven_day: weekly } as AnthropicUsageData),
+		).toBe(false);
+	});
+
+	it("is false for a live window, the idle form included", () => {
+		expect(
+			reportsNoSessionWindow({
+				five_hour: { utilization: 0, resets_at: null },
+				seven_day: weekly,
+			} as AnthropicUsageData),
+		).toBe(false);
+	});
+
+	it("is false when limits[] still lists a session entry, whatever its percent", () => {
+		for (const percent of [12, null]) {
+			expect(
+				reportsNoSessionWindow({
+					five_hour: null,
+					seven_day: weekly,
+					limits: [entry({ percent })],
+				} as AnthropicUsageData),
+			).toBe(false);
+		}
+	});
+
+	it("is false for no payload", () => {
+		expect(reportsNoSessionWindow(null)).toBe(false);
+		expect(reportsNoSessionWindow(undefined)).toBe(false);
 	});
 });

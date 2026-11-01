@@ -240,6 +240,25 @@ export function getRepresentativeUtilization(
 }
 
 /**
+ * True iff the payload says the account has NO 5-hour window: `five_hour` is
+ * present with the value `null` and `limits[]` lists no `session` entry.
+ *
+ * `{five_hour: null, seven_day: {...}}` is what a verified Anthropic Ultra
+ * account (since 2026-10-30) and a Codex account (since 2026-07-12) report.
+ * A missing key is not absence, and neither is the idle live form
+ * `{utilization: 0, resets_at: null}`. {@link normalizeAnthropicUsage}
+ * returns `session: null` for all three, so a caller that needs "this account
+ * has no 5h limit" rather than "no 5h reading" asks here.
+ */
+export function reportsNoSessionWindow(
+	data: AnthropicUsageData | null | undefined,
+): boolean {
+	if (!data || typeof data !== "object") return false;
+	if (!("five_hour" in data) || data.five_hour !== null) return false;
+	return !(data.limits ?? []).some((entry) => entry?.kind === "session");
+}
+
+/**
  * True iff `data` carries Anthropic-style usage evidence: a flat `five_hour`
  * or `seven_day` window, OR a non-empty `limits[]` array. Replaces the old
  * "both flat keys present" guards, which reject `limits[]`-only payloads.
