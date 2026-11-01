@@ -5,6 +5,7 @@ import {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	getModelFamily,
 	isUnstartedWindow,
 	normalizeResetMs,
@@ -31,6 +32,13 @@ export interface QuotaAccount {
 	 * length from the number.
 	 */
 	shortWindowRemainingPct: number | null;
+	/**
+	 * The row's short window, or null when this account's payload states it has
+	 * none (a verified Ultra or Codex account on a 5-hour provider). Its
+	 * `shortWindowRemainingPct` is then null for that reason, not for want of a
+	 * reading.
+	 */
+	shortWindow: PoolWindow | null;
 	resetMs: number | null;
 	shortWindowResetMs: number | null;
 	available: boolean;
@@ -52,8 +60,9 @@ export interface QuotaSummaryRow {
 	metered: boolean;
 	/**
 	 * Which window `shortWindowRemainingPct` measures, or null when the provider
-	 * runs none. Never inferred from the provider at the render site: a caller
-	 * that guessed would label Devin's 24-hour allowance "5h".
+	 * runs none or no account in the row has it. Never inferred from the
+	 * provider at the render site: a caller that guessed would label Devin's
+	 * 24-hour allowance "5h".
 	 */
 	shortWindow: PoolWindow | null;
 }
@@ -106,26 +115,34 @@ export function buildQuotaSummary(
 			[null, providerDisplayName(provider)],
 			...[...models].sort((a, b) => a[0].localeCompare(b[0])),
 		];
-		// The short window is a property of the PROVIDER, not of any one account:
-		// every account of a provider runs the same one, and a provider that runs
-		// none must not be given a row that implies otherwise.
-		const shortWindow: PoolWindow | null = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(
-			provider,
-		)
-			? "five_hour"
-			: DAILY_ELIGIBLE_PROVIDERS.has(provider)
-				? "daily"
-				: null;
+		// Which short window a provider runs is a property of the PROVIDER, and a
+		// provider that runs none must not be given a row that implies otherwise.
+		// Whether one account HAS it is the account's own payload's to say.
+		const providerShortWindow: PoolWindow | null =
+			FIVE_HOUR_ELIGIBLE_PROVIDERS.has(provider)
+				? "five_hour"
+				: DAILY_ELIGIBLE_PROVIDERS.has(provider)
+					? "daily"
+					: null;
+		const shortWindowOf = (a: AccountResponse): PoolWindow | null =>
+			providerShortWindow === "five_hour" && fiveHourKnownAbsent(a.usageData)
+				? null
+				: providerShortWindow;
+		const shortWindow = members.some((a) => shortWindowOf(a) !== null)
+			? providerShortWindow
+			: null;
 		for (const [model, label] of scopes) {
 			const metered =
 				model !== null || SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider);
 			const rows = members.map((a): QuotaAccount => {
 				const week = a.usageData ? extractSevenDay(a.usageData) : null;
-				const short = !a.usageData
-					? null
-					: shortWindow === "daily"
-						? extractDaily(a.usageData)
-						: extractFiveHour(a.usageData);
+				const ownShortWindow = shortWindowOf(a);
+				const short =
+					!a.usageData || ownShortWindow === null
+						? null
+						: ownShortWindow === "daily"
+							? extractDaily(a.usageData)
+							: extractFiveHour(a.usageData);
 				let reading = week;
 				if (model !== null) {
 					const entries = scopedEntries(a).filter(
@@ -180,7 +197,9 @@ export function buildQuotaSummary(
 				exhausted(week, "Weekly limit reached");
 				exhausted(
 					short,
-					shortWindow === "daily" ? "Daily limit reached" : "5h limit reached",
+					ownShortWindow === "daily"
+						? "Daily limit reached"
+						: "5h limit reached",
 				);
 				if (model !== null) exhausted(reading, "Model limit reached");
 				if (a.rateLimitedUntil && a.rateLimitedUntil > now)
@@ -250,12 +269,15 @@ export function buildQuotaSummary(
 					name: a.name,
 					remainingPct: pct,
 					shortWindowRemainingPct: remaining(short, now),
+					shortWindow: ownShortWindow,
 					resetMs: displayReset(
 						reading,
 						model === null ? "seven_day" : "seven_day_scoped",
 					),
 					shortWindowResetMs:
-						shortWindow === null ? null : displayReset(short, shortWindow),
+						ownShortWindow === null
+							? null
+							: displayReset(short, ownShortWindow),
 					available: !gates.length,
 					unknown:
 						gates.length > 0 &&

@@ -4,7 +4,11 @@ import type {
 	PacingSnapshot,
 	PoolUsageResult,
 } from "@clankermux/core";
-import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
+import {
+	effectiveRunwayOutcome,
+	hasNoFiveHourWindow,
+	summarizeKeyRunways,
+} from "@clankermux/core";
 import { ChevronDown, Hourglass, Info } from "lucide-react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
 import type { QuotaSummaryRow } from "../../lib/quota-summary";
@@ -365,6 +369,14 @@ export function LimitsCapacityOverview({
 		}
 	}
 	const fallbackNames = [...unmeasured.values()];
+	// Only on a resolved read: pending and failed reads keep the panel and its
+	// own loading or unavailable state.
+	const showFiveHourPacing = !(
+		pacing != null &&
+		!windowsLoading &&
+		windowsUnavailableReason == null &&
+		hasNoFiveHourWindow(pacing.fiveHour)
+	);
 
 	return (
 		<Card>
@@ -410,9 +422,14 @@ export function LimitsCapacityOverview({
 				</div>
 			</CardHeader>
 			<CardContent>
-				{/* Three panels: stacked and full-width on narrow viewports, side by
-				    side once there is room for them. */}
-				<div className="grid overflow-hidden rounded-md border divide-y lg:grid-cols-3 lg:divide-x lg:divide-y-0">
+				{/* Three panels (two when no account has a 5-hour window): stacked and
+				    full-width on narrow viewports, side by side once there is room. */}
+				<div
+					className={cn(
+						"grid overflow-hidden rounded-md border divide-y lg:divide-x lg:divide-y-0",
+						showFiveHourPacing ? "lg:grid-cols-3" : "lg:grid-cols-2",
+					)}
+				>
 					<WeeklyBudgetPanel
 						pacing={pacing}
 						sevenDay={sevenDay}
@@ -421,12 +438,14 @@ export function LimitsCapacityOverview({
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}
 					/>
-					<FiveHourPacingPanel
-						pacing={pacing?.fiveHour}
-						now={now}
-						loading={windowsLoading}
-						unavailableReason={windowsUnavailableReason}
-					/>
+					{showFiveHourPacing && (
+						<FiveHourPacingPanel
+							pacing={pacing?.fiveHour}
+							now={now}
+							loading={windowsLoading}
+							unavailableReason={windowsUnavailableReason}
+						/>
+					)}
 					<RunwayPanel
 						runways={runways}
 						accounts={accounts}

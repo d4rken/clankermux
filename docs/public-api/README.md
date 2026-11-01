@@ -137,8 +137,11 @@ the regression-only `prediction` object is removed.
 `kind` is `other` for any window class outside the named enum, so the enum is
 never widened under a client that switches on it. Read `scopeId` to tell those
 apart: a model family's allowance carries one, an account-wide window such as a
-daily quota carries `null`. An account reports every window its provider runs,
-so an account with two windows is constrained by whichever binds first.
+daily quota carries `null`. An account reports every window it runs, so an
+account with two windows is constrained by whichever binds first. A window can
+be missing on one account and present on another of the same provider: an
+Anthropic Ultra account whose 5-hour limit was lifted reports no `five_hour`
+window, and neither does a Codex account.
 
 Window forecast outcomes are `exhausted`, `exhausts_before_reset`,
 `lasts_until_reset`, `unknown` or `other`. An extrapolation after reset is not

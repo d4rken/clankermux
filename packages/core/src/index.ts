@@ -165,6 +165,7 @@ export {
 	classIsUnread,
 	computeFiveHourPacing,
 	type FiveHourPacing,
+	hasNoFiveHourWindow,
 } from "./five-hour-pacing";
 export {
 	detectHarness,
@@ -415,6 +416,7 @@ export {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	isAlibabaShape,
 	isAnthropicStyleShape,
 	isDevinShape,

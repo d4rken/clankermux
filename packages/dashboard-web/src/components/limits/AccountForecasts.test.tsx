@@ -112,7 +112,7 @@ it("gives a daily window its own column instead of dropping it", () => {
 	expect(html).toContain("daily forecast");
 	expect(html).toContain("weekly forecast");
 	// No 5-hour column: nothing listed reports one, so it is left out rather
-	// than printed as a column of "Not reported".
+	// than printed as a column of dashes.
 	expect(html).not.toContain("5-hour forecast");
 });
 
@@ -134,6 +134,52 @@ it("keeps one column set across accounts that report different windows", () => {
 	expect(html.indexOf("5-hour forecast")).toBeLessThan(
 		html.indexOf("daily forecast"),
 	);
-	// The account that reports neither column still gets a cell in each.
-	expect(html).toContain("Not reported");
+	// The account that reports neither column still gets a cell in each: a
+	// neutral dash, since the window does not exist for it.
+	expect(html).toContain("No such window");
+	expect(html).not.toContain("Not reported");
+});
+
+it("shows a dash, not an unavailable forecast, for an Ultra row beside a Max row", () => {
+	const weekly: RunwayWindowSummary = {
+		...session,
+		kind: "seven_day",
+		utilizationPct: 30,
+		forecast: {
+			state: "projected",
+			exhaustsAtMs: NOW + 5 * 24 * 3_600_000,
+			lowConfidence: false,
+		},
+	};
+	const html = renderToStaticMarkup(
+		<AccountForecasts
+			now={NOW}
+			accounts={[
+				{ id: "max", name: "Max-1", windows: [session, weekly] },
+				{ id: "ultra", name: "Ultra-1", windows: [weekly] },
+			]}
+		/>,
+	);
+	expect(html).toContain("5-hour forecast");
+	const ultraRow = html.slice(html.indexOf("Ultra-1"));
+	expect(ultraRow).toContain("—");
+	expect(ultraRow).toContain("No such window");
+	expect(html).not.toContain("unavailable");
+});
+
+it("drops the 5-hour column when no listed account has the window", () => {
+	const html = renderToStaticMarkup(
+		<AccountForecasts
+			now={NOW}
+			accounts={[
+				{
+					id: "ultra",
+					name: "Ultra-1",
+					windows: [{ ...session, kind: "seven_day" }],
+				},
+			]}
+		/>,
+	);
+	expect(html).toContain("weekly forecast");
+	expect(html).not.toContain("5-hour forecast");
 });

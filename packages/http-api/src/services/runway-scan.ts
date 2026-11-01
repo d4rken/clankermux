@@ -7,6 +7,7 @@ import {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	isUnstartedWindow,
 	type KeyRunway,
 	normalizeAnthropicUsage,
@@ -283,6 +284,7 @@ function observationsFrom(
 	);
 	return {
 		fiveHour: extractFiveHour(usageData),
+		fiveHourAbsent: fiveHourKnownAbsent(usageData),
 		sevenDay: extractSevenDay(usageData),
 		daily: extractDaily(usageData),
 		// From the same payload as the two windows above, so a per-family scan
@@ -311,9 +313,11 @@ function observationsFrom(
  * One account's evidence block.
  *
  * EVERY window the provider supports is emitted, with nullable values, so an
- * absent window means "this provider has no such window" and can never be
- * mistaken for "we could not read it". A provider with no account-wide window
- * at all (ollama, pay-as-you-go) reports `metered: false` and no windows.
+ * absent window means "this account has no such window" and can never be
+ * mistaken for "we could not read it". The one per-account omission is a
+ * 5-hour window the account's own payload says it does not have. A provider
+ * with no account-wide window at all (ollama, pay-as-you-go) reports
+ * `metered: false` and no windows.
  */
 function accountSummary(
 	account: Account,
@@ -322,7 +326,8 @@ function accountSummary(
 	prediction: AccountUsagePrediction | undefined,
 ): RunwayAccountSummary {
 	const provider = account.provider || "anthropic";
-	const hasFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(provider);
+	const runsFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(provider);
+	const hasFiveHour = runsFiveHour && observations?.fiveHourAbsent !== true;
 	const hasSevenDay = SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider);
 	const hasDaily = DAILY_ELIGIBLE_PROVIDERS.has(provider);
 
@@ -370,7 +375,7 @@ function accountSummary(
 		id: account.id,
 		name: account.name,
 		provider,
-		metered: hasFiveHour || hasSevenDay,
+		metered: runsFiveHour || hasSevenDay,
 		usageAsOfMs: anyUtilization ? sampledAtMs : null,
 		windows,
 	};

@@ -3,6 +3,7 @@ import {
 	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
+	fiveHourKnownAbsent,
 	isAlibabaShape,
 	isAnthropicStyleShape,
 	isDevinShape,
@@ -149,6 +150,62 @@ describe("extractFiveHour", () => {
 
 	it("returns null for a payload it does not recognise", () => {
 		expect(extractFiveHour({ something_else: 1 } as never)).toBeNull();
+	});
+
+	it("returns null when the payload says the account has no 5h window", () => {
+		// Verified Ultra since 2026-10-30, Codex since 2026-07-12.
+		const weeklyOnly = {
+			five_hour: null,
+			seven_day: { utilization: 30, resets_at: null },
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 30,
+					resets_at: null,
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as never;
+		expect(extractFiveHour(weeklyOnly)).toBeNull();
+		expect(fiveHourKnownAbsent(weeklyOnly)).toBe(true);
+	});
+
+	it("keeps a missing five_hour key as no reading, not absence", () => {
+		const missing = {
+			seven_day: { utilization: 30, resets_at: null },
+		} as never;
+		expect(extractFiveHour(missing)).toEqual({ pct: null, resetMs: null });
+		expect(fiveHourKnownAbsent(missing)).toBe(false);
+	});
+
+	it("does not call a null five_hour absent while limits[] still has a session", () => {
+		const session = {
+			five_hour: null,
+			limits: [
+				{
+					kind: "session",
+					group: "session",
+					percent: 12,
+					resets_at: new Date(NOW + HOUR).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as never;
+		expect(fiveHourKnownAbsent(session)).toBe(false);
+		expect(extractFiveHour(session)).toEqual({ pct: 12, resetMs: NOW + HOUR });
+	});
+
+	it("never calls a non-Anthropic payload absent", () => {
+		expect(
+			fiveHourKnownAbsent({
+				five_hour: null,
+				weekly: { percentUsed: 10, resetAt: NOW },
+			} as never),
+		).toBe(false);
+		expect(fiveHourKnownAbsent(null)).toBe(false);
 	});
 });
 

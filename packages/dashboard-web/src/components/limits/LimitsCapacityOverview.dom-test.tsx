@@ -19,6 +19,7 @@ function poolResult(): PoolUsageResult {
 		exhausted: [],
 		excluded: [],
 		fallback: [],
+		notApplicable: [],
 		earliestResetMs: null,
 		earliestResetAccountName: null,
 		atRisk: [],

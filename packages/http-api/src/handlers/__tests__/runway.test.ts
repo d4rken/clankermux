@@ -513,6 +513,73 @@ describe("GET /api/runway", () => {
 		expect(body.accounts[0].windows[1].utilizationPct).toBe(80);
 		expect(body.accounts[0].metered).toBe(true);
 	});
+
+	it("serves no 5-hour window for an account whose payload says it has none", async () => {
+		// Verified Ultra: `five_hour: null` and no session entry in limits[].
+		usageCache.set("acc-1", {
+			five_hour: null,
+			seven_day: {
+				utilization: 30,
+				resets_at: new Date(BASE + 6 * DAY_MS).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_all",
+					group: "weekly",
+					percent: 30,
+					resets_at: new Date(BASE + 6 * DAY_MS).toISOString(),
+					scope: null,
+					is_active: true,
+				},
+			],
+		} as unknown as AnyUsageData);
+		usageCache.set("acc-2", HEALTHY());
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "acc-1", name: "Ultra" }),
+					makeAccount({ id: "acc-2", name: "Max" }),
+				],
+				keys: [makeKey({ id: "k1" })],
+			}),
+		);
+
+		const byName = new Map(body.accounts.map((a) => [a.name, a]));
+		expect(byName.get("Ultra")?.windows.map((w) => w.kind)).toEqual([
+			"seven_day",
+		]);
+		expect(byName.get("Ultra")?.windows[0].utilizationPct).toBe(30);
+		expect(byName.get("Ultra")?.metered).toBe(true);
+		expect(byName.get("Ultra")?.usageAsOfMs).toBe(BASE);
+		expect(byName.get("Max")?.windows.map((w) => w.kind)).toEqual([
+			"five_hour",
+			"seven_day",
+		]);
+	});
+
+	it("keeps the 5-hour window when the payload merely lacks a reading", async () => {
+		// A missing `five_hour` key is not the window being gone.
+		usageCache.set("acc-1", {
+			seven_day: {
+				utilization: 30,
+				resets_at: new Date(BASE + 6 * DAY_MS).toISOString(),
+			},
+		} as unknown as AnyUsageData);
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "acc-1" })],
+				keys: [makeKey({ id: "k1" })],
+			}),
+		);
+
+		const fiveHour = body.accounts[0].windows.find(
+			(w) => w.kind === "five_hour",
+		);
+		expect(fiveHour).toBeDefined();
+		expect(fiveHour?.utilizationPct).toBeNull();
+	});
 });
 
 /**
@@ -714,12 +781,9 @@ describe("GET /api/runway persisted Codex usage", () => {
 		);
 		expect(sevenDay?.utilizationPct).toBe(45);
 		expect(sevenDay?.resetsAtMs).toBe(SEVEN_RESET);
-		// Codex retired its 5h window, so that one is present-but-null: "no such
-		// reading", never "0% used".
-		expect(
-			body.accounts[0].windows.find((w) => w.kind === "five_hour")
-				?.utilizationPct,
-		).toBeNull();
+		// Codex retired its 5h window and the payload says so (`five_hour: null`),
+		// so the account reports no such window rather than an unread one.
+		expect(body.accounts[0].windows.map((w) => w.kind)).toEqual(["seven_day"]);
 	});
 
 	it("stamps the restored reading with the column's observation time", async () => {
@@ -784,10 +848,7 @@ describe("GET /api/runway persisted Codex usage", () => {
 		// The regression appends its input stamped `t: now`. A reading observed 3
 		// hours ago must never enter it claiming to be current, so the restored
 		// account reports its utilization and no projection at all.
-		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
-			null,
-			null,
-		]);
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([null]);
 		expect(
 			body.accounts[0].windows.find((w) => w.kind === "seven_day")
 				?.utilizationPct,
@@ -1377,10 +1438,7 @@ describe("GET /api/runway payload-recovered Codex usage", () => {
 		// No trustworthy observation time, so none is claimed…
 		expect(body.accounts[0].usageAsOfMs).toBeNull();
 		// …and nothing is derived that would need one.
-		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
-			null,
-			null,
-		]);
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([null]);
 		const outcome = body.keys[0].outcome;
 		if (outcome.kind !== "runway") throw new Error("expected a runway outcome");
 		// The degraded, now-anchored lifetime average — the amber-capped estimate.
@@ -1410,10 +1468,7 @@ describe("GET /api/runway payload-recovered Codex usage", () => {
 		// The reading has not changed, so neither has what may be claimed about it:
 		// still no observation time, still no prediction.
 		expect(body.accounts[0].usageAsOfMs).toBeNull();
-		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
-			null,
-			null,
-		]);
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([null]);
 
 		const outcome = body.keys[0].outcome;
 		if (outcome.kind !== "runway") throw new Error("expected a runway outcome");
