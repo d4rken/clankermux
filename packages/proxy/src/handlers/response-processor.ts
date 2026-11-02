@@ -55,8 +55,7 @@ const SCOPED_PROJECTION_MAX_7D_RESET_MS = (7 * 24 + 1) * 60 * 60 * 1000;
  * verdict. This projection substitutes the 5h claim's OWN status and reset (a
  * coherent single-claim pair — the persisted reset's dominant consumer is the
  * scheduler's 5-hour window anchor), or the 7d claim's on an account with no
- * 5h window, whose ordinary responses persist the weekly reset anyway.
- * `isRateLimited` is left untouched: the
+ * 5h window. `isRateLimited` is left untouched: the
  * request itself WAS rejected and must still fail over.
  *
  * Trust boundary: header reinterpretation is only safe for the official
@@ -86,11 +85,11 @@ export function projectScopedRateLimitInfo(
 		? SCOPED_PROJECTION_MAX_5H_RESET_MS
 		: SCOPED_PROJECTION_MAX_7D_RESET_MS;
 	const resetMs = claim.resetMs;
-	// REJECT (don't clamp) a reset outside (now, now+ceiling]: a "5h claim
-	// reset" a day out is garbled evidence, and manufacturing a 24h value from
-	// it would freeze the status refresh — or, via the generic cooldown path,
-	// lock the account — for a day on malformed input. Degrading to none
-	// persists NULL, which the scheduler treats as "due" (self-repairing).
+	// REJECT (don't clamp) a reset outside (now, now+ceiling]: a reset beyond
+	// the claim's ceiling is garbled evidence, and manufacturing a ceiling value
+	// from it would freeze the status refresh — or, via the generic cooldown
+	// path, lock the account — for that long on malformed input. Degrading to
+	// none persists NULL, which the scheduler treats as "due" (self-repairing).
 	const projectedReset =
 		resetMs !== null && resetMs > now && resetMs <= now + maxResetMs
 			? resetMs

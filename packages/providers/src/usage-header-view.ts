@@ -182,10 +182,11 @@ function laterOf(a: number | null, b: number | null): number | null {
 /**
  * Per axis, the later-observed reading; responses can land out of order.
  *
- * `observedAtMs` is arrival time, and arrival order is the authority: a
- * response sent before the 5h window went away but landing after the absence
- * was recorded is refused, and the epoch fence and the next poll correct
- * anything else in flight. Shape ties go to presence, the conservative side.
+ * `observedAtMs` is arrival time, and arrival order is the authority. A 5h
+ * reading that arrives after a newer absence was recorded, but is stamped
+ * earlier than it, is refused. A response sent before the window went away
+ * that arrives later is stamped later, so it counts as newer evidence. Shape
+ * ties go to presence, the conservative side.
  */
 export function mergeHeaderWindows(
 	stored: HeaderWindows | undefined,
@@ -327,7 +328,8 @@ function withoutFiveHour(data: UsageData, absent: boolean): UsageData {
  * the headers' shape. When absence is newest the view has `five_hour: null`
  * and no `limits[]` session entry, timed by that absence. When presence is
  * newer than some absence, a 5h reading observed before the absence is
- * dropped; with none left the view has no 5h reading at all, timed by the poll.
+ * dropped; with none left the view has no 5h reading at all, and that axis is
+ * never fresh.
  *
  * With `headers` null this is the poll reading itself, and the returned data is
  * the same object. Otherwise the poll payload is copied, never mutated.
@@ -375,6 +377,7 @@ export function buildUsageView(
 		pollShape === "absent" ? pollAtMs : null,
 		headers.fiveHourAbsentAtMs,
 	);
+	let presenceAfterAbsence = false;
 	if (absentAtMs !== null) {
 		const presentAtMs = laterOf(
 			laterOf(
@@ -406,6 +409,7 @@ export function buildUsageView(
 			}
 			fromHeaders.fiveHour = null;
 		} else {
+			presenceAfterAbsence = true;
 			if ((fromHeaders.fiveHour?.observedAtMs ?? absentAtMs) < absentAtMs)
 				fromHeaders.fiveHour = null;
 			const pollCurrent = pollShape === "present" && pollAtMs >= absentAtMs;
@@ -439,6 +443,18 @@ export function buildUsageView(
 				header.observedAtMs,
 			),
 			freshAtMs: Math.max(pollFreshAtMs, header.observedAtMs),
+		};
+	}
+	if (
+		presenceAfterAbsence &&
+		view.fiveHour.source === "poll" &&
+		polled.fiveHour === null
+	) {
+		// The window exists again but nothing usable reads it, so it is never fresh.
+		view.fiveHour = {
+			source: "poll",
+			observedAtMs: null,
+			freshAtMs: Number.NEGATIVE_INFINITY,
 		};
 	}
 	if (copy !== null) view.data = copy;

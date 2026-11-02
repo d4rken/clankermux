@@ -5,6 +5,7 @@ import {
 	type FiveHourClaimShape,
 	normalizeAnthropicUsage,
 	type ObservedWindow,
+	reportsNoSessionWindow,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
@@ -1475,6 +1476,24 @@ class UsageCache {
 	private writeFetchedEntry(accountId: string, data: AnyUsageData): number {
 		const observedAtMs = Date.now();
 		this.cache.set(accountId, { data, timestamp: observedAtMs, observedAtMs });
+		// A poll's explicit absence raises the header store's absence watermark,
+		// so a 5h header reading observed before it never outlives it. The shape
+		// stays header evidence alone.
+		if (
+			this.headerEpochs.has(accountId) &&
+			(this.providerTypes.get(accountId) ?? "anthropic") === "anthropic" &&
+			reportsNoSessionWindow(data as AnthropicUsageData)
+		) {
+			this.headerWindows.set(
+				accountId,
+				mergeHeaderWindows(this.headerWindows.get(accountId), {
+					fiveHour: null,
+					sevenDay: null,
+					fiveHourShape: null,
+					fiveHourAbsentAtMs: observedAtMs,
+				}),
+			);
+		}
 		return observedAtMs;
 	}
 

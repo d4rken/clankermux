@@ -421,6 +421,66 @@ describe("windows replace three representations of one observation", () => {
 		expect(windowOf(snapshot, "five_hour")?.utilizationPct).toBeNull();
 	});
 
+	it("omits the 5-hour window when the account's payload reports it has none", async () => {
+		// Verified Ultra: `five_hour: null` beside a weekly window.
+		insertAccount();
+		usageCache.set("acct-1", anthropicUsage(null, 30));
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.windows.map((w) => w.kind)).toEqual([
+			"seven_day",
+		]);
+		expect(windowOf(snapshot, "seven_day")?.utilizationPct).toBe(30);
+	});
+
+	it("keeps the 5-hour window for a Max payload beside an Ultra one", async () => {
+		insertAccount({ id: "max", name: "max" });
+		insertAccount({ id: "ultra", name: "ultra" });
+		usageCache.set("max", anthropicUsage(20, 30));
+		usageCache.set("ultra", anthropicUsage(null, 30));
+		const snapshot = await read();
+		const kindsOf = (id: string) =>
+			snapshot.accounts.find((a) => a.id === id)?.windows.map((w) => w.kind);
+		expect(kindsOf("max")).toEqual(["five_hour", "seven_day"]);
+		expect(kindsOf("ultra")).toEqual(["seven_day"]);
+	});
+
+	it("keeps the null 5-hour window for a payload that lacks the key", async () => {
+		// A missing key says nothing about whether the window exists.
+		insertAccount();
+		const { five_hour: _omitted, ...withoutFiveHour } = anthropicUsage(20, 30);
+		usageCache.set("acct-1", withoutFiveHour as AnthropicUsageData);
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.windows.map((w) => w.kind)).toEqual([
+			"five_hour",
+			"seven_day",
+		]);
+		expect(windowOf(snapshot, "five_hour")?.utilizationPct).toBeNull();
+	});
+
+	it("keeps the 5-hour window when limits[] lists a session beside a null five_hour", async () => {
+		insertAccount();
+		usageCache.set(
+			"acct-1",
+			anthropicUsage(null, 30, {
+				limits: [
+					{
+						kind: "session",
+						group: "5h",
+						percent: 33,
+						resets_at: new Date(NOW + 1_000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+				],
+			}),
+		);
+		const snapshot = await read();
+		expect(windowOf(snapshot, "five_hour")).toMatchObject({
+			utilizationPct: 33,
+			resetsAtMs: NOW + 1_000,
+		});
+	});
+
 	it("carries a scoped weekly window under a stable family key", async () => {
 		insertAccount();
 		usageCache.set("acct-1", {

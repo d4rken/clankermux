@@ -16,6 +16,7 @@ import {
 	type UsageData,
 	usageCache,
 } from "../usage-fetcher";
+import { isUsageViewFresh } from "../usage-header-view";
 
 const HOUR = 3_600_000;
 const FIVE_RESET_S = () => Math.floor((Date.now() + 2 * HOUR) / 1000);
@@ -448,5 +449,91 @@ describe("UsageCache header store — 5h claim shape", () => {
 			"present",
 		);
 		expect(fiveHourOf(id)).toBe(50);
+	});
+});
+
+describe("UsageCache header store — a poll's 5h absence", () => {
+	const ultraPoll = (): UsageData =>
+		({
+			five_hour: null,
+			seven_day: pollReading(40, 30).seven_day,
+		}) as unknown as UsageData;
+	const noFiveHourKey = (): UsageData =>
+		({ seven_day: pollReading(40, 30).seven_day }) as unknown as UsageData;
+	const fiveHourKey = (id: string) => {
+		const data = usageCache.peekUsageView(id, "anthropic", Date.now())?.data as
+			| UsageData
+			| undefined;
+		return data && "five_hour" in data ? data.five_hour : "missing";
+	};
+
+	it("drops a 5h header reading observed before the poll said the window is gone", () => {
+		const id = freshId("poll-absent");
+		register(id);
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			claims(0.5),
+			Date.now() - 1_000,
+			"present",
+		);
+		usageCache.set(id, ultraPoll());
+		usageCache.set(id, noFiveHourKey());
+		expect(fiveHourKey(id)).toBeNull();
+		expect(fiveHourOf(id)).toBeUndefined();
+	});
+
+	it("a malformed 5h presence after a poll's absence leaves no fresh 5h axis", () => {
+		const id = freshId("poll-absent-malformed");
+		register(id);
+		usageCache.set(id, ultraPoll());
+		// A lone `5h-utilization` line: presence, no usable reading.
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			[{ ...claims(0.5)[0], status: "", resetMs: null }],
+			Date.now() + 1,
+			"present",
+		);
+		usageCache.set(id, noFiveHourKey());
+		const now = Date.now() + 2;
+		const view = usageCache.peekUsageView(id, "anthropic", now);
+		expect(view).not.toBeNull();
+		expect(view && isUsageViewFresh(view, now, 180_000)).toBe(false);
+	});
+
+	it.each([
+		[
+			"a stopped poller",
+			(id: string) => {
+				register(id);
+				usageCache.stopPolling(id);
+				return id;
+			},
+		],
+		[
+			"a non-Anthropic poller",
+			(id: string) => {
+				usageCache.startPolling(
+					id,
+					async () => "token",
+					"zai",
+					90_000,
+					null,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					{ initialDelayMs: 10 * HOUR },
+				);
+				return id;
+			},
+		],
+	] as const)("records no header absence for %s", (_label, setUp) => {
+		const id = setUp(freshId("poll-absent-unbound"));
+		usageCache.set(id, ultraPoll());
+		usageCache.set(id, noFiveHourKey());
+		expect(fiveHourKey(id)).toBe("missing");
 	});
 });

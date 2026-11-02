@@ -93,7 +93,10 @@ one reading. A new consumer picks one of the two on purpose.
   two decides: absence nulls the view's 5h window (flat and `limits[session]`)
   and the 5h axis is then fresh as of that observation, so a 7d-only account
   can be header-fed. Any later `5h-*` line, even a malformed one, is presence;
-  a 5h reading observed before the newest absence never comes back.
+  if nothing usable reads the returned window, its 5h axis is never fresh.
+  Header readings are stamped by arrival, and a 5h reading stamped before the
+  newest recorded absence is refused; a poll's explicit absence raises the
+  same watermark.
 - The routing view is fresh only while `seven_day_oauth_apps` (finite) and
   enabled `extra_usage` (finite) are within the bound too; headers never carry
   them.

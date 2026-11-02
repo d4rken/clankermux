@@ -53,7 +53,7 @@ export interface PooledWindowFigure {
 
 /** The pooled figures for one servable class. A null window is never written. */
 export interface PoolHeadroomFigures {
-	/** The 5-hour / session window. Always null for the codex class. */
+	/** The 5-hour / session window. {@link buildCodexWeeklyRewrite} ignores it. */
 	session: PooledWindowFigure | null;
 	/** The weekly window. */
 	weekly: PooledWindowFigure | null;

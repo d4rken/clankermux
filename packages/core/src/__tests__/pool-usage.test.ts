@@ -338,9 +338,7 @@ describe("computePoolUsage", () => {
 		});
 
 		it("is not applicable on the 5h window even while paused or cooling", () => {
-			// Exclusions are classified before extraction, so without the
-			// applicability check first these drew a 5h "paused" / "rate_limited"
-			// bar for a window the account does not have.
+			// A paused or cooling account with no 5h window has no 5h bar of any kind.
 			const accounts = [
 				mkAccount({ name: "paused", paused: true, usageData: weeklyOnly(40) }),
 				mkAccount({

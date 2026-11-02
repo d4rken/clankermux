@@ -74,21 +74,18 @@ export interface AccountWideClaimHeadroom {
 }
 
 /**
- * Whether this response carries the account-wide 5h claim.
- *
  * - `present`: any `anthropic-ratelimit-unified-5h-*` line, whatever its
  *   suffix and however malformed. A partial claim is still a claim.
  * - `absent`: no such line, beside a usable 7d claim (known status, strict
  *   decimal utilization and reset).
  * - `unknown`: neither, e.g. a burst 429 or a garbled weekly claim.
  *
- * Reading absence off one response assumes Anthropic sends every claim it
- * evaluated. Observed: all 381,779 Anthropic responses with a 7d claim between
- * 2026-09-21 and 2026-10-30 carried the 5h claim too, and from 2026-10-31
- * verified Ultra accounts send 7d alone (the 5h limit was removed for them).
+ * Absence is read off one response, so this assumes Anthropic sends every
+ * claim it evaluated.
  */
 export type FiveHourClaimShape = "present" | "absent" | "unknown";
 
+/** Whether this response carries the account-wide 5h claim. */
 export function classifyFiveHourClaimShape(
 	headers: Headers,
 ): FiveHourClaimShape {

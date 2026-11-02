@@ -566,8 +566,55 @@ describe("buildUsageView — no 5h window", () => {
 		expect(
 			normalizeAnthropicUsage(out as AnthropicUsageData, NOW).session,
 		).toBeNull();
-		expect(view.fiveHour).toEqual(pollAxis(120_000));
+		expect(view.fiveHour).toEqual({
+			source: "poll",
+			observedAtMs: null,
+			freshAtMs: Number.NEGATIVE_INFINITY,
+		});
 		expect(isUsageViewFresh(view, NOW, 60_000)).toBe(false);
+	});
+
+	// Poll at 99% (T0), header absence (T1), malformed header presence (T2).
+	const reappearedUnread = (extra: Partial<HeaderWindows> = {}) =>
+		windows({
+			fiveHourShape: presentAt(NOW - 10_000),
+			fiveHourAbsentAtMs: NOW - 20_000,
+			sevenDay: header({ observedAtMs: NOW - 10_000, resetMs: WEEK_RESET }),
+			...extra,
+		});
+
+	it("a window that came back with nothing usable reading it is never fresh", () => {
+		const view = buildUsageView(
+			poll(pollData(99, 30), 30_000),
+			reappearedUnread(),
+			NOW,
+		);
+		expect("five_hour" in (view.data as UsageData)).toBe(false);
+		expect(view.fiveHour.source).toBe("poll");
+		expect(isUsageViewFresh(view, NOW, 180_000)).toBe(false);
+	});
+
+	it("a usable header reading after the reappearance makes it fresh again", () => {
+		const view = buildUsageView(
+			poll(pollData(99, 30), 30_000),
+			reappearedUnread({
+				fiveHour: header({ utilization: 12, observedAtMs: NOW - 5_000 }),
+			}),
+			NOW,
+		);
+		expect((view.data as UsageData).five_hour?.utilization).toBe(12);
+		expect(isUsageViewFresh(view, NOW, 180_000)).toBe(true);
+	});
+
+	it("a usable poll after the reappearance makes it fresh again", () => {
+		const view = buildUsageView(
+			poll(pollData(55, 30), 5_000),
+			reappearedUnread(),
+			NOW,
+		);
+		expect((view.data as UsageData).five_hour?.utilization).toBe(55);
+		expect(view.fiveHour).toEqual(pollAxis(5_000));
+		expect(isUsageViewFresh(view, NOW, 180_000)).toBe(true);
 	});
 
 	it("a fresh header absence and 7d reading carry an old poll", () => {
