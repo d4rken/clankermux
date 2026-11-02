@@ -1,3 +1,4 @@
+import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import type { UsageData, UsageWindow } from "../../usage-fetcher";
 import { codexBackendClientHeaders } from "./client-identity";
@@ -263,6 +264,7 @@ export async function fetchCodexUsageStatus(
 		});
 
 		if (!response.ok) {
+			discardUpstreamBody(response);
 			log.warn(
 				`Usage-status endpoint returned ${response.status} ${response.statusText}`,
 			);

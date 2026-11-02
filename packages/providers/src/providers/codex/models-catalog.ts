@@ -1,3 +1,4 @@
+import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import { CODEX_VERSION, codexModelsHeaders } from "./client-identity";
 
@@ -141,6 +142,7 @@ export async function fetchCodexModelCatalog(
 		});
 
 		if (!response.ok) {
+			discardUpstreamBody(response);
 			log.warn(
 				`Model-catalog endpoint returned ${response.status} ${response.statusText}`,
 			);

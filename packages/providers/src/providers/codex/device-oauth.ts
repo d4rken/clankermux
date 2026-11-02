@@ -1,5 +1,6 @@
 // Codex device code auth flow (RFC 8628 variant)
 // Matches codex-rs/login/src/device_code_auth.rs
+import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import {
 	CODEX_CLIENT_ID,
@@ -111,6 +112,7 @@ export async function pollCodexForToken(
 
 		// 403/404 = authorization_pending — keep polling
 		if (response.status === 403 || response.status === 404) {
+			discardUpstreamBody(response);
 			continue;
 		}
 
