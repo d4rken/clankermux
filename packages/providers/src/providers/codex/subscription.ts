@@ -1,3 +1,4 @@
+import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import { codexBackendClientHeaders } from "./client-identity";
 
@@ -230,6 +231,7 @@ export async function fetchCodexSubscription(
 			headers: codexBackendClientHeaders(accessToken, accountId),
 		});
 
+		if (!response.ok) discardUpstreamBody(response);
 		if (response.status === 404) {
 			// A reachable "this workspace has no subscription record" (education
 			// plans). Reported as its own outcome so the caller can store the

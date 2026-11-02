@@ -1,3 +1,4 @@
+import { discardUpstreamBody } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
 import type {
 	CodexRateLimitResetCreditConsumeOutcome,
@@ -228,6 +229,7 @@ export async function fetchCodexRateLimitResetCredits(
 			headers: createResetCreditsHeaders(accessToken),
 		});
 		status = response.status;
+		if (!response.ok) discardUpstreamBody(response);
 
 		if (response.status === 404) {
 			log.error(
@@ -302,6 +304,7 @@ export async function consumeCodexRateLimitResetCredit(
 		);
 
 		if (!response.ok) {
+			discardUpstreamBody(response);
 			throw new Error(
 				`Codex banked-reset endpoint returned ${response.status} ${response.statusText}`,
 			);
