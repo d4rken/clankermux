@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	classifyFiveHourClaimShape,
 	type ExtractedClaimReading,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
@@ -120,12 +121,115 @@ describe("getAccountWideClaimHeadroom", () => {
 		const headers = incidentHeaders();
 		headers["anthropic-ratelimit-unified-5h-reset"] = "soon";
 		const headroom = getAccountWideClaimHeadroom(h(headers));
-		expect(headroom?.fiveHour.resetMs).toBeNull();
+		expect(headroom?.fiveHour?.resetMs).toBeNull();
 		expect(headroom?.sevenDay.resetMs).toBe(INCIDENT_WEEKLY_RESET_MS);
 	});
 
 	it("returns null for a burst shape", () => {
 		expect(getAccountWideClaimHeadroom(h({}))).toBeNull();
+	});
+});
+
+/** The incident shape as a verified Ultra account sends it: no 5h lines at all. */
+function weeklyOnlyIncidentHeaders(): Record<string, string> {
+	const headers = incidentHeaders();
+	for (const name of Object.keys(headers)) {
+		if (name.startsWith("anthropic-ratelimit-unified-5h-"))
+			delete headers[name];
+	}
+	return headers;
+}
+
+describe("classifyFiveHourClaimShape", () => {
+	it("is present when the 5h claim is on the response", () => {
+		expect(classifyFiveHourClaimShape(h(incidentHeaders()))).toBe("present");
+	});
+
+	it("is absent when no 5h line exists beside a usable weekly claim", () => {
+		expect(classifyFiveHourClaimShape(h(weeklyOnlyIncidentHeaders()))).toBe(
+			"absent",
+		);
+	});
+
+	it("is absent beside a rejecting weekly claim too", () => {
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-7d-status"] = "rejected";
+		headers["anthropic-ratelimit-unified-7d-utilization"] = "1.0";
+		expect(classifyFiveHourClaimShape(h(headers))).toBe("absent");
+	});
+
+	it("treats any lone 5h line as presence, whatever its suffix", () => {
+		for (const suffix of ["utilization", "reset", "surpassed-threshold", "x"]) {
+			const headers = weeklyOnlyIncidentHeaders();
+			headers[`anthropic-ratelimit-unified-5h-${suffix}`] = "0.5";
+			expect(classifyFiveHourClaimShape(h(headers))).toBe("present");
+		}
+	});
+
+	it("does not count a scoped 5h_* claim as the account-wide 5h", () => {
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-5h_oi-status"] = "allowed";
+		expect(classifyFiveHourClaimShape(h(headers))).toBe("absent");
+	});
+
+	it("is unknown when the weekly claim is not a usable reading", () => {
+		const broken: Array<[string, string | null]> = [
+			["anthropic-ratelimit-unified-7d-status", ""],
+			["anthropic-ratelimit-unified-7d-status", "banana"],
+			["anthropic-ratelimit-unified-7d-utilization", null],
+			["anthropic-ratelimit-unified-7d-utilization", "0.94x"],
+			["anthropic-ratelimit-unified-7d-reset", null],
+			["anthropic-ratelimit-unified-7d-reset", "soon"],
+		];
+		for (const [name, value] of broken) {
+			const headers = weeklyOnlyIncidentHeaders();
+			if (value === null) delete headers[name];
+			else headers[name] = value;
+			expect(classifyFiveHourClaimShape(h(headers))).toBe("unknown");
+		}
+	});
+
+	it("is unknown for a burst shape", () => {
+		expect(classifyFiveHourClaimShape(h({}))).toBe("unknown");
+	});
+});
+
+describe("getAccountWideClaimHeadroom without a 5h window", () => {
+	it("reads the weekly claim alone when the response has no 5h lines", () => {
+		expect(getAccountWideClaimHeadroom(h(weeklyOnlyIncidentHeaders()))).toEqual(
+			{
+				fiveHour: null,
+				sevenDay: {
+					status: "allowed_warning",
+					utilization: 0.94,
+					resetMs: INCIDENT_WEEKLY_RESET_MS,
+				},
+			},
+		);
+	});
+
+	it("still returns null when the weekly claim rejects", () => {
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-7d-status"] = "rejected";
+		expect(getAccountWideClaimHeadroom(h(headers))).toBeNull();
+	});
+
+	it("returns null when a partial 5h claim is present", () => {
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-5h-utilization"] = "0.2";
+		expect(getAccountWideClaimHeadroom(h(headers))).toBeNull();
+	});
+
+	it("makes the weekly-only incident a scoped-only rejection", () => {
+		expect(isScopedOnlyUnifiedRejection(h(weeklyOnlyIncidentHeaders()))).toBe(
+			true,
+		);
+	});
+
+	it("is not scoped-only without a rejected scoped claim", () => {
+		const headers = weeklyOnlyIncidentHeaders();
+		headers["anthropic-ratelimit-unified-7d_oi-status"] = "allowed";
+		expect(isScopedOnlyUnifiedRejection(h(headers))).toBe(false);
 	});
 });
 

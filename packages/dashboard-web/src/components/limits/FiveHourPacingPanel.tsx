@@ -23,7 +23,7 @@ interface FiveHourPacingPanelProps {
 	unavailableReason?: string;
 }
 
-/** The segment list for one class row. Zero counts are omitted, except "with room". */
+/** The segment list for one class row. Zero counts are omitted, except "with room" (see below). */
 function rowSegments(pacing: ClassPacing): string {
 	// A class with no reading at all would otherwise render as "0 with room",
 	// which states a measured absence of capacity rather than an absent
@@ -40,7 +40,15 @@ function rowSegments(pacing: ClassPacing): string {
 	if (classIsUnread(pacing) && pacing.unavailable === 0) {
 		return "no 5h reading";
 	}
-	const segments = [`${pacing.room} with room`];
+	const segments: string[] = [];
+	// A resolved "0 with room" stays, except beside an account that serves with
+	// no 5-hour window: there it would read as a class with nothing to offer.
+	if (pacing.room > 0 || pacing.unconstrained === 0) {
+		segments.push(`${pacing.room} with room`);
+	}
+	if (pacing.unconstrained > 0) {
+		segments.push(`${pacing.unconstrained} no 5h limit`);
+	}
 	if (pacing.runningHot > 0) segments.push(`${pacing.runningHot} running hot`);
 	if (pacing.waiting > 0) segments.push(`${pacing.waiting} waiting`);
 	if (pacing.unavailable > 0)

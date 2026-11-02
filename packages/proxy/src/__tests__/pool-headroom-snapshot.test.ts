@@ -373,10 +373,7 @@ describe("computePoolHeadroom", () => {
 		expect(figures.weekly?.headroomPct).toBe(70);
 	});
 
-	it("reports no session window for a codex-only class", () => {
-		// codex retired its rolling 5h window, so there is no account-wide session
-		// figure to pool. This falls out of the readings rather than being a
-		// special case.
+	it("counts a codex member, whose payload reports no 5h window, as full 5h room", () => {
 		seed("codex", {
 			fiveHourPct: null,
 			weeklyPct: 50,
@@ -390,8 +387,112 @@ describe("computePoolHeadroom", () => {
 			NOW,
 		);
 
-		expect(figures.session).toBeNull();
+		expect(figures.session).toEqual({
+			headroomPct: 100,
+			resetMs: null,
+			complete: true,
+		});
 		expect(figures.weekly?.headroomPct).toBe(50);
+	});
+
+	describe("a member with no 5h window", () => {
+		const maxFiveHourResetMs = Math.floor((NOW + HOUR_MS) / 1000) * 1000;
+		const maxWire = new Headers({
+			"anthropic-ratelimit-unified-5h-status": "allowed",
+			"anthropic-ratelimit-unified-5h-utilization": "0.95",
+			"anthropic-ratelimit-unified-5h-reset": String(maxFiveHourResetMs / 1000),
+		});
+		const seedMax = () =>
+			seed("max", {
+				fiveHourPct: 95,
+				fiveHourResetMs: maxFiveHourResetMs,
+				weeklyPct: 40,
+				weeklyResetMs: NOW + 48 * HOUR_MS,
+			});
+
+		it("gives a mixed class full 5h room, paired with the sibling's reset", () => {
+			seedMax();
+			seed("ultra", { weeklyPct: 30, weeklyResetMs: NOW + 48 * HOUR_MS });
+
+			const figures = computePoolHeadroom(
+				account("max"),
+				[account("max"), account("ultra")],
+				maxWire,
+				NOW,
+			);
+
+			expect(figures.session?.headroomPct).toBe(100);
+			expect(figures.session?.resetMs).toBe(maxFiveHourResetMs);
+			expect(figures.session?.complete).toBe(true);
+		});
+
+		it("leaves a stale one unknown rather than unused", () => {
+			seedMax();
+			// Inside the view's horizon, past this module's freshness bound.
+			const clock = spyOn(Date, "now").mockReturnValue(NOW - 5 * 60_000);
+			seed("ultra", { weeklyPct: 30, weeklyResetMs: NOW + 48 * HOUR_MS });
+			clock.mockRestore();
+
+			const figures = computePoolHeadroom(
+				account("max"),
+				[account("max"), account("ultra")],
+				maxWire,
+				NOW,
+			);
+
+			expect(figures.session?.headroomPct).toBe(5);
+			expect(figures.session?.complete).toBe(false);
+		});
+
+		it("leaves a window that came back with no usable reading unknown", () => {
+			const id = key("returned");
+			seeded.push(id);
+			usageCache.startPolling(
+				id,
+				async () => "token",
+				"anthropic",
+				90_000,
+				null,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ initialDelayMs: 10 * HOUR_MS },
+			);
+			try {
+				const now = Date.now();
+				usageCache.setWithAgeForTests(
+					id,
+					{
+						five_hour: {
+							utilization: 99,
+							resets_at: new Date(now + HOUR_MS).toISOString(),
+						},
+						seven_day: {
+							utilization: 30,
+							resets_at: new Date(now + 48 * HOUR_MS).toISOString(),
+						},
+					} as never,
+					30_000,
+				);
+				const epoch = usageCache.usageHeaderEpoch(id);
+				usageCache.recordUsageHeaders(id, epoch, [], now - 20_000, "absent");
+				usageCache.recordUsageHeaders(id, epoch, [], now - 10_000, "present");
+
+				const figures = computePoolHeadroom(
+					account("returned"),
+					[account("returned")],
+					noHeaders,
+					now,
+				);
+
+				expect(figures.session).toBeNull();
+				expect(figures.weekly?.headroomPct).toBe(70);
+			} finally {
+				usageCache.stopPolling(id);
+			}
+		});
 	});
 
 	it("pools the session window independently of the weekly one", () => {

@@ -269,6 +269,24 @@ describe("pool headroom header injection", () => {
 		).toBe("0.2");
 	});
 
+	it("adds no 5h claim to a 7d-only response from a class with no 5h window", async () => {
+		seedWeekly("serving", 90);
+		seedWeekly("sibling", 20);
+
+		const { response } = await forward({
+			poolCandidates: [makeAccount("serving"), makeAccount("sibling")],
+		});
+
+		expect(
+			response.headers.get("anthropic-ratelimit-unified-7d-utilization"),
+		).toBe("0.2");
+		for (const suffix of ["utilization", "reset", "status"]) {
+			expect(
+				response.headers.has(`anthropic-ratelimit-unified-5h-${suffix}`),
+			).toBe(false);
+		}
+	});
+
 	it("leaves headers untouched when no candidate list was stashed", async () => {
 		// A path that never ran selection cannot speak for the pool.
 		// Omission is what makes it inert.

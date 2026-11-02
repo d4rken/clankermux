@@ -36,12 +36,14 @@ import {
 const log = new Logger("ResponseProcessor");
 
 /**
- * Defensive ceiling on a projected 5h-claim reset. The claim's own reset is
- * ≤ ~5h out by construction; anything beyond this is a garbled header and the
- * projection degrades to no reset (persisted NULL — which the auto-refresh
- * scheduler treats as "due", triggering the prime that rewrites honest values).
+ * Defensive ceilings on a projected claim reset. A 5h claim's own reset is
+ * ≤ ~5h out by construction, a 7d claim's ≤ 7d; anything beyond these is a
+ * garbled header and the projection degrades to no reset (persisted NULL —
+ * which the auto-refresh scheduler treats as "due", triggering the prime that
+ * rewrites honest values).
  */
-const SCOPED_PROJECTION_MAX_RESET_MS = 24 * 60 * 60 * 1000;
+const SCOPED_PROJECTION_MAX_5H_RESET_MS = 24 * 60 * 60 * 1000;
+const SCOPED_PROJECTION_MAX_7D_RESET_MS = (7 * 24 + 1) * 60 * 60 * 1000;
 
 /**
  * Scope-aware projection of a 429's parsed rate-limit info.
@@ -52,7 +54,8 @@ const SCOPED_PROJECTION_MAX_RESET_MS = 24 * 60 * 60 * 1000;
  * cooling on those values turns one family's exhaustion into an account-wide
  * verdict. This projection substitutes the 5h claim's OWN status and reset (a
  * coherent single-claim pair — the persisted reset's dominant consumer is the
- * scheduler's 5-hour window anchor). `isRateLimited` is left untouched: the
+ * scheduler's 5-hour window anchor), or the 7d claim's on an account with no
+ * 5h window. `isRateLimited` is left untouched: the
  * request itself WAS rejected and must still fail over.
  *
  * Trust boundary: header reinterpretation is only safe for the official
@@ -76,26 +79,29 @@ export function projectScopedRateLimitInfo(
 	// isScopedOnlyUnifiedRejection implies headroom; bail defensively anyway.
 	if (!headroom) return rateLimitInfo;
 	const now = Date.now();
-	const resetMs = headroom.fiveHour.resetMs;
-	// REJECT (don't clamp) a reset outside (now, now+24h]: a "5h claim reset"
-	// a day out is garbled evidence, and manufacturing a 24h value from it
-	// would freeze the status refresh — or, via the generic cooldown path,
-	// lock the account — for a day on malformed input. Degrading to none
-	// persists NULL, which the scheduler treats as "due" (self-repairing).
+	const claim = headroom.fiveHour ?? headroom.sevenDay;
+	const label = headroom.fiveHour ? "5h" : "7d";
+	const maxResetMs = headroom.fiveHour
+		? SCOPED_PROJECTION_MAX_5H_RESET_MS
+		: SCOPED_PROJECTION_MAX_7D_RESET_MS;
+	const resetMs = claim.resetMs;
+	// REJECT (don't clamp) a reset outside (now, now+ceiling]: a reset beyond
+	// the claim's ceiling is garbled evidence, and manufacturing a ceiling value
+	// from it would freeze the status refresh — or, via the generic cooldown
+	// path, lock the account — for that long on malformed input. Degrading to
+	// none persists NULL, which the scheduler treats as "due" (self-repairing).
 	const projectedReset =
-		resetMs !== null &&
-		resetMs > now &&
-		resetMs <= now + SCOPED_PROJECTION_MAX_RESET_MS
+		resetMs !== null && resetMs > now && resetMs <= now + maxResetMs
 			? resetMs
 			: undefined;
 	log.debug(
-		`Scoped 429 on ${account.name}: projecting account-wide meta from the 5h claim ` +
-			`(status=${headroom.fiveHour.status} reset=${projectedReset ? new Date(projectedReset).toISOString() : "none"}) ` +
+		`Scoped 429 on ${account.name}: projecting account-wide meta from the ${label} claim ` +
+			`(status=${claim.status} reset=${projectedReset ? new Date(projectedReset).toISOString() : "none"}) ` +
 			`instead of the summary (status=${rateLimitInfo.statusHeader} reset=${rateLimitInfo.resetTime ? new Date(rateLimitInfo.resetTime).toISOString() : "none"})`,
 	);
 	return {
 		...rateLimitInfo,
-		statusHeader: headroom.fiveHour.status,
+		statusHeader: claim.status,
 		resetTime: projectedReset,
 	};
 }

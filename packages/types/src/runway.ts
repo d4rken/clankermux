@@ -419,9 +419,9 @@ export interface RunwayAccountSummary {
 	 */
 	usageAsOfMs: number | null;
 	/**
-	 * Every window this provider supports, values nullable. An ABSENT window
-	 * therefore means "this provider has no such window", never "we could not
-	 * read it".
+	 * Every window this account runs, values nullable. An ABSENT window means
+	 * "this account has no such window" (its provider has none, or the account
+	 * reports `five_hour: null`), never "we could not read it".
 	 */
 	windows: RunwayWindowSummary[];
 }

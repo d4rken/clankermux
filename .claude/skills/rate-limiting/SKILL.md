@@ -26,7 +26,9 @@ either when its cooldown expires, or when polling observes the quota recovered.
 ```
 reprobe (transient only; live quota/credit depletion falls through)
   → out_of_credits            (long floor, no burst-retry)
-  → live account-wide claims (trusted 5h/7d rejection; own claim resets)
+  → live account-wide claims (trusted 5h/7d rejection; own claim resets;
+                               a response with no 5h claim at all is judged
+                               on 7d alone)
   → cached account-wide exhausted    (weekly OR 5h session spent; no burst-retry)
   → family-weekly safety net  (fails over WITHOUT an account-wide cooldown;
                                cache evidence first — with the cache UNAVAILABLE
@@ -84,6 +86,17 @@ one reading. A new consumer picks one of the two on purpose.
   lands. An account-wide quota cooldown (`weekly_exhausted_429`,
   `session_exhausted_429`) reissues it too and re-arms the active poll, so the
   cooled 429's own headers never re-feed the view.
+- Some accounts have NO 5h window (verified Ultra since 2026-10-30, Codex
+  since 2026-07-12): the poll says `five_hour: null`
+  (`reportsNoSessionWindow`) and responses carry no `5h-*` line beside a
+  usable 7d claim (`classifyFiveHourClaimShape` → `absent`). The newest of the
+  two decides: absence nulls the view's 5h window (flat and `limits[session]`)
+  and the 5h axis is then fresh as of that observation, so a 7d-only account
+  can be header-fed. Any later `5h-*` line, even a malformed one, is presence;
+  if nothing usable reads the returned window, its 5h axis is never fresh.
+  Header readings are stamped by arrival, and a 5h reading stamped before the
+  newest recorded absence is refused; a poll's explicit absence raises the
+  same watermark.
 - The routing view is fresh only while `seven_day_oauth_apps` (finite) and
   enabled `extra_usage` (finite) are within the bound too; headers never carry
   them.

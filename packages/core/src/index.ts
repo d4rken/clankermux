@@ -165,6 +165,7 @@ export {
 	classIsUnread,
 	computeFiveHourPacing,
 	type FiveHourPacing,
+	hasNoFiveHourWindow,
 } from "./five-hour-pacing";
 export {
 	detectHarness,
@@ -371,10 +372,12 @@ export * from "./tool-error-evidence";
 export { TtlCache } from "./ttl-cache";
 export {
 	type AccountWideClaimHeadroom,
+	classifyFiveHourClaimShape,
 	type ExtractedClaimReading,
 	type ExtractedSummaryReading,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
+	type FiveHourClaimShape,
 	getAccountWideClaimHeadroom,
 	getScopedClaimRejection,
 	hasAccountWideUnifiedRejection,
@@ -396,6 +399,7 @@ export {
 	type NormalizedUsageWindow,
 	normalizeAnthropicUsage,
 	type ObservedWindow,
+	reportsNoSessionWindow,
 } from "./usage-normalizer";
 export {
 	computeUsagePrediction,
@@ -412,6 +416,7 @@ export {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	isAlibabaShape,
 	isAnthropicStyleShape,
 	isDevinShape,

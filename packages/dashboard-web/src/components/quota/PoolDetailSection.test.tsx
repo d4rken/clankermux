@@ -37,6 +37,7 @@ function sharedNamePool(): PoolUsageResult {
 			{ accountId: "id-fallback-a", name: "local", provider: "ollama" },
 			{ accountId: "id-fallback-b", name: "local", provider: "litellm" },
 		],
+		notApplicable: [],
 		earliestResetMs: NOW + DAY,
 		earliestResetAccountName: "claude",
 		atRisk: [],

@@ -123,6 +123,13 @@ export interface RunwayAccountSource {
  */
 export interface RunwayWindowObservations {
 	fiveHour: ExtractedValue | null;
+	/**
+	 * True when the payload this resolution came from states the account has NO
+	 * 5-hour window (`fiveHourKnownAbsent`). A null `fiveHour` does not say that
+	 * on its own. Absent when there was no payload (snapshot restore), which
+	 * claims nothing either way.
+	 */
+	fiveHourAbsent?: boolean;
 	sevenDay: ExtractedValue | null;
 	/**
 	 * The account-wide daily window, for the providers that run one.

@@ -438,6 +438,65 @@ describe("LimitsCapacityOverview", () => {
 		expect(html).not.toContain("0%");
 	});
 
+	describe("accounts with no 5-hour window", () => {
+		const weeklyOnly = (pct: number) =>
+			({
+				five_hour: null,
+				seven_day: {
+					utilization: pct,
+					resets_at: new Date(NOW + 3 * DAY).toISOString(),
+				},
+				limits: [],
+			}) as never;
+
+		it("hides the 5-hour pacing panel when no account has the window", () => {
+			const html = renderOverview(
+				pools([
+					account({ id: "acc-1", name: "ultra", usageData: weeklyOnly(30) }),
+					account({
+						id: "acc-3",
+						name: "gamma",
+						provider: "codex",
+						usageData: weeklyOnly(55),
+					}),
+				]),
+			);
+
+			expect(html).not.toContain('aria-label="5-hour pacing"');
+			expect(html).toContain("lg:grid-cols-2");
+			expect(html).not.toContain("No rolling-quota accounts");
+			expect(html).not.toContain("no 5h reading");
+		});
+
+		it("keeps the panel while the read is pending or failed", () => {
+			const accounts = [
+				account({ id: "acc-1", name: "ultra", usageData: weeklyOnly(30) }),
+			];
+			expect(
+				renderOverview(pools(accounts), { windowsLoading: true }),
+			).toContain('aria-label="5-hour pacing"');
+			expect(
+				renderOverview(pools(accounts), {
+					windowsUnavailableReason: "Account data unavailable",
+				}),
+			).toContain('aria-label="5-hour pacing"');
+		});
+
+		it("lists the Ultra account beside a held Max account as servable", () => {
+			const html = renderOverview(
+				pools([
+					account({ id: "acc-1", name: "max", usageData: usage(100, 20) }),
+					account({ id: "acc-2", name: "ultra", usageData: weeklyOnly(30) }),
+				]),
+			);
+
+			expect(html).toContain('aria-label="5-hour pacing"');
+			expect(html).toContain("lg:grid-cols-3");
+			expect(html).toContain("1 no 5h limit · 1 waiting");
+			expect(html).not.toContain("0 with room");
+		});
+	});
+
 	it("keeps the routing boundary and the calculation note close by", () => {
 		const html = renderOverview();
 

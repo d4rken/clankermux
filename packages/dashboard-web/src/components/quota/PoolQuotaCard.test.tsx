@@ -358,3 +358,39 @@ describe("PoolQuotaCard capacity claims", () => {
 		expect(html).toContain("2 of 2 accounts spent or projected");
 	});
 });
+
+describe("PoolQuotaCard short window without a 5-hour window", () => {
+	const ultra = (id: string, weeklyPct: number) =>
+		account({
+			id,
+			name: id,
+			usageData: {
+				five_hour: null,
+				seven_day: {
+					utilization: weeklyPct,
+					resets_at: new Date(NOW + 3 * DAY).toISOString(),
+				},
+				limits: [],
+			} as never,
+		});
+
+	it("averages the 5h row over the accounts that have the window", () => {
+		const html = render([
+			account({
+				id: "max",
+				name: "max",
+				usageData: bothAt(40, NOW + 2 * HOUR, 20, NOW + 3 * DAY) as never,
+			}),
+			ultra("ultra", 30),
+		]);
+
+		expect(html).toContain("5h: 40% used · account average");
+	});
+
+	it("shows no 5h row when no account in the class has the window", () => {
+		const html = render([ultra("ultra-1", 30), ultra("ultra-2", 50)]);
+
+		expect(html).toContain("Weekly · account average");
+		expect(html).not.toContain("5h:");
+	});
+});

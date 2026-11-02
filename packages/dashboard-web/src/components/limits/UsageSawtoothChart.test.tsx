@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type {
+	AccountResponse,
 	UsageHistoryResponse,
 	UsageScopedHistoryResponse,
 } from "@clankermux/types";
@@ -169,5 +170,82 @@ describe("UsageSawtoothChart availability", () => {
 		// One skeleton, not two: the resolved window must not borrow the
 		// pending one's loading state.
 		expect(html.match(/animate-pulse/g)).toHaveLength(1);
+	});
+});
+
+describe("UsageSawtoothChart with no 5-hour window on the accounts", () => {
+	const NOW = 1_700_000_000_000;
+	const NO_WINDOW = "No 5-hour window on the current accounts.";
+	const account = (
+		id: string,
+		provider: string,
+		usageData: unknown,
+	): AccountResponse =>
+		({ id, name: id, provider, usageData }) as unknown as AccountResponse;
+	const weeklyOnly = {
+		five_hour: null,
+		seven_day: {
+			utilization: 30,
+			resets_at: new Date(NOW + 3 * 86_400_000).toISOString(),
+		},
+		limits: [],
+	};
+
+	function render(
+		accounts: AccountResponse[],
+		fiveHour: Partial<UsageWindowChartState> = {},
+	): string {
+		return renderToStaticMarkup(
+			<UsageSawtoothChart
+				accounts={accounts}
+				now={NOW}
+				fiveHour={{
+					usageHistory: emptyHistory("24h"),
+					loading: false,
+					range: "24h",
+					onRangeChange: () => {},
+					...fiveHour,
+				}}
+				sevenDay={{
+					usageHistory: emptyHistory("7d"),
+					loading: false,
+					range: "7d",
+					onRangeChange: () => {},
+				}}
+			/>,
+		);
+	}
+
+	it("says so instead of collecting data, and keeps the range selector", () => {
+		const html = render([
+			account("ultra", "anthropic", weeklyOnly),
+			account("codex", "codex", weeklyOnly),
+		]);
+
+		expect(html).toContain(NO_WINDOW);
+		expect(html).toContain("5-hour window");
+		expect(html).toContain('aria-label="5-hour graph time range"');
+	});
+
+	it("keeps collecting data while any account may still have the window", () => {
+		const html = render([
+			account("ultra", "anthropic", weeklyOnly),
+			account("new", "anthropic", null),
+		]);
+
+		expect(html).not.toContain(NO_WINDOW);
+		expect(html).toContain(EMPTY_CLAIM);
+	});
+
+	it("leaves loading and failure states alone", () => {
+		const accounts = [account("ultra", "anthropic", weeklyOnly)];
+		expect(
+			render(accounts, { loading: true, usageHistory: undefined }),
+		).not.toContain(NO_WINDOW);
+		const failed = render(accounts, {
+			unavailableReason: "Usage history unavailable",
+		});
+		expect(failed).not.toContain(NO_WINDOW);
+		expect(failed).toContain("Usage history unavailable");
 	});
 });

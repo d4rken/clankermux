@@ -42,6 +42,7 @@ import {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	isAnthropicStyleShape,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 } from "./usage-window-extract";
@@ -340,6 +341,7 @@ export function scopeResultToClass(
 		exhausted,
 		excluded,
 		fallback: [],
+		notApplicable: result.notApplicable.filter((id) => ids.has(id)),
 		atRisk: result.atRisk.filter((a) => ids.has(a.accountId)),
 		learning: result.learning.filter((l) => ids.has(l.accountId)),
 		familyWeekly,
@@ -472,6 +474,13 @@ export interface PoolUsageResult {
 	exhausted: PoolUsageExclusion[];
 	excluded: PoolUsageExclusion[];
 	fallback: PoolUsageFallback[];
+	/**
+	 * Ids of accounts whose payload states they have NO such window (a verified
+	 * Ultra or a Codex account on `five_hour`; see `fiveHourKnownAbsent`). In no
+	 * bar and not in `fallback`: the provider runs this window, this account
+	 * does not, and that is neither unmetered nor unreadable.
+	 */
+	notApplicable: string[];
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
 	atRisk: PoolUsageProjection[];
@@ -1182,6 +1191,7 @@ export function computePoolUsage(
 ): PoolUsageResult {
 	accounts = accounts.filter((account) => !account.disabled);
 	const fallback: PoolUsageFallback[] = [];
+	const notApplicable: string[] = [];
 	// Captured while iterating the accounts so the at-risk projection below can
 	// reach each contribution's server-side prediction. Keyed by account id —
 	// NEVER by name, which is user-set and need not be unique.
@@ -1211,6 +1221,13 @@ export function computePoolUsage(
 				name: account.name,
 				provider: account.provider,
 			});
+			continue;
+		}
+
+		// Ahead of the exclusions: a paused or cooling account has no 5-hour
+		// window to be held on either.
+		if (window === "five_hour" && fiveHourKnownAbsent(account.usageData)) {
+			notApplicable.push(account.id);
 			continue;
 		}
 
@@ -1395,6 +1412,7 @@ export function computePoolUsage(
 		exhausted,
 		excluded,
 		fallback,
+		notApplicable,
 		earliestResetMs,
 		earliestResetAccountName,
 		atRisk,

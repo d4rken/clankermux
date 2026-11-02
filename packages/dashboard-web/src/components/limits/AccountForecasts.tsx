@@ -25,8 +25,9 @@ const WINDOW_ORDER: readonly RunwayWindowKind[] = [
  * is a calendar day has no 5-hour one, and with the columns fixed its daily
  * window had nowhere to appear — the table showed that account's comfortable
  * weekly forecast and silently omitted the exhausted daily window beside it. A
- * column nobody reports is left out entirely rather than printed as a row of
- * "Not reported".
+ * column nobody reports is left out entirely, and a row whose account lacks a
+ * listed window gets a dash there: an omitted window is one the account does
+ * not have, not one that went unread.
  */
 function columnsFor(accounts: ForecastAccount[]): RunwayWindowKind[] {
 	const present = new Set(
@@ -77,9 +78,14 @@ export function AccountForecasts({
 									const window = account.windows?.find((w) => w.kind === kind);
 									return (
 										<td key={kind} className="p-item text-muted-foreground">
-											{window
-												? windowForecastMessage(window, now)
-												: "Not reported"}
+											{window ? (
+												windowForecastMessage(window, now)
+											) : (
+												<>
+													<span aria-hidden="true">—</span>
+													<span className="sr-only">No such window</span>
+												</>
+											)}
 										</td>
 									);
 								})}

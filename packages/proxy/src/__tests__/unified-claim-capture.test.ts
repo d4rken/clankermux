@@ -237,6 +237,21 @@ describe("response-handler — unified claim capture", () => {
 		expect(h.saved).toHaveLength(0);
 	});
 
+	it("does not record a lone 5h-utilization line, which is no claim reading", async () => {
+		const h = makeHarness();
+		await forward(h, {
+			account: makeAccount(),
+			response: new Response(JSON.stringify({ type: "message" }), {
+				status: 200,
+				headers: {
+					"Content-Type": "application/json",
+					"anthropic-ratelimit-unified-5h-utilization": "0.45",
+				},
+			}),
+		});
+		expect(h.enqueueCalls).toBe(0);
+	});
+
 	it("warns once when the writer queue rejects the job", async () => {
 		const lines: string[] = [];
 		const spy = spyOn(Logger.prototype, "warn").mockImplementation(
@@ -468,6 +483,138 @@ describe("response-handler — usage header store", () => {
 			liveClaims("rejected", 429),
 		);
 		expect(windowsOf(account.id)).toEqual({ fiveHour: 10, sevenDay: 35 });
+	});
+
+	describe("5h claim shape", () => {
+		/** An account whose poll has no 5h window, as verified Ultra reports it. */
+		function ultraAccount(): Account {
+			const account = polledAccount();
+			usageCache.setWithAgeForTests(
+				account.id,
+				{
+					five_hour: null,
+					seven_day: {
+						utilization: 20,
+						resets_at: new Date(weekResetS * 1000).toISOString(),
+					},
+				},
+				1_000,
+			);
+			return account;
+		}
+
+		function claimsResponse(headers: Record<string, string>): Response {
+			return new Response(JSON.stringify({ type: "message" }), {
+				status: 200,
+				headers: { "Content-Type": "application/json", ...headers },
+			});
+		}
+
+		const weekly = {
+			"anthropic-ratelimit-unified-7d-status": "allowed",
+			"anthropic-ratelimit-unified-7d-utilization": "0.35",
+			"anthropic-ratelimit-unified-7d-reset": String(weekResetS),
+		};
+
+		function viewOf(id: string, horizonMs?: number) {
+			const view = usageCache.peekUsageView(
+				id,
+				"anthropic",
+				Date.now(),
+				horizonMs,
+			);
+			const data = view?.data as Record<string, unknown> | undefined;
+			return {
+				fiveHour: data && "five_hour" in data ? data.five_hour : "missing",
+				source: view?.fiveHour.source,
+			};
+		}
+
+		it("a 7d-only response reaches the view as a 5h absence", async () => {
+			const account = polledAccount();
+			usageCache.setWithAgeForTests(
+				account.id,
+				{
+					five_hour: {
+						utilization: 10,
+						resets_at: new Date(fiveResetS * 1000).toISOString(),
+					},
+					seven_day: {
+						utilization: 20,
+						resets_at: new Date(weekResetS * 1000).toISOString(),
+					},
+				},
+				1_000,
+			);
+			await forwardWithEpoch(
+				account,
+				usageCache.usageHeaderEpoch(account.id),
+				claimsResponse(weekly),
+			);
+			expect(viewOf(account.id)).toEqual({ fiveHour: null, source: "header" });
+		});
+
+		it("a lone 5h-utilization line beside 7d claims is presence without a reading", async () => {
+			const account = ultraAccount();
+			const epoch = usageCache.usageHeaderEpoch(account.id);
+			await forwardWithEpoch(account, epoch, claimsResponse(weekly));
+			expect(viewOf(account.id)).toEqual({ fiveHour: null, source: "merged" });
+
+			await forwardWithEpoch(
+				account,
+				epoch,
+				claimsResponse({
+					...weekly,
+					"anthropic-ratelimit-unified-5h-utilization": "0.45",
+				}),
+			);
+			expect(viewOf(account.id)).toEqual({
+				fiveHour: "missing",
+				source: "poll",
+			});
+		});
+
+		it("a lone 5h-utilization line with nothing else still reaches the cache", async () => {
+			const account = ultraAccount();
+			await forwardWithEpoch(
+				account,
+				usageCache.usageHeaderEpoch(account.id),
+				claimsResponse({
+					"anthropic-ratelimit-unified-5h-utilization": "0.45",
+				}),
+			);
+			expect(viewOf(account.id)).toEqual({
+				fiveHour: "missing",
+				source: "poll",
+			});
+		});
+
+		it("shape-only evidence ages out with the view's horizon", async () => {
+			const account = polledAccount();
+			const realNow = Date.now();
+			const clock = spyOn(Date, "now").mockReturnValue(realNow - 10 * 60_000);
+			try {
+				await forwardWithEpoch(
+					account,
+					usageCache.usageHeaderEpoch(account.id),
+					claimsResponse(weekly),
+				);
+			} finally {
+				clock.mockRestore();
+			}
+			// A poll that names no 5h window either way, so only the header decides.
+			usageCache.set(account.id, {
+				seven_day: {
+					utilization: 20,
+					resets_at: new Date(weekResetS * 1000).toISOString(),
+				},
+			} as never);
+			expect(viewOf(account.id, 15 * 60_000).fiveHour).toBeNull();
+			expect(viewOf(account.id, 5 * 60_000)).toEqual({
+				fiveHour: "missing",
+				source: "poll",
+			});
+		});
 	});
 
 	function polledAccountRestart(id: string): void {

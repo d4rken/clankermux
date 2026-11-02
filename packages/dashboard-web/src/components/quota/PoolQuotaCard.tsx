@@ -133,9 +133,13 @@ export function PoolQuotaCard({
 	// one-account card, how many accounts across every class will run out.
 	const { willRunOut, capacity, spent } = willRunOutCount(scoped, "seven_day");
 
+	// An account with no short window at all is outside this average rather
+	// than an unread member of it.
 	const shortWindowRemaining = average(
 		summary
-			? summary.accounts.map((account) => account.shortWindowRemainingPct)
+			? summary.accounts
+					.filter((account) => account.shortWindow !== null)
+					.map((account) => account.shortWindowRemainingPct)
 			: (shortWindow?.pool.accounts ?? []).map((bar) =>
 					bar.pct === null ? null : 100 - bar.pct,
 				),

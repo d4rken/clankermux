@@ -8,6 +8,7 @@ import type {
 import {
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
+	reportsNoSessionWindow,
 } from "./usage-normalizer";
 
 /**
@@ -20,10 +21,11 @@ import {
  * `dashboard-web`, so they live here: everything they need is
  * `@clankermux/types` plus core's own Anthropic usage normalizer.
  *
- * Both extractors return `null` when the payload is a shape they do not
- * recognise (the caller decides whether that is "unmetered" or "unreadable"),
- * and `{ pct: null }` when the shape IS recognised but carries no percentage.
- * Those two are deliberately different answers.
+ * Both extractors return `null` when the payload has no such window or is a
+ * shape they do not recognise (the caller decides whether that is "unmetered"
+ * or "unreadable"; {@link fiveHourKnownAbsent} separates out the 5-hour "no
+ * such window" case), and `{ pct: null }` when the shape IS recognised but
+ * carries no percentage. Those are deliberately different answers.
  */
 
 /**
@@ -155,6 +157,23 @@ export interface ExtractedValue {
 	resetMs: number | null;
 }
 
+/**
+ * True when the payload states this account HAS no 5-hour window (Anthropic
+ * verified Ultra, Codex): see {@link reportsNoSessionWindow}.
+ *
+ * The one way to ask this. {@link extractFiveHour} returning null is not the
+ * same answer, because null also means "a shape this extractor does not
+ * recognise".
+ */
+export function fiveHourKnownAbsent(
+	usageData: FullUsageData | null | undefined,
+): boolean {
+	return (
+		isAnthropicStyleShape(usageData) &&
+		reportsNoSessionWindow(usageData as AnthropicUsageData)
+	);
+}
+
 export function extractFiveHour(
 	usageData: FullUsageData,
 ): ExtractedValue | null {
@@ -189,6 +208,7 @@ export function extractFiveHour(
 			resetMs: normalizeResetMs(tokens.resetAt ?? null),
 		};
 	}
+	if (fiveHourKnownAbsent(usageData)) return null;
 	if (isAnthropicStyleShape(usageData)) {
 		// Read the session (5h) window via the normalizer so a `limits[]`-only
 		// payload resolves too. For a flat payload this reads the same

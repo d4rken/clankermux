@@ -85,6 +85,7 @@ describe("computePoolUsage", () => {
 		expect(result.contributing).toEqual([]);
 		expect(result.excluded).toEqual([]);
 		expect(result.fallback).toEqual([]);
+		expect(result.notApplicable).toEqual([]);
 		expect(result.earliestResetMs).toBeNull();
 		expect(result.earliestResetAccountName).toBeNull();
 	});
@@ -290,6 +291,102 @@ describe("computePoolUsage", () => {
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.fallback.map((f) => f.accountId)).toEqual(["acc-8", "acc-9"]);
+	});
+
+	describe("an account with no 5-hour window", () => {
+		const weeklyOnly = (pct: number) =>
+			({
+				five_hour: null,
+				seven_day: {
+					utilization: pct,
+					resets_at: new Date(NOW + 3 * 86_400_000).toISOString(),
+				},
+				limits: [
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: pct,
+						resets_at: new Date(NOW + 3 * 86_400_000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+				],
+			}) as never;
+
+		it("is not applicable on the 5h window, and still reads on the weekly one", () => {
+			const accounts = [
+				mkAccount({ name: "ultra", usageData: weeklyOnly(40) }),
+				mkAccount({
+					name: "codex",
+					provider: "codex",
+					usageData: weeklyOnly(10),
+				}),
+			];
+
+			const five = computePoolUsage(accounts, "five_hour", NOW);
+			expect(five.notApplicable).toEqual(["ultra", "codex"]);
+			expect(five.fallback).toEqual([]);
+			expect(five.classes).toEqual([]);
+			expect(five.excluded).toEqual([]);
+
+			const seven = computePoolUsage(accounts, "seven_day", NOW);
+			expect(seven.notApplicable).toEqual([]);
+			expect(seven.contributing.map((c) => c.accountId)).toEqual([
+				"ultra",
+				"codex",
+			]);
+		});
+
+		it("is not applicable on the 5h window even while paused or cooling", () => {
+			// A paused or cooling account with no 5h window has no 5h bar of any kind.
+			const accounts = [
+				mkAccount({ name: "paused", paused: true, usageData: weeklyOnly(40) }),
+				mkAccount({
+					name: "cooling",
+					rateLimitedUntil: NOW + 60_000,
+					usageData: weeklyOnly(40),
+				}),
+				mkAccount({
+					name: "max",
+					usageData: {
+						five_hour: {
+							utilization: 30,
+							resets_at: new Date(NOW + 3_600_000).toISOString(),
+						},
+						seven_day: { utilization: 10, resets_at: null },
+					} as never,
+				}),
+			];
+
+			const five = computePoolUsage(accounts, "five_hour", NOW);
+			expect(five.notApplicable).toEqual(["paused", "cooling"]);
+			expect(five.classes).toHaveLength(1);
+			expect(five.classes[0].accounts.map((bar) => bar.accountId)).toEqual([
+				"max",
+			]);
+			expect(five.classes[0].eligibleTotal).toBe(1);
+		});
+
+		it("keeps an unread or unrecognised 5h payload on today's path", () => {
+			const accounts = [
+				mkAccount({
+					name: "missing-key",
+					usageData: {
+						seven_day: { utilization: 10, resets_at: null },
+					} as never,
+				}),
+				mkAccount({ name: "no-data", usageData: null }),
+			];
+
+			const five = computePoolUsage(accounts, "five_hour", NOW);
+			expect(five.notApplicable).toEqual([]);
+			expect(
+				five.classes[0].accounts.map((bar) => [bar.accountId, bar.state]),
+			).toEqual([
+				["missing-key", "unknown"],
+				["no-data", "unknown"],
+			]);
+		});
 	});
 
 	it("claude-console-api goes to fallback for both pools", () => {

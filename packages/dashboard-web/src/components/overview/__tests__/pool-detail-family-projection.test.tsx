@@ -12,6 +12,7 @@ function emptyPool(familyWeekly: FamilyWeeklyUsage[]): PoolUsageResult {
 		exhausted: [],
 		excluded: [],
 		fallback: [],
+		notApplicable: [],
 		earliestResetMs: NOW + 3 * DAY,
 		earliestResetAccountName: "alpha",
 		atRisk: [],

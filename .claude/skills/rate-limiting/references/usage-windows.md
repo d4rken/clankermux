@@ -4,7 +4,7 @@
 
 | Window | Meaning | Notes |
 |---|---|---|
-| `five_hour` | rolling 5h session | nullable: `null` = absent (Codex retired it), `{0,…}` = live at 0% |
+| `five_hour` | rolling 5h session | nullable: `null` = absent (Codex since 2026-07-12; Anthropic verified Ultra, ex-Max 20x, since 2026-10-30; unverified Ultra and Max 5x keep it), `{0,…}` = live at 0%, missing key = unknown |
 | `seven_day` / `limits[weekly_all]` | **account-wide** weekly | the flat form wins when both exist |
 | `seven_day_oauth_apps` | Claude Code's own weekly | NOT captured by the normalizer's `weeklyAll`; read separately |
 | `limits[weekly_scoped]` | per model **family** | family gate + display only; never account-wide |

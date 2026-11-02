@@ -249,4 +249,61 @@ describe("short-window evidence", () => {
 		expect(row.accounts[0].status).toBe("Available");
 		expect(row.availableCount).toBe(1);
 	});
+
+	const ultra = (id: string, weeklyPct: number): AccountResponse =>
+		account(id, weeklyPct, {
+			usageData: {
+				five_hour: null,
+				seven_day: {
+					utilization: weeklyPct,
+					resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+				},
+				limits: [],
+			},
+		} as Partial<AccountResponse>);
+
+	it("gives a mixed Max/Ultra row a 5h window only on the Max account", () => {
+		const max = account("Max-1", 20, {
+			usageData: {
+				five_hour: {
+					utilization: 100,
+					resets_at: new Date(NOW + HOUR).toISOString(),
+				},
+				seven_day: {
+					utilization: 20,
+					resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+				},
+			},
+		} as Partial<AccountResponse>);
+		const [row] = buildQuotaSummary([max, ultra("Ultra-1", 30)], NOW);
+
+		expect(row.shortWindow).toBe("five_hour");
+		const byId = new Map(row.accounts.map((a) => [a.id, a]));
+		expect(byId.get("Max-1")?.shortWindow).toBe("five_hour");
+		expect(byId.get("Max-1")?.status).toBe("5h limit reached");
+		expect(byId.get("Ultra-1")?.shortWindow).toBeNull();
+		expect(byId.get("Ultra-1")?.shortWindowRemainingPct).toBeNull();
+		expect(byId.get("Ultra-1")?.shortWindowResetMs).toBeNull();
+		expect(byId.get("Ultra-1")?.status).toBe("Available");
+	});
+
+	it("drops the 5h window from a row whose every account has none", () => {
+		const [row] = buildQuotaSummary(
+			[ultra("Ultra-1", 30), ultra("Ultra-2", 50)],
+			NOW,
+		);
+		expect(row.shortWindow).toBeNull();
+		expect(row.accounts.every((a) => a.shortWindow === null)).toBe(true);
+	});
+
+	it("keeps the 5h window on an account that has no reading yet", () => {
+		const [row] = buildQuotaSummary(
+			[ultra("Ultra-1", 30), account("New-1", 0, { usageData: null })],
+			NOW,
+		);
+		expect(row.shortWindow).toBe("five_hour");
+		expect(row.accounts.find((a) => a.id === "New-1")?.shortWindow).toBe(
+			"five_hour",
+		);
+	});
 });

@@ -29,6 +29,12 @@ export interface ClassPacing {
 	unavailable: number;
 	/** Accounts with no 5-hour reading at all. Never counted as 0%. */
 	unknown: number;
+	/**
+	 * Accounts with NO 5-hour window (see `PoolUsageResult.notApplicable`) that
+	 * are reporting on the weekly window: they can serve, and no 5-hour limit
+	 * will ever hold them.
+	 */
+	unconstrained: number;
 	/** Earliest future reset among this class's waiting accounts. */
 	nextLiftMs: number | null;
 	nextLiftAccountName: string | null;
@@ -57,6 +63,8 @@ export interface FiveHourPacing {
 	nextLiftAccountName: string | null;
 	/** In `fiveHour.classes` order. */
 	classes: ClassPacing[];
+	/** Accounts in the pool with no 5-hour window at all. */
+	notApplicable: number;
 	outlook: Outlook;
 }
 
@@ -81,6 +89,16 @@ export function computeFiveHourPacing(
 			.map((e) => e.accountId),
 	);
 	const atRisk = new Set(fiveHour.atRisk.map((a) => a.accountId));
+	const notApplicable = new Set(fiveHour.notApplicable);
+	// Class membership comes from the weekly result: these accounts have no
+	// 5-hour bar to carry it.
+	const unconstrainedByClass = new Map<string, number>();
+	for (const pool of sevenDay.classes) {
+		const count = pool.accounts.filter(
+			(bar) => bar.state === "reporting" && notApplicable.has(bar.accountId),
+		).length;
+		unconstrainedByClass.set(pool.classId, count);
+	}
 
 	const classes: ClassPacing[] = fiveHour.classes.map((pool) => {
 		let room = 0;
@@ -88,6 +106,7 @@ export function computeFiveHourPacing(
 		let waiting = 0;
 		let unavailable = 0;
 		let unknown = 0;
+		const unconstrained = unconstrainedByClass.get(pool.classId) ?? 0;
 		let nextLiftMs: number | null = null;
 		let nextLiftAccountName: string | null = null;
 		let nextLiftAccountId: string | null = null;
@@ -129,10 +148,11 @@ export function computeFiveHourPacing(
 			waiting,
 			unavailable,
 			unknown,
+			unconstrained,
 			nextLiftMs,
 			nextLiftAccountName,
 			nextLiftAccountId,
-			noPath: room === 0 && waiting > 0,
+			noPath: room === 0 && unconstrained === 0 && waiting > 0,
 		};
 	});
 
@@ -153,13 +173,24 @@ export function computeFiveHourPacing(
 		nextLiftMs,
 		nextLiftAccountName,
 		classes,
+		notApplicable: notApplicable.size,
 		outlook: pacingOutlook(classes),
 	};
 }
 
 /**
+ * True when the pool has accounts the 5-hour rate limit could apply to and not
+ * one of them has the window. A pool with no 5-hour-eligible account at all is
+ * a different answer and returns false.
+ */
+export function hasNoFiveHourWindow(pacing: FiveHourPacing): boolean {
+	return pacing.classes.length === 0 && pacing.notApplicable > 0;
+}
+
+/**
  * True when this class yields NO 5-hour reading: nobody reporting, nobody held
- * by the limit, and at least one account nothing could be read from.
+ * by the limit, nobody serving without a 5-hour window, and at least one
+ * account nothing could be read from.
  *
  * `unavailable` is deliberately NOT part of this test. An excluded account —
  * paused, cooling down, token-expired — is classified before usage is even
@@ -168,13 +199,14 @@ export function computeFiveHourPacing(
  * about the class's 5-hour situation. Requiring `unavailable === 0` let a class
  * of one unread account plus one paused account pass as read, and a sibling
  * class with room then carried the whole panel to green.
- *
- * Codex accounts are the standing case rather than an edge one: they report no
- * 5-hour window at all, so any pool holding one has a permanently unread class
- * sitting beside fully-read ones.
  */
 export function classIsUnread(pacing: ClassPacing): boolean {
-	return pacing.room === 0 && pacing.waiting === 0 && pacing.unknown > 0;
+	return (
+		pacing.room === 0 &&
+		pacing.unconstrained === 0 &&
+		pacing.waiting === 0 &&
+		pacing.unknown > 0
+	);
 }
 
 /**
@@ -184,15 +216,15 @@ export function classIsUnread(pacing: ClassPacing): boolean {
  * serve it is the only state where waiting is the only option, so it outranks
  * everything. "Pacing" is the ordinary busy state: some capacity is deferred or
  * heading that way, and a sibling can still serve. The neutral "No reading"
- * comes before the reassuring "Clear" deliberately — no class with room and
- * nothing waiting means there is nothing to be clear ABOUT, and green would
- * dress an absent measurement as a healthy one.
+ * comes before the reassuring "Clear" deliberately — no class with room (or an
+ * account with no 5-hour window to be held on) and nothing waiting means there
+ * is nothing to be clear ABOUT, and green would dress an absent measurement as
+ * a healthy one.
  *
  * "Partial" applies that same rule PER CLASS, which is the granularity it was
  * missing. One class with room was enough to paint the chip green while a
  * sibling had no 5-hour reading whatsoever, so the reassurance covered accounts
- * that nothing had measured — and with a Codex account in the pool that is the
- * permanent state, not a transient one. It ranks below the pacing states and
+ * that nothing had measured. It ranks below the pacing states and
  * above "Clear", and stays NEUTRAL: an unread class is not evidence of trouble,
  * only the absence of evidence of health. Which class it is comes from the
  * rows beneath, which render "no 5h reading" off the same predicate.
@@ -204,7 +236,7 @@ function pacingOutlook(classes: ClassPacing[]): Outlook {
 	if (classes.some((c) => c.waiting > 0 || c.runningHot > 0)) {
 		return { label: "Pacing", tone: "warning" };
 	}
-	if (!classes.some((c) => c.room > 0)) {
+	if (!classes.some((c) => c.room > 0 || c.unconstrained > 0)) {
 		return { label: "No reading", tone: "neutral" };
 	}
 	if (classes.some(classIsUnread)) {

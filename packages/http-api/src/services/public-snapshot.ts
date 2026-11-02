@@ -6,6 +6,7 @@ import {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	isAccountAvailable,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
@@ -459,10 +460,11 @@ export function attachWindowForecasts(
  * MEASUREMENT and the PREDICTION for that window sit together in it.
  *
  * An account-wide window is emitted whenever the PROVIDER has it, with a null
- * utilization when it could not be read — so an absent `five_hour` entry means
- * "this provider has no 5-hour window", never "we could not read it". The
- * scoped entries are the opposite: they exist only when the provider reported
- * them, because nothing enumerates the families an account is entitled to.
+ * utilization when it could not be read, unless the account's own payload says
+ * it has none (verified Ultra). So an absent `five_hour` entry means "this
+ * account has no 5-hour window", never "we could not read it". The scoped
+ * entries are the opposite: they exist only when the provider reported them,
+ * because nothing enumerates the families an account is entitled to.
  */
 function buildWindows(
 	provider: string,
@@ -484,7 +486,7 @@ function buildWindows(
 	const normalized = normalizeAnthropicUsage(anthropic, now);
 	const windows: PublicWindowSnapshot[] = [];
 
-	if (hasFiveHourWindow(provider)) {
+	if (hasFiveHourWindow(provider) && !(usage && fiveHourKnownAbsent(usage))) {
 		windows.push({
 			kind: "five_hour",
 			scopeId: null,

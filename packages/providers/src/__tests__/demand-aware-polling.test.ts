@@ -785,18 +785,22 @@ describe("demand-aware cadence — header-fed accounts", () => {
 		const ids: string[] = [];
 		let fetchCalls = 0;
 		let fetchSpy: ReturnType<typeof spyOn>;
+		const usableFiveHour = {
+			utilization: 10,
+			resets_at: new Date(fiveReset).toISOString(),
+		};
+		// Null for a verified Ultra account, whose poll has no 5h window.
+		let pollFiveHour: object | null = usableFiveHour;
 
 		beforeEach(() => {
 			fetchCalls = 0;
+			pollFiveHour = usableFiveHour;
 			fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 				mockFetch(async () => {
 					fetchCalls++;
 					return new Response(
 						JSON.stringify({
-							five_hour: {
-								utilization: 10,
-								resets_at: new Date(fiveReset).toISOString(),
-							},
+							five_hour: pollFiveHour,
 							seven_day: {
 								utilization: 20,
 								resets_at: new Date(weekReset).toISOString(),
@@ -941,6 +945,77 @@ describe("demand-aware cadence — header-fed accounts", () => {
 			usageCache.noteActivity(id);
 			await wait(500);
 			expect(fetchCalls).toBeGreaterThan(1);
+		});
+
+		describe("an account without a 5h window", () => {
+			function feedWeekly(
+				id: string,
+				fiveHourShape: "absent" | "unknown",
+				observedAt = Date.now(),
+			): void {
+				usageCache.recordUsageHeaders(
+					id,
+					usageCache.usageHeaderEpoch(id),
+					[
+						{
+							claim: "7d",
+							status: "allowed",
+							utilization: 0.2,
+							resetMs: weekReset,
+							surpassedThreshold: null,
+						},
+					],
+					observedAt,
+					fiveHourShape,
+				);
+			}
+
+			it("fresh 7d-only headers keep the idle cadence", async () => {
+				pollFiveHour = null;
+				const id = start("ultra-fresh");
+				feedWeekly(id, "absent");
+				await wait(40);
+				expect(fetchCalls).toBe(1);
+				expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+
+				for (let i = 0; i < 4; i++) {
+					feedWeekly(id, "absent");
+					usageCache.noteActivity(id);
+					await wait(150);
+				}
+				expect(fetchCalls).toBe(1);
+				expect(schedule(id)).toMatchObject({ isIdle: true, headerFed: true });
+			});
+
+			it("a stale absence does not stand in for the 5h reading", async () => {
+				pollFiveHour = null;
+				const id = start("ultra-stale", 150_000);
+				feedWeekly(id, "absent", Date.now() - 200_000);
+				feedWeekly(id, "unknown");
+				await wait(40);
+				expect(schedule(id)?.headerFed).toBeUndefined();
+			});
+
+			it("7d-only headers of unknown shape do not count", async () => {
+				pollFiveHour = null;
+				const id = start("ultra-unknown");
+				feedWeekly(id, "unknown");
+				await wait(40);
+				expect(schedule(id)?.headerFed).toBeUndefined();
+			});
+
+			it("a newer poll whose 5h window came back unreadable is not header-fed", async () => {
+				pollFiveHour = { utilization: null, resets_at: null };
+				const id = start("ultra-returned");
+				feedWeekly(id, "absent");
+				await wait(40);
+				expect(fetchCalls).toBe(1);
+				expect(schedule(id)?.headerFed).toBeUndefined();
+
+				usageCache.noteActivity(id);
+				await wait(500);
+				expect(fetchCalls).toBeGreaterThan(1);
+			});
 		});
 	});
 });

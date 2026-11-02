@@ -1,4 +1,9 @@
-import type { ModelFamily, PoolWindow } from "@clankermux/core";
+import {
+	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
+	type ModelFamily,
+	type PoolWindow,
+} from "@clankermux/core";
 import type {
 	AccountResponse,
 	UsageHistoryResponse,
@@ -164,6 +169,24 @@ interface WindowChart {
 
 const EMPTY_MESSAGE =
 	"Collecting data — this graph fills in as snapshots accumulate. History starts at deploy; a full 7-day view needs about a week of uptime.";
+
+const NO_FIVE_HOUR_WINDOW_MESSAGE = "No 5-hour window on the current accounts.";
+
+/**
+ * True when there are accounts the 5-hour window could apply to and every one
+ * of their payloads says it has none. An account with no reading yet keeps this
+ * false: nothing has said its window is gone.
+ */
+function noAccountHasFiveHourWindow(accounts: AccountResponse[]): boolean {
+	const eligible = accounts.filter(
+		(account) =>
+			!account.disabled && FIVE_HOUR_ELIGIBLE_PROVIDERS.has(account.provider),
+	);
+	return (
+		eligible.length > 0 &&
+		eligible.every((account) => fiveHourKnownAbsent(account.usageData))
+	);
+}
 
 const FORECAST_DASH = "5 4";
 const POOL_KEY = "pool";
@@ -341,6 +364,7 @@ function WindowChartPanel({
 	range,
 	onRangeChange,
 	selectorLabel,
+	emptyMessage = EMPTY_MESSAGE,
 }: {
 	label: string;
 	history: WindowHistory | undefined;
@@ -354,6 +378,7 @@ function WindowChartPanel({
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
 	selectorLabel: string;
+	emptyMessage?: string;
 }) {
 	// Built per panel rather than in the parent: the family panels are rendered
 	// from a list, and a hook cannot be called in a loop outside a component.
@@ -391,7 +416,7 @@ function WindowChartPanel({
 					style={{ height: 300 }}
 				>
 					<p className="max-w-md text-center text-sm text-muted-foreground">
-						{EMPTY_MESSAGE}
+						{emptyMessage}
 					</p>
 				</div>
 			) : (
@@ -465,6 +490,11 @@ export function UsageSawtoothChart({
 					range={fiveHourState.range}
 					onRangeChange={fiveHourState.onRangeChange}
 					selectorLabel="5-hour graph time range"
+					emptyMessage={
+						noAccountHasFiveHourWindow(accounts)
+							? NO_FIVE_HOUR_WINDOW_MESSAGE
+							: EMPTY_MESSAGE
+					}
 				/>
 				<WindowChartPanel
 					label="7-day window"

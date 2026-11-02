@@ -2,6 +2,7 @@ import {
 	FAMILY_PRIORITY,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
+	reportsNoSessionWindow,
 } from "@clankermux/core";
 import type {
 	AccountPauseMarker,
@@ -58,8 +59,9 @@ export const BANKED_RESET_RECOVERY_WINDOW_MS = 60 * 60_000;
 
 /**
  * What a usage reading says about lifting an overage pause after a reset:
- * both the 5-hour and weekly windows known and below their limit (`lift`),
- * either at its limit (`exhausted`), or either missing (`unknown`).
+ * either account-wide window known and at its limit (`exhausted`), else the
+ * weekly window and the 5-hour one (unless the account has none) known and
+ * below their limits (`lift`), else `unknown`.
  */
 export function overagePauseVerdict(
 	usage: UsageData | null,
@@ -68,19 +70,19 @@ export function overagePauseVerdict(
 	| { kind: "lift" }
 	| { kind: "exhausted"; detail: string }
 	| { kind: "unknown" } {
-	const normalized = normalizeAnthropicUsage(
-		usage as unknown as AnthropicUsageData | null,
-		now,
-	);
-	if (!normalized.session || !normalized.weeklyAll) return { kind: "unknown" };
+	const data = usage as unknown as AnthropicUsageData | null;
+	const { session, weeklyAll } = normalizeAnthropicUsage(data, now);
 	if (
-		normalized.session.utilization >= 100 ||
-		normalized.weeklyAll.utilization >= 100
+		(session && session.utilization >= 100) ||
+		(weeklyAll && weeklyAll.utilization >= 100)
 	) {
 		return {
 			kind: "exhausted",
-			detail: `5h ${normalized.session.utilization}%, weekly ${normalized.weeklyAll.utilization}%`,
+			detail: `5h ${session ? `${session.utilization}%` : "n/a"}, weekly ${weeklyAll ? `${weeklyAll.utilization}%` : "n/a"}`,
 		};
+	}
+	if (!weeklyAll || (!session && !reportsNoSessionWindow(data))) {
+		return { kind: "unknown" };
 	}
 	return { kind: "lift" };
 }

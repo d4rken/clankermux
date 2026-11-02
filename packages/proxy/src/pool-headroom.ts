@@ -26,14 +26,16 @@
  *  - **Per-window presence, never `CapacitySignal`.** `sessionHeadroom` and
  *    `weeklyHeadroom` both report 100 when their window is ABSENT, which is
  *    indistinguishable from a window that is wide open. Taking a max over those
- *    would let an account with no window at all declare the pool empty-handedly
- *    unconstrained. `extractFiveHour`/`extractSevenDay` keep absence and zero
- *    distinct, which is the distinction this computation turns on.
+ *    would let an account we could not read declare the pool empty-handedly
+ *    unconstrained. `extractFiveHour`/`extractSevenDay` keep "no reading" and
+ *    zero distinct. The one absence that counts as room is the account's own
+ *    payload stating it has no 5h window (`fiveHourKnownAbsent`).
  */
 import {
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	fiveHourKnownAbsent,
 	type PooledWindowFigure,
 	type PoolHeadroomFigures,
 	parseStrictDecimal,
@@ -104,9 +106,13 @@ type MemberReading =
  *
  * Returns "unknown" rather than a value in every case where we lack positive
  * evidence — no cache entry, an entry too old to act on, a payload shape whose
- * window we cannot locate, a provider that reports no such window, or a codex
+ * window we cannot locate, a provider that has no such window, or a codex
  * account holding purchased credits (which let it serve past 100% while
  * reporting 100%, so its reading cannot bound anything).
+ *
+ * An account whose own fresh payload reports no 5h window (verified Ultra,
+ * codex) is the exception: it reads as an unused 5h window, because nothing
+ * there bounds it on that axis.
  */
 function readWindow(
 	account: Account,
@@ -124,6 +130,16 @@ function readWindow(
 	const axis = kind === "session" ? view.fiveHour : view.sevenDay;
 	if (nowMs - axis.freshAtMs > MAX_USAGE_AGE_MS) return "unknown";
 
+	// `AnyUsageData` is the cache's union and is wider than the extractors'
+	// input by one provider shape (MiniMax) they do not model. Both extractors
+	// dispatch on shape and return null for anything they cannot read, so an
+	// unmodelled payload lands on the "unknown" branch below rather than being
+	// misread — which is exactly what the widening cast has to guarantee.
+	const data = view.data as FullUsageData;
+	if (kind === "session" && fiveHourKnownAbsent(data)) {
+		return { pct: 0, resetMs: null };
+	}
+
 	const credits = (view.data as { codexCredits?: unknown }).codexCredits as
 		| { hasCredits?: boolean; unlimited?: boolean }
 		| null
@@ -132,12 +148,6 @@ function readWindow(
 		return "unbounded";
 	}
 
-	// `AnyUsageData` is the cache's union and is wider than the extractors'
-	// input by one provider shape (MiniMax) they do not model. Both extractors
-	// dispatch on shape and return null for anything they cannot read, so an
-	// unmodelled payload lands on the "unknown" branch below rather than being
-	// misread — which is exactly what the widening cast has to guarantee.
-	const data = view.data as FullUsageData;
 	const extracted =
 		kind === "session" ? extractFiveHour(data) : extractSevenDay(data);
 	if (extracted === null || extracted.pct === null) return "unknown";

@@ -16,6 +16,7 @@ import {
 	type UsageData,
 	usageCache,
 } from "../usage-fetcher";
+import { isUsageViewFresh } from "../usage-header-view";
 
 const HOUR = 3_600_000;
 const FIVE_RESET_S = () => Math.floor((Date.now() + 2 * HOUR) / 1000);
@@ -339,5 +340,200 @@ describe("UsageCache header store — lookups", () => {
 		register(id);
 		usageCache.set(id, pollReading(40, 30));
 		expect(fiveHourOf(id)).toBe(40);
+	});
+});
+
+describe("UsageCache header store — 5h claim shape", () => {
+	const weeklyOnly = () => [claims(0.5)[1]];
+	const fiveHourAxis = (id: string) =>
+		usageCache.peekUsageView(id, "anthropic", Date.now())?.fiveHour;
+	const fiveHourKey = (id: string, horizonMs?: number) => {
+		const data = usageCache.peekUsageView(
+			id,
+			"anthropic",
+			Date.now(),
+			horizonMs,
+		)?.data as UsageData | undefined;
+		return data && "five_hour" in data ? data.five_hour : "missing";
+	};
+
+	it("records an absence that came with no usable reading", () => {
+		const id = freshId("shape-only");
+		register(id);
+		usageCache.set(id, pollReading(40, 30));
+		const observedAt = Date.now() + 1;
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			[],
+			observedAt,
+			"absent",
+		);
+		expect(fiveHourKey(id)).toBeNull();
+		expect(fiveHourAxis(id)).toEqual({
+			source: "header",
+			observedAtMs: observedAt,
+			freshAtMs: observedAt,
+		});
+	});
+
+	it("records nothing for an unknown shape with no usable reading", () => {
+		const id = freshId("shape-unknown");
+		register(id);
+		usageCache.set(id, pollReading(40, 30));
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			[],
+			Date.now() + 1,
+			"unknown",
+		);
+		expect(fiveHourOf(id)).toBe(40);
+		expect(fiveHourAxis(id)?.source).toBe("poll");
+	});
+
+	it("ages the shape out with the view's horizon", () => {
+		const id = freshId("shape-horizon");
+		register(id);
+		// A poll that names no 5h window either way, so only the header decides.
+		usageCache.set(id, {
+			seven_day: pollReading(40, 30).seven_day,
+		} as unknown as UsageData);
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			weeklyOnly(),
+			Date.now() - 10 * 60_000,
+			"absent",
+		);
+		expect(fiveHourKey(id, 15 * 60_000)).toBeNull();
+		expect(fiveHourKey(id, 5 * 60_000)).toBe("missing");
+	});
+
+	it("rejects a late reading observed before a recorded absence", () => {
+		const id = freshId("shape-late");
+		register(id);
+		usageCache.set(id, pollReading(40, 30));
+		const epoch = usageCache.usageHeaderEpoch(id);
+		const now = Date.now() + 1;
+		usageCache.recordUsageHeaders(id, epoch, weeklyOnly(), now, "absent");
+		usageCache.recordUsageHeaders(
+			id,
+			epoch,
+			claims(0.5),
+			now - 1_000,
+			"present",
+		);
+		expect(fiveHourKey(id)).toBeNull();
+	});
+
+	it("delete() clears the shape and its absence watermark", () => {
+		const id = freshId("shape-delete");
+		register(id);
+		const now = Date.now();
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			weeklyOnly(),
+			now,
+			"absent",
+		);
+		usageCache.delete(id);
+		usageCache.set(id, pollReading(40, 30));
+		// Observed before the deleted absence, so the watermark would refuse it.
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			claims(0.5),
+			now - 1_000,
+			"present",
+		);
+		expect(fiveHourOf(id)).toBe(50);
+	});
+});
+
+describe("UsageCache header store — a poll's 5h absence", () => {
+	const ultraPoll = (): UsageData =>
+		({
+			five_hour: null,
+			seven_day: pollReading(40, 30).seven_day,
+		}) as unknown as UsageData;
+	const noFiveHourKey = (): UsageData =>
+		({ seven_day: pollReading(40, 30).seven_day }) as unknown as UsageData;
+	const fiveHourKey = (id: string) => {
+		const data = usageCache.peekUsageView(id, "anthropic", Date.now())?.data as
+			| UsageData
+			| undefined;
+		return data && "five_hour" in data ? data.five_hour : "missing";
+	};
+
+	it("drops a 5h header reading observed before the poll said the window is gone", () => {
+		const id = freshId("poll-absent");
+		register(id);
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			claims(0.5),
+			Date.now() - 1_000,
+			"present",
+		);
+		usageCache.set(id, ultraPoll());
+		usageCache.set(id, noFiveHourKey());
+		expect(fiveHourKey(id)).toBeNull();
+		expect(fiveHourOf(id)).toBeUndefined();
+	});
+
+	it("a malformed 5h presence after a poll's absence leaves no fresh 5h axis", () => {
+		const id = freshId("poll-absent-malformed");
+		register(id);
+		usageCache.set(id, ultraPoll());
+		// A lone `5h-utilization` line: presence, no usable reading.
+		usageCache.recordUsageHeaders(
+			id,
+			usageCache.usageHeaderEpoch(id),
+			[{ ...claims(0.5)[0], status: "", resetMs: null }],
+			Date.now() + 1,
+			"present",
+		);
+		usageCache.set(id, noFiveHourKey());
+		const now = Date.now() + 2;
+		const view = usageCache.peekUsageView(id, "anthropic", now);
+		expect(view).not.toBeNull();
+		expect(view && isUsageViewFresh(view, now, 180_000)).toBe(false);
+	});
+
+	it.each([
+		[
+			"a stopped poller",
+			(id: string) => {
+				register(id);
+				usageCache.stopPolling(id);
+				return id;
+			},
+		],
+		[
+			"a non-Anthropic poller",
+			(id: string) => {
+				usageCache.startPolling(
+					id,
+					async () => "token",
+					"zai",
+					90_000,
+					null,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					undefined,
+					{ initialDelayMs: 10 * HOUR },
+				);
+				return id;
+			},
+		],
+	] as const)("records no header absence for %s", (_label, setUp) => {
+		const id = setUp(freshId("poll-absent-unbound"));
+		usageCache.set(id, ultraPoll());
+		usageCache.set(id, noFiveHourKey());
+		expect(fiveHourKey(id)).toBe("missing");
 	});
 });

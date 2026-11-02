@@ -62,10 +62,48 @@ export interface UnifiedClaimReading {
 	resetMs: number | null;
 }
 
-/** The account-wide `5h`/`7d` pair, present only when BOTH assert headroom. */
+/**
+ * The account-wide claims, present only when every one the response carries
+ * asserts headroom. `fiveHour` is null when the response carries no 5h claim
+ * at all ({@link classifyFiveHourClaimShape} `absent`), never when it carries
+ * an unusable one.
+ */
 export interface AccountWideClaimHeadroom {
-	fiveHour: UnifiedClaimReading;
+	fiveHour: UnifiedClaimReading | null;
 	sevenDay: UnifiedClaimReading;
+}
+
+/**
+ * - `present`: any `anthropic-ratelimit-unified-5h-*` line, whatever its
+ *   suffix and however malformed. A partial claim is still a claim.
+ * - `absent`: no such line, beside a usable 7d claim (known status, strict
+ *   decimal utilization and reset).
+ * - `unknown`: neither, e.g. a burst 429 or a garbled weekly claim.
+ *
+ * Absence is read off one response, so this assumes Anthropic sends every
+ * claim it evaluated.
+ */
+export type FiveHourClaimShape = "present" | "absent" | "unknown";
+
+/** Whether this response carries the account-wide 5h claim. */
+export function classifyFiveHourClaimShape(
+	headers: Headers,
+): FiveHourClaimShape {
+	let present = false;
+	headers.forEach((_value, name) => {
+		if (name.startsWith("anthropic-ratelimit-unified-5h-")) present = true;
+	});
+	if (present) return "present";
+	const status = headers.get("anthropic-ratelimit-unified-7d-status");
+	const usableWeekly =
+		status !== null &&
+		(HEADROOM_STATUSES.has(status) || REJECTING_STATUSES.has(status)) &&
+		parseStrictDecimal(
+			headers.get("anthropic-ratelimit-unified-7d-utilization"),
+		) !== null &&
+		parseStrictDecimal(headers.get("anthropic-ratelimit-unified-7d-reset")) !==
+			null;
+	return usableWeekly ? "absent" : "unknown";
 }
 
 /**
@@ -82,33 +120,44 @@ export function hasAccountWideUnifiedRejection(headers: Headers): boolean {
 	return false;
 }
 
+/** One account-wide claim, if it asserts headroom; null otherwise. */
+function readHeadroomClaim(
+	headers: Headers,
+	win: "5h" | "7d",
+): UnifiedClaimReading | null {
+	const status = headers.get(`anthropic-ratelimit-unified-${win}-status`);
+	if (status === null || !HEADROOM_STATUSES.has(status)) return null;
+	const utilization = parseStrictDecimal(
+		headers.get(`anthropic-ratelimit-unified-${win}-utilization`),
+	);
+	if (utilization === null || utilization >= 1) return null;
+	const resetSec = parseStrictDecimal(
+		headers.get(`anthropic-ratelimit-unified-${win}-reset`),
+	);
+	return {
+		status,
+		utilization,
+		resetMs: resetSec !== null ? resetSec * 1000 : null,
+	};
+}
+
 /**
- * The account-wide `5h`/`7d` pair — non-null only when BOTH claims are
- * present, carry a whitelisted headroom status, AND parse to a strict-decimal
- * utilization < 1. Any contradiction, unknown value, or absence yields null:
- * missing evidence must read as "no headroom proven", never as headroom.
+ * The account-wide claims — non-null only when the 7d claim and, unless the
+ * response carries no 5h claim at all, the 5h claim each carry a whitelisted
+ * headroom status AND parse to a strict-decimal utilization < 1. Any
+ * contradiction, unknown value, or partial claim yields null: missing evidence
+ * must read as "no headroom proven", never as headroom.
  */
 export function getAccountWideClaimHeadroom(
 	headers: Headers,
 ): AccountWideClaimHeadroom | null {
-	const readings: UnifiedClaimReading[] = [];
-	for (const win of ["5h", "7d"]) {
-		const status = headers.get(`anthropic-ratelimit-unified-${win}-status`);
-		if (status === null || !HEADROOM_STATUSES.has(status)) return null;
-		const utilization = parseStrictDecimal(
-			headers.get(`anthropic-ratelimit-unified-${win}-utilization`),
-		);
-		if (utilization === null || utilization >= 1) return null;
-		const resetSec = parseStrictDecimal(
-			headers.get(`anthropic-ratelimit-unified-${win}-reset`),
-		);
-		readings.push({
-			status,
-			utilization,
-			resetMs: resetSec !== null ? resetSec * 1000 : null,
-		});
+	const sevenDay = readHeadroomClaim(headers, "7d");
+	if (sevenDay === null) return null;
+	if (classifyFiveHourClaimShape(headers) === "absent") {
+		return { fiveHour: null, sevenDay };
 	}
-	return { fiveHour: readings[0], sevenDay: readings[1] };
+	const fiveHour = readHeadroomClaim(headers, "5h");
+	return fiveHour === null ? null : { fiveHour, sevenDay };
 }
 
 /** A rejected scoped-window claim, with the soonest finite FUTURE reset among
