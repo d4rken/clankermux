@@ -19,6 +19,17 @@ import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 
 const log = new Logger("OpenAICompatibleProvider");
 
+/** True when the body carries an OpenAI `error` object with a nonempty string message. */
+function hasConvertibleError(data: unknown): boolean {
+	if (typeof data !== "object" || data === null) return false;
+	const error = (data as { error?: unknown }).error;
+	if (typeof error !== "object" || error === null || Array.isArray(error)) {
+		return false;
+	}
+	const message = (error as { message?: unknown }).message;
+	return typeof message === "string" && message.length > 0;
+}
+
 export class OpenAICompatibleProvider extends BaseProvider {
 	name = "openai-compatible";
 
@@ -180,6 +191,16 @@ export class OpenAICompatibleProvider extends BaseProvider {
 					markUpstreamReportedNoUsage(
 						response.headers.get("x-clankermux-request-id"),
 					);
+				}
+				// `{"code":11128,"msg":"…"}`, `{"detail":[…]}` or `{"error":"…"}`
+				// would otherwise become a generic "Invalid response format" or
+				// "An error occurred". A 200 still goes through the converter.
+				if (!response.ok && !hasConvertibleError(openaiData)) {
+					return new Response(rawBytes.byteLength > 0 ? rawBytes : null, {
+						status: response.status,
+						statusText: response.statusText,
+						headers: sanitizeHeaders(response.headers),
+					});
 				}
 				const anthropicData = convertOpenAIResponseToAnthropic(
 					openaiData,

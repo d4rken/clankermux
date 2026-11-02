@@ -305,6 +305,48 @@ describe("processResponse – JSON (application/json)", () => {
 		});
 	});
 
+	// Non-2xx bodies the converter cannot express without inventing a message.
+	// Each must reach the client byte-verbatim with its status.
+	for (const [label, status, raw] of [
+		["flat {code,msg}", 400, '{"code":11128,"msg":"request rejected"}'],
+		["{detail} list", 422, '{"detail":[{"loc":["body","model"],"msg":"bad"}]}'],
+		["{message} only", 403, '{"message":"key disabled"}'],
+		["string error", 500, '{"error":"upstream exploded"}'],
+		["empty error object", 400, '{"error":{}}'],
+		["non-string error message", 400, '{"error":{"message":{"text":"x"}}}'],
+		["empty error message", 400, '{"error":{"message":""}}'],
+	] as const) {
+		it(`non-2xx ${label} is forwarded byte-verbatim instead of masked`, async () => {
+			const provider = makeProvider();
+			const upstream = new Response(raw, {
+				status,
+				headers: {
+					"content-type": "application/json",
+					"openai-organization": "org-abc",
+				},
+			});
+
+			const result = await provider.processResponse(upstream, makeAccount());
+			expect(result.status).toBe(status);
+			expect(await result.text()).toBe(raw);
+			expect(result.headers.get("openai-organization")).toBeNull();
+		});
+	}
+
+	it("non-2xx passthrough keeps the exact bytes, BOM included", async () => {
+		const provider = makeProvider();
+		const json = new TextEncoder().encode('{"msg":"rejected"}');
+		const raw = new Uint8Array([0xef, 0xbb, 0xbf, ...json]);
+		const upstream = new Response(raw, {
+			status: 400,
+			headers: { "content-type": "application/json" },
+		});
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		expect(result.status).toBe(400);
+		expect(new Uint8Array(await result.arrayBuffer())).toEqual(raw);
+	});
+
 	it("provider-specific headers are stripped from JSON response", async () => {
 		const provider = makeProvider();
 		const upstream = openaiJsonResponse(
