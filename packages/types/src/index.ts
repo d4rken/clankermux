@@ -1,6 +1,7 @@
 // Re-export all types organized by domain
 export * from "./account";
 export * from "./account-tier-history";
+export * from "./anthropic-tools";
 // Keep existing exports for backward compatibility
 export * from "./api";
 export * from "./api-key";
