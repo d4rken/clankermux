@@ -164,7 +164,10 @@ export interface TransformStreamContext {
 	sawUsage?: boolean;
 	/** From `x-clankermux-request-id`, for reporting the line above. */
 	requestId?: string | null;
-	/** The last `choices[0].finish_reason` upstream sent. */
+	/**
+	 * The last nonempty `choices[0].finish_reason` upstream sent. Some senders
+	 * put `""` on every chunk to mean "still generating".
+	 */
 	finishReason?: string;
 	buffer: string;
 	hasStarted: boolean;
