@@ -15,7 +15,6 @@ export function resolveDbPath(): string {
 	// Always use the same database path for consistency.
 	// For development/testing, specify a different database using:
 	// - Environment variable: CLANKERMUX_DB_PATH=/path/to/dev.db
-	// - Command line flag: --db-path /path/to/dev.db
 	// - .env file: CLANKERMUX_DB_PATH=/path/to/dev.db
 	return join(configDir, "clankermux.db");
 }
