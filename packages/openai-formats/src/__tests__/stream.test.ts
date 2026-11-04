@@ -891,6 +891,44 @@ describe("transformStreamingResponse — flush path (no [DONE])", () => {
 		expect(parseData(events[2] ?? {}).delta.stop_reason).toBe("end_turn");
 	});
 
+	it("closes the text block when a malformed tool call opened no block of its own", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [{ index: 0, function: { arguments: "{}" } }],
+						},
+						finish_reason: null,
+					},
+				],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			}),
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		const types = events.map((e) => e.event);
+		expect(types.slice(-3)).toEqual([
+			"content_block_stop",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(parseData(events.at(-3) ?? {}).index).toBe(0);
+	});
+
 	for (const finishReason of [null, ""])
 		it(`leaves a reply with no content unfinished when finish_reason is ${JSON.stringify(finishReason)}`, async () => {
 			const upstream = makeOpenAIStream([

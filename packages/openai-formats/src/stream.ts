@@ -707,11 +707,12 @@ export function transformStreamingResponse(response: Response): Response {
 						lengthStop,
 					);
 				} else if (context.hasSentStart && context.finishReason) {
-					// Only a finish_reason says an empty reply is over. Without one,
-					// a role-only chunk followed by EOF is a dropped connection and
-					// stays unfinished, so it is classified as truncated.
+					// Only a finish_reason says the reply is over. Without one, a
+					// role-only chunk followed by EOF is a dropped connection and
+					// stays unfinished. A text block is still open here only when a
+					// tool call delta lacked its id or name and so opened nothing.
 					log.warn(
-						"Stream terminated without [DONE] — no content block opened, finishing message",
+						"Stream terminated without [DONE] — no block left to close, finishing message",
 					);
 					emitStreamEnd(
 						controller,
@@ -719,7 +720,9 @@ export function transformStreamingResponse(response: Response): Response {
 						"end_turn",
 						context,
 						null,
-						null,
+						context.hasSentContentBlockStart && !context.textBlockClosed
+							? context.textBlockIndex
+							: null,
 						lengthStop,
 					);
 				}
