@@ -4110,6 +4110,43 @@ describe("CodexProvider Tranche 3 — tool_choice mapping", () => {
 		expect(body.parallel_tool_calls).toBeUndefined();
 	});
 
+	it("rejects an Anthropic server tool instead of sending it as an empty function", async () => {
+		const provider = new CodexProvider();
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "claude-opus-4-8",
+				max_tokens: 10,
+				messages: [{ role: "user", content: "Perform a web search" }],
+				tools: [
+					{ type: "web_search_20250305", name: "web_search", max_uses: 8 },
+				],
+			}),
+		});
+		await expect(provider.transformRequestBody(request)).rejects.toThrow(
+			'Tool type "web_search_20250305" is not supported on Codex accounts; only custom tools are',
+		);
+	});
+
+	it("translates a tool typed custom like an untyped one", async () => {
+		const body = await t3transform({
+			model: "claude-opus-4-8",
+			max_tokens: 10,
+			messages: [{ role: "user", content: "hi" }],
+			tools: [
+				{ type: "custom", name: "Read", input_schema: { type: "object" } },
+			],
+		});
+		expect(body.tools as unknown).toEqual([
+			{
+				type: "function",
+				name: "Read",
+				parameters: { type: "object" },
+			},
+		]);
+	});
+
 	it("rejects a named tool_choice absent from tools", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {

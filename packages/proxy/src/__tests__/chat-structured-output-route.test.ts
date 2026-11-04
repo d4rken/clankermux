@@ -221,3 +221,38 @@ describe("a schema too large for Claude Code's argument list", () => {
 		);
 	});
 });
+
+describe("a Messages request with an Anthropic-defined tool", () => {
+	const codexThenClaude = [
+		{ model: "gpt-5.6-sol", accountIds: [codex.id] },
+		{ model: "claude-sonnet-5", accountIds: [claude.id] },
+	];
+	const webSearch = (meta: RequestMeta) => {
+		meta.officialAnthropicVia = "direct";
+		meta.sdkBridgeRefusedField = null;
+		meta.serverToolType = "web_search_20250305";
+	};
+	it("skips the Codex stage for the Claude one", async () => {
+		const { ctx, meta } = setup(codexThenClaude, null);
+		webSearch(meta);
+		await initializeRequestRoute(meta, ctx, null);
+		const [codexStage, claudeStage] = getAliasRoutes(meta) ?? [];
+		expect(codexStage?.admissionError).toMatchObject({
+			statusCode: 400,
+			param: "tools",
+		});
+		expect(getResolvedRoute(meta)).toBe(claudeStage);
+	});
+	it("answers 400 naming the tool when only Codex would serve it", async () => {
+		const { ctx, meta } = setup(codexThenClaude.slice(0, 1), null);
+		webSearch(meta);
+		await expect(initializeRequestRoute(meta, ctx, null)).rejects.toMatchObject(
+			{
+				statusCode: 400,
+				code: "invalid_request_error",
+				param: "tools",
+				message: expect.stringContaining('"web_search_20250305"'),
+			},
+		);
+	});
+});

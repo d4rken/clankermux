@@ -1,5 +1,10 @@
+import { ValidationError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import type { Account } from "@clankermux/types";
+import {
+	type Account,
+	isAnthropicServerTool,
+	quotedToolType,
+} from "@clankermux/types";
 import { resolveReasoningEffort } from "./reasoning";
 import type {
 	AnthropicContent,
@@ -108,6 +113,13 @@ export function convertAnthropicRequestToOpenAI(
 		Array.isArray(anthropicData.tools) &&
 		anthropicData.tools.length > 0
 	) {
+		// Backstop: route construction keeps these requests away from
+		// OpenAI-compatible accounts (resolved-route.test.ts).
+		const serverTool = anthropicData.tools.find(isAnthropicServerTool);
+		if (serverTool)
+			throw new ValidationError(
+				`Tool type ${quotedToolType(serverTool.type)} is not supported on OpenAI-compatible accounts; only custom tools are`,
+			);
 		openaiRequest.tools = anthropicData.tools.map((tool) => ({
 			type: "function",
 			function: {

@@ -827,6 +827,156 @@ describe("transformStreamingResponse — flush path (no [DONE])", () => {
 		);
 		expect(jsonDelta).toBeDefined();
 	});
+
+	for (const [label, delta] of [
+		["text", { content: "Hel" }],
+		[
+			"a tool call",
+			{
+				tool_calls: [
+					{
+						index: 0,
+						id: "call_1",
+						type: "function",
+						function: { name: "read", arguments: '{"pa' },
+					},
+				],
+			},
+		],
+	] as const)
+		it(`ends ${label} that stopped for length with stop_reason max_tokens`, async () => {
+			const upstream = makeOpenAIStream([
+				JSON.stringify({
+					id: "c1",
+					model: "gpt-4",
+					choices: [{ index: 0, delta, finish_reason: null }],
+				}),
+				JSON.stringify({
+					id: "c1",
+					model: "gpt-4",
+					choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+				}),
+			]);
+			const events = parseSSEEvents(
+				await readStream(transformStreamingResponse(upstream).body),
+			);
+			const msgDelta = events.find((e) => e.event === "message_delta");
+			expect(parseData(msgDelta ?? {}).delta.stop_reason).toBe("max_tokens");
+		});
+
+	it("ends a finished reply with no content with message_delta and message_stop", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [
+					{ index: 0, delta: { role: "assistant" }, finish_reason: null },
+				],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+			}),
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		expect(events.map((e) => e.event)).toEqual([
+			"message_start",
+			"ping",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(parseData(events[2] ?? {}).delta.stop_reason).toBe("end_turn");
+	});
+
+	it("closes the text block when a malformed tool call opened no block of its own", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [{ index: 0, function: { arguments: "{}" } }],
+						},
+						finish_reason: null,
+					},
+				],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "glm-5",
+				choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			}),
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		const types = events.map((e) => e.event);
+		expect(types.slice(-3)).toEqual([
+			"content_block_stop",
+			"message_delta",
+			"message_stop",
+		]);
+		expect(parseData(events.at(-3) ?? {}).index).toBe(0);
+	});
+
+	for (const finishReason of [null, ""])
+		it(`leaves a reply with no content unfinished when finish_reason is ${JSON.stringify(finishReason)}`, async () => {
+			const upstream = makeOpenAIStream([
+				JSON.stringify({
+					id: "c1",
+					model: "glm-5",
+					choices: [
+						{
+							index: 0,
+							delta: { role: "assistant" },
+							finish_reason: finishReason,
+						},
+					],
+				}),
+			]);
+			const events = parseSSEEvents(
+				await readStream(transformStreamingResponse(upstream).body),
+			);
+			expect(events.map((e) => e.event)).toEqual(["message_start", "ping"]);
+		});
+});
+
+describe("transformStreamingResponse — empty finish_reason", () => {
+	it("keeps an earlier length stop when a later chunk sends an empty finish_reason", async () => {
+		const upstream = makeOpenAIStream([
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: { content: "Hel" }, finish_reason: "" }],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+			}),
+			JSON.stringify({
+				id: "c1",
+				model: "gpt-4",
+				choices: [{ index: 0, delta: {}, finish_reason: "" }],
+			}),
+			"[DONE]",
+		]);
+		const events = parseSSEEvents(
+			await readStream(transformStreamingResponse(upstream).body),
+		);
+		const msgDelta = events.find((e) => e.event === "message_delta");
+		expect(parseData(msgDelta ?? {}).delta.stop_reason).toBe("max_tokens");
+	});
 });
 
 // ── transformStreamingResponse — thinking/reasoning blocks ───────────────────

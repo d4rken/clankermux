@@ -122,6 +122,30 @@ describe("Devin provider", () => {
 		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("400");
 		expect(await result.text()).toContain("forced tool selection");
 	});
+	it("rejects an Anthropic-defined tool even when it carries an input_schema", async () => {
+		const provider = new DevinProvider(new Client());
+		const result = await provider.transformRequestBody(
+			new Request(provider.buildUrl("/v1/messages", "", account), {
+				method: "POST",
+				body: JSON.stringify({
+					model: "swe-2-high",
+					messages: [{ role: "user", content: "Search" }],
+					tools: [
+						{
+							type: "web_search_20250305",
+							name: "web_search",
+							input_schema: { type: "object" },
+						},
+					],
+				}),
+			}),
+			account,
+		);
+		expect(result.headers.get("x-clankermux-synthetic-status")).toBe("400");
+		expect(await result.text()).toContain(
+			'Tool type \\"web_search_20250305\\" is not supported on Devin accounts',
+		);
+	});
 	it("isolates identical conversations and uses verified tool-choice encoding", async () => {
 		const provider = new DevinProvider(new Client());
 		const build = async (choice: object) => {

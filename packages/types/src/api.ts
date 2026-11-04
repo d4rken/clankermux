@@ -147,6 +147,12 @@ export interface RequestMeta {
 	 */
 	sdkBridgeRefusedField?: SdkBridgeRefusedField | null;
 	/**
+	 * The first Anthropic-defined tool type of a Messages turn (POST
+	 * /v1/messages), or null. Route construction leaves out providers that
+	 * cannot carry one.
+	 */
+	serverToolType?: string | null;
+	/**
 	 * The SDK bridge turn this request is an inner model call of. Set only from
 	 * the in-process inner context, never from a header.
 	 */

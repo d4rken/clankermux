@@ -295,6 +295,7 @@ export async function initializeRequestRoute(
 		officialAnthropicExclusion,
 		bridgesOfficialAnthropic,
 		sdkBridgeRefusal: meta.sdkBridgeRefusedField ?? null,
+		serverToolType: meta.serverToolType ?? null,
 		sdkBridgeVersionFloor:
 			bridgesOfficialAnthropic && bridge
 				? (upstreamModel: string) => bridge.versionFloor(upstreamModel)
@@ -584,6 +585,7 @@ async function initializeSdkBridgeInnerRoute(
 		pin: null,
 		headerAccountId: null,
 		officialAnthropicExclusion: null,
+		serverToolType: meta.serverToolType ?? null,
 	};
 	const pool = (await ctx.dbOps.getAllAccounts()).filter((a) => {
 		const candidate = byId.get(a.id);

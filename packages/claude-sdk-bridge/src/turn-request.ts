@@ -3,6 +3,8 @@ import type {
 	JsonSchemaOutputFormat,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
+	isAnthropicServerTool,
+	quotedToolType,
 	type SdkBridgeTranslationGaps,
 	sdkBridgeRefusedField,
 } from "@clankermux/types";
@@ -123,12 +125,11 @@ function parseTools(
 	let schemaBytes = 0;
 	for (const raw of value) {
 		if (!isRecord(raw)) return bridgeErrors.invalid("tools[] must be objects");
-		// Server tools (web search, code execution, bash, editor, computer use)
-		// run on Anthropic's side or in Claude Code; the client cannot execute
-		// them, so they have no place in a bridged turn.
-		if (raw.type !== undefined && raw.type !== "custom")
+		// Server tools run on Anthropic's side or in Claude Code; the client
+		// cannot execute them, so they have no place in a bridged turn.
+		if (isAnthropicServerTool(raw))
 			return bridgeErrors.invalid(
-				`Tool type "${String(raw.type)}" is not supported through the SDK bridge; only custom tools are`,
+				`Tool type ${quotedToolType(raw.type)} is not supported through the SDK bridge; only custom tools are`,
 			);
 		const name = raw.name;
 		if (typeof name !== "string" || !TOOL_NAME.test(name))

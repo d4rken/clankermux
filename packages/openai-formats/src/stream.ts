@@ -69,6 +69,15 @@ function emitToolCallJson(
 }
 
 /**
+ * A reply the output limit cut off says so, whatever block it was cut off in.
+ */
+function lengthStopReason(context: TransformStreamContext): string | undefined {
+	return context.finishReason === "length"
+		? mapOpenAIFinishReason(context.finishReason)
+		: undefined;
+}
+
+/**
  * Emit content_block_stop, message_delta, and message_stop events.
  * Shared between [DONE] handler and flush handler.
  *
@@ -256,12 +265,7 @@ export function transformStreamingResponse(response: Response): Response {
 
 						// Handle [DONE] marker
 						if (dataStr === "[DONE]") {
-							// A reply the output limit cut off says so, whatever block
-							// it was cut off in.
-							const lengthStop =
-								context.finishReason === "length"
-									? mapOpenAIFinishReason(context.finishReason)
-									: undefined;
+							const lengthStop = lengthStopReason(context);
 							if (context.encounteredToolCall) {
 								// Emit buffered JSON for all tool calls, then stop events.
 								// Use Anthropic block indices (from toolCallBlockIndices), not OpenAI tool_call indices.
@@ -342,7 +346,7 @@ export function transformStreamingResponse(response: Response): Response {
 							}
 
 							const finishReason = data.choices?.[0]?.finish_reason;
-							if (typeof finishReason === "string")
+							if (typeof finishReason === "string" && finishReason !== "")
 								context.finishReason = finishReason;
 
 							// Extract usage data if present (typically in last chunk before [DONE])
@@ -642,6 +646,7 @@ export function transformStreamingResponse(response: Response): Response {
 			flush(this: { context: TransformStreamContext | null }, controller) {
 				const context = this.context;
 				if (!context) return;
+				const lengthStop = lengthStopReason(context);
 
 				// Stream ended without [DONE] (e.g. timeout/truncation).
 				// Emit buffered JSON + stop events so the client gets a valid response.
@@ -665,6 +670,8 @@ export function transformStreamingResponse(response: Response): Response {
 						"tool_use",
 						context,
 						context.toolCallBlockIndices,
+						undefined,
+						lengthStop,
 					);
 				} else if (
 					context.hasSentContentBlockStart &&
@@ -683,6 +690,7 @@ export function transformStreamingResponse(response: Response): Response {
 						context,
 						null,
 						lastBlockIndex,
+						lengthStop,
 					);
 				} else if (context.hasSentThinkingBlockStart) {
 					log.warn(
@@ -696,6 +704,26 @@ export function transformStreamingResponse(response: Response): Response {
 						context,
 						null,
 						context.thinkingBlockIndex,
+						lengthStop,
+					);
+				} else if (context.hasSentStart && context.finishReason) {
+					// Only a finish_reason says the reply is over. Without one, a
+					// role-only chunk followed by EOF is a dropped connection and
+					// stays unfinished. A text block is still open here only when a
+					// tool call delta lacked its id or name and so opened nothing.
+					log.warn(
+						"Stream terminated without [DONE] — no block left to close, finishing message",
+					);
+					emitStreamEnd(
+						controller,
+						encoder,
+						"end_turn",
+						context,
+						null,
+						context.hasSentContentBlockStart && !context.textBlockClosed
+							? context.textBlockIndex
+							: null,
+						lengthStop,
 					);
 				}
 

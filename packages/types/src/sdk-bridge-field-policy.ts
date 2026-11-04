@@ -1,3 +1,5 @@
+import { isAnthropicServerTool, quotedToolType } from "./anthropic-tools";
+
 /** A request field a turn served through the SDK bridge cannot honour. */
 export interface SdkBridgeRefusedField {
 	/** The field's Messages name. */
@@ -75,19 +77,12 @@ export function sdkBridgeRefusedField(
 			message: `tool_choice "${choice}" is not supported through the SDK bridge; Claude Code decides when to call tools`,
 		};
 	const serverTool = Array.isArray(tools)
-		? tools.find(
-				(tool): tool is Record<string, unknown> =>
-					!!tool &&
-					typeof tool === "object" &&
-					!Array.isArray(tool) &&
-					(tool as Record<string, unknown>).type !== undefined &&
-					(tool as Record<string, unknown>).type !== "custom",
-			)
+		? tools.find(isAnthropicServerTool)
 		: undefined;
 	if (serverTool)
 		return {
 			field: "tools",
-			message: `Tool type "${String(serverTool.type)}" is not supported through the SDK bridge; only custom tools are`,
+			message: `Tool type ${quotedToolType(serverTool.type)} is not supported through the SDK bridge; only custom tools are`,
 		};
 	const format =
 		outputConfig && typeof outputConfig === "object"

@@ -192,6 +192,7 @@ export {
 	weeklyRedEligible,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
+export { refusesMessagesServerTools } from "./messages-server-tools";
 export { isModelAliasId, validateModelAlias } from "./model-alias";
 export {
 	type BodyMeasurement,
