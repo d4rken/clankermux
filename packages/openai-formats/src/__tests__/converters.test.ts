@@ -421,6 +421,21 @@ describe("convertAnthropicRequestToOpenAI — messages conversion", () => {
 });
 
 describe("convertAnthropicRequestToOpenAI — tools", () => {
+	it("refuses an Anthropic-defined tool instead of sending an empty function", () => {
+		expect(() =>
+			convertAnthropicRequestToOpenAI(
+				anthropicRequest({
+					tools: [
+						{ name: "read", input_schema: { type: "object" } },
+						{ type: "web_search_20250305", name: "web_search" },
+					],
+				}),
+			),
+		).toThrow(
+			'Tool type "web_search_20250305" is not supported on OpenAI-compatible accounts; only custom tools are',
+		);
+	});
+
 	it("converts tools array to OpenAI function format", () => {
 		const result = convertAnthropicRequestToOpenAI(
 			anthropicRequest({

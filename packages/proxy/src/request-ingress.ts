@@ -8,6 +8,7 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	anthropicServerToolType,
 	defaultProjectRules,
 	getNativeResponsesRequestContext,
 	getSdkBridgeInnerRequestContext,
@@ -401,6 +402,10 @@ export async function ingestProxyRequest(
 		: null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
+	requestMeta.serverToolType =
+		req.method === "POST" && url.pathname === "/v1/messages"
+			? anthropicServerToolType(parsedBody)
+			: null;
 	// Cache-measurement capture: session identity (already derived by
 	// resolveProject) + the prefix digests, persisted with the request row.
 	requestMeta.sessionKey = resolved.sessionKey;

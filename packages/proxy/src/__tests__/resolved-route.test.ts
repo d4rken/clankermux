@@ -510,6 +510,69 @@ describe("server tools under the SDK bridge field policy", () => {
 	});
 });
 
+describe("server tools on providers that translate Messages tools", () => {
+	const open = {
+		rules: [],
+		pin: { accountId: null, providers: ["codex", "openrouter"] },
+		serverToolType: "web_search_20250305",
+	};
+
+	it("leave Codex out of a route with another candidate", () => {
+		expect(build(open).accountIds()).toEqual(["o"]);
+		expect(build({ ...open, serverToolType: null }).accountIds()).toEqual([
+			"c",
+			"o",
+		]);
+	});
+
+	it("keep a cooling forwarder in the route, so availability decides, not a 400", () => {
+		const cooling = {
+			...o,
+			rate_limited_until: Date.now() + 3_600_000,
+		} as Account;
+		expect(build({ ...open, accounts: [a, c, cooling] }).accountIds()).toEqual([
+			"o",
+		]);
+	});
+
+	it("raise a 400 naming the tool when Codex was all that was left", () => {
+		expect(() =>
+			build({ ...open, pin: { accountId: "c", providers: null } }),
+		).toThrow(
+			expect.objectContaining({
+				statusCode: 400,
+				code: "invalid_request_error",
+				param: "tools",
+				message: expect.stringContaining('"web_search_20250305"'),
+			}),
+		);
+	});
+
+	it("treat an empty tool type like any other", () => {
+		expect(() =>
+			build({
+				...open,
+				serverToolType: "",
+				pin: { accountId: "c", providers: null },
+			}),
+		).toThrow(expect.objectContaining({ statusCode: 400, param: "tools" }));
+	});
+
+	it("keep the bridge's own 400 when bridged accounts were left out too", () => {
+		const bridged = sdkBridgeRefusedField({
+			tools: [{ type: "web_search_20250305", name: "web_search" }],
+		});
+		expect(() =>
+			build({
+				...open,
+				pin: { accountId: null, providers: ["codex", "anthropic"] },
+				bridgesOfficialAnthropic: true,
+				sdkBridgeRefusal: bridged,
+			}),
+		).toThrow(bridged?.message);
+	});
+});
+
 describe("a [1m] id", () => {
 	const bare = {
 		completeness: "known-complete" as const,

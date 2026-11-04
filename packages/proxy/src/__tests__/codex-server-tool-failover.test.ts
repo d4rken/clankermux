@@ -4,14 +4,22 @@ import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 
 /**
- * Claude Code's WebSearch helper sends one Messages request whose only tool is
- * `web_search_20250305`. Codex cannot run it, so the attempt has to move on to
- * an account that can, without the Codex backend ever seeing the request.
+ * A Messages request carrying an Anthropic-defined tool, here
+ *
+ *   tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }]
+ *
+ * never reaches Codex: another account serves it, or the client gets a 400
+ * naming the tool when Codex was all that was left.
  */
 
 async function callHandleProxy(req: Request, ctx: ProxyContext) {
 	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, new URL(req.url), ctx, null, null, false);
+}
+
+async function attemptedProviders(ctx: ProxyContext) {
+	const { routingAttempts } = await import("./fixtures/routing-harness");
+	return routingAttempts(ctx).map((row) => row.provider);
 }
 
 function makeContext(accounts: Account[]): ProxyContext {
@@ -117,45 +125,82 @@ describe("Codex and Anthropic server tools", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("skips the Codex account without calling it and serves from the next one", async () => {
-		const codex = canonicalAccount({
-			id: crypto.randomUUID(),
-			name: "Codex",
-			provider: "codex",
-			api_key: null,
-			refresh_token: "rt-codex",
-			access_token: "at-codex",
-			expires_at: Date.now() + 3_600_000,
-			created_at: Date.now(),
-		});
-		const zai = canonicalAccount({
-			id: crypto.randomUUID(),
-			name: "Zai",
-			provider: "zai",
-			api_key: "zai-key",
-			refresh_token: "",
-			access_token: null,
-			expires_at: null,
-			created_at: Date.now(),
-		});
-		const ctx = makeContext([codex, zai]);
-		const req = new Request("https://proxy.local/v1/messages", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model: "claude-sonnet-4-5",
-				max_tokens: 16,
-				messages: [{ role: "user", content: "Perform a web search" }],
-				tools: [
-					{ type: "web_search_20250305", name: "web_search", max_uses: 8 },
-				],
-			}),
-		});
+	it("serves from another account without attempting Codex", async () => {
+		const ctx = makeContext([codexAccount(), zaiAccount()]);
 
-		const res = await callHandleProxy(req, ctx);
+		const res = await callHandleProxy(messagesRequest(), ctx);
 
 		expect(res.status).toBe(200);
 		expect(await res.json()).toEqual(ZAI_REPLY);
 		expect(upstreamHosts).toEqual(["api.z.ai"]);
+		expect(await attemptedProviders(ctx)).toEqual(["zai"]);
+	});
+
+	it("answers 400 naming the tool when Codex is the only candidate", async () => {
+		const ctx = makeContext([codexAccount()]);
+
+		const res = await callHandleProxy(messagesRequest(), ctx);
+
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as {
+			error: { type: string; param?: string; message: string };
+		};
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.param).toBe("tools");
+		expect(body.error.message).toContain('"web_search_20250305"');
+		expect(upstreamHosts).toEqual([]);
+	});
+
+	it("still counts tokens on Codex, which answers them locally", async () => {
+		const ctx = makeContext([codexAccount()]);
+
+		const res = await callHandleProxy(
+			messagesRequest("/v1/messages/count_tokens"),
+			ctx,
+		);
+
+		expect(res.status).toBe(200);
+		expect(upstreamHosts).toEqual([]);
 	});
 });
+
+const WEB_SEARCH_BODY = {
+	model: "claude-sonnet-4-5",
+	max_tokens: 16,
+	messages: [{ role: "user", content: "Perform a web search" }],
+	tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
+};
+
+function messagesRequest(path = "/v1/messages"): Request {
+	return new Request(`https://proxy.local${path}`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(WEB_SEARCH_BODY),
+	});
+}
+
+function codexAccount(): Account {
+	return canonicalAccount({
+		id: crypto.randomUUID(),
+		name: "Codex",
+		provider: "codex",
+		api_key: null,
+		refresh_token: "rt-codex",
+		access_token: "at-codex",
+		expires_at: Date.now() + 3_600_000,
+		created_at: Date.now(),
+	});
+}
+
+function zaiAccount(): Account {
+	return canonicalAccount({
+		id: crypto.randomUUID(),
+		name: "Zai",
+		provider: "zai",
+		api_key: "zai-key",
+		refresh_token: "",
+		access_token: null,
+		expires_at: null,
+		created_at: Date.now(),
+	});
+}

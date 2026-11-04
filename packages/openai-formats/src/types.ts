@@ -110,6 +110,8 @@ export interface AnthropicMessage {
 }
 
 export interface AnthropicTool {
+	/** Absent, null or "custom" for a client tool; see isAnthropicServerTool. */
+	type?: string | null;
 	name: string;
 	description?: string;
 	input_schema?: Record<string, unknown>;
@@ -165,8 +167,9 @@ export interface TransformStreamContext {
 	/** From `x-clankermux-request-id`, for reporting the line above. */
 	requestId?: string | null;
 	/**
-	 * The last nonempty `choices[0].finish_reason` upstream sent. Some senders
-	 * put `""` on every chunk to mean "still generating".
+	 * The last nonempty `choices[0].finish_reason` upstream sent. CodeBuddy
+	 * sends `""` on every chunk to mean "still generating" (reported upstream
+	 * in better-ccflare b9d68ce9, v3.6.0).
 	 */
 	finishReason?: string;
 	buffer: string;

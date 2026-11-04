@@ -18,6 +18,7 @@ import {
 	isAnthropicServerTool,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	quotedToolType,
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	REASONING_EFFORT_BACKEND_CLAMP,
 	REASONING_EFFORT_PROXY_DEFAULT,
@@ -1449,15 +1450,16 @@ export class CodexProvider extends BaseProvider {
 			}
 		}
 
-		// Convert tools. A server tool has no input_schema and runs on
-		// Anthropic's side, so as a function it would be one the model can call
-		// and nobody can answer. Refusing it fails the attempt over.
+		// Convert tools. An Anthropic-defined tool has no input_schema to send.
+		// Route construction already keeps such requests away from Codex
+		// (resolved-route.test.ts "server tools on providers that translate
+		// Messages tools"); this is the backstop.
 		let tools: CodexTool[] | undefined;
 		if (body.tools && body.tools.length > 0) {
 			const serverTool = body.tools.find(isAnthropicServerTool);
 			if (serverTool)
 				throw new ValidationError(
-					`Tool type "${String(serverTool.type)}" is not supported on Codex accounts; only custom tools are`,
+					`Tool type ${quotedToolType(serverTool.type)} is not supported on Codex accounts; only custom tools are`,
 				);
 			tools = body.tools.map((t) => ({
 				type: "function" as const,

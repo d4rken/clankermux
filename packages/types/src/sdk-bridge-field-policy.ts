@@ -1,4 +1,4 @@
-import { isAnthropicServerTool } from "./anthropic-tools";
+import { isAnthropicServerTool, quotedToolType } from "./anthropic-tools";
 
 /** A request field a turn served through the SDK bridge cannot honour. */
 export interface SdkBridgeRefusedField {
@@ -82,7 +82,7 @@ export function sdkBridgeRefusedField(
 	if (serverTool)
 		return {
 			field: "tools",
-			message: `Tool type "${String(serverTool.type)}" is not supported through the SDK bridge; only custom tools are`,
+			message: `Tool type ${quotedToolType(serverTool.type)} is not supported through the SDK bridge; only custom tools are`,
 		};
 	const format =
 		outputConfig && typeof outputConfig === "object"

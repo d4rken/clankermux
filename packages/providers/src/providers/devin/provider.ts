@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { isDevinSubscriptionLapse } from "@clankermux/core";
-import type { Account, DevinUsageData } from "@clankermux/types";
+import {
+	type Account,
+	type DevinUsageData,
+	isAnthropicServerTool,
+	quotedToolType,
+} from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import { localTokenCountUrl } from "../../local-token-count";
 import { buildSyntheticCountTokensRequest } from "../../synthetic-count-tokens";
@@ -364,6 +369,11 @@ export class DevinProvider extends BaseProvider {
 					? []
 					: (body.tools as unknown[]).map((raw) => {
 							const tool = record(raw);
+							if (isAnthropicServerTool(tool))
+								throw new DevinRpcError(
+									"invalid_argument",
+									`Tool type ${quotedToolType(tool.type)} is not supported on Devin accounts; only custom tools are`,
+								);
 							if (!tool.name || !tool.input_schema)
 								throw new DevinRpcError(
 									"invalid_argument",

@@ -4,6 +4,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
 	isAnthropicServerTool,
+	quotedToolType,
 	type SdkBridgeTranslationGaps,
 	sdkBridgeRefusedField,
 } from "@clankermux/types";
@@ -128,7 +129,7 @@ function parseTools(
 		// cannot execute them, so they have no place in a bridged turn.
 		if (isAnthropicServerTool(raw))
 			return bridgeErrors.invalid(
-				`Tool type "${String(raw.type)}" is not supported through the SDK bridge; only custom tools are`,
+				`Tool type ${quotedToolType(raw.type)} is not supported through the SDK bridge; only custom tools are`,
 			);
 		const name = raw.name;
 		if (typeof name !== "string" || !TOOL_NAME.test(name))
