@@ -646,9 +646,8 @@ describe("convertAnthropicRequestToOpenAI — multi-content tool results", () =>
 			}),
 		);
 		const toolMsg = result.messages.find((m) => m.role === "tool");
-		expect(toolMsg?.content).toContain("Here is the image:");
-		expect(toolMsg?.content).toContain(
-			"[image content not supported in OpenAI tool results]",
+		expect(toolMsg?.content).toBe(
+			"Here is the image:\n[image attached in the following message]",
 		);
 	});
 
@@ -678,11 +677,22 @@ describe("convertAnthropicRequestToOpenAI — multi-content tool results", () =>
 				],
 			}),
 		);
-		const toolMsg = result.messages.find((m) => m.role === "tool");
-		expect(toolMsg?.content).toBe(
-			"[image content not supported in OpenAI tool results]",
-		);
-		expect(toolMsg?.tool_call_id).toBe("tool_2");
+		expect(result.messages).toEqual([
+			{
+				role: "tool",
+				tool_call_id: "tool_2",
+				content: "[image attached in the following message]",
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "image_url",
+						image_url: { url: "data:image/jpeg;base64,xyz" },
+					},
+				],
+			},
+		]);
 	});
 });
 
