@@ -325,7 +325,8 @@ export type ProxyAttemptOutcome =
 	| { kind: "model_substituted"; served: string }
 	| { kind: "server_error"; status: number }
 	| { kind: "network_error"; beforeDispatch?: boolean }
-	| { kind: "invalid_request" }
+	/** The provider refused to translate the body; `message` is its ValidationError's. */
+	| { kind: "invalid_request"; message: string }
 	/**
 	 * The SDK bridge could not run a turn for this attempt (unavailable, or
 	 * shutting down since the route was built). Nothing reached the account.
@@ -3602,7 +3603,7 @@ export async function proxyWithAccount(
 			(err.statusCode === 401 || err.statusCode === 403)
 				? { kind: "auth" }
 				: err instanceof ValidationError
-					? { kind: "invalid_request" }
+					? { kind: "invalid_request", message: err.message }
 					: {
 							kind: "network_error",
 							...(!attemptAudit.id ? { beforeDispatch: true } : {}),

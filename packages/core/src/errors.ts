@@ -202,6 +202,18 @@ export class ModelNotServedError extends AppError {
 }
 
 /**
+ * Every attempted account's provider refused to translate the request body
+ * (a {@link ValidationError} from its request transform). Nothing reached
+ * upstream and the same body would be refused again, so this is a 400 with a
+ * client-facing message rather than a retryable 503.
+ */
+export class RequestUntranslatableError extends AppError {
+	constructor(message: string) {
+		super(message, "REQUEST_UNTRANSLATABLE", 400);
+	}
+}
+
+/**
  * Every candidate answered HTTP 200 as a different model than it was sent.
  *
  * 503 rather than the 400 {@link ModelNotServedError} carries, because nothing

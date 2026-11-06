@@ -5,6 +5,7 @@ import {
 	ModelNotServedError,
 	ModelSubstitutedError,
 	type RequestIngressEvt,
+	RequestUntranslatableError,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
@@ -690,7 +691,19 @@ async function handleIngestedProxy(
 	let substitutedAttempts = 0;
 	/** The substitute the last such attempt actually served, for the terminal. */
 	const substitutedServed = new Set<string>();
-	const noteAttemptOutcome = (outcome: ProxyAttemptOutcome): void => {
+	/** Attempts whose provider refused to translate the body, by account, and why. */
+	let untranslatableAttempts = 0;
+	const untranslatableAccountIds = new Set<string>();
+	const untranslatableReasons = new Set<string>();
+	const noteAttemptOutcome = (
+		outcome: ProxyAttemptOutcome,
+		account: Account,
+	): void => {
+		if (outcome.kind === "invalid_request") {
+			untranslatableAttempts++;
+			untranslatableAccountIds.add(account.id);
+			untranslatableReasons.add(outcome.message);
+		}
 		if (
 			outcome.kind === "model_not_entitled" ||
 			outcome.kind === "model_not_found"
@@ -964,7 +977,7 @@ async function handleIngestedProxy(
 									gates.everyRemainingCandidateUnattemptable(accounts, 0),
 								onOutcome: (o) => {
 									firstOutcome = o;
-									noteAttemptOutcome(o);
+									noteAttemptOutcome(o, heldAccount);
 									// The normal loop below skips the held account (attempted-id
 									// guard), so its suppression must be recorded here — and so
 									// must an ordinary failure, for the same reason. Without
@@ -1238,7 +1251,7 @@ async function handleIngestedProxy(
 							gates.everyRemainingCandidateUnattemptable(list, i),
 						codexHoldBudget,
 						onOutcome: (o) => {
-							noteAttemptOutcome(o);
+							noteAttemptOutcome(o, list[i]);
 							holds.noteOverloadSuppression(list[i], o);
 							// An ORDINARY failure — no overload verdict to wait on.
 							// Recorded so a hold entered later in THIS request does not
@@ -1414,6 +1427,25 @@ async function handleIngestedProxy(
 			failoverAttempts: upstreamAttempts,
 		});
 	};
+
+	// Every attempt stopped at its provider's request translator, so nothing
+	// reached upstream and the same body would be refused again. Every
+	// candidate must have been asked and refused: one dropped by an admission
+	// gate, or skipped (probe-suppressed, path-incompatible), might take this
+	// body as it is.
+	if (
+		upstreamAttempts > 0 &&
+		untranslatableAttempts === upstreamAttempts &&
+		accounts.length >= selectedAccounts.length &&
+		accounts.every((account) => untranslatableAccountIds.has(account.id))
+	) {
+		const message = `The request could not be translated for any attempted account (${upstreamAttempts}): ${[...untranslatableReasons].join("; ")}`;
+		await recordGiveUpTerminal("request_untranslatable", message, {
+			status: 400,
+			errorType: "invalid_request_error",
+		});
+		throw new RequestUntranslatableError(message);
+	}
 
 	// Every account we actually reached rejected the MODEL, not the load. That is
 	// a different diagnosis from an exhausted pool and must not be filed under
