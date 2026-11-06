@@ -206,6 +206,8 @@ export interface TransformStreamContext {
 export interface OpenAIStreamDelta {
 	content?: string;
 	reasoning_content?: string;
+	/** OpenRouter-shaped gateways' name for reasoning_content; see readReasoningText. */
+	reasoning?: unknown;
 	tool_calls?: Array<{
 		index: number;
 		id?: string;
@@ -227,6 +229,8 @@ export interface OpenAIResponse {
 			role?: string;
 			tool_calls?: OpenAIToolCall[];
 			reasoning_content?: string;
+			/** OpenRouter-shaped gateways' name for reasoning_content; see readReasoningText. */
+			reasoning?: unknown;
 		};
 		delta?: OpenAIStreamDelta;
 		finish_reason?: string;

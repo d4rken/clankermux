@@ -21,7 +21,11 @@ import type {
 	OpenAIUsage,
 } from "./types";
 import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
-import { mapOpenAIFinishReason, removeUriFormat } from "./utils";
+import {
+	mapOpenAIFinishReason,
+	readReasoningText,
+	removeUriFormat,
+} from "./utils";
 
 const log = new Logger("openai-formats/converters");
 
@@ -350,14 +354,10 @@ export function convertOpenAIResponseToAnthropic(
 	// Build content array with text and tool calls
 	const content: AnthropicContentBlock[] = [];
 
-	// Reasoning-capable openai-compatible providers (DashScope, DeepSeek)
-	// return reasoning_content on the message; thinking leads per Anthropic
-	// block ordering, matching the streaming path in stream.ts.
-	if (choice.message?.reasoning_content) {
-		content.push({
-			type: "thinking",
-			thinking: choice.message.reasoning_content,
-		});
+	// Thinking leads per Anthropic block ordering, matching stream.ts.
+	const reasoning = readReasoningText(choice.message);
+	if (reasoning) {
+		content.push({ type: "thinking", thinking: reasoning });
 	}
 
 	// Add text content if present

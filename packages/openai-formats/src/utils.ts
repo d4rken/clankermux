@@ -72,6 +72,26 @@ export function mapOpenAIFinishReason(openaiReason?: string): string {
 }
 
 /**
+ * The reasoning text of a chat-completions message or stream delta.
+ * DeepSeek and DashScope name it `reasoning_content`; OpenRouter-shaped
+ * gateways (kilo, openrouter, nanogpt) name it `reasoning`. When both are
+ * present `reasoning_content` wins, so a gateway that duplicates the text into
+ * both fields emits it once.
+ *
+ *   { reasoning_content: "a", reasoning: "a" } -> "a"
+ *   { reasoning: "b" }                         -> "b"
+ *   { reasoning: { effort: "high" } }          -> undefined
+ */
+export function readReasoningText(
+	source: { reasoning_content?: unknown; reasoning?: unknown } | undefined,
+): string | undefined {
+	for (const value of [source?.reasoning_content, source?.reasoning]) {
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
+}
+
+/**
  * Convert Anthropic API paths to OpenAI-compatible paths
  */
 export function convertAnthropicPathToOpenAI(anthropicPath: string): string {
