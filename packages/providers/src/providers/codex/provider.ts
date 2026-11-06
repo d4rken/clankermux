@@ -8,7 +8,11 @@ import {
 } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import { resolveReasoningEffort } from "@clankermux/openai-formats";
+import {
+	anthropicImageUrl,
+	documentRemovalMarker,
+	resolveReasoningEffort,
+} from "@clankermux/openai-formats";
 import {
 	type Account,
 	applyReasoningEffortAdaptation,
@@ -125,20 +129,6 @@ export const CODEX_PING_MODEL = "gpt-5.6-sol";
 // subsequent turn bloats context and destroys prompt-cache reuse.
 const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
 
-/**
- * Documents have no Responses item shape this backend is known to accept, so
- * they are announced instead of translated. The marker is what the model reads
- * in place of the attachment, so it says the removal happened rather than
- * leaving the turn looking as though nothing was attached.
- *
- *   media_type "application/pdf" →
- *     "[application/pdf document removed: not supported on this backend]"
- */
-const documentRemovalMarker = (mediaType: string | undefined) => {
-	const label = mediaType?.trim();
-	return `[${label ? `${label} ` : ""}document removed: not supported on this backend]`;
-};
-
 const _normalizeUsage = (value: unknown): Record<string, number | null> => {
 	const usage =
 		typeof value === "object" && value !== null
@@ -216,10 +206,12 @@ interface CodexFunctionCallItem {
 	status?: "in_progress" | "completed" | "incomplete";
 }
 
+type CodexToolOutput = string | (CodexInputTextItem | CodexInputImageItem)[];
+
 interface CodexFunctionCallOutputItem {
 	type: "function_call_output";
 	call_id: string;
-	output: string;
+	output: CodexToolOutput;
 	status?: "in_progress" | "completed" | "incomplete";
 }
 
@@ -1041,28 +1033,57 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	/**
-	 * Serialize an Anthropic tool_result `content` into the single output string
-	 * the Codex `function_call_output` item requires. Degrades non-text blocks
-	 * safely: image blocks become a marker, other structured blocks are JSON'd
-	 * (with an 8 KiB cap replacing oversized payloads), and malformed input
-	 * (missing/null/non-array content, null blocks) yields empty output instead of
-	 * throwing — a throw here is swallowed by transformRequestBody, which then
-	 * forwards the UNtranslated Anthropic body upstream.
+	 * Translate an Anthropic tool_result into a `function_call_output.output`.
+	 * Without images it is one string (blocks joined by newlines), with images
+	 * the input_text/input_image array Codex CLI itself sends:
+	 *
+	 *   [text "a", image] -> [{input_text "a"}, {input_image "data:…"}]
+	 *   [text "a", text "b"] -> "a\nb"
+	 *
+	 * Structured blocks are JSON'd (with an 8 KiB cap replacing oversized
+	 * payloads), and malformed input (missing/null/non-array content, null
+	 * blocks) yields empty output. An unusable image source throws
+	 * ValidationError, which transformRequestBody rethrows; any other throw is
+	 * swallowed there and the UNtranslated Anthropic body goes upstream.
 	 */
-	private serializeToolResultContent(
+	private toolResultOutput(block: AnthropicToolResult): CodexToolOutput {
+		const isError = block.is_error === true;
+		const items = this.toolResultItems(block.content);
+		if (!items.some((item) => item.type === "input_image")) {
+			const text = items
+				.map((item) => (item.type === "input_text" ? item.text : ""))
+				.join("\n");
+			return isError ? `[tool error] ${text}` : text;
+		}
+		return isError
+			? [{ type: "input_text", text: "[tool error]" }, ...items]
+			: items;
+	}
+
+	private toolResultItems(
 		content: AnthropicToolResult["content"],
-	): string {
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-		const parts: string[] = [];
+	): (CodexInputTextItem | CodexInputImageItem)[] {
+		if (typeof content === "string") {
+			return [{ type: "input_text", text: content }];
+		}
+		if (!Array.isArray(content)) return [];
+		const items: (CodexInputTextItem | CodexInputImageItem)[] = [];
+		const text = (value: string) => {
+			items.push({ type: "input_text", text: value });
+		};
 		for (const block of content) {
 			if (!block || typeof block !== "object") continue;
 			if (block.type === "text" && typeof block.text === "string") {
-				parts.push(block.text);
+				text(block.text);
 				continue;
 			}
 			if (block.type === "image") {
-				parts.push("[image content not supported in Codex tool results]");
+				items.push({
+					type: "input_image",
+					image_url: anthropicImageUrl(
+						(block as { source?: AnthropicAttachmentSource }).source,
+					),
+				});
 				continue;
 			}
 			let serialized: string;
@@ -1072,46 +1093,14 @@ export class CodexProvider extends BaseProvider {
 				continue;
 			}
 			if (serialized.length > CODEX_MAX_STRUCTURED_BLOCK_CHARS) {
-				parts.push(
+				text(
 					`[${String(block.type ?? "unknown")} content omitted: ${serialized.length} chars]`,
 				);
 				continue;
 			}
-			parts.push(serialized);
+			text(serialized);
 		}
-		return parts.join("\n");
-	}
-
-	/**
-	 * Build the `image_url` a Responses `input_image` item carries from an
-	 * Anthropic image source. Base64 sources become a data URL; url sources are
-	 * forwarded once their scheme is one the backend can fetch over the network.
-	 * A `file:` or `blob:` url would otherwise be handed to whatever host serves
-	 * the request. Anything else throws rather than degrading, because the two
-	 * ways to degrade are both worse than a stated error: dropping the block
-	 * makes the model answer as if no image was sent, and an empty item is a body
-	 * the backend rejects with a message that says nothing about the cause.
-	 */
-	private imageUrlFromSource(source: AnthropicAttachmentSource | undefined) {
-		if (source?.type === "base64") {
-			const mediaType = source.media_type?.trim();
-			const data = source.data;
-			if (mediaType && typeof data === "string" && data.length > 0) {
-				return `data:${mediaType};base64,${data}`;
-			}
-		}
-		if (source?.type === "url") {
-			const url = source.url?.trim();
-			if (url) {
-				if (url.startsWith("https://") || url.startsWith("http://")) return url;
-				throw new ValidationError(
-					`unsupported image source url scheme: ${url.split(":", 1)[0]}`,
-				);
-			}
-		}
-		throw new ValidationError(
-			`unsupported image source: ${String(source?.type ?? "missing")}`,
-		);
+		return items;
 	}
 
 	private convertMessage(
@@ -1163,7 +1152,7 @@ export class CodexProvider extends BaseProvider {
 				}
 				pendingContent.push({
 					type: "input_image",
-					image_url: this.imageUrlFromSource(block.source),
+					image_url: anthropicImageUrl(block.source),
 				});
 			} else if (block.type === "document") {
 				pendingContent.push({
@@ -1183,12 +1172,10 @@ export class CodexProvider extends BaseProvider {
 				});
 			} else if (block.type === "tool_result") {
 				flushContent();
-				const serialized = this.serializeToolResultContent(block.content);
 				items.push({
 					type: "function_call_output",
 					call_id: block.tool_use_id,
-					output:
-						block.is_error === true ? `[tool error] ${serialized}` : serialized,
+					output: this.toolResultOutput(block),
 					status: "completed",
 				});
 			}

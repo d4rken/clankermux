@@ -4202,18 +4202,71 @@ describe("CodexProvider Tranche 3 — tool_choice mapping", () => {
 });
 
 describe("CodexProvider Tranche 3 — tool_result serialization fidelity", () => {
-	it("renders image blocks as a bounded placeholder, not the base64 payload", async () => {
+	// The array is the shape Codex CLI itself sends for a screenshot-bearing
+	// tool result, so the image stays under its own call_id.
+	it("sends an image-bearing result as an input_text/input_image array", async () => {
 		const body = await t3transform(
 			t3taskTurn([
+				{ type: "text", text: "captured" },
 				{
 					type: "image",
 					source: { type: "base64", media_type: "image/png", data: "AAAA" },
 				},
+				{ type: "tool_reference", tool_name: "TaskCreate" },
 			]),
 		);
-		const out = t3outputs(body.input)[0]?.output as string;
-		expect(out).toBe("[image content not supported in Codex tool results]");
-		expect(out).not.toContain("AAAA");
+		expect(t3outputs(body.input)[0]?.output).toEqual([
+			{ type: "input_text", text: "captured" },
+			{ type: "input_image", image_url: "data:image/png;base64,AAAA" },
+			{
+				type: "input_text",
+				text: '{"type":"tool_reference","tool_name":"TaskCreate"}',
+			},
+		]);
+	});
+
+	it("sends an image-only result as a one-item array", async () => {
+		const body = await t3transform(
+			t3taskTurn([
+				{
+					type: "image",
+					source: { type: "url", url: "https://example.com/shot.png" },
+				},
+			]),
+		);
+		expect(t3outputs(body.input)[0]?.output).toEqual([
+			{ type: "input_image", image_url: "https://example.com/shot.png" },
+		]);
+	});
+
+	it("marks an errored image-bearing result with a leading input_text", async () => {
+		const body = await t3transform(
+			t3taskTurn(
+				[
+					{ type: "text", text: "boom" },
+					{
+						type: "image",
+						source: { type: "base64", media_type: "image/png", data: "AA" },
+					},
+				],
+				{ is_error: true },
+			),
+		);
+		expect(t3outputs(body.input)[0]?.output).toEqual([
+			{ type: "input_text", text: "[tool error]" },
+			{ type: "input_text", text: "boom" },
+			{ type: "input_image", image_url: "data:image/png;base64,AA" },
+		]);
+	});
+
+	it("rejects a tool_result image with an unusable source", async () => {
+		await expect(
+			t3transform(
+				t3taskTurn([
+					{ type: "image", source: { type: "url", url: "file:///x.png" } },
+				]),
+			),
+		).rejects.toThrow(/image source url scheme/i);
 	});
 
 	it("preserves small structured (non-text) blocks as JSON", async () => {
