@@ -63,6 +63,28 @@ describe("isImageInputRefusal", () => {
 			{ error: { message: "Image not supported: blocked by content policy" } },
 		],
 		[
+			"an unsupported format",
+			400,
+			{
+				error: {
+					message:
+						"Unsupported image format; only PNG and JPEG images are supported",
+				},
+			},
+		],
+		[
+			"an unsupported media type",
+			400,
+			{ error: { message: "image media_type image/heic is not supported" } },
+		],
+		[
+			"an unreachable image url",
+			400,
+			{
+				error: { message: "Image URL could not be downloaded: not supported" },
+			},
+		],
+		[
 			"a cache_control rejection",
 			400,
 			{ error: { message: "cache_control: Extra inputs are not permitted" } },

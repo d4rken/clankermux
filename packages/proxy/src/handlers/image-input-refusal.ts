@@ -84,6 +84,24 @@ const NON_CAPABILITY_PATTERNS = [
 	"too many",
 	"exceeded the maximum",
 	"cache_control",
+	// This image's format or location, not the model's capability. Stripping
+	// would hide an error the client can fix. ("url" alone would also catch
+	// DeepSeek's "unknown variant `image_url`".)
+	"format",
+	"mime",
+	"media type",
+	"media_type",
+	"image/",
+	"png",
+	"jpeg",
+	"jpg",
+	"webp",
+	"gif",
+	"download",
+	"fetch",
+	"retrieve",
+	"unreachable",
+	"invalid url",
 ] as const;
 
 function statesImageInputUnsupported(text: string): boolean {
