@@ -23,6 +23,7 @@ import {
 	selectAliasRoute,
 } from "./resolved-route";
 import { recordRouteRejection } from "./routing-dispatch";
+import { eligibleRouteAccounts } from "./routing-service";
 import {
 	sdkBridgeRefusalLabel,
 	sdkBridgeRefusalTerminal,
@@ -86,6 +87,9 @@ export function aliasFallbackReason(
 			return "claude_code_version_too_old";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";
+		// Another target may be a model or provider whose translator takes the body.
+		case "invalid_request":
+			return "request_untranslatable";
 		default:
 			return null;
 	}
@@ -163,6 +167,18 @@ export async function handleAliasProxy(
 		isAnthropicBurstThrottleActive();
 	let terminalStatus = 503;
 	let terminalMessage = "All alias targets are temporarily unavailable";
+	let terminalLabel: string | null = null;
+	// Translator refusals, for the 400 the ordinary give-up answers with. It
+	// needs every reached stage's eligible accounts to have refused THAT stage's
+	// target: the same account can serve another model in another stage.
+	let untranslatable = 0;
+	const untranslatableReasons = new Set<string>();
+	let everyStageRefused = true;
+	const noteStageRefusals = async (refused: ReadonlySet<string>) => {
+		if (!everyStageRefused || untranslatable !== attempts) return;
+		const eligible = await eligibleRouteAccounts(meta, ctx);
+		everyStageRefused = eligible.every((a) => refused.has(a.id));
+	};
 	const record = createSyntheticTerminalRecorder(
 		req,
 		url,
@@ -215,8 +231,10 @@ export async function handleAliasProxy(
 		if (!accounts.length && gates.contextExcludedAccounts.length) {
 			unservable ??= { stage, reason, permission: null };
 			reason = "pool_unavailable";
+			everyStageRefused = false;
 			continue;
 		}
+		const stageRefused = new Set<string>();
 		servableReached = true;
 		const laterStages = admissibleAliasStages(ordered.slice(stageIndex + 1));
 		let mayAdvance = true;
@@ -270,6 +288,11 @@ export async function handleAliasProxy(
 						forwardTransientServerError: isLastAliasAttempt,
 						onOutcome: (o) => {
 							outcome = o;
+							if (o.kind === "invalid_request") {
+								untranslatable++;
+								untranslatableReasons.add(o.message);
+								stageRefused.add(account.id);
+							}
 						},
 					},
 				);
@@ -289,6 +312,7 @@ export async function handleAliasProxy(
 			if (!failure) mayAdvance = false;
 			else stageReason = failure;
 		}
+		await noteStageRefusals(stageRefused);
 		if (!mayAdvance) {
 			terminalMessage =
 				"Alias target failed for a non-retryable reason; model fallback was not used";
@@ -309,6 +333,10 @@ export async function handleAliasProxy(
 		terminalStatus = 400;
 		terminalMessage =
 			"Request exceeds the context capacity of the alias target";
+	} else if (attempts > 0 && untranslatable === attempts && everyStageRefused) {
+		terminalStatus = 400;
+		terminalLabel = "request_untranslatable";
+		terminalMessage = `The request could not be translated for any attempted account (${attempts}): ${[...untranslatableReasons].join("; ")}`;
 	}
 	// As in the ordinary give-up: the bridge's own refusal answers.
 	const bridgeRefusal =
@@ -340,9 +368,10 @@ export async function handleAliasProxy(
 	if (!ctx.requestRecorder.hasRecord(meta.id))
 		await record(
 			response,
-			terminalStatus === 400
-				? "alias_incompatible_request"
-				: "alias_targets_unavailable",
+			terminalLabel ??
+				(terminalStatus === 400
+					? "alias_incompatible_request"
+					: "alias_targets_unavailable"),
 			{ failoverAttempts: attempts },
 		);
 	return response;

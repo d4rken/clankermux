@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { ValidationError } from "@clankermux/core";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -7,7 +8,7 @@ import {
 	RoutingRepository,
 } from "@clankermux/database";
 import { SessionStrategy } from "@clankermux/load-balancer";
-import { usageCache } from "@clankermux/providers";
+import { getProvider, usageCache } from "@clankermux/providers";
 import { mockFetch } from "@clankermux/test-support";
 import type { ModelAlias } from "@clankermux/types";
 import {
@@ -1002,5 +1003,102 @@ describe("a client that leaves before the response starts", () => {
 		expect(attempts.map((a) => a.status)).toEqual([429, 429]);
 		for (const attempt of attempts)
 			expect(attempt.error).not.toBe("client_closed_request");
+	});
+});
+
+describe("translator refusals", () => {
+	/** The anthropic translator refuses bodies for `models`, passes the rest through. */
+	function refuseModels(...models: string[]) {
+		const provider = getProvider("anthropic");
+		if (!provider?.transformRequestBody)
+			throw new Error("anthropic provider has no request transform");
+		const original = provider.transformRequestBody.bind(provider);
+		return spyOn(provider, "transformRequestBody").mockImplementation(
+			async (req, account) => {
+				const model = (await req.clone().json()).model;
+				if (models.includes(model))
+					throw new ValidationError(`unsupported image source: ${model}`);
+				return original(req, account);
+			},
+		);
+	}
+
+	it("advances to a stage whose translator takes the body", async () => {
+		const { ctx } = await setup();
+		const refuse = refuseModels("primary-model");
+		try {
+			const seen = upstream((model) => success(model));
+			expect((await run(ctx)).status).toBe(200);
+			expect(seen.map((s) => s.model)).toEqual(["backup-model"]);
+		} finally {
+			refuse.mockRestore();
+		}
+	});
+
+	it("answers 400 request_untranslatable when every stage refused", async () => {
+		const { ctx } = await setup();
+		const refuse = refuseModels("primary-model", "backup-model");
+		try {
+			const seen = upstream((model) => success(model));
+			const response = await run(ctx);
+			expect(response.status).toBe(400);
+			const body = (await response.json()) as {
+				error: { type: string; message: string };
+			};
+			expect(body.error.type).toBe("invalid_request_error");
+			expect(body.error.message).toContain(
+				"unsupported image source: primary-model",
+			);
+			expect(seen).toEqual([]);
+			const calls = ctx.recorder.recordSynthetic.mock.calls as unknown[][];
+			expect(calls.at(-1)?.[2]).toBe("request_untranslatable");
+		} finally {
+			refuse.mockRestore();
+		}
+	});
+
+	it("keeps the retryable 503 when a stage's only account was cooling", async () => {
+		const { ctx, accounts } = await setup();
+		accounts[2].rate_limited_until = Date.now() + 60000;
+		const refuse = refuseModels("primary-model", "backup-model");
+		try {
+			upstream((model) => success(model));
+			expect((await run(ctx)).status).toBe(503);
+		} finally {
+			refuse.mockRestore();
+		}
+	});
+
+	it("does not count an account's refusal for a target it was never asked", async () => {
+		const { ctx, accounts, modelAliases } = await setup();
+		await modelAliases.save({
+			id: "alias:same",
+			displayName: "Same account twice",
+			revision: 0,
+			targets: [
+				{ model: "primary-model", accountIds: [accounts[0].id] },
+				{ model: "backup-model", accountIds: [accounts[0].id] },
+			],
+		});
+		const refuse = refuseModels("primary-model", "backup-model");
+		const gate = await import("../handlers/rate-limit-cooldown");
+		let admissions = 0;
+		const admit = spyOn(gate, "getRateLimitProbeAdmission").mockImplementation(
+			() =>
+				++admissions === 1
+					? { decision: "not_required" }
+					: ({ decision: "suppressed" } as never),
+		);
+		try {
+			upstream((model) => success(model));
+			const response = await run(
+				ctx,
+				request(undefined, { model: "alias:same" }),
+			);
+			expect(response.status).toBe(503);
+		} finally {
+			admit.mockRestore();
+			refuse.mockRestore();
+		}
 	});
 });
