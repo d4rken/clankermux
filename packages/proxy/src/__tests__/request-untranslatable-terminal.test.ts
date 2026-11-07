@@ -186,6 +186,27 @@ describe("request-untranslatable terminal", () => {
 		expect(syntheticCall(ctx.recorder).label).toBe("all_accounts_failed");
 	});
 
+	it("keeps the broad 503 when an eligible account was cooling down", async () => {
+		refuseTranslation();
+		globalThis.fetch = upstreamOnlyFetch(async () => unauthorized());
+		const first = makeAccount({ name: "First" });
+		const cooling = makeAccount({
+			name: "Cooling",
+			rate_limited_until: Date.now() + 60_000,
+		});
+		for (const a of [first, cooling]) usageCache.delete(a.id);
+		const ctx = makeContext([first, cooling]);
+
+		await expect(
+			callHandleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			),
+		).rejects.toThrow(/All accounts failed/);
+		expect(syntheticCall(ctx.recorder).label).toBe("all_accounts_failed");
+	});
+
 	it("serves from a later candidate whose provider takes the body", async () => {
 		refuseTranslation(1);
 		globalThis.fetch = upstreamOnlyFetch(

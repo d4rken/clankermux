@@ -1429,15 +1429,16 @@ async function handleIngestedProxy(
 	};
 
 	// Every attempt stopped at its provider's request translator, so nothing
-	// reached upstream and the same body would be refused again. Every
-	// candidate must have been asked and refused: one dropped by an admission
-	// gate, or skipped (probe-suppressed, path-incompatible), might take this
-	// body as it is.
+	// reached upstream. The 400 also needs every eligible destination of the
+	// frozen route to have been asked and to have refused: one that was
+	// cooling down, paused, gated or probe-suppressed might take this body as
+	// it is once it is back, so the retryable 503 stays the honest answer.
 	if (
 		upstreamAttempts > 0 &&
 		untranslatableAttempts === upstreamAttempts &&
-		accounts.length >= selectedAccounts.length &&
-		accounts.every((account) => untranslatableAccountIds.has(account.id))
+		(await eligibleRouteAccounts(requestMeta, ctx)).every((account) =>
+			untranslatableAccountIds.has(account.id),
+		)
 	) {
 		const message = `The request could not be translated for any attempted account (${upstreamAttempts}): ${[...untranslatableReasons].join("; ")}`;
 		await recordGiveUpTerminal("request_untranslatable", message, {
