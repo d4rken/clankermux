@@ -1,4 +1,5 @@
 import { ValidationError } from "@clankermux/core";
+import type { OpenAIRequest } from "./types";
 
 /** An Anthropic attachment `source`, typed loosely because clients send it unchecked. */
 export interface AnthropicAttachmentSourceInput {
@@ -63,4 +64,26 @@ export function anthropicImageUrl(
 export function documentRemovalMarker(mediaType: unknown): string {
 	const label = nonEmptyString(mediaType);
 	return `[${label ? `${label} ` : ""}document removed: not supported on this backend]`;
+}
+
+/** What a text-only model reads where an image was. */
+export const IMAGE_REMOVED_MARKER =
+	"[image removed: this model does not accept image input]";
+
+/**
+ * Replace every chat-completions `image_url` part with
+ * {@link IMAGE_REMOVED_MARKER}, in place, and return how many it replaced.
+ */
+export function replaceImageParts(body: OpenAIRequest): number {
+	if (!Array.isArray(body.messages)) return 0;
+	let replaced = 0;
+	for (const message of body.messages) {
+		if (!Array.isArray(message.content)) continue;
+		message.content = message.content.map((part) => {
+			if (part?.type !== "image_url") return part;
+			replaced++;
+			return { type: "text", text: IMAGE_REMOVED_MARKER };
+		});
+	}
+	return replaced;
 }
