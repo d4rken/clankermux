@@ -646,9 +646,8 @@ describe("convertAnthropicRequestToOpenAI — multi-content tool results", () =>
 			}),
 		);
 		const toolMsg = result.messages.find((m) => m.role === "tool");
-		expect(toolMsg?.content).toContain("Here is the image:");
-		expect(toolMsg?.content).toContain(
-			"[image content not supported in OpenAI tool results]",
+		expect(toolMsg?.content).toBe(
+			"Here is the image:\n[image attached in the following message]",
 		);
 	});
 
@@ -678,11 +677,22 @@ describe("convertAnthropicRequestToOpenAI — multi-content tool results", () =>
 				],
 			}),
 		);
-		const toolMsg = result.messages.find((m) => m.role === "tool");
-		expect(toolMsg?.content).toBe(
-			"[image content not supported in OpenAI tool results]",
-		);
-		expect(toolMsg?.tool_call_id).toBe("tool_2");
+		expect(result.messages).toEqual([
+			{
+				role: "tool",
+				tool_call_id: "tool_2",
+				content: "[image attached in the following message]",
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "image_url",
+						image_url: { url: "data:image/jpeg;base64,xyz" },
+					},
+				],
+			},
+		]);
 	});
 });
 
@@ -894,6 +904,91 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 		const result = convertOpenAIResponseToAnthropic(openaiTextResponse());
 		const content = result.content ?? [];
 		expect(content.some((c) => c.type === "thinking")).toBe(false);
+	});
+
+	it("reads OpenRouter's `reasoning` field as the thinking block", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: "4",
+							reasoning: "2 + 2 = 4.",
+						},
+						finish_reason: "stop",
+					},
+				],
+			}),
+		);
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "2 + 2 = 4." },
+			{ type: "text", text: "4" },
+		]);
+	});
+
+	it("keeps the thinking of a reply that spent its whole budget reasoning", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: null,
+							reasoning: "Still working through the cases",
+						},
+						finish_reason: "length",
+					},
+				],
+			}),
+		);
+		expect(result.stop_reason).toBe("max_tokens");
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "Still working through the cases" },
+		]);
+	});
+
+	it("prefers reasoning_content when a gateway sends both fields", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: "ok",
+							reasoning_content: "from reasoning_content",
+							reasoning: "from reasoning",
+						},
+						finish_reason: "stop",
+					},
+				],
+			}),
+		);
+		expect(result.content?.[0]).toEqual({
+			type: "thinking",
+			thinking: "from reasoning_content",
+		});
+		expect(
+			(result.content ?? []).filter((c) => c.type === "thinking"),
+		).toHaveLength(1);
+	});
+
+	it("ignores a non-string `reasoning` value", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: "ok",
+							reasoning: { effort: "high" },
+						},
+						finish_reason: "stop",
+					},
+				],
+			} as unknown as Partial<OpenAIResponse>),
+		);
+		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
 	});
 });
 

@@ -24,6 +24,7 @@ export * from "./payment";
 export * from "./pool-sizing";
 export * from "./pricing";
 export * from "./project-rules";
+export * from "./proxy-refusal";
 export * from "./quota-drift";
 export * from "./reasoning-adaptation";
 export * from "./request";

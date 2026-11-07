@@ -14,6 +14,7 @@ export const STOP_CAUSE_LABELS: Record<StopCause, string> = {
 	pool_quota_exhausted: "Pool quota exhausted",
 	family_weekly_exhausted: "Model weekly limit",
 	model_not_served: "Model not served by any account",
+	request_untranslatable: "Request not translatable",
 	oauth_tokens_expired: "OAuth tokens expired",
 	pinned_target_unavailable: "Destination unavailable",
 	provider_overloaded: "Provider overloaded",
@@ -43,6 +44,8 @@ export const STOP_CAUSE_COLORS: Record<StopCause, string> = {
 	pool_quota_exhausted: CHART_TOKENS.primary,
 	family_weekly_exhausted: CHART_TOKENS.pink,
 	model_not_served: CHART_TOKENS.warning,
+	request_untranslatable:
+		"color-mix(in oklch, var(--warning) 60%, var(--foreground))",
 	oauth_tokens_expired: CHART_TOKENS.error,
 	pinned_target_unavailable: CHART_TOKENS.blue,
 	provider_overloaded: CHART_TOKENS.purple,

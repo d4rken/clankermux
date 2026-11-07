@@ -65,6 +65,14 @@ describe("public Stops outcome contract", () => {
 		expect(JSON.stringify(dto)).not.toContain("series");
 		assertPublicSchema("stops", dto);
 	});
+	it("publishes a translator refusal under its own cause", () => {
+		expect(toPublicStopCause("request_untranslatable")).toBe(
+			"request_untranslatable",
+		);
+		expect(toPublicErrorCategory("request_untranslatable", 400)).toBe(
+			"request_untranslatable",
+		);
+	});
 	it("maps every blocked history cause to the existing public vocabulary", () => {
 		for (const cause of STOP_CAUSES)
 			if (outcomeForCause(cause) === "blocked")

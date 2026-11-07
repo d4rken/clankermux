@@ -2,7 +2,11 @@ import { markUpstreamReportedNoUsage } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { TransformStreamContext } from "./types";
 import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
-import { mapOpenAIFinishReason, repairTruncatedToolJson } from "./utils";
+import {
+	mapOpenAIFinishReason,
+	readReasoningText,
+	repairTruncatedToolJson,
+} from "./utils";
 
 const log = new Logger("openai-formats");
 
@@ -511,8 +515,9 @@ export function transformStreamingResponse(response: Response): Response {
 										(context.toolCallAccumulators[idx] || "") + newArgs;
 								}
 							} else {
-								// reasoning_content and content can coexist in one delta — handle both
-								if (delta?.reasoning_content) {
+								// reasoning and content can coexist in one delta — handle both
+								const reasoning = readReasoningText(delta);
+								if (reasoning) {
 									// DeepSeek/reasoning providers emit reasoning_content before text.
 									// Map to Anthropic thinking block using monotonic nextBlockIndex.
 									if (!context.hasSentThinkingBlockStart) {
@@ -558,7 +563,7 @@ export function transformStreamingResponse(response: Response): Response {
 										index: context.thinkingBlockIndex,
 										delta: {
 											type: "thinking_delta",
-											thinking: delta.reasoning_content,
+											thinking: reasoning,
 										},
 									};
 									controller.enqueue(

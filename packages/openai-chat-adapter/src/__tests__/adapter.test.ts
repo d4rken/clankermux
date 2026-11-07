@@ -855,3 +855,42 @@ describe("the client-facing request id survives the Chat adapter", () => {
 		await r.text();
 	});
 });
+
+describe("Chat ingress proxy refusals", () => {
+	const refuse = (code: string, statusCode: number) =>
+		handleChatCompletionsRequest(
+			new Request("http://localhost/v1/chat/completions", {
+				method: "POST",
+				body: JSON.stringify(input),
+				headers: { "content-type": "application/json" },
+			}),
+			new URL("http://localhost/v1/chat/completions"),
+			async () => {
+				throw Object.assign(new Error("unsupported image source: file"), {
+					code,
+					statusCode,
+				});
+			},
+			{},
+		);
+
+	it("answers a translator refusal as a 400 carrying its reason", async () => {
+		const res = await refuse("REQUEST_UNTRANSLATABLE", 400);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({
+			error: {
+				type: "invalid_request_error",
+				code: "invalid_request_error",
+				message: "unsupported image source: file",
+			},
+		});
+	});
+
+	it("keeps the generic 502 for any other thrown error", async () => {
+		const res = await refuse("DATABASE_ERROR", 500);
+		expect(res.status).toBe(502);
+		expect(await res.json()).toMatchObject({
+			error: { message: "Chat proxy request failed" },
+		});
+	});
+});

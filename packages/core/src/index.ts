@@ -145,6 +145,7 @@ export {
 	PAUSE_REASON_NEEDS_REAUTH,
 	ProviderError,
 	RateLimitError,
+	RequestUntranslatableError,
 	ServiceUnavailableError,
 	TokenRefreshError,
 	ValidationError,

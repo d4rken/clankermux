@@ -1769,3 +1769,64 @@ describe("transformStreamingResponse — block index assignment", () => {
 		expect(indices.sort()).toEqual([0, 1]);
 	});
 });
+
+describe("transformStreamingResponse — `reasoning` alias (OpenRouter-shaped gateways)", () => {
+	function reasoningChunk(delta: Record<string, unknown>): string {
+		return JSON.stringify({
+			id: "c1",
+			model: "openai/gpt-6-luna",
+			choices: [{ index: 0, delta, finish_reason: null }],
+		});
+	}
+
+	async function thinkingTexts(chunks: string[]): Promise<string[]> {
+		const transformed = transformStreamingResponse(makeOpenAIStream(chunks));
+		const events = parseSSEEvents(await readStream(transformed.body));
+		return events
+			.filter(
+				(e) =>
+					e.event === "content_block_delta" &&
+					parseData(e).delta?.type === "thinking_delta",
+			)
+			.map((e) => parseData(e).delta.thinking ?? "");
+	}
+
+	it("emits delta.reasoning as thinking before the text", async () => {
+		const upstream = makeOpenAIStream([
+			reasoningChunk({ reasoning: "Weighing it." }),
+			reasoningChunk({ content: "Done." }),
+			"[DONE]",
+		]);
+		const transformed = transformStreamingResponse(upstream);
+		const events = parseSSEEvents(await readStream(transformed.body));
+		const starts = events
+			.filter((e) => e.event === "content_block_start")
+			.map((e) => parseData(e).content_block?.type);
+		expect(starts).toEqual(["thinking", "text"]);
+		const thinking = events.find(
+			(e) =>
+				e.event === "content_block_delta" &&
+				parseData(e).delta?.type === "thinking_delta",
+		);
+		expect(thinking && parseData(thinking).delta.thinking).toBe("Weighing it.");
+	});
+
+	it("emits a delta carrying both fields once, from reasoning_content", async () => {
+		expect(
+			await thinkingTexts([
+				reasoningChunk({ reasoning_content: "A", reasoning: "A" }),
+				reasoningChunk({ reasoning: "B" }),
+				"[DONE]",
+			]),
+		).toEqual(["A", "B"]);
+	});
+
+	it("ignores a non-string delta.reasoning", async () => {
+		expect(
+			await thinkingTexts([
+				reasoningChunk({ reasoning: { effort: "high" }, content: "x" }),
+				"[DONE]",
+			]),
+		).toEqual([]);
+	});
+});

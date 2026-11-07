@@ -5,23 +5,30 @@ import {
 	isAnthropicServerTool,
 	quotedToolType,
 } from "@clankermux/types";
+import { anthropicImageUrl, documentRemovalMarker } from "./attachments";
 import { resolveReasoningEffort } from "./reasoning";
 import type {
 	AnthropicContent,
 	AnthropicContentBlock,
+	AnthropicImageContent,
 	AnthropicRequest,
 	AnthropicResponse,
 	AnthropicTextContent,
 	AnthropicThinkingContent,
 	AnthropicToolResult,
 	AnthropicToolUse,
+	OpenAIContentPart,
 	OpenAIMessage,
 	OpenAIRequest,
 	OpenAIResponse,
 	OpenAIUsage,
 } from "./types";
 import { normalizeCacheInclusiveInput, readPromptTokensDetails } from "./usage";
-import { mapOpenAIFinishReason, removeUriFormat } from "./utils";
+import {
+	mapOpenAIFinishReason,
+	readReasoningText,
+	removeUriFormat,
+} from "./utils";
 
 const log = new Logger("openai-formats/converters");
 
@@ -48,11 +55,25 @@ export function stripCacheControlFromOpenAIRequest(body: OpenAIRequest): void {
 		if (Array.isArray(msg.content)) {
 			for (const part of msg.content) {
 				if (typeof part === "object" && part !== null) {
-					delete (part as Record<string, unknown>).cache_control;
+					delete part.cache_control;
 				}
 			}
 		}
 	}
+}
+
+const TOOL_IMAGE_PLACEHOLDER = "[image attached in the following message]";
+
+function toImagePart(block: AnthropicImageContent): OpenAIContentPart {
+	return {
+		type: "image_url",
+		image_url: { url: anthropicImageUrl(block.source) },
+	};
+}
+
+function contentParts(content: OpenAIMessage["content"]): OpenAIContentPart[] {
+	if (Array.isArray(content)) return content;
+	return content ? [{ type: "text", text: content }] : [];
 }
 
 /**
@@ -206,17 +227,39 @@ export function convertAnthropicRequestToOpenAI(
 					(part): part is AnthropicThinkingContent => part.type === "thinking",
 				);
 
+				const toTextPart = (part: AnthropicTextContent): OpenAIContentPart => {
+					const block: OpenAIContentPart = { type: "text", text: part.text };
+					if (part.cache_control) block.cache_control = part.cache_control;
+					return block;
+				};
+				if (
+					message.role !== "user" &&
+					message.content.some((part) => part?.type === "image")
+				) {
+					throw new ValidationError(
+						`image content is only supported on user messages, not ${message.role}`,
+					);
+				}
+				const hasAttachments = message.content.some(
+					(part) => part?.type === "image" || part?.type === "document",
+				);
+
 				let content: OpenAIMessage["content"];
-				if (hasCacheControl) {
-					content = textBlocks.map((part) => {
-						const block: {
-							type: string;
-							text: string;
-							cache_control?: { type: string };
-						} = { type: "text", text: part.text };
-						if (part.cache_control) block.cache_control = part.cache_control;
-						return block;
-					});
+				if (hasAttachments) {
+					// Text, images and document markers keep the client's order.
+					content = [];
+					for (const part of message.content) {
+						if (part?.type === "text") content.push(toTextPart(part));
+						else if (part?.type === "image") content.push(toImagePart(part));
+						else if (part?.type === "document") {
+							content.push({
+								type: "text",
+								text: documentRemovalMarker(part.source?.media_type),
+							});
+						}
+					}
+				} else if (hasCacheControl) {
+					content = textBlocks.map(toTextPart);
 				} else {
 					content = textBlocks.map((part) => part.text).join("") || null;
 				}
@@ -252,21 +295,21 @@ export function convertAnthropicRequestToOpenAI(
 				const toolResults = message.content.filter(
 					(item): item is AnthropicToolResult => item.type === "tool_result",
 				);
+				// A `tool` message is text-only, so its images travel in the user
+				// message that follows this turn's tool messages.
+				const toolImages: OpenAIContentPart[] = [];
 				for (const toolResult of toolResults) {
 					let toolContent: string;
 					if (typeof toolResult.content === "string") {
 						toolContent = toolResult.content;
 					} else if (Array.isArray(toolResult.content)) {
-						// Array content: serialize non-image items; drop images (not supported in OpenAI tool messages)
 						const parts: string[] = [];
 						for (const block of toolResult.content as AnthropicContent[]) {
 							if (block.type === "text") {
 								parts.push(block.text);
 							} else if (block.type === "image") {
-								// OpenAI tool messages don't support image content — drop with placeholder
-								parts.push(
-									"[image content not supported in OpenAI tool results]",
-								);
+								toolImages.push(toImagePart(block));
+								parts.push(TOOL_IMAGE_PLACEHOLDER);
 							} else {
 								// Other structured blocks (tool_use, tool_result, etc.) — serialize as JSON
 								parts.push(JSON.stringify(block));
@@ -281,6 +324,17 @@ export function convertAnthropicRequestToOpenAI(
 						content: toolContent,
 						tool_call_id: toolResult.tool_use_id,
 					});
+				}
+
+				if (toolImages.length > 0) {
+					if (message.role === "user") {
+						openaiMessage.content = [
+							...toolImages,
+							...contentParts(openaiMessage.content),
+						];
+					} else {
+						messages.push({ role: "user", content: toolImages });
+					}
 				}
 
 				if (
@@ -350,14 +404,10 @@ export function convertOpenAIResponseToAnthropic(
 	// Build content array with text and tool calls
 	const content: AnthropicContentBlock[] = [];
 
-	// Reasoning-capable openai-compatible providers (DashScope, DeepSeek)
-	// return reasoning_content on the message; thinking leads per Anthropic
-	// block ordering, matching the streaming path in stream.ts.
-	if (choice.message?.reasoning_content) {
-		content.push({
-			type: "thinking",
-			thinking: choice.message.reasoning_content,
-		});
+	// Thinking leads per Anthropic block ordering, matching stream.ts.
+	const reasoning = readReasoningText(choice.message);
+	if (reasoning) {
+		content.push({ type: "thinking", thinking: reasoning });
 	}
 
 	// Add text content if present

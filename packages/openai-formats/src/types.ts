@@ -9,16 +9,16 @@ export interface OpenAIToolCall {
 	};
 }
 
+export interface OpenAIContentPart {
+	type: string;
+	text?: string;
+	image_url?: { url: string };
+	cache_control?: { type: string };
+}
+
 export interface OpenAIMessage {
 	role: "system" | "user" | "assistant" | "tool";
-	content:
-		| string
-		| null
-		| Array<{
-				type: string;
-				text?: string;
-				cache_control?: { type: string };
-		  }>;
+	content: string | null | OpenAIContentPart[];
 	tool_calls?: OpenAIToolCall[];
 	tool_call_id?: string;
 	reasoning_content?: string;
@@ -104,9 +104,19 @@ export type AnthropicContentBlock =
 	| AnthropicToolUse
 	| AnthropicToolResult;
 
+/** No chat-completions shape carries it; converters emit a marker instead. */
+export interface AnthropicDocumentContent {
+	type: "document";
+	source?: { type?: string; media_type?: string; data?: string; url?: string };
+}
+
 export interface AnthropicMessage {
 	role: "user" | "assistant";
-	content: string | AnthropicContentBlock[];
+	content:
+		| string
+		| Array<
+				AnthropicContentBlock | AnthropicImageContent | AnthropicDocumentContent
+		  >;
 }
 
 export interface AnthropicTool {
@@ -206,6 +216,8 @@ export interface TransformStreamContext {
 export interface OpenAIStreamDelta {
 	content?: string;
 	reasoning_content?: string;
+	/** OpenRouter-shaped gateways' name for reasoning_content; see readReasoningText. */
+	reasoning?: unknown;
 	tool_calls?: Array<{
 		index: number;
 		id?: string;
@@ -227,6 +239,8 @@ export interface OpenAIResponse {
 			role?: string;
 			tool_calls?: OpenAIToolCall[];
 			reasoning_content?: string;
+			/** OpenRouter-shaped gateways' name for reasoning_content; see readReasoningText. */
+			reasoning?: unknown;
 		};
 		delta?: OpenAIStreamDelta;
 		finish_reason?: string;

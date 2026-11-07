@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { Logger } from "@clankermux/logger";
 import {
+	clientFacingProxyRefusal,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 	type NativeResponsesContext,
 	parseUpstreamError,
@@ -525,14 +526,20 @@ async function respondToResponsesRequest(
 			rawRetryAfter > 0
 				? rawRetryAfter
 				: undefined;
+		const refusal = isUnavailable ? null : clientFacingProxyRefusal(err);
+		const errorType = isUnavailable
+			? "server_error"
+			: refusal !== null
+				? "invalid_request_error"
+				: "api_error";
 		return new Response(
 			JSON.stringify({
 				error: {
 					message: isUnavailable
 						? "Service temporarily unavailable. Please try again later."
-						: "Proxy request failed",
-					type: isUnavailable ? "server_error" : "api_error",
-					code: isUnavailable ? "server_error" : "api_error",
+						: (refusal ?? "Proxy request failed"),
+					type: errorType,
+					code: errorType,
 					...(retryAfterSeconds === undefined
 						? {}
 						: { availability_guaranteed: false }),

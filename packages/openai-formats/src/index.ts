@@ -1,3 +1,4 @@
+export * from "./attachments";
 export * from "./converters";
 export * from "./rate-limit-headers";
 export * from "./reasoning";

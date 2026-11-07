@@ -190,4 +190,30 @@ describe("CodexProvider attachment translation", () => {
 			},
 		]);
 	});
+
+	it.each([
+		["a numeric media_type", { type: "base64", media_type: 7, data: "AA" }],
+		["an object url", { type: "url", url: { href: "https://x" } }],
+	])("refuses an image with %s as a ValidationError", async (_l, source) => {
+		await expect(
+			translate([{ role: "user", content: [{ type: "image", source }] }]),
+		).rejects.toThrow(/unsupported image source/);
+	});
+
+	it("treats a non-string document media_type as unknown", async () => {
+		const body = await translate([
+			{
+				role: "user",
+				content: [
+					{ type: "document", source: { type: "base64", media_type: 7 } },
+				],
+			},
+		]);
+		expect(body.input[0]?.content).toEqual([
+			{
+				type: "input_text",
+				text: "[document removed: not supported on this backend]",
+			},
+		]);
+	});
 });

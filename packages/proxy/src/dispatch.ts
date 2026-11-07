@@ -1,10 +1,10 @@
 import {
 	HTTP_STATUS,
-	ModelNotServedError,
 	ModelSubstitutedError,
 	ServiceUnavailableError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { clientFacingProxyRefusal } from "@clankermux/types";
 import { requestIdFromError } from "./error-request-id";
 import { handleProxy, type ProxyContext } from "./proxy";
 import { ModelSubstitutionRouteError } from "./resolved-route";
@@ -48,14 +48,14 @@ export async function dispatchProxyRequest(
 		const requestId = requestIdFromError(proxyError);
 
 		const isServiceUnavailable = statusCode === HTTP_STATUS.SERVICE_UNAVAILABLE;
-		// The one non-503 terminal whose message is deliberately client-facing.
+		// The non-503 terminals whose message is deliberately client-facing.
 		// The generic branch below replaces every other message with "Proxy
 		// request failed" so an internal string can never leak, and that default
-		// is right — but it would also swallow the model name, which is the
-		// entire content of this terminal. Gated on the class rather than on the
-		// status so a future 400 from anywhere else does not inherit the
-		// passthrough by accident.
-		const isModelNotServed = proxyError instanceof ModelNotServedError;
+		// is right — but it would also swallow the model name or the translator's
+		// reason, which is the entire content of these terminals. Gated on an
+		// error-code allowlist rather than on the status so a future 400 from
+		// anywhere else does not inherit the passthrough by accident.
+		const isRequestRefused400 = clientFacingProxyRefusal(proxyError) !== null;
 		// Also a 503, so it would otherwise be serialized as a generic
 		// "Service temporarily unavailable" and lose the two model names that
 		// are the whole point of the terminal. Its own type as well: a client
@@ -70,7 +70,8 @@ export async function dispatchProxyRequest(
 			proxyError instanceof ModelSubstitutedError ||
 			proxyError instanceof ModelSubstitutionRouteError;
 		const message =
-			(isServiceUnavailable || isModelNotServed) && proxyError instanceof Error
+			(isServiceUnavailable || isRequestRefused400) &&
+			proxyError instanceof Error
 				? proxyError.message
 				: isServiceUnavailable
 					? "Service temporarily unavailable. Please try again later."
@@ -92,7 +93,7 @@ export async function dispatchProxyRequest(
 						? "model_substituted_error"
 						: isServiceUnavailable
 							? "service_unavailable_error"
-							: isModelNotServed
+							: isRequestRefused400
 								? // Anthropic's vocabulary for a 400 about the request
 									// itself, so a client's existing error handling reads it
 									// as a request problem rather than a transport one.

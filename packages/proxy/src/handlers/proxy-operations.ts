@@ -25,7 +25,10 @@ import {
 	discardUpstreamBody,
 } from "@clankermux/core/response-body-disposal";
 import { Logger } from "@clankermux/logger";
-import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
+import {
+	replaceImageParts,
+	stripCacheControlFromOpenAIRequest,
+} from "@clankermux/openai-formats";
 import {
 	anthropicBankedResetCache,
 	DevinSessionAuthenticationError,
@@ -149,6 +152,7 @@ import {
 	resolveFamilyWeeklyExclusion,
 	resolveFamilyWeeklyExclusionFromHeaders,
 } from "./family-weekly-gate";
+import { isImageInputRefusal } from "./image-input-refusal";
 import {
 	isModelSubstitution,
 	isSubstitutionExcepted,
@@ -325,7 +329,8 @@ export type ProxyAttemptOutcome =
 	| { kind: "model_substituted"; served: string }
 	| { kind: "server_error"; status: number }
 	| { kind: "network_error"; beforeDispatch?: boolean }
-	| { kind: "invalid_request" }
+	/** The provider refused to translate the body; `message` is its ValidationError's. */
+	| { kind: "invalid_request"; message: string }
 	/**
 	 * The SDK bridge could not run a turn for this attempt (unavailable, or
 	 * shutting down since the route was built). Nothing reached the account.
@@ -2014,41 +2019,70 @@ export async function proxyWithAccount(
 			}
 		}
 
-		// Retry without cache_control if provider rejected it (e.g. GLM-5.1 strict validation).
-		// Mark (accountId, model) so subsequent requests skip cache_control immediately.
-		if (await isCacheControlRejectionError(rawResponse)) {
-			const rejectorKey = cacheControlRejectorKey(account.id, transformedModel);
-			if (!cacheControlRejectors.has(rejectorKey)) {
-				// Mark before retry so subsequent requests pre-strip without a round-trip.
-				// The current caller still receives the retried response (or the original
-				// 400 if the retry also fails).
-				cacheControlRejectors.add(rejectorKey);
+		// In-place repairs of a translated OpenAI-chat body, each at most once, in
+		// whichever order the upstream refuses: cache_control (e.g. GLM-5.1 strict
+		// validation) and image input (a text-only model). Each repair edits the
+		// body last sent, so neither undoes the other or the pre-strip above.
+		let sentBody = transformedBodyJson;
+		const repaired = new Set<"cache_control" | "image_input">();
+		while (
+			sentBody &&
+			(rawResponse.status === 400 || rawResponse.status === 404)
+		) {
+			const next = structuredClone(sentBody) as unknown as Parameters<
+				typeof stripCacheControlFromOpenAIRequest
+			>[0];
+			let repair: "cache_control" | "image_input" | null = null;
+			if (
+				!repaired.has("cache_control") &&
+				(await isCacheControlRejectionError(rawResponse))
+			) {
+				repair = "cache_control";
+				stripCacheControlFromOpenAIRequest(next);
+				// Marked before the retry so later requests pre-strip without a
+				// round-trip; this one still gets the retry's response.
+				const rejectorKey = cacheControlRejectorKey(
+					account.id,
+					transformedModel,
+				);
+				if (!cacheControlRejectors.has(rejectorKey)) {
+					cacheControlRejectors.add(rejectorKey);
+					log.info(
+						`Provider rejected cache_control for account=${account.name} model=${transformedModel}, retrying without it`,
+					);
+				}
+			} else if (
+				!repaired.has("image_input") &&
+				replaceImageParts(next) > 0 &&
+				(await isImageInputRefusal(rawResponse))
+			) {
+				repair = "image_input";
 				log.info(
-					`Provider rejected cache_control for account=${account.name} model=${transformedModel}, retrying without it`,
+					`Model rejected image input for account=${account.name} model=${transformedModel}, retrying without images`,
 				);
 			}
-
+			if (!repair) break;
+			repaired.add(repair);
 			try {
-				const retryBodyJson = JSON.parse(transformedBodyText);
-				stripCacheControlFromOpenAIRequest(retryBodyJson);
 				const retryRequest = new Request(transformedRequest.url, {
 					method: transformedRequest.method,
 					headers: transformedRequest.headers,
-					body: JSON.stringify(retryBodyJson),
+					body: JSON.stringify(next),
 				});
-				// Acquire the retry FIRST: if makeProxyRequest throws, the local
-				// catch below continues with the original 400 still intact (its body
-				// not yet discarded), preserving the "forward the original 400 on
-				// retry failure" contract.
+				// Acquire the retry FIRST: if makeProxyRequest throws, the catch
+				// below continues with the refusal still intact (its body not yet
+				// discarded), so the client gets the refusal rather than nothing.
 				const retryResponse = await forwardAttempt(retryRequest);
 				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
+				sentBody = next as unknown as Record<string, unknown>;
 			} catch (err) {
 				if (err instanceof RoutingPolicyError) throw err;
 				if (options?.signal?.aborted || req.signal.aborted) throw err;
 				liveUpstream = rawResponse;
-				log.warn("Failed to retry without cache_control:", err);
+				log.warn(`Failed to retry with the ${repair} repair:`, err);
+				break;
 			}
 		}
 
@@ -3602,7 +3636,7 @@ export async function proxyWithAccount(
 			(err.statusCode === 401 || err.statusCode === 403)
 				? { kind: "auth" }
 				: err instanceof ValidationError
-					? { kind: "invalid_request" }
+					? { kind: "invalid_request", message: err.message }
 					: {
 							kind: "network_error",
 							...(!attemptAudit.id ? { beforeDispatch: true } : {}),

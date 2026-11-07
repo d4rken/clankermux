@@ -575,6 +575,7 @@ export type PublicStopCauseDto =
 	| "pool_quota_exhausted"
 	| "family_weekly_exhausted"
 	| "model_not_served"
+	| "request_untranslatable"
 	| "oauth_tokens_expired"
 	| "pinned_target_unavailable"
 	| "provider_overloaded"
@@ -603,6 +604,8 @@ export function toPublicStopCause(cause: string): PublicStopCauseDto {
 			return "family_weekly_exhausted";
 		case "model_not_served":
 			return "model_not_served";
+		case "request_untranslatable":
+			return "request_untranslatable";
 		case "oauth_tokens_expired":
 			return "oauth_tokens_expired";
 		case "pinned_target_unavailable":

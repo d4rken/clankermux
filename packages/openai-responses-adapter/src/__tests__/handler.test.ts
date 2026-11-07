@@ -405,6 +405,43 @@ describe("handleResponsesRequest", () => {
 		expect("availability_guaranteed" in body.error).toBe(false);
 	});
 
+	test("Test 3b2d: a proxy refusal reaches the client as invalid_request_error with its reason", async () => {
+		const mockHandleProxy: HandleProxyFn = async () => {
+			throw Object.assign(new Error("unsupported image source: file"), {
+				code: "REQUEST_UNTRANSLATABLE",
+				statusCode: 400,
+			});
+		};
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(400);
+		expect(await resp.json()).toMatchObject({
+			error: {
+				message: "unsupported image source: file",
+				type: "invalid_request_error",
+				code: "invalid_request_error",
+			},
+		});
+	});
+
 	test("Test 3b3: a throw with no advice is serialized exactly as before", async () => {
 		const mockHandleProxy: HandleProxyFn = async () => {
 			throw Object.assign(new Error("boom"), { statusCode: 503 });
