@@ -1,11 +1,10 @@
 import {
 	HTTP_STATUS,
-	ModelNotServedError,
 	ModelSubstitutedError,
-	RequestUntranslatableError,
 	ServiceUnavailableError,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
+import { clientFacingProxyRefusal } from "@clankermux/types";
 import { requestIdFromError } from "./error-request-id";
 import { handleProxy, type ProxyContext } from "./proxy";
 import { ModelSubstitutionRouteError } from "./resolved-route";
@@ -53,12 +52,10 @@ export async function dispatchProxyRequest(
 		// The generic branch below replaces every other message with "Proxy
 		// request failed" so an internal string can never leak, and that default
 		// is right — but it would also swallow the model name or the translator's
-		// reason, which is the entire content of these terminals. Gated on the
-		// class rather than on the status so a future 400 from anywhere else does
-		// not inherit the passthrough by accident.
-		const isRequestRefused400 =
-			proxyError instanceof ModelNotServedError ||
-			proxyError instanceof RequestUntranslatableError;
+		// reason, which is the entire content of these terminals. Gated on an
+		// error-code allowlist rather than on the status so a future 400 from
+		// anywhere else does not inherit the passthrough by accident.
+		const isRequestRefused400 = clientFacingProxyRefusal(proxyError) !== null;
 		// Also a 503, so it would otherwise be serialized as a generic
 		// "Service temporarily unavailable" and lose the two model names that
 		// are the whole point of the terminal. Its own type as well: a client

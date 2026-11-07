@@ -1,5 +1,6 @@
 import {
 	type ChatIngressContext,
+	clientFacingProxyRefusal,
 	parseUpstreamError,
 	setChatContext,
 } from "@clankermux/types";
@@ -416,6 +417,8 @@ async function respondToChatCompletionsRequest(
 	} catch (e) {
 		if (req.signal.aborted) return new Response(null, { status: 499 });
 		if (e instanceof ChatError) return chatErrorResponse(e);
+		const refusal = clientFacingProxyRefusal(e);
+		if (refusal !== null) return chatErrorResponse(new ChatError(refusal));
 		return chatErrorResponse(
 			new ChatError("Chat proxy request failed", null, 502, "api_error"),
 		);
