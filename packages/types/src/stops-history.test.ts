@@ -10,7 +10,9 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+	classifyRequestOutcomeCause,
 	classifyStopCause,
+	outcomeForCause,
 	STOP_CAUSES,
 	type StopCause,
 } from "./stops-history";
@@ -45,6 +47,16 @@ describe("classifyStopCause", () => {
 
 	it("maps the model-not-served terminal to its own cause", () => {
 		expect(classifyStopCause("model_not_served", 400)).toBe("model_not_served");
+	});
+
+	it("files a translator refusal as its own blocked cause, not an upstream error", () => {
+		expect(classifyStopCause("request_untranslatable", 400)).toBe(
+			"request_untranslatable",
+		);
+		expect(classifyRequestOutcomeCause("request_untranslatable", 400)).toBe(
+			"request_untranslatable",
+		);
+		expect(outcomeForCause("request_untranslatable")).toBe("blocked");
 	});
 
 	it("classifies free-form upstream text by its leading status code", () => {
@@ -93,6 +105,7 @@ describe("classifyStopCause", () => {
 			["all_accounts_failed", 503],
 			["family_weekly_exhausted_429", 429],
 			["model_not_served", 400],
+			["request_untranslatable", 400],
 			["oauth_tokens_expired", 503],
 			["pinned_no_available_account", 503],
 			["provider_overloaded", 529],

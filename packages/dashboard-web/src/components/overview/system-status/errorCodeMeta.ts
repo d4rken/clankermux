@@ -122,6 +122,14 @@ const KNOWN_TERMINAL_META: Record<string, ErrorMeta> = {
 			"Stop sending this model, or add an account on a plan that serves it. Retrying will not help while the same accounts are reachable.",
 		severity: "error",
 	},
+	request_untranslatable: {
+		title: "Request could not be translated",
+		description:
+			"Every eligible account's provider refused to translate the request body (for example an image with an unsupported source), so nothing was sent upstream. Accounts that were unavailable at the time keep the request retryable instead, so this row means every eligible destination was asked.",
+		suggestion:
+			"Fix the request the message names. Retrying the same body will be refused again.",
+		severity: "error",
+	},
 	all_accounts_failed: {
 		title: "No account could serve the request",
 		description:

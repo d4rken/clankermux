@@ -164,6 +164,7 @@
         "pool_quota_exhausted",
         "family_weekly_exhausted",
         "model_not_served",
+        "request_untranslatable",
         "oauth_tokens_expired",
         "pinned_target_unavailable",
         "provider_overloaded",

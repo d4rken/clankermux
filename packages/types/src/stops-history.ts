@@ -34,6 +34,8 @@ export type StopCause =
 	| "family_weekly_exhausted"
 	/** No account could serve the requested model. Not a capacity event. */
 	| "model_not_served"
+	/** Every eligible account's translator refused the body; nothing reached upstream. */
+	| "request_untranslatable"
 	/** Every OAuth account's refresh token was past its maximum age. */
 	| "oauth_tokens_expired"
 	/** The request was pinned to a target that could not serve it; pinning forbids failover. */
@@ -57,6 +59,7 @@ export const STOP_CAUSES: readonly StopCause[] = [
 	"pool_quota_exhausted",
 	"family_weekly_exhausted",
 	"model_not_served",
+	"request_untranslatable",
 	"oauth_tokens_expired",
 	"pinned_target_unavailable",
 	"provider_overloaded",
@@ -88,6 +91,7 @@ const EXACT_LABELS: Readonly<Record<string, StopCause>> = {
 	family_weekly_exhausted: "family_weekly_exhausted",
 	family_weekly_exhausted_429: "family_weekly_exhausted",
 	model_not_served: "model_not_served",
+	request_untranslatable: "request_untranslatable",
 	oauth_tokens_expired: "oauth_tokens_expired",
 	pinned_target_unavailable: "pinned_target_unavailable",
 	pinned_no_available_account: "pinned_target_unavailable",
@@ -190,6 +194,7 @@ const OUTCOME_BY_CAUSE: Record<StopCause, RequestOutcome> = {
 	pool_quota_exhausted: "blocked",
 	family_weekly_exhausted: "blocked",
 	model_not_served: "blocked",
+	request_untranslatable: "blocked",
 	oauth_tokens_expired: "blocked",
 	pinned_target_unavailable: "blocked",
 	provider_overloaded: "blocked",
