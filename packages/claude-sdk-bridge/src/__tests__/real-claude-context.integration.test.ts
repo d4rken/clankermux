@@ -347,14 +347,16 @@ describe.skipIf(reason !== null)(
 					calls: 1,
 					terminal: "blocking_limit",
 				});
-				expect(outcome("claude-opus-5-5[1m] 900000")).toEqual({
-					calls: 2,
-					terminal: "completed",
-				});
-				expect(outcome("claude-opus-5-5[1m] 1020000")).toEqual({
-					calls: 1,
-					terminal: "blocking_limit",
-				});
+				for (const model of ["claude-opus-5-5[1m]", "claude-fable-5-2[1m]"]) {
+					expect(outcome(`${model} 900000`)).toEqual({
+						calls: 2,
+						terminal: "completed",
+					});
+					expect(outcome(`${model} 1020000`)).toEqual({
+						calls: 1,
+						terminal: "blocking_limit",
+					});
+				}
 			},
 			TIMEOUT,
 		);
@@ -416,12 +418,20 @@ describe.skipIf(reason !== null)(
 		it(
 			"sends a [1m] model as its bare id with the 1M beta on every call, resumed included",
 			async () => {
-				const s = await scenario<{ first: Run; second: Run }>("oneMillion");
-				const calls = s.second.calls;
-				expect(calls.length).toBeGreaterThanOrEqual(3);
-				for (const call of calls) {
-					expect(call.model).toBe("claude-opus-5-5");
-					expect(call.betas).toContain("context-1m-2025-08-07");
+				const s =
+					await scenario<Record<string, { first: Run; second: Run }>>(
+						"oneMillion",
+					);
+				for (const [model, wire] of [
+					["claude-opus-5-5[1m]", "claude-opus-5-5"],
+					["claude-fable-5-2[1m]", "claude-fable-5-2"],
+				] as const) {
+					const calls = s[model]?.second.calls ?? [];
+					expect(calls.length).toBeGreaterThanOrEqual(3);
+					for (const call of calls) {
+						expect(call.model).toBe(wire);
+						expect(call.betas).toContain("context-1m-2025-08-07");
+					}
 				}
 			},
 			TIMEOUT,

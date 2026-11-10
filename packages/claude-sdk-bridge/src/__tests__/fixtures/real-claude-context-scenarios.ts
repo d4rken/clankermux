@@ -597,6 +597,8 @@ await scenario("window", async () => {
 		["claude-sonnet-5", 250_000],
 		["claude-opus-5-5[1m]", 900_000],
 		["claude-opus-5-5[1m]", 1_020_000],
+		["claude-fable-5-2[1m]", 900_000],
+		["claude-fable-5-2[1m]", 1_020_000],
 	];
 	const runs = await Promise.all(
 		cases.map(async ([model, tokens]) => {
@@ -686,22 +688,27 @@ await scenario("refusal", async () => {
 
 // `[1m]`: the id and betas of every call of a tool round and a resumed turn.
 await scenario("oneMillion", async () => {
-	const marker = "[S:1m]";
-	const first = await runQuery({
-		marker,
-		env: "bridge",
-		model: "claude-opus-5-5[1m]",
-		prompt: `${marker} LOOP1 read one`,
-	});
-	const second = await runQuery({
-		marker,
-		env: "bridge",
-		model: "claude-opus-5-5[1m]",
-		prompt: `${marker} next turn`,
-		sessionId: first.sessionId,
-		resume: true,
-	});
-	return { first, second };
+	const runs = await Promise.all(
+		["claude-opus-5-5[1m]", "claude-fable-5-2[1m]"].map(async (model) => {
+			const marker = `[S:1m-${model}]`;
+			const first = await runQuery({
+				marker,
+				env: "bridge",
+				model,
+				prompt: `${marker} LOOP1 read one`,
+			});
+			const second = await runQuery({
+				marker,
+				env: "bridge",
+				model,
+				prompt: `${marker} next turn`,
+				sessionId: first.sessionId,
+				resume: true,
+			});
+			return [model, { first, second }] as const;
+		}),
+	);
+	return Object.fromEntries(runs);
 });
 
 // ---- Through the bridge: what the client sees. ----

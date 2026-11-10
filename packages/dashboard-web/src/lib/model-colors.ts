@@ -50,6 +50,8 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	"claude-mythos-5": "mauve",
 	"claude-fable-5.1": "violet",
 	"claude-mythos-5.1": "fuchsia",
+	"claude-fable-5.2": "lichen",
+	"claude-mythos-5.2": "thistle",
 	// Codex slugs, from MODEL_CONTEXT_WINDOWS. These need explicit entries for
 	// the same reason the Claude ids do, and more urgently: the substring
 	// fallback below would collapse `gpt-5.4-mini` onto `gpt-5.4`, and

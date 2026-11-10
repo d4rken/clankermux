@@ -168,12 +168,17 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
 	});
 
-	it("prices Fable/Mythos 5.1's cheaper cache reads on their own weights", () => {
-		// The 5.1 generation reads cache at $0.25/M against $10/M input — 0.025x
-		// where every other Anthropic model reads at 0.1x. Claude Code traffic is
-		// cache-read-dominated, so the shared weight would overstate exposure
-		// fourfold on the dominant token class.
-		for (const id of ["claude-fable-5-1", "claude-mythos-5-1"]) {
+	it("prices Fable/Mythos 5.1 and 5.2's cheaper cache reads on their own weights", () => {
+		// Both generations read cache at 2.5% of input — 0.025x where most
+		// Anthropic models read at 0.1x. Claude Code traffic is cache-read-
+		// dominated, so the shared weight would overstate exposure fourfold on
+		// the dominant token class.
+		for (const id of [
+			"claude-fable-5-1",
+			"claude-mythos-5-1",
+			"claude-fable-5-2",
+			"claude-mythos-5-2",
+		]) {
 			const entry = entriesFor("anthropic").find(([entryId]) => entryId === id);
 			expect(entry).toBeDefined();
 			const [, cost] = entry as [string, ModelCost];

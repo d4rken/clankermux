@@ -6,6 +6,9 @@ it("names the bare id of a measured 1M-context id, and nothing else", () => {
 	expect(oneMillionContextBase("claude-fable-5-1[1m]")).toBe(
 		"claude-fable-5-1",
 	);
+	expect(oneMillionContextBase("claude-fable-5-2[1m]")).toBe(
+		"claude-fable-5-2",
+	);
 	expect(oneMillionContextBase("claude-sonnet-5[1m]")).toBe("claude-sonnet-5");
 	for (const model of [
 		"claude-opus-5-5",

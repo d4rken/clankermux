@@ -27,9 +27,8 @@ export interface EqTokenWeights {
 /**
  * Anthropic list-price ratios, normalized to input = 1. Verified against the
  * haiku-4.5 entry (input 1 / output 5 / cache_read 0.1 / cache_write 1.25);
- * every Anthropic entry in the bundled table shares them except Fable/Mythos
- * 5.1, whose 0.025x cache read is corrected by
- * {@link MODEL_EQ_WEIGHT_OVERRIDES}.
+ * every Anthropic entry in the bundled table shares them except those listed
+ * in {@link MODEL_EQ_WEIGHT_OVERRIDES}.
  */
 export const ANTHROPIC_EQ_WEIGHTS: EqTokenWeights = {
 	input: 1,
@@ -72,10 +71,11 @@ export const OPENAI_EQ_WEIGHTS: EqTokenWeights = {
  * this a trap that arms itself the first time the model is routed rather than a
  * live defect.
  *
- * Fable/Mythos 5.1 price cache reads at $0.25/M against a $10/M input — a
- * 0.025x multiplier where every other Anthropic model reads at 0.1x. Claude
- * Code traffic is cache-read-dominated, so the shared weight would overstate
- * their exposure fourfold on the class that carries most of their tokens.
+ * Fable/Mythos 5.1 and 5.2 price cache reads at 2.5% of input ($0.25/M on
+ * $10/M, $0.20/M on $8/M) — a 0.025x multiplier against the shared 0.1x.
+ * Claude Code traffic is cache-read-dominated, so the shared weight would
+ * overstate their exposure fourfold on the class that carries most of their
+ * tokens.
  *
  * Opus 5.5 reads cache at $0.20/M against $4/M input, and Sonnet 5.5 at
  * $0.10/M against $2/M — 0.05x, the same overstatement at half the size.
@@ -100,6 +100,8 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	"gpt-5.6-sol": { ...OPENAI_EQ_WEIGHTS, output: 5 },
 	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
+	"claude-fable-5-2": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
+	"claude-mythos-5-2": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 	"claude-opus-5-5": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.05 },
 	"claude-sonnet-5-5": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.05 },
 };
