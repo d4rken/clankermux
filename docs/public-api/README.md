@@ -228,10 +228,11 @@ An inference request is Claude Code's when its key's application is
 request reaches an official Anthropic account directly; every other one
 reaches it only through the SDK bridge.
 
-`claude-opus-5-5[1m]`, `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` are
-served on an official Anthropic account that permits the bare id, through the
-SDK bridge only (Responses and Chat Completions on `/wire/openai`, and
-Messages on `/wire/anthropic` from a client other than Claude Code). Their
+`claude-opus-5-5[1m]`, `claude-fable-5-1[1m]`, `claude-fable-5-2[1m]` and
+`claude-sonnet-5[1m]` are served on an official Anthropic account that
+permits the bare id, through the SDK bridge only (Responses and Chat
+Completions on `/wire/openai`, and Messages on `/wire/anthropic` from a
+client other than Claude Code). Their
 `contextWindow` is `1000000`; every other metadata field is the bare id's,
 and the bare ids stay at `200000`. Any other `[1m]` id is a literal no
 account serves. A route that would send a suffixed id to Anthropic directly,

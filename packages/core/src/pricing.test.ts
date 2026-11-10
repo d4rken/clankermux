@@ -920,7 +920,7 @@ describe("bundled Opus 5.5 pricing (offline fallback)", () => {
 
 describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
 	// The 5.1 generation keeps $10/M input, $50/M output, $12.50/M cache write
-	// but drops cache reads to $0.25/M — 0.025x, unique to Fable/Mythos 5.1.
+	// but drops cache reads to $0.25/M — 0.025x.
 	const ioTokens: TokenBreakdown = {
 		inputTokens: 1_000_000,
 		outputTokens: 1_000_000,
@@ -957,6 +957,28 @@ describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
 			6,
 		);
 	});
+});
+
+describe("bundled Fable/Mythos 5.2 pricing (offline fallback)", () => {
+	// $8/M input, $40/M output, $10/M cache write, $0.20/M cache read.
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+	const cacheTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	for (const model of ["claude-fable-5-2", "claude-mythos-5-2"]) {
+		it(`prices ${model} input/output from bundled data`, async () => {
+			expect(await estimateCostUSD(model, ioTokens)).toBeCloseTo(48, 6);
+		});
+
+		it(`prices ${model} cache tokens from bundled data`, async () => {
+			expect(await estimateCostUSD(model, cacheTokens)).toBeCloseTo(10.2, 6);
+		});
+	}
 });
 
 describe("bundled MiMo pricing (offline fallback)", () => {

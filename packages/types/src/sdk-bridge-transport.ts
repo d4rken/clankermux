@@ -115,10 +115,15 @@ export function sdkBridgeWireModel(upstreamModel: string): string {
 	return upstreamModel.replace(/\[1m\]$/i, "");
 }
 
-/** Measured to serve a 1M window on every plan through Claude Code. */
+/**
+ * Served at a 1M window through Claude Code. Fable 5.2's bridge behaviour is
+ * pinned by real-claude-context.integration.test.ts; the others were also
+ * measured on every plan.
+ */
 const ONE_MILLION_CONTEXT_MODELS: ReadonlySet<string> = new Set([
 	"claude-opus-5-5",
 	"claude-fable-5-1",
+	"claude-fable-5-2",
 	"claude-sonnet-5",
 ]);
 

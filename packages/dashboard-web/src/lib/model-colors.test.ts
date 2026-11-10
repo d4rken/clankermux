@@ -427,6 +427,26 @@ describe("getModelColor", () => {
 		);
 	});
 
+	it("keeps Fable 5.2 and Mythos 5.2 off their predecessors' colors", () => {
+		// Both contain `claude-fable-5` / `claude-mythos-5`, so a missing entry
+		// would fall back to the 5.0 generation's colour.
+		for (const [current, previous, base] of [
+			[
+				CLAUDE_MODEL_IDS.FABLE_5_2,
+				CLAUDE_MODEL_IDS.FABLE_5_1,
+				CLAUDE_MODEL_IDS.FABLE_5,
+			],
+			[
+				CLAUDE_MODEL_IDS.MYTHOS_5_2,
+				CLAUDE_MODEL_IDS.MYTHOS_5_1,
+				CLAUDE_MODEL_IDS.MYTHOS_5,
+			],
+		]) {
+			expect(getModelColor(current)).not.toBe(getModelColor(previous));
+			expect(getModelColor(current)).not.toBe(getModelColor(base));
+		}
+	});
+
 	it("keeps Opus 5.5 off Opus 5's color", () => {
 		// `claude-opus-5.5` contains `claude-opus-5`, so without its explicit entry
 		// the substring fallback would draw both as one azure line.

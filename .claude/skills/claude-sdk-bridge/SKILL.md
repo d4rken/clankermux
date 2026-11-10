@@ -314,8 +314,9 @@ made private, never deleted: no pid says whether a process still uses them.
 - A `[1m]` model goes to Claude Code as is. Claude Code turns the suffix into
   the 1M beta header and sends the bare id, so the inner route plans both
   forms (`sdkBridgeCandidatesForModel`). Only `claude-opus-5-5[1m]`,
-  `claude-fable-5-1[1m]` and `claude-sonnet-5[1m]` (`oneMillionContextBase`)
-  are permitted through their bare id and published at a 1M window. Family
+  `claude-fable-5-1[1m]`, `claude-fable-5-2[1m]` and `claude-sonnet-5[1m]`
+  (`oneMillionContextBase`) are permitted through their bare id and
+  published at a 1M window. Family
   rules and bare-id suppressions apply to them. A route that would send any
   suffixed id directly (not bridged) answers 400
   `model_suffix_requires_claude_code`.
