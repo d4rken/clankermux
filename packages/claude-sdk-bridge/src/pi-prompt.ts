@@ -2,7 +2,8 @@
  * pi's system prompt with pi's own harness text taken out. pi renders that
  * text as one head at the very start whenever the preamble is its stock one:
  *
- *   You are an expert coding assistant operating inside pi, …
+ *   You are an expert coding assistant operating inside pi, …   (up to 1.3)
+ *   You are a coding assistant running inside pi, …             (1.5)
  *
  *   <tools>
  *   …
@@ -29,6 +30,8 @@
  */
 interface PiPromptHead {
 	stockPreamble: string;
+	/** The preamble's opening clause, a refusal trigger (see the claude-sdk-bridge skill). */
+	openingLine: string;
 	/** The sections that follow a stock preamble, in order. */
 	sections: readonly string[];
 }
@@ -39,6 +42,16 @@ const HEADS: ReadonlyArray<{ versions: string[]; head: PiPromptHead }> = [
 		head: {
 			stockPreamble:
 				"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.",
+			openingLine: "You are an expert coding assistant operating inside pi",
+			sections: ["tools", "rules", "docs"],
+		},
+	},
+	{
+		versions: ["1.5"],
+		head: {
+			stockPreamble:
+				"You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.",
+			openingLine: "You are a coding assistant running inside pi",
 			sections: ["tools", "rules", "docs"],
 		},
 	},
@@ -57,9 +70,10 @@ export function piPromptHead(version: string): PiPromptHead | null {
 	return BY_VERSION.get(version) ?? null;
 }
 
-/** The text the in-pi bridge refused to forward: subscription accounts answer it with a 400. */
-const PI_PREAMBLE_LINE =
-	"You are an expert coding assistant operating inside pi";
+/** Every layout's opening line, refused at a line start whatever the declared layout. */
+const PI_OPENING_LINES: readonly string[] = HEADS.map(
+	({ head }) => head.openingLine,
+);
 const TRIGGER_PAIR = ["docs/custom-provider.md", "docs/packages.md"] as const;
 
 const MAX_SECTION_NAMES = 32;
@@ -121,13 +135,14 @@ function headEnd(text: string, head: PiPromptHead): number | null {
 }
 
 function triggerIn(text: string): PiPromptRefusedReason | null {
-	for (
-		let at = text.indexOf(PI_PREAMBLE_LINE);
-		at !== -1;
-		at = text.indexOf(PI_PREAMBLE_LINE, at + 1)
-	)
-		// Mid-line mentions describe pi's prompt; they are not pi's prompt.
-		if (at === 0 || text[at - 1] === "\n") return "trigger_preamble";
+	for (const line of PI_OPENING_LINES)
+		for (
+			let at = text.indexOf(line);
+			at !== -1;
+			at = text.indexOf(line, at + 1)
+		)
+			// Mid-line mentions describe pi's prompt; they are not pi's prompt.
+			if (at === 0 || text[at - 1] === "\n") return "trigger_preamble";
 	return TRIGGER_PAIR.every((t) => text.includes(t))
 		? "trigger_docs_pair"
 		: null;

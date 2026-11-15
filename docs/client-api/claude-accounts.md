@@ -25,7 +25,7 @@ What differs from a direct request:
   `APPEND_SYSTEM.md`, the working directory, extension sections and text
   extensions add) reaches the model unchanged. A replaced prompt
   (`SYSTEM.md`, a subagent persona) is sent whole. pi must declare its
-  prompt layout with `x-clankermux-pi-prompt` (`0.87`, `0.99`, `1.0`, `1.2` or `1.3`); the
+  prompt layout with `x-clankermux-pi-prompt` (`0.87`, `0.99`, `1.0`, `1.2`, `1.3` or `1.5`); the
   layouts ClankerMux serves are listed at `clankermux.piPromptVersions` in the
   `/wire/openai/v1/models?clankermux_metadata=1` response. A pi turn is
   refused with a 400 rather than sent without your instructions when the
@@ -33,9 +33,11 @@ What differs from a direct request:
   (`sdk_bridge_prompt_unsupported`), when `</tools>`, `</rules>` or
   `</docs>` appears more than once or pi's opening lacks the sections that
   follow it (`sdk_bridge_prompt_malformed`), or when the forwarded text
-  contains pi's opening line at the start of a line, or both `docs/custom-provider.md` and
-  `docs/packages.md`, which subscription accounts answer with a 400
-  (`sdk_bridge_prompt_refused`). OpenCode's, Codex's, oh-my-pi's and Qwen
+  contains the opening line of any pi release ClankerMux serves at the
+  start of a line, or both `docs/custom-provider.md` and
+  `docs/packages.md` (`sdk_bridge_prompt_refused`). Subscription accounts
+  answer pi 1.3's opening line and that pair with a 400; pi 1.5's opening
+  line is refused as a precaution. OpenCode's, Codex's, oh-my-pi's and Qwen
   Code's system prompts are not sent. A client ClankerMux does not recognize
   (curl, an SDK, your own program), on a key whose application is generic or
   unset, has its system prompt appended unchanged.
