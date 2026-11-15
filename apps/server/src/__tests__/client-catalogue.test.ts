@@ -155,7 +155,7 @@ describe("client catalogue serving", () => {
 			// The OpenAI shape, pi's, also names the pi prompt layouts the SDK bridge serves.
 			expect(enriched.clankermux).toEqual(
 				format === "openai"
-					? { piPromptVersions: ["0.87", "0.99", "1.0", "1.2", "1.3"] }
+					? { piPromptVersions: ["0.87", "0.99", "1.0", "1.2", "1.3", "1.5"] }
 					: undefined,
 			);
 			delete enriched.clankermux;

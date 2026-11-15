@@ -28,6 +28,10 @@ import { type Gateway, startGateway } from "./fixtures/sdk-bridge-gateway";
 const MODEL = "claude-sonnet-5";
 /** pi 0.87's user agent through its clankermux provider, as recorded live. */
 const PI_USER_AGENT = "pi (linux 6.12.101+deb13-amd64; x64)";
+/** pi 1.5's detailed client identity (pi-ai 1.5.2 `formatUserAgent`). */
+const PI_IDENTITY_USER_AGENT = "pi/1.5.2 (linux; node/v24.3.0; x64)";
+/** Layouts whose fixtures still model claude-context's retired section hook. */
+const SECTION_HOOK_LAYOUTS = ["0.87", "0.99", "1.0", "1.2"];
 
 const mock = startMockUpstream();
 afterAll(() => mock.stop());
@@ -153,7 +157,9 @@ for (const endpoint of ["responses", "chat"] as const)
 				"stock-extension-section",
 				"forced-claude-context",
 				"forced-claude-context-and-agents",
-				...(version === "1.3" ? [] : ["claude-context-section"]),
+				...(SECTION_HOOK_LAYOUTS.includes(version)
+					? ["claude-context-section"]
+					: []),
 				"herdr-child",
 				"collapsed-tools-change",
 				"collapsed-section-update",
@@ -164,6 +170,9 @@ for (const endpoint of ["responses", "chat"] as const)
 					const f = byName(name, version);
 					const pending = send(h.gw, endpoint, f, {
 						"x-clankermux-pi-prompt": version,
+						...(version === "1.5"
+							? { "user-agent": PI_IDENTITY_USER_AGENT }
+							: {}),
 					});
 					const query = await h.sdk.next();
 					expect(query.options.systemPrompt).toEqual({
@@ -212,7 +221,15 @@ for (const endpoint of ["responses", "chat"] as const)
 			expect(row?.system_prompt_detail).not.toContain("expert coding");
 		});
 
-		for (const version of ["1.3.0", "v1.3", "1.3, 1.2", "1.4", "1.1"])
+		for (const version of [
+			"1.3.0",
+			"v1.3",
+			"1.3, 1.2",
+			"1.4",
+			"1.1",
+			"1.5.2",
+			"1.6",
+		])
 			it(`refuses layout header ${version} before starting the SDK`, async () => {
 				const h = await harness();
 				const response = await send(h.gw, endpoint, byName("stock-all"), {

@@ -219,6 +219,18 @@ const TOOL_SNIPPETS = {
 };
 const BASE = { cwd: CWD, toolSnippets: TOOL_SNIPPETS };
 const STOCK_PREAMBLE = prompt.buildSystemPromptSections(BASE).preamble ?? "";
+/**
+ * The release's own opening clause and first sentence, for the trigger cases:
+ * 1.3 "You are an expert coding assistant operating inside pi" /
+ * "…inside pi, a coding agent harness."
+ */
+const OPENING_LINE = STOCK_PREAMBLE.slice(0, STOCK_PREAMBLE.indexOf(", "));
+const OPENING_SENTENCE = STOCK_PREAMBLE.slice(
+	0,
+	STOCK_PREAMBLE.indexOf(". ") + 1,
+);
+if (!OPENING_LINE.endsWith(" pi") || !OPENING_SENTENCE.startsWith(OPENING_LINE))
+	throw new Error(`unexpected stock preamble: ${STOCK_PREAMBLE}`);
 /** Releases before `hiddenTools` ignore it, which would turn its cases into mislabelled copies of `stock`. */
 const HIDES_TOOLS =
 	prompt.buildSystemPromptSections({ ...BASE, hiddenTools: ["read"] }).tools !==
@@ -646,8 +658,7 @@ const ALL_CASES: Case[] = [
 			contextFiles: [
 				{
 					path: `${CWD}/AGENTS.md`,
-					content:
-						"pi's prompt starts:\nYou are an expert coding assistant operating inside pi, a coding agent harness.",
+					content: `pi's prompt starts:\n${OPENING_SENTENCE}`,
 				},
 			],
 		},
@@ -670,8 +681,7 @@ const ALL_CASES: Case[] = [
 			"A replaced preamble that opens with pi's preamble line, as a persona built on the parent's prompt would.",
 		input: {
 			...BASE,
-			customPrompt:
-				"You are an expert coding assistant operating inside pi, acting as the reviewer.",
+			customPrompt: `${OPENING_LINE}, acting as the reviewer.`,
 		},
 		expect: refused("sdk_bridge_prompt_refused", "trigger_preamble"),
 	},

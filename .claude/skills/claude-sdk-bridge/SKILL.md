@@ -632,17 +632,28 @@ pi declares its layout in `x-clankermux-pi-prompt` (threaded as
 same head sections in the same order share an entry, whatever the sections
 hold. 0.99, 1.0, 1.2 and 1.3 share 0.87's; the `<docs>` "When asked about" list
 gained an MCP servers entry in 0.99 and a codemode entry in 1.0. Both 1.2
-and 1.3 render exactly 1.0's text. A version is supported only while it has fixtures under
+and 1.3 render exactly 1.0's text. 1.5 has its own entry: pi 1.5.0 rewrote
+the preamble ("You are a coding assistant running inside pi, …"), the
+`<tools>` trailer, the `<docs>` heading and closing bullets (the docs line
+now reads `packages (docs/packages.md)`, no longer `pi packages`) and the
+skills section's relative-path line, but kept `tools`, `rules` and `docs`
+in that order. 1.4 was never served. A version is supported only while it has fixtures under
 `__tests__/fixtures/pi-prompts/<version>/`, written by
 `scripts/generate-pi-prompt-fixtures.ts` from the installed pi release's
 own builder and the claude-context and pi-subagents code that rewrites the
 prompt. Historical layouts through 1.2 retain section-hook fixtures generated
 with their matching older extension source and generator; this upgrade does
-not regenerate them. The 1.3 fixtures use the current `before_agent_start`
+not regenerate them. The 1.3 and 1.5 fixtures use the current `before_agent_start`
 forced-prompt hook instead of the retired claude-context section hook, while
-retaining generic section-update coverage. Regenerate and review the fixtures when a pi release changes the
+retaining generic section-update coverage. The trigger cases quote each
+release's own opening line. Regenerate and review the fixtures when a pi release changes the
 head, pi-ai's system-message collapse, or the rendering of the extensions
-above. For a pi release newer than `~/.pi`'s, never install it: unpack its
+above. When a pi config commit pinning the new release exists, build the
+scratch home from it: extract it, run `npm ci --ignore-scripts
+--include=dev --include=optional` against its lockfile, compare the
+installed `@earendil-works/*` packages with the release tarballs, and copy
+the pinned clones under `~/.pi/agent/git` in read-only (1.5.2 was generated
+this way). Otherwise, for a pi release newer than `~/.pi`'s, never install it: unpack its
 pi-coding-agent and pi-ai tarballs, and the few packages their prompt
 modules import, with `npm pack --ignore-scripts` into a scratch
 `node_modules`, link the scratch home's `packages` and `agent` to `~/.pi`'s,
@@ -663,7 +674,7 @@ All refusals are `400 invalid_request_error`:
 | --- | --- |
 | `sdk_bridge_prompt_unsupported` | header missing, or a version without fixtures |
 | `sdk_bridge_prompt_malformed` | `</tools>`, `</rules>` or `</docs>` more than once anywhere, or the stock preamble not followed by the full head |
-| `sdk_bridge_prompt_refused` | the forwarded text carries pi's preamble line at a line start, or both `docs/custom-provider.md` and `docs/packages.md`; subscription accounts answer those with a 400. A persona embedding its parent's pi prompt lands here too |
+| `sdk_bridge_prompt_refused` | the forwarded text carries any served layout's opening line (`openingLine` in `HEADS`) at a line start, or both `docs/custom-provider.md` and `docs/packages.md`. The in-pi bridge refuses 1.3's line and the pair because subscription accounts answer them with a 400. 1.5's line is a precaution by owner decision (2026-11-15), unmeasured upstream: the in-pi bridge's 400 bisection pinned `pi packages`, which 1.5 dropped. A persona embedding its parent's pi prompt lands here too |
 
 The single leading system message is the layout's contract. pi's
 clankermux provider (openai-responses, no `compat`) sends only that:

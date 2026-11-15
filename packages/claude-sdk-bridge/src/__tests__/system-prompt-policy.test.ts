@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SUPPORTED_PI_PROMPT_VERSIONS } from "@clankermux/types";
-import { PI_PROMPT_HEAD_VERSIONS } from "../pi-prompt";
+import { PI_PROMPT_HEAD_VERSIONS, piPromptHead } from "../pi-prompt";
 import {
 	appendSystemPromptPolicy,
 	dropSystemPromptPolicy,
@@ -126,27 +126,28 @@ describe("fixtures", () => {
 				expect(Object.keys(f.sections ?? {})).not.toContain("undefined");
 	});
 
-	it("covers current extension hooks and generic updates without the retired hook", () => {
-		const fixtures = loadPiPromptFixtures("1.3");
-		const names = fixtures.map((f) => f.name);
-		expect(names).not.toContain("claude-context-section");
-		for (const name of [
-			"forced-claude-context",
-			"forced-claude-context-and-agents",
-		]) {
-			const f = loadPiPromptFixture("1.3", name);
-			expect(f.sections).toBeNull();
-			expect(expectedAppend(f)).toContain(
-				"## Claude supplemental guidance (claude-context)\n",
-			);
-		}
-		for (const name of [
-			"stock-extension-section",
-			"collapsed-section-update",
-			"collapsed-extension-section-update",
-		])
-			expect(names).toContain(name);
-	});
+	for (const version of ["1.3", "1.5"])
+		it(`covers current extension hooks and generic updates without the retired hook in ${version}`, () => {
+			const fixtures = loadPiPromptFixtures(version);
+			const names = fixtures.map((f) => f.name);
+			expect(names).not.toContain("claude-context-section");
+			for (const name of [
+				"forced-claude-context",
+				"forced-claude-context-and-agents",
+			]) {
+				const f = loadPiPromptFixture(version, name);
+				expect(f.sections).toBeNull();
+				expect(expectedAppend(f)).toContain(
+					"## Claude supplemental guidance (claude-context)\n",
+				);
+			}
+			for (const name of [
+				"stock-extension-section",
+				"collapsed-section-update",
+				"collapsed-extension-section-update",
+			])
+				expect(names).toContain(name);
+		});
 
 	it("cover a head for exactly the versions discovery publishes", () => {
 		expect([...PI_PROMPT_HEAD_VERSIONS].sort()).toEqual(
@@ -406,6 +407,117 @@ describe("pi 1.0 head strip", () => {
 	});
 });
 
+describe("pi 1.5 head strip", () => {
+	const stock15 = loadPiPromptFixture("1.5", "stock").system;
+	const stock13 = loadPiPromptFixture("1.3", "stock").system;
+
+	it("strips the rewritten preamble, tools trailer and docs", () => {
+		const f = loadPiPromptFixture("1.5", "stock-all");
+		expect(f.system).toStartWith(
+			"You are a coding assistant running inside pi, a coding agent harness.",
+		);
+		expect(f.system).toContain(
+			"\n\nAdditional tools may be available.\n</tools>",
+		);
+		expect(f.system).toContain(
+			"adding models (docs/models.md), packages (docs/packages.md)",
+		);
+		expect(f.system).not.toContain("pi packages");
+		const append = appendOf(decide(f.system, "1.5")) ?? "";
+		for (const text of [
+			"You are a coding assistant",
+			"<tools>",
+			"Additional tools may be available.",
+			"<rules>",
+			"<docs>",
+			"Before implementing harness changes",
+			"docs/packages.md",
+		])
+			expect(append).not.toContain(text);
+		expect(append).toBe(expectedAppend(f) as string);
+		expect(append).toStartWith("<addendum>\n");
+		expect(append).toEndWith("<cwd>\n/home/user/projects/widget\n</cwd>");
+	});
+
+	it("forwards 1.5's skills wording, which follows the head", () => {
+		const append =
+			appendOf(
+				decide(loadPiPromptFixture("1.5", "stock-skills").system, "1.5"),
+			) ?? "";
+		expect(append).toContain(
+			"Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
+		);
+	});
+
+	it("refuses a 1.5 prompt declared as 1.3: its preamble is never stripped", () => {
+		expect(refusalOf(decide(stock15, "1.3")).detail).toMatchObject({
+			code: "sdk_bridge_prompt_refused",
+			reason: "trigger_preamble",
+		});
+	});
+
+	it("refuses 1.5's opening line at a line start under every layout", () => {
+		for (const version of SUPPORTED_PI_PROMPT_VERSIONS)
+			for (const system of [
+				"You are a coding assistant running inside pi, acting as the reviewer.",
+				"Persona.\nYou are a coding assistant running inside pi, a coding agent harness.",
+			])
+				expect(refusalOf(decide(system, version)).detail).toMatchObject({
+					code: "sdk_bridge_prompt_refused",
+					reason: "trigger_preamble",
+				});
+	});
+
+	it("forwards a mid-line mention of 1.5's opening line", () => {
+		const text =
+			"Persona. pi's prompt opens with: You are a coding assistant running inside pi.";
+		expect(appendOf(decide(text, "1.5"))).toBe(text);
+	});
+
+	it("treats every registered stock preamble's opening line as a trigger", () => {
+		for (const version of SUPPORTED_PI_PROMPT_VERSIONS) {
+			const head = piPromptHead(version);
+			expect(head?.stockPreamble).toStartWith(`${head?.openingLine}, `);
+			expect(
+				refusalOf(decide(`Persona.\n${head?.openingLine}.`, version)).detail,
+			).toMatchObject({ reason: "trigger_preamble" });
+		}
+	});
+
+	it("generates 1.5's trigger cases from 1.5's own opening line", () => {
+		for (const name of [
+			"trigger-persona-embeds-pi",
+			"trigger-preamble-in-context",
+		]) {
+			const f = loadPiPromptFixture("1.5", name);
+			expect(f.system).toContain(
+				"You are a coding assistant running inside pi",
+			);
+			expect(f.system).not.toContain("expert coding assistant");
+		}
+	});
+
+	it("refuses a 1.3 prompt declared as 1.5: its preamble is never stripped", () => {
+		expect(refusalOf(decide(stock13, "1.5")).detail).toMatchObject({
+			code: "sdk_bridge_prompt_refused",
+			reason: "trigger_preamble",
+		});
+	});
+
+	it("refuses 1.5's stock preamble without its full head", () => {
+		const preamble = stock15.slice(0, stock15.indexOf("\n\n"));
+		for (const system of [
+			preamble,
+			`${preamble}\n\nBe brief.`,
+			stock15.replace("\n</docs>", "\n</docz>"),
+		])
+			expect(refusalOf(decide(system, "1.5")).detail).toMatchObject({
+				code: "sdk_bridge_prompt_malformed",
+				reason: "incomplete_head",
+			});
+	});
+});
+
 describe("pi 0.87 malformed heads", () => {
 	const stock = fixture("stock").system;
 	const cut = (text: string, from: string, to: string) =>
@@ -508,7 +620,16 @@ describe("the version gate", () => {
 			expect(appendOf(decide(f.system, version))).toBe(expectedAppend(f));
 		});
 
-	for (const version of ["1.3.0", "v1.3", "1.3, 1.2", "1.4", "2.0"])
+	for (const version of [
+		"1.3.0",
+		"v1.3",
+		"1.3, 1.2",
+		"1.4",
+		"1.5.2",
+		"1.5, 1.3",
+		"1.6",
+		"2.0",
+	])
 		it(`refuses unregistered layout ${version} instead of guessing compatibility`, () => {
 			expect(refusalOf(decide(system, version)).error).toMatchObject({
 				status: 400,

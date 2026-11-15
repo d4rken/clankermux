@@ -62,6 +62,10 @@ describe("detectHarness", () => {
 			"pi-coding-agent/0.4.0",
 			// What pi 0.87 sends through its clankermux provider.
 			"pi (linux 6.12.101+deb13-amd64; x64)",
+			// pi 1.5's detailed client identity (pi-ai 1.5.2 formatUserAgent).
+			"pi/1.5.2 (linux; node/v24.3.0; x64)",
+			"pi/1.5.2 (darwin; bun/1.4.4; arm64)",
+			"pi/1.5.2 (browser)",
 		]) {
 			expect(detectHarness(new Headers({ "user-agent": userAgent }))).toEqual({
 				harness: "pi",
