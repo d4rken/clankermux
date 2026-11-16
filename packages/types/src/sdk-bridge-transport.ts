@@ -327,6 +327,11 @@ export interface SdkBridgeTransport {
 		| { turnId: string; ownerApiKeyId: string | null }
 		| SdkBridgeContinuationUnavailable
 		| null;
+	/**
+	 * Continue a parked turn with the client's tool results. Throws like
+	 * {@link startTurn} only when the turn had to start afresh (its released
+	 * session gone) and that start could not run.
+	 */
 	continueTurn(input: {
 		turnId: string;
 		request: Request;

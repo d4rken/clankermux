@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
 	SDK_BRIDGE_HISTORY_HEADER,
+	SdkBridgeExtraUsageError,
 	type SdkBridgeTurnMeta,
 } from "@clankermux/types";
 import { parkTurnIdentity } from "../released-parks";
@@ -694,6 +695,54 @@ describe("resuming a released park", () => {
 		expect(fresh).toMatchObject({
 			historyMode: "rebuild_flattened",
 			rebuildReason: "dead_continuation",
+		});
+	});
+
+	it("lets the fresh start's failover reach the proxy when the stored session is gone", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		for (const name of parkFiles(h)) rmSync(join(parkDir(h), name));
+		const message = "You're out of extra usage. Add more and keep going.";
+		h.inner.respond = (_req, ctx) => {
+			const requestId = crypto.randomUUID();
+			ctx.onInnerRequestStarted?.(requestId, ctx.legId);
+			ctx.onInnerOutcome?.({
+				requestId,
+				status: 400,
+				errorType: "invalid_request_error",
+				message,
+				retryAfter: null,
+				accountId: "acct-a",
+			});
+			return Response.json(
+				{ type: "error", error: { type: "invalid_request_error", message } },
+				{ status: 400 },
+			);
+		};
+		const meta = makeMeta();
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		q2.emit(
+			initMessage(),
+			resultMessage({
+				isError: true,
+				subtype: "success",
+				result: `API Error: 400 ${message}`,
+			}),
+		);
+		await expect(response).rejects.toBeInstanceOf(SdkBridgeExtraUsageError);
+		// Its only leg is the fresh start's, which the proxy moves past.
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			kind: "start",
+			failedOver: true,
 		});
 	});
 

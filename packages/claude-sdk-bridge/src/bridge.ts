@@ -1950,6 +1950,10 @@ export function createClaudeSdkBridge(
 			);
 			return leg.response.response;
 		} catch (error) {
+			// A continuation that had to start afresh (its released session
+			// gone) answers like any start, which the proxy fails over on. A
+			// refused leg here would collide with the fresh start's own.
+			if (error instanceof SdkBridgeUnavailableError) throw error;
 			log.error(
 				`SDK bridge continuation of turn ${input.turnId} failed`,
 				error,
