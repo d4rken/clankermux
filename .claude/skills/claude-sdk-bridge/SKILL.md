@@ -281,8 +281,40 @@ pipeline. The client keeps executing its own tools.
   `deadlineAt` to what is left.
 - **Accounting.** `sdk_bridge_turns` (one per Claude Code query) and
   `sdk_bridge_turn_legs` (one per outer HTTP request; the leg id is the
-  client's `x-clankermux-request-id`). Legs have no `requests` row.
-  `GET /api/sdk-bridge-turns/:id` takes a turn id or a leg id.
+  client's `x-clankermux-request-id`). Legs have no `requests` row, except
+  a start leg the proxy failed over from (`failed_over`), whose request the
+  direct path or a give-up terminal records under the same id.
+  `GET /api/sdk-bridge-turns/:id` takes a turn id or a leg id. A leg records
+  its outer request's key, validated correlation tag, requested model and
+  project: a refused continuation's leg sits on another key's turn. The
+  inner listener stamps each admitted call with the leg open at admission
+  (`SdkBridgeInnerContext.legId`, frozen per call; `setLeg` on attach,
+  null once the leg ends), the proxy writes it to `requests.sdk_bridge_leg_id`,
+  and `countInnerCall` bumps the turn's and the leg's `inner_call_count`
+  in one transaction. `settled_at` is written once the leg's own in-flight
+  dispatches have drained (`drainedLeg`), with the finish for legs that never
+  attach a query (`reject`, `refuseContinuation`), and with a park's release
+  (`markReleased` settles only the legs the releasing recorder vouches for:
+  ones it finished, every count landed, no call in flight). A dead owner's
+  leftovers are repaired at recovery, under the lease: `closeOpenTurnsWithoutPark`
+  (park-less turns, open or already finished) and `recoverParkedTurnLegs`
+  (every parked turn) finish an open leg with the reconstructed
+  `SDK_BRIDGE_LEG_OWNER_LOST` outcome (no status, no error phase) and settle
+  every finished one, never overwriting a leg's stored facts or a turn's
+  outcome. `closeTurn` in a live process (expiry, supersession) settles
+  nothing. A leg whose count write failed is never settled in that process;
+  after a crash only the row count against `inner_call_count` gates it.
+  `finishLeg` is write-once. Retention keeps a turn while it finished, or
+  had a leg start, inside the window; each cleanup pass records the cutoff
+  it applies (`cleanup:applied-request-cutoff` in `strategies`) before
+  deleting requests, and client reads never go below it.
+  `/client/v1/requests` reads a bridged request through its leg
+  (`legCtes` in `request.repository.ts`): finished, not failed over, no
+  `requests` row under its id, started inside request retention; counts
+  summed over its inner rows, which are never readable on their own; final
+  when settled, the inner row count equals `inner_call_count` and every one
+  is final. Legs written before these columns (`inner_call_count` NULL)
+  resolve only as a turn's single start leg, from the turn's inner rows.
 
 ## Child options and environment
 

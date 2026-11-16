@@ -122,6 +122,7 @@ export async function recordPreHeadClientAbort(
 		clientUserAgent: requestMeta.clientUserAgent ?? null,
 		clientHarness: requestMeta.clientHarness ?? null,
 		sdkBridgeTurnId: requestMeta.sdkBridgeTurnId ?? null,
+		sdkBridgeLegId: requestMeta.sdkBridgeLegId ?? null,
 		servedServiceTier: dispatch.servedServiceTier,
 		routing: toRecordRouting(dispatch.routing, dispatch.account.id),
 		// Arrival, so the row's response time is how long the client waited.
@@ -214,6 +215,7 @@ export function createSyntheticTerminalRecorder(
 			clientUserAgent: requestMeta.clientUserAgent ?? null,
 			clientHarness: requestMeta.clientHarness ?? null,
 			sdkBridgeTurnId: requestMeta.sdkBridgeTurnId ?? null,
+			sdkBridgeLegId: requestMeta.sdkBridgeLegId ?? null,
 			servedServiceTier: requestMeta.servedServiceTier ?? null,
 			routing: toRecordRouting(requestMeta.routing),
 			timestamp: requestMeta.timestamp,

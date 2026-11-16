@@ -236,7 +236,11 @@ export function ensureSchema(db: Database): void {
 			-- 'standard' | 'priority': the tier the latest upstream attempt
 			-- went out at. NULL when nothing reached upstream, and on rows
 			-- recorded before the column.
-			service_tier TEXT
+			service_tier TEXT,
+			-- The bridge leg (sdk_bridge_turn_legs.id) an inner model call was
+			-- admitted under; NULL for one admitted while no leg was open. Not a
+			-- foreign key, for the same reason as sdk_bridge_turn_id.
+			sdk_bridge_leg_id TEXT
 		)
 	`);
 
@@ -270,6 +274,12 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_sdk_bridge_turn
 			ON requests(sdk_bridge_turn_id)
 			WHERE sdk_bridge_turn_id IS NOT NULL`,
+	);
+	// The client API sums a leg's inner rows.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_requests_sdk_bridge_leg
+			ON requests(sdk_bridge_leg_id)
+			WHERE sdk_bridge_leg_id IS NOT NULL`,
 	);
 
 	// NOTE: do NOT add a partial index over failed rows here for the
@@ -1161,9 +1171,14 @@ export function ensureSchema(db: Database): void {
 	);
 
 	// One row per outer HTTP request of a turn. id is the leg's request id, the
-	// one returned to the client as x-clankermux-request-id. A leg has no
-	// `requests` row, so it is the parent of its routing_attempts rows.
-	// tool_use_ids is a JSON array.
+	// one returned to the client as x-clankermux-request-id. A leg normally has
+	// no `requests` row, so it is the parent of its routing_attempts rows.
+	// tool_use_ids is a JSON array. api_key_id, correlation_tag,
+	// requested_model and project are the outer request's, which a refused
+	// continuation does not share with its turn. inner_call_count counts the
+	// inner rows begun under the leg (NULL on legs written before it);
+	// settled_at is set once none can begin any more. failed_over marks a
+	// start leg the proxy moved past, whose request is answered elsewhere.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS sdk_bridge_turn_legs (
 			id TEXT PRIMARY KEY,
@@ -1176,11 +1191,32 @@ export function ensureSchema(db: Database): void {
 			stop_reason TEXT,
 			error_type TEXT,
 			error_message TEXT,
-			tool_use_ids TEXT
+			tool_use_ids TEXT,
+			api_key_id TEXT,
+			correlation_tag TEXT,
+			requested_model TEXT,
+			project TEXT,
+			inner_call_count INTEGER,
+			settled_at INTEGER,
+			failed_over INTEGER NOT NULL DEFAULT 0
 		)
 	`);
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
+	);
+	// Legs whose settle is still owed; recovery finds a dead owner's leftovers
+	// through it. Legs written before the leg columns never settle.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_unsettled
+			ON sdk_bridge_turn_legs(turn_id)
+			WHERE settled_at IS NULL AND inner_call_count IS NOT NULL`,
+	);
+	// The client API's tag search over bridged requests, in the column order
+	// of idx_requests_correlation_tag.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_correlation_tag
+			ON sdk_bridge_turn_legs(correlation_tag, api_key_id, finished_at, id)
+			WHERE correlation_tag IS NOT NULL`,
 	);
 
 	// Which bridge process may act on sdk_bridge_released_parks: at most one
@@ -2150,6 +2186,50 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "request_payloads",
 		column: "payload",
 		ddl: "ALTER TABLE request_payloads ADD COLUMN payload BLOB",
+	},
+	// The bridge leg an inner model call was admitted under, so the client API
+	// can sum a bridged request's own calls.
+	{
+		table: "requests",
+		column: "sdk_bridge_leg_id",
+		ddl: "ALTER TABLE requests ADD COLUMN sdk_bridge_leg_id TEXT",
+	},
+	// The outer request's identity on its leg, and the leg's own accounting
+	// state (see the CREATE TABLE).
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "api_key_id",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN api_key_id TEXT",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "correlation_tag",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN correlation_tag TEXT",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "requested_model",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN requested_model TEXT",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "project",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN project TEXT",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "inner_call_count",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN inner_call_count INTEGER",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "settled_at",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN settled_at INTEGER",
+	},
+	{
+		table: "sdk_bridge_turn_legs",
+		column: "failed_over",
+		ddl: "ALTER TABLE sdk_bridge_turn_legs ADD COLUMN failed_over INTEGER NOT NULL DEFAULT 0",
 	},
 ];
 

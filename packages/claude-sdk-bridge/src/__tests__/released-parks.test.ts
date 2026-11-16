@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
 	SDK_BRIDGE_HISTORY_HEADER,
+	SdkBridgeExtraUsageError,
 	type SdkBridgeTurnMeta,
 } from "@clankermux/types";
 import { parkTurnIdentity } from "../released-parks";
@@ -162,6 +163,8 @@ async function parkTurn(
 		system?: string;
 		/** false: none; "first": only the envelopes up to the first call. */
 		envelopes?: boolean | "first";
+		/** Runs once the query exists, before its reply parks it. */
+		beforeReply?: (query: FakeQuery) => Promise<void>;
 	} = {},
 ): Promise<Parked> {
 	const ids = opts.ids ?? [`toolu_${crypto.randomUUID().slice(0, 8)}`];
@@ -178,6 +181,7 @@ async function parkTurn(
 		signal: new AbortController().signal,
 	});
 	const query = await h.sdk.next();
+	await opts.beforeReply?.(query);
 	const msgId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
 	const blocks: Block[] = [
 		{ type: "thinking", text: "hm" },
@@ -460,6 +464,41 @@ describe("resuming a released park", () => {
 		).toBeNull();
 	});
 
+	it("records the results' own request on the resumed leg, and counts the resumed calls there", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { meta: { project: "start-project" } });
+		await released(h, p);
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+		const meta = makeMeta({
+			project: "resume-project",
+			correlationTag: "tag-2",
+		});
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await finishResumed(h, q2, response);
+		// The inner rows keep the turn's attribution; the leg is the request's.
+		expect(h.inner.calls.at(-1)?.ctx).toMatchObject({
+			project: "start-project",
+			legId: meta.legId,
+		});
+		await waitFor(() => h.repo.legs.get(meta.legId)?.settledAt != null);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			kind: "continue",
+			project: "resume-project",
+			correlationTag: "tag-2",
+			innerCallCount: 1,
+		});
+		expect(h.repo.turns.get(p.turnId)?.counters.innerCalls).toBe(1);
+	});
+
 	it("resumes with the system prompt the turn appended", async () => {
 		const h = await releaseHarness();
 		const p = await parkTurn(h, {
@@ -656,6 +695,54 @@ describe("resuming a released park", () => {
 		expect(fresh).toMatchObject({
 			historyMode: "rebuild_flattened",
 			rebuildReason: "dead_continuation",
+		});
+	});
+
+	it("lets the fresh start's failover reach the proxy when the stored session is gone", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h);
+		await released(h, p);
+		for (const name of parkFiles(h)) rmSync(join(parkDir(h), name));
+		const message = "You're out of extra usage. Add more and keep going.";
+		h.inner.respond = (_req, ctx) => {
+			const requestId = crypto.randomUUID();
+			ctx.onInnerRequestStarted?.(requestId, ctx.legId);
+			ctx.onInnerOutcome?.({
+				requestId,
+				status: 400,
+				errorType: "invalid_request_error",
+				message,
+				retryAfter: null,
+				accountId: "acct-a",
+			});
+			return Response.json(
+				{ type: "error", error: { type: "invalid_request_error", message } },
+				{ status: 400 },
+			);
+		};
+		const meta = makeMeta();
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		q2.emit(
+			initMessage(),
+			resultMessage({
+				isError: true,
+				subtype: "success",
+				result: `API Error: 400 ${message}`,
+			}),
+		);
+		await expect(response).rejects.toBeInstanceOf(SdkBridgeExtraUsageError);
+		// Its only leg is the fresh start's, which the proxy moves past.
+		await waitFor(() => h.repo.legs.get(meta.legId)?.finished === true);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			kind: "start",
+			failedOver: true,
 		});
 	});
 
@@ -1019,6 +1106,146 @@ describe("the session byte ceiling", () => {
 		await waitFor(() => !existsSync(file(oldId)), 2_000);
 		expect(existsSync(file(newId))).toBe(true);
 		expect(h.bridge.status().releaseBlocked).toBeNull();
+	});
+});
+
+describe("leg settlement across a release", () => {
+	const legOf = (h: Harness, id: string) => h.repo.legs.get(id);
+
+	/** Every inner call reports its row as begun under its leg. */
+	function reportRows(h: Harness) {
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+	}
+
+	it("settles a parked leg whose own settle write was lost when its park is released", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		// As if the process had died before the drained leg's settle landed.
+		h.repo.settleLeg = async () => {};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await waitFor(() => legOf(h, p.meta.legId)?.finished === true);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)).toMatchObject({
+			innerCallCount: 1,
+			settledAt: expect.any(Number),
+		});
+	});
+
+	it("never settles at the release a leg one of whose counts failed", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		h.repo.countInnerCall = async () => {
+			throw new Error("database is locked");
+		};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.finished).toBe(true);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+	});
+
+	it("never lets a later recorder's release settle a leg an earlier one left unsettled", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		const count = h.repo.countInnerCall.bind(h.repo);
+		let failures = 1;
+		h.repo.countInnerCall = async (...args) => {
+			if (failures-- > 0) throw new Error("database is locked");
+			return count(...args);
+		};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		// The resumed query runs under a recorder of its own, and parks again.
+		const response = answer(h, p, results(p), { legId: "leg-2" });
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		const block = {
+			type: "tool_use",
+			id: "toolu_again",
+			name: "mcp__c__read",
+			input: {},
+		};
+		q2.emit(
+			initMessage(),
+			...streamedMessage([block as never], { id: "msg_again" }),
+		);
+		expect((await reply(response)).stop).toBe("tool_use");
+		q2.emit(
+			assistantMessage([block], { id: "msg_again", stopReason: "tool_use" }),
+		);
+		void q2.callTool("toolu_again", "read");
+		await waitFor(
+			() =>
+				h.parkRepo.parks.get(p.turnId)?.awaitedToolUseIds[0] ===
+					"toolu_again" && h.parkRepo.parks.get(p.turnId)?.state === "released",
+			8_000,
+		);
+		expect(legOf(h, "leg-2")).toMatchObject({
+			innerCallCount: 1,
+			settledAt: expect.any(Number),
+		});
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+	});
+
+	it("leaves to its own drain a leg with a call still in flight at the release", async () => {
+		const h = await releaseHarness();
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		h.inner.respond = async (_req, ctx) => {
+			await held;
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+		let call: Promise<Response> | null = null;
+		const p = await parkTurn(h, {
+			beforeReply: async (q) => {
+				call = innerCall(q);
+				await waitFor(() => h.inner.calls.length === 1);
+			},
+		});
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		release();
+		await (call as Promise<Response> | null)?.catch(() => null);
+		await waitFor(() => legOf(h, p.meta.legId)?.settledAt != null);
+		expect(legOf(h, p.meta.legId)?.innerCallCount).toBe(1);
+	});
+
+	it("a new process settles the legs of a parked turn its dead owner left unsettled, finishing an open one as lost", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		// The rows as a crash between a leg's finish and its settle leaves
+		// them, next to a leg its owner died in.
+		const leg = repo.legs.get(p.meta.legId);
+		if (leg) delete leg.settledAt;
+		await repo.insertLeg({
+			id: "never-finished",
+			turnId: p.turnId,
+			kind: "continue",
+			startedAt: 1,
+		});
+
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(1);
+		expect(repo.legs.get(p.meta.legId)?.settledAt).toBeNumber();
+		expect(repo.legs.get("never-finished")).toMatchObject({
+			errorType: "owner_lost",
+			settledAt: expect.any(Number),
+		});
 	});
 });
 

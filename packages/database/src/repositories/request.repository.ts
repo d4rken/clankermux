@@ -10,6 +10,7 @@ import type {
 	UsageSource,
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
+import { APPLIED_REQUEST_CUTOFF_SQL } from "../applied-request-cutoff";
 import {
 	decodeStoredPayload,
 	decodeStoredPayloadText,
@@ -176,6 +177,8 @@ export interface RequestData extends GatewayHintMetadata {
 	 * foreign key: the turn may already be gone when a late write lands.
 	 */
 	sdkBridgeTurnId?: string | null;
+	/** The leg the inner call was admitted under; carried like `sdkBridgeTurnId`. */
+	sdkBridgeLegId?: string | null;
 	/**
 	 * 'standard' | 'priority' from the request's latest upstream attempt; NULL
 	 * when nothing reached upstream. Absent on the usage-patch re-upsert, so it
@@ -232,9 +235,17 @@ export interface RequestHeadersData {
  * An ALLOWLIST rather than `SELECT *`: these rows leave the process on a
  * credential-scoped wire, so a column added to `requests` later is published
  * by someone deciding to publish it, not by inheriting the star.
+ *
+ * A row is one of two sources. `request` is a `requests` row. `sdk_bridge_leg`
+ * is a request the SDK bridge served: its leg row, with the token columns
+ * summed over the inner rows begun under it, and the `leg_*` facts the
+ * caller decides finality from. Both `id`s are the client's
+ * `x-clankermux-request-id`.
  */
 export interface ClientRequestRow {
+	source: "request" | "sdk_bridge_leg";
 	id: string;
+	/** A request row's write time; a leg's `finished_at`. */
 	timestamp: number;
 	status_code: number | null;
 	error_message: string | null;
@@ -249,7 +260,7 @@ export interface ClientRequestRow {
 	usage_source: string | null;
 	failover_attempts: number | null;
 	project: string | null;
-	/** Non-null by construction: both queries filter `api_key_id = ?`. */
+	/** Non-null by construction: both queries scope to one key. */
 	api_key_id: string;
 	correlation_tag: string | null;
 	/**
@@ -261,28 +272,212 @@ export interface ClientRequestRow {
 	 * a column would add except a second place for the same fact to be wrong.
 	 */
 	model_substitution_discards: number;
+	/** 1 once no inner row can begin under the leg; null on a request row. */
+	leg_settled: number | null;
+	/** Inner rows the bridge counted as begun under the leg. */
+	leg_expected_calls: number | null;
+	/** Inner rows of the leg that exist now. */
+	leg_inner_rows: number | null;
+	/** Of those, the ones whose accounting is finished. */
+	leg_inner_finalized: number | null;
+	/** Of those, the ones whose usage source reads `approximate`. */
+	leg_inner_approximate: number | null;
+	/** Of those, the ones whose usage source is `provider`. */
+	leg_inner_provider: number | null;
+}
+
+/**
+ * SQL twin of `isClientRequestFinalized` over the `requests` row aliased `r`.
+ * The two are pinned equal by a parity test next to the DTO.
+ */
+export function clientRowFinalizedSql(r: string): string {
+	return `(${r}.usage_source IS NOT NULL OR ${r}.usage_finalized_at IS NOT NULL OR ${r}.model IS NOT NULL OR ${r}.total_tokens IS NOT NULL)`;
+}
+
+/** SQL twin of `toClientUsageSource(row) === "approximate"`, as above. */
+export function clientRowApproximateSql(r: string): string {
+	return `(CASE WHEN ${r}.usage_source IS NULL THEN ${clientRowFinalizedSql(r)} ELSE ${r}.usage_source NOT IN ('provider', 'none') END)`;
 }
 
 /**
  * Counted rather than stored. `kind` matters as much as the reason: a local
  * rejection never reached an upstream, so it discarded nothing.
  *
- * The reason is interpolated, not bound. Both queries below take POSITIONAL
- * parameters, so a `?` inside this shared column list would silently shift
- * every existing binding at both call sites. What makes that safe is a property
- * of the constant, and it is pinned as a test where the constant is declared.
+ * The reason is interpolated, not bound. The queries below take POSITIONAL
+ * parameters, so a `?` inside a shared fragment would silently shift every
+ * binding after it. What makes that safe is a property of the fragment, and
+ * it is pinned as a test.
  */
-const MODEL_SUBSTITUTION_DISCARDS = `(SELECT COUNT(*) FROM routing_attempts ra
-		WHERE ra.request_id = requests.id
+export function modelSubstitutionDiscardsSql(requestId: string): string {
+	return `(SELECT COUNT(*) FROM routing_attempts ra
+		WHERE ra.request_id = ${requestId}
 			AND ra.kind = 'upstream_send'
 			AND ra.error = '${MODEL_SUBSTITUTION_SUPPRESSION_REASON}')`;
+}
 
-const CLIENT_REQUEST_COLUMNS = `id, timestamp, status_code, error_message,
-	model, requested_model, input_tokens, output_tokens,
-	cache_read_input_tokens, cache_creation_input_tokens, total_tokens,
-	usage_finalized_at, usage_source, failover_attempts, project, api_key_id,
-	correlation_tag,
-	${MODEL_SUBSTITUTION_DISCARDS} AS model_substitution_discards`;
+const CLIENT_REQUEST_COLUMNS = `'request' AS source, id, timestamp,
+	status_code, error_message, model, requested_model, input_tokens,
+	output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+	total_tokens, usage_finalized_at, usage_source, failover_attempts, project,
+	api_key_id, correlation_tag,
+	${modelSubstitutionDiscardsSql("requests.id")} AS model_substitution_discards,
+	NULL AS leg_settled, NULL AS leg_expected_calls, NULL AS leg_inner_rows,
+	NULL AS leg_inner_finalized, NULL AS leg_inner_approximate,
+	NULL AS leg_inner_provider`;
+
+const LEG_INNER_COLUMNS = `p.id AS leg_id, r.id, r.timestamp, r.model,
+	r.input_tokens, r.output_tokens, r.cache_read_input_tokens,
+	r.cache_creation_input_tokens, r.total_tokens, r.usage_finalized_at,
+	r.usage_source, r.failover_attempts`;
+
+/**
+ * The bridged arm of a client read: the selected legs (`legs_page`), their
+ * inner rows and the sums over them, as CTEs ahead of the final SELECT.
+ *
+ * `selector` picks legs and binds its own parameters first; then come the
+ * retention bound, the key twice and the page limit.
+ *
+ * A leg is published once finished, unless the proxy failed over from it or
+ * a `requests` row carries its id (that row is the request's answer). It
+ * belongs to the key that sent its outer request. A leg written before that
+ * was recorded is resolvable only as its turn's single start leg, which is
+ * the turn owner's: such a leg counts its turn's inner rows, and attributing
+ * a multi-leg turn's rows to its legs by time would be guesswork.
+ *
+ * CROSS JOIN keeps the selected legs the outer loop and INDEXED BY probes
+ * their inner rows through the partial leg and turn indexes: left to itself
+ * the planner walks every inner row ever retained, or every row of the key.
+ *
+ * A leg stays readable only while it started inside request retention, and
+ * at or after the newest cutoff a cleanup pass applied (a retention raised
+ * since then does not bring back rows that pass deleted). Its inner rows are
+ * written at or after its start and age out on the same cutoff, so a readable
+ * leg still has every one of them, and a published sum never shrinks; the
+ * turn row itself can outlive the cutoff.
+ */
+function legCtes(selector: string): string {
+	return `WITH legs_page AS (
+		SELECT l.id, l.turn_id, l.finished_at, l.http_status, l.error_message,
+			l.correlation_tag, l.settled_at, l.requested_model,
+			l.project AS leg_project, l.inner_call_count AS leg_calls,
+			t.inner_call_count AS turn_calls, t.finished_at AS turn_finished_at,
+			t.project AS turn_project, t.model AS turn_model,
+			COALESCE(l.api_key_id, t.api_key_id) AS owner
+		FROM sdk_bridge_turn_legs l
+		CROSS JOIN sdk_bridge_turns t ON t.id = l.turn_id
+		WHERE ${selector}
+			AND l.finished_at IS NOT NULL
+			AND l.failed_over = 0
+			AND l.started_at >= MAX(?, ${APPLIED_REQUEST_CUTOFF_SQL})
+			AND NOT EXISTS (SELECT 1 FROM requests d WHERE d.id = l.id)
+			AND (l.api_key_id = ?
+				OR (l.api_key_id IS NULL AND l.inner_call_count IS NULL
+					AND l.kind = 'start' AND t.leg_count = 1 AND t.api_key_id = ?))
+		ORDER BY l.finished_at, l.id
+		LIMIT ?
+	),
+	leg_inner AS (
+		SELECT ${LEG_INNER_COLUMNS}
+		FROM legs_page p
+		CROSS JOIN requests r INDEXED BY idx_requests_sdk_bridge_leg
+			ON r.sdk_bridge_leg_id = p.id AND r.api_key_id = p.owner
+		WHERE p.leg_calls IS NOT NULL
+		UNION ALL
+		SELECT ${LEG_INNER_COLUMNS}
+		FROM legs_page p
+		CROSS JOIN requests r INDEXED BY idx_requests_sdk_bridge_turn
+			ON r.sdk_bridge_turn_id = p.turn_id AND r.api_key_id = p.owner
+		WHERE p.leg_calls IS NULL
+	),
+	leg_agg AS (
+		SELECT i.leg_id,
+			COUNT(*) AS n,
+			SUM(i.input_tokens) AS input_tokens,
+			SUM(i.output_tokens) AS output_tokens,
+			SUM(i.cache_read_input_tokens) AS cache_read_input_tokens,
+			SUM(i.cache_creation_input_tokens) AS cache_creation_input_tokens,
+			SUM(i.total_tokens) AS total_tokens,
+			MAX(i.failover_attempts) AS failover_attempts,
+			SUM(${clientRowFinalizedSql("i")}) AS finalized,
+			SUM(${clientRowApproximateSql("i")}) AS approximate,
+			SUM(i.usage_source = 'provider') AS provider,
+			SUM(${modelSubstitutionDiscardsSql("i.id")}) AS discards
+		FROM leg_inner i
+		GROUP BY i.leg_id
+	)`;
+}
+
+/** The final SELECT's bridged arm, over {@link legCtes}. */
+const LEG_ROWS = `SELECT 'sdk_bridge_leg' AS source, p.id,
+		p.finished_at AS timestamp,
+		p.http_status AS status_code,
+		p.error_message,
+		(SELECT i.model FROM leg_inner i
+			WHERE i.leg_id = p.id AND i.model IS NOT NULL
+			ORDER BY i.timestamp DESC, i.id DESC LIMIT 1) AS model,
+		CASE WHEN p.leg_calls IS NOT NULL THEN p.requested_model
+			ELSE COALESCE(
+				(SELECT ra.requested_model FROM routing_attempts ra
+					WHERE ra.request_id = p.id
+					ORDER BY ra.started_at, ra.id LIMIT 1),
+				p.turn_model)
+		END AS requested_model,
+		a.input_tokens, a.output_tokens, a.cache_read_input_tokens,
+		a.cache_creation_input_tokens, a.total_tokens,
+		NULL AS usage_finalized_at, NULL AS usage_source,
+		a.failover_attempts,
+		CASE WHEN p.leg_calls IS NOT NULL THEN p.leg_project ELSE p.turn_project END AS project,
+		p.owner AS api_key_id,
+		p.correlation_tag,
+		${modelSubstitutionDiscardsSql("p.id")} + COALESCE(a.discards, 0) AS model_substitution_discards,
+		CASE WHEN p.leg_calls IS NOT NULL THEN p.settled_at IS NOT NULL
+			ELSE p.turn_finished_at IS NOT NULL END AS leg_settled,
+		COALESCE(p.leg_calls, p.turn_calls) AS leg_expected_calls,
+		COALESCE(a.n, 0) AS leg_inner_rows,
+		COALESCE(a.finalized, 0) AS leg_inner_finalized,
+		COALESCE(a.approximate, 0) AS leg_inner_approximate,
+		COALESCE(a.provider, 0) AS leg_inner_provider
+	FROM legs_page p
+	LEFT JOIN leg_agg a ON a.leg_id = p.id`;
+
+/**
+ * `GET /client/v1/requests/{id}`. Parameters: id, retention bound, key, key,
+ * then id and key for the request arm.
+ */
+export const CLIENT_REQUEST_BY_ID_SQL = `${legCtes("l.id = ?")}
+	SELECT * FROM (
+		SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests
+		WHERE id = ? AND api_key_id = ? AND sdk_bridge_turn_id IS NULL
+	)
+	UNION ALL
+	${LEG_ROWS}`;
+
+/**
+ * `GET /client/v1/requests?tag=`: each arm walks its own tag index from the
+ * cursor and is cut at the page size, then the two merge in (timestamp, id)
+ * order. Request ids and leg ids never collide (a leg whose id has a row is
+ * left out), so the pair stays a total order across both.
+ */
+export function clientRequestsByTagSql(withCursor: boolean): string {
+	const legKeyset = withCursor
+		? " AND (l.finished_at > ? OR (l.finished_at = ? AND l.id > ?))"
+		: "";
+	const keyset = withCursor
+		? " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+		: "";
+	return `${legCtes(`l.correlation_tag = ? AND l.api_key_id = ?${legKeyset}`)}
+	SELECT * FROM (
+		SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests
+		WHERE correlation_tag = ? AND api_key_id = ?${keyset}
+			AND sdk_bridge_turn_id IS NULL
+		ORDER BY timestamp ASC, id ASC
+		LIMIT ?
+	)
+	UNION ALL
+	${LEG_ROWS}
+	ORDER BY timestamp ASC, id ASC
+	LIMIT ?`;
+}
 
 export class RequestRepository extends BaseRepository<RequestData> {
 	async save(data: RequestData): Promise<void> {
@@ -308,9 +503,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
 					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted, gateway_hint_prompt_id,
 					correlation_tag, usage_source, cache_creation_1h_input_tokens,
-					sdk_bridge_turn_id, service_tier
+					sdk_bridge_turn_id, service_tier, sdk_bridge_leg_id
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -377,6 +572,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				gateway_hint_prompt_id = COALESCE(EXCLUDED.gateway_hint_prompt_id, requests.gateway_hint_prompt_id),
 				correlation_tag = COALESCE(EXCLUDED.correlation_tag, requests.correlation_tag),
 				sdk_bridge_turn_id = COALESCE(EXCLUDED.sdk_bridge_turn_id, requests.sdk_bridge_turn_id),
+				sdk_bridge_leg_id = COALESCE(EXCLUDED.sdk_bridge_leg_id, requests.sdk_bridge_leg_id),
 				service_tier = COALESCE(EXCLUDED.service_tier, requests.service_tier),
 				-- Stored value FIRST, unlike the token columns above: a non-NULL
 				-- usage_source is a promise that accounting for this row is
@@ -457,6 +653,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage?.cacheCreation1hInputTokens ?? null,
 				data.sdkBridgeTurnId ?? null,
 				data.servedServiceTier ?? null,
+				data.sdkBridgeLegId ?? null,
 			],
 		);
 	}
@@ -727,60 +924,72 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	//
 	// Both are scoped to ONE api key IN SQL. The predicate is the security
 	// property of `/client/v1/requests/*`: a client presents the key it proxies
-	// with and reads back its own rows, so a filter applied after the read — or
-	// a caller that forgets to pass one — would publish every other client's
-	// accounting. Rows with a NULL `api_key_id` belong to no key and match
-	// neither query, because `= ?` is never true of NULL.
+	// with and reads back its own requests, so a filter applied after the read
+	// — or a caller that forgets to pass one — would publish every other
+	// client's accounting. Rows with a NULL `api_key_id` belong to no key and
+	// match neither query, because `= ?` is never true of NULL.
+	//
+	// A bridged request is read through its leg (see `legCtes`). The inner
+	// rows Claude Code's model calls wrote are part of their leg's answer and
+	// are never readable on their own.
 
 	/**
-	 * One request by id, for one api key. Null when no such row exists FOR THIS
-	 * KEY — which covers another key's row, a row retention has deleted, and an
-	 * id that never existed. The caller turns all three into the same 404, so
-	 * the surface cannot be used to probe for ids.
+	 * One request by id, for one api key. Null when no such request is
+	 * readable FOR THIS KEY — which covers another key's request, one
+	 * retention has deleted (or, bridged, whose leg started before
+	 * `legsReadableSince`), and an id that never existed. The caller turns all
+	 * of them into the same 404, so the surface cannot be used to probe for ids.
 	 */
 	async getClientRequest(
 		apiKeyId: string,
 		id: string,
+		legsReadableSince: number,
 	): Promise<ClientRequestRow | null> {
-		return this.get<ClientRequestRow>(
-			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests WHERE id = ? AND api_key_id = ?`,
-			[id, apiKeyId],
-		);
+		return this.get<ClientRequestRow>(CLIENT_REQUEST_BY_ID_SQL, [
+			id,
+			legsReadableSince,
+			apiKeyId,
+			apiKeyId,
+			1,
+			id,
+			apiKeyId,
+		]);
 	}
 
 	/**
-	 * One page of a key's rows carrying `tag`, oldest first.
+	 * One page of a key's requests carrying `tag`, oldest first.
 	 *
-	 * Keyset pagination over `(timestamp, id)`: `id` is the PRIMARY KEY, so the
-	 * pair is a total order and rows sharing a timestamp still have exactly one
+	 * Keyset pagination over `(timestamp, id)`: ids are unique, so the pair is
+	 * a total order and rows sharing a timestamp still have exactly one
 	 * successor. An OFFSET would skip or repeat rows as new ones land during a
 	 * scan, which is the one thing a reconciliation pass cannot tolerate.
 	 *
-	 * Column order matches `idx_requests_correlation_tag`
-	 * `(correlation_tag, api_key_id, timestamp, id)`, so the equality pair seeks
-	 * and the range walks the index in ORDER BY order.
+	 * The request arm walks `idx_requests_correlation_tag` and the bridged arm
+	 * `idx_sdk_bridge_turn_legs_correlation_tag`, each in ORDER BY order.
 	 */
 	async listClientRequestsByTag(opts: {
 		apiKeyId: string;
 		tag: string;
 		limit: number;
 		after?: { timestamp: number; id: string } | null;
+		legsReadableSince: number;
 	}): Promise<ClientRequestRow[]> {
-		const { apiKeyId, tag, limit, after } = opts;
-		const params: unknown[] = [tag, apiKeyId];
-		let keyset = "";
-		if (after) {
-			keyset = " AND (timestamp > ? OR (timestamp = ? AND id > ?))";
-			params.push(after.timestamp, after.timestamp, after.id);
-		}
-		params.push(limit);
-		return this.query<ClientRequestRow>(
-			`SELECT ${CLIENT_REQUEST_COLUMNS} FROM requests
-			 WHERE correlation_tag = ? AND api_key_id = ?${keyset}
-			 ORDER BY timestamp ASC, id ASC
-			 LIMIT ?`,
-			params,
-		);
+		const { apiKeyId, tag, limit, after, legsReadableSince } = opts;
+		const cursor = after ? [after.timestamp, after.timestamp, after.id] : [];
+		return this.query<ClientRequestRow>(clientRequestsByTagSql(!!after), [
+			tag,
+			apiKeyId,
+			...cursor,
+			legsReadableSince,
+			apiKeyId,
+			apiKeyId,
+			limit,
+			tag,
+			apiKeyId,
+			...cursor,
+			limit,
+			limit,
+		]);
 	}
 
 	// Payload management

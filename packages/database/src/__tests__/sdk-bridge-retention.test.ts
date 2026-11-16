@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { APPLIED_REQUEST_CUTOFF_KEY } from "../applied-request-cutoff";
 import { DatabaseOperations } from "../database-operations";
+import { RequestRepository } from "../repositories/request.repository";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -88,6 +90,15 @@ function insertAttempt(
 	);
 }
 
+function appliedCutoff(dbPath: string): number | null {
+	return withDb(dbPath, (db) => {
+		const row = db
+			.query("SELECT config FROM strategies WHERE name = ?")
+			.get(APPLIED_REQUEST_CUTOFF_KEY) as { config: string } | null;
+		return row ? (JSON.parse(row.config) as { cutoff: number }).cutoff : null;
+	});
+}
+
 async function runCleanup(
 	dbPath: string,
 	requestRetentionMs: number | undefined,
@@ -153,6 +164,145 @@ describe("cleanup worker: SDK bridge turns", () => {
 		expect(ids(dbPath, "sdk_bridge_turns")).toEqual(["turn-new"]);
 		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["leg-new"]);
 		expect(ids(dbPath, "routing_attempts")).toEqual(["attempt-new"]);
+	});
+
+	it("leaves a kept turn's aged leg unreadable through the client API, never smaller", async () => {
+		const now = Date.now();
+		const old = now - 10 * DAY;
+		withDb(dbPath, (db) => {
+			insertTurn(db, "turn-released", old, "released");
+			db.run("UPDATE sdk_bridge_turns SET api_key_id = 'key-1' WHERE id = ?", [
+				"turn-released",
+			]);
+			insertPark(db, "turn-released", "released");
+			db.run(
+				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at,
+					finished_at, http_status, api_key_id, inner_call_count, settled_at)
+				VALUES ('leg-tool', 'turn-released', 'start', ?, ?, 200, 'key-1', 1, ?)`,
+				[old, old + 1_000, old + 1_000],
+			);
+			db.run(
+				`INSERT INTO requests (id, timestamp, method, path, api_key_id,
+					input_tokens, usage_source, sdk_bridge_turn_id, sdk_bridge_leg_id)
+				VALUES ('inner-1', ?, 'POST', '/v1/messages', 'key-1', 10,
+					'provider', 'turn-released', 'leg-tool')`,
+				[old + 500],
+			);
+		});
+		const readLeg = async (since: number) => {
+			const dbOps = new DatabaseOperations(dbPath);
+			try {
+				return await new RequestRepository(dbOps.getAdapter()).getClientRequest(
+					"key-1",
+					"leg-tool",
+					since,
+				);
+			} finally {
+				await dbOps.close();
+			}
+		};
+		expect(await readLeg(old - DAY)).toMatchObject({ input_tokens: 10 });
+
+		await runCleanup(dbPath, 7 * DAY);
+
+		// The turn and its leg outlive the cutoff with the park; the inner row
+		// does not, and the leg is gone with it rather than read as smaller.
+		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["leg-tool"]);
+		expect(ids(dbPath, "requests")).toEqual([]);
+		expect(await readLeg(now - 7 * DAY)).toBeNull();
+		// Retention raised to 30 days: the cutoff the pass applied still holds.
+		expect(await readLeg(now - 30 * DAY)).toBeNull();
+	});
+
+	it("records the cutoff it applies before deleting any request, and only ever raises it", async () => {
+		const now = Date.now();
+		await runCleanup(dbPath, 7 * DAY);
+		const first = appliedCutoff(dbPath);
+		expect(first).toBeGreaterThanOrEqual(now - 7 * DAY);
+		expect(first).toBeLessThanOrEqual(Date.now() - 7 * DAY);
+
+		await runCleanup(dbPath, 30 * DAY);
+		expect(appliedCutoff(dbPath)).toBe(first);
+
+		withDb(dbPath, (db) => {
+			db.run(
+				`INSERT INTO requests (id, timestamp, method, path) VALUES ('old', ?, 'POST', '/v1/messages')`,
+				[now - 10 * DAY],
+			);
+			db.run(
+				"CREATE TRIGGER no_request_delete BEFORE DELETE ON requests BEGIN SELECT RAISE(ABORT, 'refused'); END",
+			);
+		});
+		await runCleanup(dbPath, 2 * DAY).catch(() => {});
+		expect(ids(dbPath, "requests")).toEqual(["old"]);
+		expect(appliedCutoff(dbPath)).toBeGreaterThanOrEqual(now - 2 * DAY);
+	});
+
+	it("records no cutoff when request retention is disabled", async () => {
+		await runCleanup(dbPath, undefined);
+		expect(appliedCutoff(dbPath)).toBeNull();
+	});
+
+	it("keeps an old turn while a continuation of it is recent, and once it finished recently", async () => {
+		const now = Date.now();
+		const old = now - 10 * DAY;
+		withDb(dbPath, (db) => {
+			insertTurn(db, "turn-continued", old);
+			db.run("UPDATE sdk_bridge_turns SET finished_at = ? WHERE id = ?", [
+				old + HOUR,
+				"turn-continued",
+			]);
+			insertLeg(db, "leg-start", "turn-continued", old);
+			db.run(
+				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at)
+				 VALUES ('leg-recent', 'turn-continued', 'continue', ?)`,
+				[now - HOUR],
+			);
+			insertTurn(db, "turn-late-finish", old);
+			db.run("UPDATE sdk_bridge_turns SET finished_at = ? WHERE id = ?", [
+				now - HOUR,
+				"turn-late-finish",
+			]);
+			insertTurn(db, "turn-old", old);
+			db.run("UPDATE sdk_bridge_turns SET finished_at = ? WHERE id = ?", [
+				old + HOUR,
+				"turn-old",
+			]);
+		});
+
+		await runCleanup(dbPath, 7 * DAY);
+
+		expect(ids(dbPath, "sdk_bridge_turns")).toEqual([
+			"turn-continued",
+			"turn-late-finish",
+		]);
+		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual([
+			"leg-recent",
+			"leg-start",
+		]);
+	});
+
+	it("keeps an old finished turn that another key's refused continuation reached recently", async () => {
+		const now = Date.now();
+		const old = now - 10 * DAY;
+		withDb(dbPath, (db) => {
+			insertTurn(db, "turn-1", old);
+			db.run("UPDATE sdk_bridge_turns SET finished_at = ? WHERE id = ?", [
+				old + HOUR,
+				"turn-1",
+			]);
+			db.run(
+				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at,
+					finished_at, http_status, api_key_id, inner_call_count, settled_at)
+				 VALUES ('refused', 'turn-1', 'continue', ?, ?, 409, 'key-2', 0, ?)`,
+				[now - HOUR, now - HOUR, now - HOUR],
+			);
+		});
+
+		await runCleanup(dbPath, 7 * DAY);
+
+		expect(ids(dbPath, "sdk_bridge_turns")).toEqual(["turn-1"]);
+		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["refused"]);
 	});
 
 	it("keeps every turn when request retention is disabled", async () => {

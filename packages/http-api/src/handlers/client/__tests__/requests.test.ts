@@ -500,3 +500,127 @@ describe("finalized and usageSource", () => {
 		});
 	});
 });
+
+describe("a request served through Claude Code", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+
+	/** A finished turn with one leg of KEY_A's and that leg's inner rows. */
+	async function seedBridged(opts: {
+		legId: string;
+		startedAt?: number;
+		settled?: boolean;
+		inner: Array<{ id: string; input: number; usageSource: string | null }>;
+	}): Promise<void> {
+		const turns = dbOps.sdkBridgeTurns;
+		const turnId = `turn-of-${opts.legId}`;
+		const startedAt = opts.startedAt ?? Date.now() - 60_000;
+		await turns.insertTurn({
+			id: turnId,
+			startedAt,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+			apiKeyId: KEY_A,
+			model: "claude-sonnet-5",
+			project: "turn-project",
+		});
+		await turns.insertLeg({
+			id: opts.legId,
+			turnId,
+			kind: "start",
+			startedAt,
+			apiKeyId: KEY_A,
+			correlationTag: TAG,
+			requestedModel: "alias:balanced",
+			project: "leg-project",
+		});
+		for (const call of opts.inner) {
+			await turns.countInnerCall(turnId, opts.legId);
+			await dbOps.getAdapter().run(
+				`INSERT INTO requests (id, timestamp, method, path, model,
+					input_tokens, output_tokens, cache_read_input_tokens,
+					cache_creation_input_tokens, total_tokens, usage_source,
+					api_key_id, sdk_bridge_turn_id, sdk_bridge_leg_id)
+				VALUES (?, ?, 'POST', '/v1/messages', 'claude-sonnet-5-20261101',
+					?, 2, 0, 0, NULL, ?, ?, ?, ?)`,
+				[
+					call.id,
+					startedAt + 1_000,
+					call.input,
+					call.usageSource,
+					KEY_A,
+					turnId,
+					opts.legId,
+				],
+			);
+		}
+		await turns.finishLeg(opts.legId, {
+			finishedAt: startedAt + 2_000,
+			httpStatus: 200,
+			stopReason: "end_turn",
+		});
+		if (opts.settled !== false)
+			await turns.settleLeg(opts.legId, startedAt + 2_100);
+	}
+
+	it("answers the id the client was given, summed over Claude Code's calls", async () => {
+		await seedBridged({
+			legId: "leg-1",
+			inner: [
+				{ id: "inner-1", input: 10, usageSource: "provider" },
+				{ id: "inner-2", input: 5, usageSource: "provider" },
+			],
+		});
+
+		const { status, body } = await call("/client/v1/requests/leg-1");
+		expect(status).toBe(200);
+		expect(body).toMatchObject({
+			schema: "clankermux.client.request.v1",
+			id: "leg-1",
+			finalized: true,
+			statusCode: 200,
+			model: "claude-sonnet-5-20261101",
+			requestedModel: "alias:balanced",
+			inputTokens: 15,
+			outputTokens: 4,
+			usageSource: "provider",
+			project: "leg-project",
+			apiKeyId: KEY_A,
+			correlationTag: TAG,
+		});
+	});
+
+	it("is not finalized before the bridge settles it", async () => {
+		await seedBridged({
+			legId: "leg-1",
+			settled: false,
+			inner: [{ id: "inner-1", input: 10, usageSource: "provider" }],
+		});
+
+		const { body } = await call("/client/v1/requests/leg-1");
+		expect(body).toMatchObject({ finalized: false, usageSource: null });
+	});
+
+	it("404s Claude Code's own calls and finds only the leg by tag", async () => {
+		await seedBridged({
+			legId: "leg-1",
+			inner: [{ id: "inner-1", input: 10, usageSource: "provider" }],
+		});
+		await seed({ id: "direct-1", tag: TAG, timestamp: Date.now() });
+
+		expect((await call("/client/v1/requests/inner-1")).status).toBe(404);
+		expect((await call("/client/v1/requests/leg-1", KEY_B)).status).toBe(404);
+		const { body } = await list(`tag=${TAG}`);
+		expect(body.requests.map((r) => r.id)).toEqual(["leg-1", "direct-1"]);
+	});
+
+	it("404s a leg that started before request retention", async () => {
+		await seedBridged({
+			legId: "old-leg",
+			startedAt: Date.now() - 46 * DAY,
+			inner: [{ id: "inner-1", input: 10, usageSource: "provider" }],
+		});
+
+		expect((await call("/client/v1/requests/old-leg")).status).toBe(404);
+		expect((await list(`tag=${TAG}`)).body.requests).toEqual([]);
+	});
+});

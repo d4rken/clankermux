@@ -642,6 +642,8 @@ export class ReleasedParkStore {
 		park: Omit<SdkBridgeReleasedParkInsert, "sessionPath" | "fileBytes">,
 		descriptor: ResumeDescriptor,
 		source: string,
+		/** Legs of the turn the releasing recorder vouches for: settled with the release. */
+		settleLegs: readonly string[],
 		/** Checked between the steps: the release was given up (dispose). */
 		abandoned: () => boolean = () => false,
 	): Promise<ReleasedEntry> {
@@ -671,6 +673,7 @@ export class ReleasedParkStore {
 					park.turnId,
 					{ sessionPath: path, fileBytes },
 					this.token,
+					{ at: this.opts.now(), legIds: settleLegs },
 				))
 			)
 				throw new Error(
@@ -973,6 +976,10 @@ export class ReleasedParkStore {
 		const repo = this.opts.recoveryRepo ?? this.opts.repo;
 		if (!(await this.takeLease(repo))) throw new LeaseHeldElsewhere();
 		const now = this.opts.now();
+		// The parks' turns ran in a process that is gone: a leg it left open
+		// or unsettled can take no further call.
+		if (!(await repo.recoverParkedTurnLegs(now, this.token)))
+			throw new Error("the park lease moved on during recovery");
 		const entries = new Map<string, ReleasedEntry>();
 		const byToolId = new Map<string, string>();
 		const kept = new Set<string>();

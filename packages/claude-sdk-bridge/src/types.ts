@@ -55,11 +55,24 @@ export interface SdkBridgeTurnRepo {
 	): Promise<void>;
 	/** False, inserting nothing, when fenced out. */
 	insertLeg(leg: SdkBridgeLegInsert, fence?: string): Promise<boolean>;
+	/** Write-once: a finished leg keeps its facts. */
 	finishLeg(
 		id: string,
 		finish: SdkBridgeLegFinish,
 		fence?: string,
 	): Promise<void>;
+	/**
+	 * Count an inner call's row on its turn and on the leg it was admitted
+	 * under, together. False, counting nothing, when fenced out or the turn
+	 * is missing.
+	 */
+	countInnerCall(
+		turnId: string,
+		legId: string | null,
+		fence?: string,
+	): Promise<boolean>;
+	/** No inner row can begin under the leg any more. Write-once. */
+	settleLeg(id: string, at: number, fence?: string): Promise<void>;
 }
 
 /**
@@ -82,10 +95,15 @@ export interface SdkBridgeParkRepo {
 	): Promise<boolean>;
 	find(turnId: string): Promise<SdkBridgeReleasedPark | null>;
 	list(): Promise<SdkBridgeReleasedPark[]>;
+	/**
+	 * Also settles `settle.legIds`, where finished, at `settle.at`, in the
+	 * same write.
+	 */
 	markReleased(
 		turnId: string,
 		file: { sessionPath: string; fileBytes: number },
 		token: string,
+		settle: { at: number; legIds: readonly string[] },
 	): Promise<boolean>;
 	claim(
 		turnId: string,
@@ -111,6 +129,12 @@ export interface SdkBridgeParkRepo {
 		finish: SdkBridgeTurnFinish,
 		token: string,
 	): Promise<SdkBridgeParkCloseOutcome>;
+	/**
+	 * At recovery: finish the open legs of every turn a park owns as lost
+	 * with their owner, and settle its finished legs. False without the
+	 * lease.
+	 */
+	recoverParkedTurnLegs(at: number, token: string): Promise<boolean>;
 	closeOpenTurnsWithoutPark(
 		startedBefore: number,
 		finish: SdkBridgeTurnFinish,

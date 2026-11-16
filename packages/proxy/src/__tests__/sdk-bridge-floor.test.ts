@@ -5,7 +5,7 @@
  * direct fetch; without one the account is excluded. Only Claude Code on a
  * `claude-code` key goes direct.
  */
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, type mock, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
 import {
 	type Account,
@@ -1505,6 +1505,100 @@ describe("SDK bridge continuations", () => {
 			message: "Anthropic requires a newer Claude Code.",
 			code: "claude_code_version_too_old",
 		});
+	});
+
+	describe("record a row under the request's id when no leg answers it", () => {
+		function synthetic(h: BridgeHarness) {
+			return (
+				h.ctx.requestRecorder.recordSynthetic as ReturnType<typeof mock>
+			).mock.calls.map((call) => ({
+				requestId: (call[0] as { requestId: string }).requestId,
+				status: (call[0] as { responseStatus: number }).responseStatus,
+				error: call[2] as string,
+			}));
+		}
+
+		it("for results that may belong to a park still recovering", async () => {
+			const { bridge, h } = await withContinuation(KEY);
+			bridge.continuation = { unavailable: "recovering", retryAfter: "3" };
+
+			const { response } = await run(flooredRequest(toolResults), h.ctx);
+
+			expect(response.status).toBe(503);
+			expect(synthetic(h)).toEqual([
+				{
+					requestId: response.headers.get(CLIENT_REQUEST_ID_HEADER) ?? "",
+					status: 503,
+					error: "sdk_bridge_unavailable",
+				},
+			]);
+		});
+
+		it("for a fresh start's refusal, which only failed-over legs record", async () => {
+			const { bridge, h } = await withContinuation(KEY);
+			bridge.continueTurn = async () => {
+				throw new SdkBridgeExtraUsageError({
+					status: 400,
+					type: "invalid_request_error",
+					message: "You're out of extra usage.",
+					retryAfter: null,
+				});
+			};
+
+			const { response } = await run(flooredRequest(toolResults), h.ctx);
+
+			expect(synthetic(h)).toEqual([
+				{
+					requestId: response.headers.get(CLIENT_REQUEST_ID_HEADER) ?? "",
+					status: 400,
+					error: "sdk_bridge_extra_usage",
+				},
+			]);
+		});
+
+		it("for a fresh start the bridge could not run", async () => {
+			const { bridge, h } = await withContinuation(KEY);
+			bridge.continueTurn = async () => {
+				throw new SdkBridgeUnavailableError("Claude Code could not start");
+			};
+
+			const { response } = await run(flooredRequest(toolResults), h.ctx);
+
+			expect(response.status).toBe(503);
+			expect(synthetic(h).map((row) => row.error)).toEqual([
+				"sdk_bridge_unavailable",
+			]);
+		});
+
+		it("but not for an answer the bridge gave, whose leg it recorded", async () => {
+			const { h } = await withContinuation(KEY);
+
+			await run(flooredRequest(toolResults), h.ctx);
+
+			expect(synthetic(h)).toEqual([]);
+		});
+	});
+
+	it("carry the client's correlation tag to the bridge when it is valid, and none otherwise", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+
+		await run(
+			flooredRequest(toolResults, {
+				"x-clankermux-correlation-tag": "run-42",
+			}),
+			h.ctx,
+		);
+		await run(
+			flooredRequest(toolResults, {
+				"x-clankermux-correlation-tag": "bad\ttag",
+			}),
+			h.ctx,
+		);
+
+		expect(bridge.continues.map((c) => c.meta.correlationTag)).toEqual([
+			"run-42",
+			null,
+		]);
 	});
 
 	it("leave another key's turn to the bridge, which refuses and records it", async () => {

@@ -1,6 +1,7 @@
 import type {
 	SdkBridgeLegFinish,
 	SdkBridgeLegKind,
+	SdkBridgeLegOwner,
 	SdkBridgeTurnCounterDelta,
 	SdkBridgeTurnFinish,
 	SdkBridgeTurnInsert,
@@ -31,6 +32,8 @@ function tokenCount(value: unknown): number | null {
 export class TurnRecorder {
 	private chain: Promise<void> = Promise.resolve();
 	private readonly finishedLegs = new Set<string>();
+	/** Legs one of whose inner-call counts did not land: never settled. */
+	private readonly uncountedLegs = new Set<string>();
 	private turnFinished = false;
 	/** Whether this process inserted the turn: only then are its counters whole. */
 	private inserted = false;
@@ -111,15 +114,65 @@ export class TurnRecorder {
 		id: string,
 		kind: SdkBridgeLegKind,
 		startedAt: number,
+		owner: SdkBridgeLegOwner,
 	): Promise<void> {
 		return this.enqueue("insertLeg", async () => {
 			if (
 				await this.repo.insertLeg(
-					{ id, turnId: this.turnId, kind, startedAt },
+					{ id, turnId: this.turnId, kind, startedAt, ...owner },
 					this.fence,
 				)
 			)
 				this.counts.legs++;
+		});
+	}
+
+	/**
+	 * An inner call's row began, under `legId` (null: no leg was open). A count
+	 * that does not land keeps its leg from ever settling, so the client API
+	 * never reports a sum it knows to be short; inference goes on regardless.
+	 */
+	countInnerCall(legId: string | null): void {
+		this.chain = this.chain.then(async () => {
+			let counted = false;
+			try {
+				counted = await this.repo.countInnerCall(
+					this.turnId,
+					legId,
+					this.fence,
+				);
+			} catch (error) {
+				this.log.warn(
+					`SDK bridge turn ${this.turnId}: countInnerCall failed`,
+					error,
+				);
+			}
+			if (counted) this.counts.innerCalls++;
+			else if (legId !== null) {
+				this.uncountedLegs.add(legId);
+				this.log.warn(
+					`SDK bridge turn ${this.turnId}: leg ${legId} missed an inner call count and will not be settled`,
+				);
+			}
+		});
+	}
+
+	/**
+	 * Legs this recorder finished whose counts, as far as the writes so far
+	 * tell, all landed.
+	 */
+	countedFinishedLegIds(): string[] {
+		return [...this.finishedLegs].filter((id) => !this.uncountedLegs.has(id));
+	}
+
+	/**
+	 * No inner row can begin under the leg any more. Queued behind every count
+	 * queued before it, and skipped for a leg that missed one.
+	 */
+	settleLeg(id: string, at: number): Promise<void> {
+		return this.enqueue("settleLeg", async () => {
+			if (this.uncountedLegs.has(id)) return;
+			await this.repo.settleLeg(id, at, this.fence);
 		});
 	}
 

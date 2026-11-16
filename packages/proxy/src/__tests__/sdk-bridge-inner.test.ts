@@ -51,6 +51,7 @@ function innerContext(
 ): SdkBridgeInnerContext {
 	return {
 		turnId: "turn-1",
+		legId: "leg-1",
 		plan: plan(),
 		apiKeyId: KEY,
 		apiKeyName: "outer",
@@ -355,6 +356,7 @@ describe("SDK bridge inner calls", () => {
 		expect(begin).toHaveBeenCalledTimes(1);
 		const meta = begin.mock.calls[0][0];
 		expect(meta.sdkBridgeTurnId).toBe("turn-1");
+		expect(meta.sdkBridgeLegId).toBe("leg-1");
 		expect(meta.project).toBe("outer-project");
 		expect(meta.projectAttributionSource).toBe("header");
 		expect(meta.clientHarness).toBe("pi");
@@ -614,9 +616,10 @@ describe("SDK bridge inner calls", () => {
 		});
 	});
 
-	it("report their row's start once, apart from the outcome", async () => {
+	it("report their row's start once, apart from the outcome, with the leg it was admitted under", async () => {
 		harness = await makeBridgeHarness([a]);
 		const started: string[] = [];
+		const legs: Array<string | null> = [];
 		const ctx = innerContext({
 			plan: plan({
 				candidates: [
@@ -624,7 +627,10 @@ describe("SDK bridge inner calls", () => {
 				],
 				preferredAccountId: a.id,
 			}),
-			onInnerRequestStarted: (id) => started.push(id),
+			onInnerRequestStarted: (id, legId) => {
+				started.push(id);
+				legs.push(legId);
+			},
 		});
 		const res = await dispatchProxyRequest(
 			innerRequest(ctx),
@@ -635,6 +641,7 @@ describe("SDK bridge inner calls", () => {
 		);
 		await res.text();
 		expect(started).toHaveLength(1);
+		expect(legs).toEqual(["leg-1"]);
 		const begin = harness.ctx.requestRecorder.begin as ReturnType<typeof mock>;
 		expect(started[0]).toBe(begin.mock.calls[0][0].requestId);
 	});
@@ -662,8 +669,106 @@ describe("SDK bridge inner calls", () => {
 		>;
 		expect(synthetic).toHaveBeenCalledTimes(1);
 		expect(started).toEqual([synthetic.mock.calls[0][0].requestId]);
+		expect(synthetic.mock.calls[0][0].sdkBridgeLegId).toBe("leg-1");
 		expect(outcomes).toHaveLength(1);
 		expect(outcomes[0]?.status).toBeGreaterThanOrEqual(400);
+	});
+
+	describe("report the row's start by the time the dispatch resolves, body unread", () => {
+		const onlyA = () =>
+			plan({
+				candidates: [
+					{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
+				],
+				preferredAccountId: a.id,
+			});
+
+		/** Dispatch through ingress with the trusted context, recording each start. */
+		async function dispatch(
+			ctx: Partial<SdkBridgeInnerContext>,
+			body: Record<string, unknown> = {},
+		) {
+			const started: Array<[string, string | null]> = [];
+			const res = await dispatchProxyRequest(
+				innerRequest(
+					innerContext({
+						plan: onlyA(),
+						legId: "leg-7",
+						onInnerRequestStarted: (id, legId) => started.push([id, legId]),
+						...ctx,
+					}),
+					body,
+				),
+				new URL("https://proxy.local/v1/messages"),
+				harness?.ctx as BridgeHarness["ctx"],
+				KEY,
+				"outer",
+			);
+			// Copied now, before anything reads the body.
+			return { res, started: [...started] };
+		}
+
+		it("for a streamed reply whose body is still open", async () => {
+			let close!: () => void;
+			const encoder = new TextEncoder();
+			harness = await makeBridgeHarness([a], {
+				upstream: () =>
+					new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								controller.enqueue(
+									encoder.encode(
+										`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { model: MODEL } })}\n\n`,
+									),
+								);
+								close = () => {
+									controller.enqueue(
+										encoder.encode(
+											'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+										),
+									);
+									controller.close();
+								};
+							},
+						}),
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+			});
+
+			const { res, started } = await dispatch({}, { stream: true });
+
+			const begin = harness.ctx.requestRecorder.begin as ReturnType<
+				typeof mock
+			>;
+			expect(started).toEqual([[begin.mock.calls[0][0].requestId, "leg-7"]]);
+			close();
+			await res.text();
+		});
+
+		it("for a non-streamed reply", async () => {
+			harness = await makeBridgeHarness([a]);
+
+			const { res, started } = await dispatch({});
+
+			const begin = harness.ctx.requestRecorder.begin as ReturnType<
+				typeof mock
+			>;
+			expect(started).toEqual([[begin.mock.calls[0][0].requestId, "leg-7"]]);
+			await res.text();
+		});
+
+		it("for a synthetic terminal", async () => {
+			harness = await makeBridgeHarness([a]);
+
+			const { res, started } = await dispatch({ deadlineAt: Date.now() - 1 });
+
+			const synthetic = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof mock>;
+			expect(started).toEqual([
+				[synthetic.mock.calls[0][0].requestId, "leg-7"],
+			]);
+			await res.text();
+		});
 	});
 
 	it("cannot be entered through headers: without the in-process context the key's pin applies", async () => {
@@ -690,5 +795,6 @@ describe("SDK bridge inner calls", () => {
 		expect(upstreamAccounts(harness)).toEqual([c.id]);
 		const begin = harness.ctx.requestRecorder.begin as ReturnType<typeof mock>;
 		expect(begin.mock.calls[0][0].sdkBridgeTurnId ?? null).toBeNull();
+		expect(begin.mock.calls[0][0].sdkBridgeLegId ?? null).toBeNull();
 	});
 });

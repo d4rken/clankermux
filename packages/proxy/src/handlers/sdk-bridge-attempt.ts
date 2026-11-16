@@ -17,6 +17,10 @@ import {
 	sdkBridgeHeaderToken,
 	sdkBridgeSideRequestMode,
 } from "@clankermux/types";
+import {
+	CORRELATION_TAG_HEADER,
+	validateCorrelationTag,
+} from "../correlation-tag";
 import { isSdkBridgeTurnRequest } from "../official-anthropic-floor";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
@@ -25,7 +29,11 @@ import {
 	type RoutingAttemptAudit,
 	sendAuthorizedRequest,
 } from "../routing-dispatch";
-import { priorSdkBridgeRefusal } from "../sdk-bridge-refusal";
+import {
+	priorSdkBridgeRefusal,
+	sdkBridgeRefusalLabel,
+} from "../sdk-bridge-refusal";
+import { createSyntheticTerminalRecorder } from "../synthetic-terminal-recorder";
 import { createClientAbortResponse } from "./client-abort-response";
 import type { ProxyContext } from "./proxy-types";
 
@@ -130,6 +138,7 @@ export function sdkBridgeTurnMeta(
 			getNativeResponsesMetaContext(meta)?.hostedWebSearch ?? null,
 		piPromptVersion: sdkBridgeHeaderToken(headers, SDK_BRIDGE_PI_PROMPT_HEADER),
 		sideRequest: sdkBridgeSideRequestMode(headers),
+		correlationTag: validateCorrelationTag(headers.get(CORRELATION_TAG_HEADER)),
 	};
 }
 
@@ -320,15 +329,40 @@ export async function continueParkedSdkBridgeTurn(input: {
 		model: requestMeta.requestedModel ?? "",
 	});
 	if (!parked) return null;
+	// Answers the bridge gives itself are recorded as its legs. The ones below
+	// have no leg the client can read (none, or a fresh start's failed-over
+	// one), so they get a request row under the client's id.
+	const recordTerminal = async (
+		response: Response,
+		error: string,
+	): Promise<Response> => {
+		if (!ctx.requestRecorder.hasRecord(requestMeta.id))
+			await createSyntheticTerminalRecorder(
+				req,
+				input.url,
+				ctx,
+				requestMeta,
+				input.body,
+				input.apiKeyId,
+				input.apiKeyName,
+			)(response, error);
+		return response;
+	};
 	// Results that may belong to a park the bridge is still recovering: a
 	// fresh turn would rebuild a conversation that is about to resume.
 	if ("unavailable" in parked)
-		return Response.json(
-			{
-				type: "error",
-				error: { type: "sdk_bridge_unavailable", message: parked.unavailable },
-			},
-			{ status: 503, headers: { "retry-after": parked.retryAfter } },
+		return recordTerminal(
+			Response.json(
+				{
+					type: "error",
+					error: {
+						type: "sdk_bridge_unavailable",
+						message: parked.unavailable,
+					},
+				},
+				{ status: 503, headers: { "retry-after": parked.retryAfter } },
+			),
+			"sdk_bridge_unavailable",
 		);
 	// The bridge refuses another key's continuation itself, recording the leg.
 	try {
@@ -351,14 +385,25 @@ export async function continueParkedSdkBridgeTurn(input: {
 			error instanceof SdkBridgeExtraUsageError ||
 			error instanceof SdkBridgeVersionTooOldError
 		)
-			return error.terminalResponse();
+			return recordTerminal(
+				error.terminalResponse(),
+				sdkBridgeRefusalLabel(error),
+			);
 		if (error instanceof SdkBridgeUnavailableError)
-			return errorResponse(
-				503,
-				"sdk_bridge_unavailable",
-				`The SDK bridge cannot continue this turn: ${error.message}`,
+			return recordTerminal(
+				errorResponse(
+					503,
+					"sdk_bridge_unavailable",
+					`The SDK bridge cannot continue this turn: ${error.message}`,
+				),
+				error instanceof SdkBridgeRefusalError
+					? sdkBridgeRefusalLabel(error)
+					: "sdk_bridge_unavailable",
 			);
 		log.error(`SDK bridge continuation of turn ${parked.turnId} failed`, error);
-		return errorResponse(502, "api_error", "SDK bridge turn failed");
+		return recordTerminal(
+			errorResponse(502, "api_error", "SDK bridge turn failed"),
+			"sdk_bridge_failed",
+		);
 	}
 }

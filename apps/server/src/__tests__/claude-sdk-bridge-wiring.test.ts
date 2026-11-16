@@ -40,6 +40,8 @@ const turnRepo = {
 	bumpTurnCounters: async () => {},
 	insertLeg: async () => true,
 	finishLeg: async () => {},
+	countInnerCall: async () => true,
+	settleLeg: async () => {},
 };
 
 /** A bridge module whose factory records the dependencies it was built with. */

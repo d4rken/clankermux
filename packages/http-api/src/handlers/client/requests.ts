@@ -7,6 +7,10 @@
  * `listClientRequestsByTag`). Nothing here re-filters what the database
  * returned, because a filter in this layer is one that a future caller of the
  * repository can forget.
+ *
+ * A request served through Claude Code is read through its SDK bridge leg,
+ * under the id the client was given; Claude Code's own model calls are summed
+ * into it and are not readable by their ids.
  */
 import { ValidationError, validateNumber } from "@clankermux/core";
 import type { ClientRequestRow } from "@clankermux/database";
@@ -35,14 +39,22 @@ export interface ClientRequestReader {
 	getClientRequest(
 		apiKeyId: string,
 		id: string,
+		legsReadableSince: number,
 	): Promise<ClientRequestRow | null>;
 	listClientRequestsByTag(opts: {
 		apiKeyId: string;
 		tag: string;
 		limit: number;
 		after?: ClientRequestCursor | null;
+		legsReadableSince: number;
 	}): Promise<ClientRequestRow[]>;
 }
+
+/**
+ * Epoch ms before which a bridged request's leg must not have started to be
+ * readable: the request-retention cutoff, read per call.
+ */
+export type LegsReadableSince = () => number;
 
 /**
  * `GET /client/v1/requests/{id}`.
@@ -52,9 +64,16 @@ export interface ClientRequestReader {
  * existence oracle for request ids and the consumer has a single terminal
  * meaning to handle. 404, never 403: a 403 would confirm the row exists.
  */
-export function createClientRequestByIdHandler(reader: ClientRequestReader) {
+export function createClientRequestByIdHandler(
+	reader: ClientRequestReader,
+	legsReadableSince: LegsReadableSince,
+) {
 	return async (id: string, ctx: ClientRequestContext): Promise<Response> => {
-		const row = await reader.getClientRequest(ctx.apiKeyId, id);
+		const row = await reader.getClientRequest(
+			ctx.apiKeyId,
+			id,
+			legsReadableSince(),
+		);
 		if (!row) {
 			return clientError(
 				404,
@@ -77,7 +96,10 @@ export function createClientRequestByIdHandler(reader: ClientRequestReader) {
  * tags that can be searched for is exactly the set that can be stored. A search
  * term this refuses could never have reached the column.
  */
-export function createClientRequestSearchHandler(reader: ClientRequestReader) {
+export function createClientRequestSearchHandler(
+	reader: ClientRequestReader,
+	legsReadableSince: LegsReadableSince,
+) {
 	return async (url: URL, ctx: ClientRequestContext): Promise<Response> => {
 		const tag = validateCorrelationTag(url.searchParams.get("tag"));
 		if (tag === null) {
@@ -127,6 +149,7 @@ export function createClientRequestSearchHandler(reader: ClientRequestReader) {
 			tag,
 			limit: limit + 1,
 			after,
+			legsReadableSince: legsReadableSince(),
 		});
 		const page = rows.slice(0, limit);
 		const last = page[page.length - 1];

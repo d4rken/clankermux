@@ -350,6 +350,13 @@ describe("SdkBridgeTurnRepository", () => {
 				errorType: null,
 				errorMessage: null,
 				toolUseIds: ["toolu_a", "toolu_b"],
+				apiKeyId: null,
+				correlationTag: null,
+				requestedModel: null,
+				project: null,
+				innerCallCount: 0,
+				settledAt: null,
+				failedOver: false,
 			},
 			{
 				id: "leg-2",
@@ -363,6 +370,13 @@ describe("SdkBridgeTurnRepository", () => {
 				errorType: "api_error",
 				errorMessage: "client disconnected",
 				toolUseIds: null,
+				apiKeyId: null,
+				correlationTag: null,
+				requestedModel: null,
+				project: null,
+				innerCallCount: 0,
+				settledAt: null,
+				failedOver: false,
 			},
 		]);
 	});
@@ -528,6 +542,164 @@ describe("SdkBridgeTurnRepository", () => {
 			cacheCreationInputTokens: 0,
 			costUsd: 0,
 		});
+	});
+});
+
+describe("leg accounting", () => {
+	let db: Database;
+	let repo: SdkBridgeTurnRepository;
+
+	beforeEach(async () => {
+		db = makeDb();
+		repo = new SdkBridgeTurnRepository(new BunSqlAdapter(db));
+		await repo.insertTurn({
+			id: "turn-1",
+			startedAt: 1_000,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+			apiKeyId: "key-1",
+			project: "turn-project",
+		});
+		await repo.insertLeg({
+			id: "leg-1",
+			turnId: "turn-1",
+			kind: "start",
+			startedAt: 1_000,
+			apiKeyId: "key-1",
+			correlationTag: "run-1",
+			requestedModel: "alias:balanced",
+			project: "leg-project",
+		});
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	const leg = async (id = "leg-1") =>
+		(await repo.getTurnWithLegs("turn-1"))?.legs.find((l) => l.id === id);
+	const turn = async () => (await repo.getTurnWithLegs("turn-1"))?.turn;
+	const holdLease = (token: string) =>
+		db.run(
+			`INSERT INTO sdk_bridge_park_lease (id, dir, pid, token, acquired_at)
+			VALUES (1, '/tmp', 1, ?, 1)`,
+			[token],
+		);
+
+	it("stores the outer request's identity and starts counting at 0", async () => {
+		expect(await leg()).toMatchObject({
+			apiKeyId: "key-1",
+			correlationTag: "run-1",
+			requestedModel: "alias:balanced",
+			project: "leg-project",
+			innerCallCount: 0,
+			settledAt: null,
+			failedOver: false,
+		});
+	});
+
+	it("finishes a leg once: a second finish changes nothing", async () => {
+		await repo.finishLeg("leg-1", { finishedAt: 2_000, httpStatus: 200 });
+		await repo.finishLeg("leg-1", {
+			finishedAt: 3_000,
+			httpStatus: 500,
+			failedOver: true,
+			settled: true,
+		});
+		expect(await leg()).toMatchObject({
+			finishedAt: 2_000,
+			httpStatus: 200,
+			failedOver: false,
+			settledAt: null,
+		});
+	});
+
+	it("records a failover and a settlement with the finish", async () => {
+		await repo.finishLeg("leg-1", {
+			finishedAt: 2_000,
+			httpStatus: 529,
+			failedOver: true,
+			settled: true,
+		});
+		expect(await leg()).toMatchObject({
+			finishedAt: 2_000,
+			failedOver: true,
+			settledAt: 2_000,
+		});
+	});
+
+	it("counts an inner call on the turn and on its leg in one write", async () => {
+		expect(await repo.countInnerCall("turn-1", "leg-1")).toBe(true);
+		await Promise.all([
+			repo.countInnerCall("turn-1", "leg-1"),
+			repo.countInnerCall("turn-1", null),
+		]);
+		expect((await leg())?.innerCallCount).toBe(2);
+		expect((await turn())?.innerCallCount).toBe(3);
+	});
+
+	it("counts nothing under a fence that holds no lease", async () => {
+		holdLease("held");
+		expect(await repo.countInnerCall("turn-1", "leg-1", "not-held")).toBe(
+			false,
+		);
+		expect(await repo.countInnerCall("turn-1", "leg-1", "held")).toBe(true);
+		expect((await leg())?.innerCallCount).toBe(1);
+		expect((await turn())?.innerCallCount).toBe(1);
+	});
+
+	it("never counts a call on another turn's leg", async () => {
+		await repo.insertTurn({
+			id: "turn-2",
+			startedAt: 1_000,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+		});
+		await repo.countInnerCall("turn-2", "leg-1");
+		expect((await leg())?.innerCallCount).toBe(0);
+	});
+
+	it("settles a leg once, keeping the first time", async () => {
+		await repo.settleLeg("leg-1", 4_000);
+		await repo.settleLeg("leg-1", 5_000);
+		expect((await leg())?.settledAt).toBe(4_000);
+	});
+
+	it("settles nothing under a fence that holds no lease", async () => {
+		holdLease("held");
+		await repo.settleLeg("leg-1", 4_000, "not-held");
+		expect((await leg())?.settledAt).toBeNull();
+		await repo.settleLeg("leg-1", 4_500, "held");
+		expect((await leg())?.settledAt).toBe(4_500);
+	});
+});
+
+describe("requests.sdk_bridge_leg_id", () => {
+	let db: Database;
+	let requests: RequestRepository;
+
+	beforeEach(() => {
+		db = makeDb();
+		requests = new RequestRepository(new BunSqlAdapter(db));
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	const legIdOf = (id: string) =>
+		(
+			db
+				.query("SELECT sdk_bridge_leg_id FROM requests WHERE id = ?")
+				.get(id) as { sdk_bridge_leg_id: string | null } | null
+		)?.sdk_bridge_leg_id;
+
+	it("is written on insert, NULL when absent, and survives a re-upsert without it", async () => {
+		await requests.save(innerRequest("inner-1", { sdkBridgeLegId: "leg-1" }));
+		await requests.save(innerRequest("inner-2"));
+		await requests.save(innerRequest("inner-1", { usage: { inputTokens: 7 } }));
+		expect(legIdOf("inner-1")).toBe("leg-1");
+		expect(legIdOf("inner-2")).toBeNull();
 	});
 });
 

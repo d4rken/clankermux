@@ -16,6 +16,10 @@ interface TokenEntry {
 	beforeFirstDispatch: (() => Promise<void>) | null;
 	/** Whether this turn has logged an environment block it left in place. */
 	environmentNoted: boolean;
+	/** Dispatches in flight, by the leg they were admitted under. */
+	inFlight: Map<string, number>;
+	/** Waiting for a leg's dispatches to end. */
+	drainWaiters: Map<string, Array<() => void>>;
 }
 
 export interface InnerRegistration {
@@ -27,6 +31,19 @@ export interface InnerRegistration {
 	 * park). Only `deadlineAt` changes; the route context stays as frozen.
 	 */
 	setDeadline(deadlineAt: number): void;
+	/**
+	 * The leg calls admitted from now on belong to; null while none is open.
+	 * Each call keeps the leg it was admitted under.
+	 */
+	setLeg(legId: string | null): void;
+	/**
+	 * Resolves once no call admitted under `legId` is still being dispatched:
+	 * each one's `requests` row has begun by then, or never will. Revoking the
+	 * token does not end a dispatch already under way.
+	 */
+	drainedLeg(legId: string): Promise<void>;
+	/** The legs with a call still being dispatched. */
+	inFlightLegs(): string[];
 }
 
 export interface InnerRegistrationHooks {
@@ -167,6 +184,8 @@ export class InnerListener {
 			gate: null,
 			beforeFirstDispatch: hooks.beforeFirstDispatch ?? null,
 			environmentNoted: false,
+			inFlight: new Map(),
+			drainWaiters: new Map(),
 		};
 		this.tokens.set(key, entry);
 		return {
@@ -178,7 +197,37 @@ export class InnerListener {
 			setDeadline: (deadlineAt) => {
 				entry.context = Object.freeze({ ...entry.context, deadlineAt });
 			},
+			setLeg: (legId) => {
+				entry.context = Object.freeze({ ...entry.context, legId });
+			},
+			drainedLeg: (legId) =>
+				entry.inFlight.has(legId)
+					? new Promise<void>((resolve) => {
+							const waiters = entry.drainWaiters.get(legId) ?? [];
+							waiters.push(resolve);
+							entry.drainWaiters.set(legId, waiters);
+						})
+					: Promise.resolve(),
+			inFlightLegs: () => [...entry.inFlight.keys()],
 		};
+	}
+
+	private enter(entry: TokenEntry, legId: string | null): void {
+		if (legId === null) return;
+		entry.inFlight.set(legId, (entry.inFlight.get(legId) ?? 0) + 1);
+	}
+
+	private leave(entry: TokenEntry, legId: string | null): void {
+		if (legId === null) return;
+		const left = (entry.inFlight.get(legId) ?? 1) - 1;
+		if (left > 0) {
+			entry.inFlight.set(legId, left);
+			return;
+		}
+		entry.inFlight.delete(legId);
+		const waiters = entry.drainWaiters.get(legId) ?? [];
+		entry.drainWaiters.delete(legId);
+		for (const resolve of waiters) resolve();
 	}
 
 	private report(entry: TokenEntry, outcome: SdkBridgeInnerOutcome): void {
@@ -318,9 +367,13 @@ export class InnerListener {
 			if (entry.revoked || this.tokens.get(key) !== entry)
 				return unauthorized();
 		}
+		// Admitted: the call belongs to the leg open now, and that leg is not
+		// drained until its dispatch ends.
+		const context = entry.context;
+		this.enter(entry, context.legId);
 		let response: Response;
 		try {
-			response = await this.opts.dispatchInner(inner, entry.context);
+			response = await this.opts.dispatchInner(inner, context);
 		} catch (error) {
 			if (req.signal.aborted) return new Response(null, { status: 499 });
 			this.opts.log.error("SDK bridge inner dispatch failed", error);
@@ -337,6 +390,8 @@ export class InnerListener {
 				"api_error",
 				"The proxy failed to serve this model call",
 			);
+		} finally {
+			this.leave(entry, context.legId);
 		}
 		if (response.status !== 403) return response;
 		// Claude Code reads a 403 as a credential problem and reports "Failed to

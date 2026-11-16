@@ -171,6 +171,7 @@ describe("resolveOfficialAnthropicFloor", () => {
 		const m = meta({ clientHarness: "pi" });
 		setSdkBridgeInnerMetaContext(m, {
 			turnId: "turn-1",
+			legId: "leg-1",
 			plan: {
 				turnId: "turn-1",
 				routeSnapshot: null,

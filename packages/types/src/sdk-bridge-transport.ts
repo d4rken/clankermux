@@ -205,6 +205,8 @@ export interface SdkBridgeTurnMeta {
 	readonly sideRequest: string | null;
 	/** Null unless the client's hosted web search is to be served. */
 	readonly hostedWebSearch: SdkBridgeHostedWebSearch | null;
+	/** The client's validated `x-clankermux-correlation-tag`; null without one. */
+	readonly correlationTag: string | null;
 }
 
 /**
@@ -325,6 +327,11 @@ export interface SdkBridgeTransport {
 		| { turnId: string; ownerApiKeyId: string | null }
 		| SdkBridgeContinuationUnavailable
 		| null;
+	/**
+	 * Continue a parked turn with the client's tool results. Throws like
+	 * {@link startTurn} only when the turn had to start afresh (its released
+	 * session gone) and that start could not run.
+	 */
 	continueTurn(input: {
 		turnId: string;
 		request: Request;
@@ -496,6 +503,12 @@ export interface SdkBridgeInnerOutcome {
  */
 export interface SdkBridgeInnerContext {
 	readonly turnId: string;
+	/**
+	 * The leg open when the call was admitted; null while none is. The
+	 * listener freezes the context at admission, so a later leg never claims
+	 * an earlier call.
+	 */
+	readonly legId: string | null;
 	readonly plan: SdkBridgeRoutePlan;
 	readonly apiKeyId: string | null;
 	readonly apiKeyName: string | null;
@@ -504,8 +517,14 @@ export interface SdkBridgeInnerContext {
 	readonly projectAttributionSource?: ProjectAttributionSource | null;
 	/** Epoch ms after which an inner call is refused. */
 	readonly deadlineAt: number;
-	/** An inner call's `requests` row has begun; once per request id. */
-	readonly onInnerRequestStarted?: (requestId: string) => void;
+	/**
+	 * An inner call's `requests` row has begun; once per request id, with the
+	 * leg its call was admitted under.
+	 */
+	readonly onInnerRequestStarted?: (
+		requestId: string,
+		legId: string | null,
+	) => void;
 	/**
 	 * How an inner call ended, once per call. A streamed reply reports when its
 	 * stream ends, so an error event inside a 200 counts as the error it is.

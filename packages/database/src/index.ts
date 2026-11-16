@@ -88,6 +88,8 @@ export {
 } from "./repositories/quota-drift-result.repository";
 export {
 	type ClientRequestRow,
+	clientRowApproximateSql,
+	clientRowFinalizedSql,
 	RequestRepository,
 } from "./repositories/request.repository";
 export {

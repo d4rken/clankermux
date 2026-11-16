@@ -3,6 +3,7 @@ import type {
 	SdkBridgeHistoryMode,
 	SdkBridgeInnerOutcome,
 	SdkBridgeLegKind,
+	SdkBridgeLegOwner,
 	SdkBridgeTurnFinish,
 	SdkBridgeTurnStatus,
 } from "@clankermux/types";
@@ -127,6 +128,8 @@ export interface Leg {
 	id: string;
 	kind: SdkBridgeLegKind;
 	startedAt: number;
+	/** Who sent the leg's outer request, as its row records it. */
+	owner: SdkBridgeLegOwner;
 	response: LegResponse;
 }
 
@@ -457,6 +460,8 @@ export class LiveQuery {
 
 	private attach(leg: Leg): void {
 		this.leg = leg;
+		// Claude Code's calls from here on are this leg's.
+		this.init.registration.setLeg(leg.id);
 		this.toolUsesThisLeg = 0;
 		// A failure answers the leg it happens in; an earlier leg's inner
 		// outcome or wording must not decide it.
@@ -528,8 +533,11 @@ export class LiveQuery {
 			: fallback;
 	}
 
-	/** An inner call's `requests` row began: that is what `inner_call_count` counts. */
-	onInnerRequestStarted(requestId: string): void {
+	/**
+	 * An inner call's `requests` row began: that is what `inner_call_count`
+	 * counts, on the turn and on `legId`, the leg the call was admitted under.
+	 */
+	onInnerRequestStarted(requestId: string, legId: string | null): void {
 		if (!requestId || this.innerRequestsStarted.has(requestId)) return;
 		this.innerRequestsStarted.add(requestId);
 		this.legCalls.push({
@@ -538,7 +546,7 @@ export class LiveQuery {
 			afterGiveUp: this.gaveUp,
 			outcome: null,
 		});
-		void this.init.recorder.bump({ innerCalls: 1 });
+		this.init.recorder.countInnerCall(legId);
 	}
 
 	/**
@@ -682,7 +690,12 @@ export class LiveQuery {
 		this.state = "running";
 		this.resumeActive();
 		this.clientMessages = clientMessages;
-		void this.init.recorder.insertLeg(leg.id, leg.kind, leg.startedAt);
+		void this.init.recorder.insertLeg(
+			leg.id,
+			leg.kind,
+			leg.startedAt,
+			leg.owner,
+		);
 		this.attach(leg);
 		void this.init.recorder.bump({ toolRounds: 1 });
 		const parked = this.init.parked;
@@ -710,6 +723,11 @@ export class LiveQuery {
 		this.teardown("client_abort", bridgeErrors.clientGone());
 	}
 
+	/**
+	 * Record the current leg's end. Calls admitted from now on belong to no
+	 * leg; the leg settles once the calls admitted under it are dispatched,
+	 * whose rows have begun by then or never will.
+	 */
 	private finishLeg(
 		leg: Leg,
 		finish: {
@@ -718,9 +736,12 @@ export class LiveQuery {
 			stopReason?: string | null;
 			toolUseIds?: string[] | null;
 			committed?: boolean;
+			failedOver?: boolean;
 		},
 	): void {
-		void this.init.recorder.finishLeg(leg.id, {
+		const { registration, recorder } = this.init;
+		registration.setLeg(null);
+		void recorder.finishLeg(leg.id, {
 			finishedAt: this.init.now(),
 			httpStatus: finish.httpStatus,
 			errorPhase: finish.error
@@ -732,7 +753,11 @@ export class LiveQuery {
 			errorType: finish.error?.type ?? null,
 			errorMessage: finish.error?.message ?? null,
 			toolUseIds: finish.toolUseIds?.length ? finish.toolUseIds : null,
+			failedOver: finish.failedOver ?? false,
 		});
+		void registration
+			.drainedLeg(leg.id)
+			.then(() => recorder.settleLeg(leg.id, this.init.now()));
 	}
 
 	/** The leg's reply is complete. */
@@ -968,6 +993,19 @@ export class LiveQuery {
 	 */
 	fenceTurn(token: string): void {
 		this.init.recorder.setFence(token);
+	}
+
+	/**
+	 * Legs a release may settle: ones this query's recorder finished, with
+	 * every count landed and no call still being dispatched (that leg's own
+	 * drain settles it). Read once the recorder's queued writes have landed.
+	 * A leg another recorder left unsettled is never this one's to settle.
+	 */
+	legsToSettleAtRelease(): string[] {
+		const inFlight = new Set(this.init.registration.inFlightLegs());
+		return this.init.recorder
+			.countedFinishedLegIds()
+			.filter((id) => !inFlight.has(id));
 	}
 
 	/** The session is stored: the turn lives on in its released park, not here. */
@@ -1547,9 +1585,14 @@ export class LiveQuery {
 			const committed = leg.response.committed;
 			// A no-op for a client that is already gone. A start leg's failover
 			// rejects only once this teardown has closed the query.
-			if (leg.kind !== "start" || !leg.response.failOver(error))
-				leg.response.fail(error);
-			this.finishLeg(leg, { httpStatus: error.status, error, committed });
+			const failedOver = leg.kind === "start" && leg.response.failOver(error);
+			if (!failedOver) leg.response.fail(error);
+			this.finishLeg(leg, {
+				httpStatus: error.status,
+				error,
+				committed,
+				failedOver,
+			});
 			this.leg = null;
 		}
 		this.finalError = error;

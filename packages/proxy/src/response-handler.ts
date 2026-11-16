@@ -599,6 +599,8 @@ export interface ResponseHandlerOptions {
 	clientHarness?: string | null;
 	/** See RequestMeta.sdkBridgeTurnId. */
 	sdkBridgeTurnId?: string | null;
+	/** See RequestMeta.sdkBridgeLegId. */
+	sdkBridgeLegId?: string | null;
 	/** See RequestMeta.servedServiceTier. */
 	servedServiceTier?: ServiceTierGroup;
 	/** Called once the request's row has begun (`requestRecorder.begin`). */
@@ -802,6 +804,7 @@ async function forwardToClientInner(
 		clientUserAgent,
 		clientHarness,
 		sdkBridgeTurnId,
+		sdkBridgeLegId,
 		servedServiceTier,
 		claudeDeviceId,
 		response: responseRaw,
@@ -965,6 +968,7 @@ async function forwardToClientInner(
 			clientUserAgent: clientUserAgent ?? null,
 			clientHarness: clientHarness ?? null,
 			sdkBridgeTurnId: sdkBridgeTurnId ?? null,
+			sdkBridgeLegId: sdkBridgeLegId ?? null,
 			servedServiceTier: servedServiceTier ?? null,
 			routing: routingRecord,
 			timestamp,

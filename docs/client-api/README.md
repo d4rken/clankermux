@@ -76,7 +76,9 @@ failure. Those never reached a provider and there is nothing to look up.
 
 One proxied request produces exactly ONE row under ONE id, whatever happens
 upstream. If the proxy retries, or falls back to another account, provider or
-model, every attempt stays under the id it first answered with. So more than one
+model, every attempt stays under the id it first answered with. A request
+served through Claude Code is one row as well, whatever model calls Claude Code
+made for it (see [Requests served through Claude Code](#requests-served-through-claude-code)). So more than one
 distinct id for a single correlation tag means more than one request was made,
 never that one request was split. `failoverAttempts` describes attempts INSIDE
 that single row and never implies a second one.
@@ -132,6 +134,66 @@ lands, while `requestedModel` is known from the request itself. The two differ
 whenever the proxy or the provider served something other than what was asked
 for.
 
+## Requests served through Claude Code
+
+When routing lands a request on a Claude account and the client is not Claude
+Code itself, ClankerMux runs Claude Code for it
+([Claude accounts from other clients](claude-accounts.md)), and Claude Code
+makes its own model calls through the proxy. The row under the id you were
+handed describes your request, with its counts summed over those calls:
+
+| Field | Value |
+| --- | --- |
+| `id` | Your request's id, as returned in `x-clankermux-request-id` |
+| `timestamp` | When the reply to your request ended |
+| `statusCode`, `error` | What your request was answered with |
+| token classes | Summed over Claude Code's model calls for your request; null when none of them reported that class |
+| `model` | The model the newest of those calls was recorded against; null until one was |
+| `requestedModel` | The model your request named, an alias included |
+| `usageSource` | `approximate` when any of the calls is, else `provider` when any of them is, else `none` |
+| `failoverAttempts` | The largest over the calls |
+| `modelSubstitutionDiscards` | Discards recorded for your request and for each of the calls |
+| `project`, `correlationTag` | Your request's |
+
+Claude Code's calls are not readable on their own: their ids were never handed
+to you, they are answered by `404`, and the tag search never returns them. A
+request whose reply ended in tool calls is one row, and the request that sends
+the results back is the next, each with the calls Claude Code made while
+serving it. A request that made no call at all (refused before Claude Code ran,
+for instance) reads with null counts, a null `model` and `usageSource: "none"`.
+
+`finalized` turns true once ClankerMux can count no further call toward your
+request and every call it counted has its own accounting finished. That can
+come after the reply ended: a call already under way when it ended still
+counts. Until then the counts can still grow.
+
+Residuals. If ClankerMux could not record that one of the calls began
+because a database write failed, the request stays `finalized: false` for
+good, so a sum known to be short is never reported as final. A process that
+stops between sending a call and recording it loses that call from the counts
+entirely, and the request can still turn final without it. An operator
+statistics reset deletes the calls but not your request, which then reads with
+null counts and `finalized: false` from then on. Resolve a request that never
+turns final as unknown when your own reconciliation window closes.
+
+When ClankerMux stops while serving a request (a crash, a kill), its next
+start closes what was left. A request whose reply had not ended by then reads
+with `statusCode: null`, an `error` saying recovery closed it, and the time of
+that recovery as its `timestamp`. That outcome is reconstructed, not a
+response anyone sent: your client got whatever its connection carried before
+it dropped. Its counts cover the calls recorded before the stop.
+
+A request ClankerMux tried to serve this way, then moved to another
+destination (no Claude Code process free, or the account out of extra usage
+before any of the reply went out), reads as the request the other destination
+answered.
+
+Requests served this way before the version that publishes this section are
+readable only when Claude Code served them in one request with no tool round,
+and are matched to their calls through that one request. They carry no
+correlation tag, since none was stored for them, and their `requestedModel` is
+the first model routing recorded for them.
+
 ## Searching by tag
 
 `GET /client/v1/requests?tag={tag}&limit={n}&after={cursor}` answers with the
@@ -163,6 +225,10 @@ keep unsettled ids for direct polling by id, and re-scan a tail of the range
 while requests are still outstanding.
 
 ## `finalized`
+
+For a request served through Claude Code, see
+[Requests served through Claude Code](#requests-served-through-claude-code);
+the rest of this section is about every other request.
 
 `true` means accounting for that request is complete and `usageSource` will not
 change. It is a property of the committed row rather than an elapsed-time
@@ -321,12 +387,15 @@ It is the paging order. It is not a request clock, and it must not be used to
 reconstruct when a request ran. A client that needs that has its own clock
 around the call.
 
+For a request served through Claude Code it is when the reply to it ended,
+and it never changes afterwards.
+
 ## What a 404 means
 
 A row becomes readable only after two things have happened: the request's
 transport closed, and the metadata write committed. A stream may legitimately
 run for a long time (the recorder's own backstop is 35 minutes), and the write
-is asynchronous, so absence has five causes this response cannot tell apart:
+is asynchronous, so absence has six causes this response cannot tell apart:
 
 1. The request is still running.
 2. The write is queued, or retrying against a locked database.
@@ -338,6 +407,10 @@ is asynchronous, so absence has five causes this response cannot tell apart:
 4. The row was deleted, by retention or by an operator statistics reset.
 5. The request is one Request History does not keep, such as an internal
    probe. Its response still carried an id.
+6. The id is one of Claude Code's own model calls, or a request Claude Code
+   served before this was readable and that took more than one request to
+   answer (see
+   [Requests served through Claude Code](#requests-served-through-claude-code)).
 
 No elapsed-time rule makes a 404 terminal. The SQL adapter retries a busy
 database against a ten-minute deadline, so "it has been a while" establishes
@@ -365,6 +438,13 @@ GET /client/v1/retention  ->  {"requestRetentionDays": 3650}
 Rows older than that are deleted by the hourly retention sweep. A consumer's
 reconciliation window has to be shorter than this number, and the number is
 operator-configurable, so read it rather than assuming the default.
+
+A request served through Claude Code stops being readable once it STARTED
+longer ago than that, so it can go up to its own duration earlier than a row
+written when it finished. Its counts never shrink while it is readable: every
+call it counts is retained at least as long as it is. Raising the retention
+does not make such a request readable again once a cleanup has deleted calls
+of it under the shorter setting.
 
 ## Rate limiting
 
