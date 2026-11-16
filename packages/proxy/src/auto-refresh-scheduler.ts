@@ -888,7 +888,7 @@ export class AutoRefreshScheduler {
 							};
 
 					log.debug(
-						`Auto-refresh request payload: ${JSON.stringify(requestBody, null, 2)}`,
+						`Auto-refresh request payload: ${JSON.stringify(requestBody)}`,
 					);
 
 					const req = new Request(url, {
