@@ -674,6 +674,103 @@ describe("SDK bridge inner calls", () => {
 		expect(outcomes[0]?.status).toBeGreaterThanOrEqual(400);
 	});
 
+	describe("report the row's start by the time the dispatch resolves, body unread", () => {
+		const onlyA = () =>
+			plan({
+				candidates: [
+					{ accountId: a.id, provider: "anthropic", upstreamModel: MODEL },
+				],
+				preferredAccountId: a.id,
+			});
+
+		/** Dispatch through ingress with the trusted context, recording each start. */
+		async function dispatch(
+			ctx: Partial<SdkBridgeInnerContext>,
+			body: Record<string, unknown> = {},
+		) {
+			const started: Array<[string, string | null]> = [];
+			const res = await dispatchProxyRequest(
+				innerRequest(
+					innerContext({
+						plan: onlyA(),
+						legId: "leg-7",
+						onInnerRequestStarted: (id, legId) => started.push([id, legId]),
+						...ctx,
+					}),
+					body,
+				),
+				new URL("https://proxy.local/v1/messages"),
+				harness?.ctx as BridgeHarness["ctx"],
+				KEY,
+				"outer",
+			);
+			// Copied now, before anything reads the body.
+			return { res, started: [...started] };
+		}
+
+		it("for a streamed reply whose body is still open", async () => {
+			let close!: () => void;
+			const encoder = new TextEncoder();
+			harness = await makeBridgeHarness([a], {
+				upstream: () =>
+					new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								controller.enqueue(
+									encoder.encode(
+										`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { model: MODEL } })}\n\n`,
+									),
+								);
+								close = () => {
+									controller.enqueue(
+										encoder.encode(
+											'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+										),
+									);
+									controller.close();
+								};
+							},
+						}),
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+			});
+
+			const { res, started } = await dispatch({}, { stream: true });
+
+			const begin = harness.ctx.requestRecorder.begin as ReturnType<
+				typeof mock
+			>;
+			expect(started).toEqual([[begin.mock.calls[0][0].requestId, "leg-7"]]);
+			close();
+			await res.text();
+		});
+
+		it("for a non-streamed reply", async () => {
+			harness = await makeBridgeHarness([a]);
+
+			const { res, started } = await dispatch({});
+
+			const begin = harness.ctx.requestRecorder.begin as ReturnType<
+				typeof mock
+			>;
+			expect(started).toEqual([[begin.mock.calls[0][0].requestId, "leg-7"]]);
+			await res.text();
+		});
+
+		it("for a synthetic terminal", async () => {
+			harness = await makeBridgeHarness([a]);
+
+			const { res, started } = await dispatch({ deadlineAt: Date.now() - 1 });
+
+			const synthetic = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof mock>;
+			expect(started).toEqual([
+				[synthetic.mock.calls[0][0].requestId, "leg-7"],
+			]);
+			await res.text();
+		});
+	});
+
 	it("cannot be entered through headers: without the in-process context the key's pin applies", async () => {
 		harness = await makeBridgeHarness([a, b, c], {
 			pin: { pinnedAccountId: c.id, pinnedProviders: null },
