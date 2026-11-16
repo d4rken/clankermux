@@ -996,17 +996,16 @@ export class LiveQuery {
 	}
 
 	/**
-	 * Legs a release must not settle: one with a call still being dispatched
-	 * (its own drain settles it), or one a count of which failed (never
-	 * settled). Read once the recorder's queued writes have landed.
+	 * Legs a release may settle: ones this query's recorder finished, with
+	 * every count landed and no call still being dispatched (that leg's own
+	 * drain settles it). Read once the recorder's queued writes have landed.
+	 * A leg another recorder left unsettled is never this one's to settle.
 	 */
-	legsNotToSettle(): string[] {
-		return [
-			...new Set([
-				...this.init.registration.inFlightLegs(),
-				...this.init.recorder.uncountedLegIds(),
-			]),
-		];
+	legsToSettleAtRelease(): string[] {
+		const inFlight = new Set(this.init.registration.inFlightLegs());
+		return this.init.recorder
+			.countedFinishedLegIds()
+			.filter((id) => !inFlight.has(id));
 	}
 
 	/** The session is stored: the turn lives on in its released park, not here. */

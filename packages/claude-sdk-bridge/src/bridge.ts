@@ -821,7 +821,7 @@ export function createClaudeSdkBridge(
 				},
 				descriptor,
 				source,
-				live.legsNotToSettle(),
+				live.legsToSettleAtRelease(),
 				() => abandoned.has(live.turnId),
 			);
 		} catch (error) {

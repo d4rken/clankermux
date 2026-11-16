@@ -157,9 +157,12 @@ export class TurnRecorder {
 		});
 	}
 
-	/** Legs a count write of which did not land, as far as the writes so far tell. */
-	uncountedLegIds(): string[] {
-		return [...this.uncountedLegs];
+	/**
+	 * Legs this recorder finished whose counts, as far as the writes so far
+	 * tell, all landed.
+	 */
+	countedFinishedLegIds(): string[] {
+		return [...this.finishedLegs].filter((id) => !this.uncountedLegs.has(id));
 	}
 
 	/**

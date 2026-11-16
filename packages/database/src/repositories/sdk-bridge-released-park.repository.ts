@@ -1,10 +1,11 @@
-import type {
-	SdkBridgeParkCloseOutcome,
-	SdkBridgeParkLease,
-	SdkBridgeReleasedPark,
-	SdkBridgeReleasedParkInsert,
-	SdkBridgeReleasedParkState,
-	SdkBridgeTurnFinish,
+import {
+	SDK_BRIDGE_LEG_OWNER_LOST,
+	type SdkBridgeParkCloseOutcome,
+	type SdkBridgeParkLease,
+	type SdkBridgeReleasedPark,
+	type SdkBridgeReleasedParkInsert,
+	type SdkBridgeReleasedParkState,
+	type SdkBridgeTurnFinish,
 } from "@clankermux/types";
 import type { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { BaseRepository } from "./base.repository";
@@ -75,6 +76,32 @@ const TURN_OPEN = `NOT EXISTS (
 )`;
 
 type Binding = string | number | null;
+
+type Db = ReturnType<BunSqlAdapter["getSQLiteDb"]>;
+
+/**
+ * The legs of a turn whose process is gone, at `at`: one still open is
+ * finished with the reconstructed {@link SDK_BRIDGE_LEG_OWNER_LOST} outcome,
+ * and every finished one is settled. Facts a leg already holds are kept.
+ */
+function repairDeadOwnerLegs(db: Db, turnId: string, at: number): void {
+	db.run(
+		`UPDATE sdk_bridge_turn_legs SET finished_at = ?, error_type = ?,
+			error_message = ?
+		WHERE turn_id = ? AND finished_at IS NULL`,
+		[
+			at,
+			SDK_BRIDGE_LEG_OWNER_LOST.errorType,
+			SDK_BRIDGE_LEG_OWNER_LOST.message,
+			turnId,
+		],
+	);
+	db.run(
+		`UPDATE sdk_bridge_turn_legs SET settled_at = ?
+		WHERE turn_id = ? AND finished_at IS NOT NULL AND settled_at IS NULL`,
+		[at, turnId],
+	);
+}
 
 function leaseHeld(
 	db: ReturnType<BunSqlAdapter["getSQLiteDb"]>,
@@ -226,16 +253,14 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 
 	/**
 	 * preparing → released, once the file is published; the turn row reads
-	 * `released`. Its Claude Code process is gone, so its finished legs are
-	 * settled at `settle.at` in the same step, except `settle.except`: legs
-	 * the releasing process still has a call in flight for, or knows missed
-	 * an inner-call count.
+	 * `released`. In the same step it settles `settle.legIds` at `settle.at`,
+	 * the legs of this turn the releasing process vouches for, where finished.
 	 */
 	async markReleased(
 		turnId: string,
 		file: { sessionPath: string; fileBytes: number },
 		token: string,
-		settle: { at: number; except: readonly string[] },
+		settle: { at: number; legIds: readonly string[] },
 	): Promise<boolean> {
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
@@ -252,28 +277,27 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 			db.run(
 				`UPDATE sdk_bridge_turn_legs SET settled_at = ?
 				WHERE turn_id = ? AND finished_at IS NOT NULL AND settled_at IS NULL
-					AND id NOT IN (SELECT value FROM json_each(?))`,
-				[settle.at, turnId, JSON.stringify(settle.except)],
+					AND id IN (SELECT value FROM json_each(?))`,
+				[settle.at, turnId, JSON.stringify(settle.legIds)],
 			);
 			return true;
 		});
 	}
 
 	/**
-	 * Settle the finished legs of every turn a park owns, at recovery: the
-	 * process that ran them is gone, and whatever settle writes it still owed
-	 * went with it. False, settling nothing, without the lease.
+	 * At recovery, repair the legs of every turn a park owns: the process
+	 * that ran them is gone, and whatever leg writes it still owed went with
+	 * it (see `repairDeadOwnerLegs`). False, changing nothing, without the
+	 * lease.
 	 */
-	async settleParkedTurnLegs(at: number, token: string): Promise<boolean> {
+	async recoverParkedTurnLegs(at: number, token: string): Promise<boolean> {
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
 			if (!leaseHeld(db, token)) return false;
-			db.run(
-				`UPDATE sdk_bridge_turn_legs SET settled_at = ?
-				WHERE finished_at IS NOT NULL AND settled_at IS NULL
-					AND turn_id IN (SELECT turn_id FROM sdk_bridge_released_parks)`,
-				[at],
-			);
+			const parked = db
+				.query(`SELECT turn_id FROM sdk_bridge_released_parks`)
+				.all() as Array<{ turn_id: string }>;
+			for (const { turn_id } of parked) repairDeadOwnerLegs(db, turn_id, at);
 			return true;
 		});
 	}
@@ -395,7 +419,11 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 	 * Close turns left open (`running` or `released`, started before
 	 * `startedBefore`) that no park keeps alive and whose owning process is
 	 * gone (`ownerDead`; a row with no recorded owner predates the column and
-	 * counts as gone). Under the lease only. Returns how many were closed.
+	 * counts as gone), and repair their legs (`repairDeadOwnerLegs`). A turn
+	 * that already finished but whose dead owner left a leg open or unsettled
+	 * gets its legs repaired too, its own outcome untouched. Under the lease
+	 * only. Returns how many turns were closed; repaired legs of finished
+	 * turns are not counted.
 	 */
 	async closeOpenTurnsWithoutPark(
 		startedBefore: number,
@@ -421,16 +449,19 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 				owner_pid: number | null;
 				owner_start_time: string | null;
 			}>;
+			const dead = (row: {
+				owner_pid: number | null;
+				owner_start_time: string | null;
+			}) =>
+				row.owner_pid === null ||
+				ownerDead({
+					pid: Number(row.owner_pid),
+					startTime: row.owner_start_time,
+				});
+			const at = finish.finishedAt ?? Date.now();
 			let closed = 0;
 			for (const row of open) {
-				if (
-					row.owner_pid !== null &&
-					!ownerDead({
-						pid: Number(row.owner_pid),
-						startTime: row.owner_start_time,
-					})
-				)
-					continue;
+				if (!dead(row)) continue;
 				const changes = db.run(
 					`UPDATE sdk_bridge_turns SET
 						finished_at = ?, status = ?, http_status = ?, error_type = ?,
@@ -438,15 +469,31 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 					WHERE id = ? AND finished_at IS NULL`,
 					[...finishParams(finish), row.id],
 				).changes;
-				// Its process is gone, so no inner call can begin under its legs.
-				if (changes)
-					db.run(
-						`UPDATE sdk_bridge_turn_legs SET settled_at = COALESCE(settled_at, ?)
-						WHERE turn_id = ? AND finished_at IS NOT NULL`,
-						[finish.finishedAt, row.id],
-					);
+				if (changes) repairDeadOwnerLegs(db, row.id, at);
 				closed += changes;
 			}
+			// Finished turns whose leg writes stopped short, found through the
+			// partial index of unsettled legs. Legs written before the leg
+			// columns (inner_call_count NULL) have nothing to settle.
+			const unsettled = db
+				.query(
+					`SELECT DISTINCT t.id, t.owner_pid, t.owner_start_time
+					FROM sdk_bridge_turn_legs l
+					JOIN sdk_bridge_turns t ON t.id = l.turn_id
+					WHERE l.settled_at IS NULL AND l.inner_call_count IS NOT NULL
+						AND t.finished_at IS NOT NULL AND t.started_at < ?
+						AND NOT EXISTS (
+							SELECT 1 FROM sdk_bridge_released_parks p
+							WHERE p.turn_id = t.id
+						)`,
+				)
+				.all(startedBefore) as Array<{
+				id: string;
+				owner_pid: number | null;
+				owner_start_time: string | null;
+			}>;
+			for (const row of unsettled)
+				if (dead(row)) repairDeadOwnerLegs(db, row.id, at);
 			return closed;
 		});
 	}

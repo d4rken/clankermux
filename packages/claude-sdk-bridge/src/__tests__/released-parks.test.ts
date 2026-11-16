@@ -1148,6 +1148,51 @@ describe("leg settlement across a release", () => {
 		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
 	});
 
+	it("never lets a later recorder's release settle a leg an earlier one left unsettled", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		const count = h.repo.countInnerCall.bind(h.repo);
+		let failures = 1;
+		h.repo.countInnerCall = async (...args) => {
+			if (failures-- > 0) throw new Error("database is locked");
+			return count(...args);
+		};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		// The resumed query runs under a recorder of its own, and parks again.
+		const response = answer(h, p, results(p), { legId: "leg-2" });
+		const q2 = await h.sdk.next();
+		await innerCall(q2);
+		const block = {
+			type: "tool_use",
+			id: "toolu_again",
+			name: "mcp__c__read",
+			input: {},
+		};
+		q2.emit(
+			initMessage(),
+			...streamedMessage([block as never], { id: "msg_again" }),
+		);
+		expect((await reply(response)).stop).toBe("tool_use");
+		q2.emit(
+			assistantMessage([block], { id: "msg_again", stopReason: "tool_use" }),
+		);
+		void q2.callTool("toolu_again", "read");
+		await waitFor(
+			() =>
+				h.parkRepo.parks.get(p.turnId)?.awaitedToolUseIds[0] ===
+					"toolu_again" && h.parkRepo.parks.get(p.turnId)?.state === "released",
+			8_000,
+		);
+		expect(legOf(h, "leg-2")).toMatchObject({
+			innerCallCount: 1,
+			settledAt: expect.any(Number),
+		});
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+	});
+
 	it("leaves to its own drain a leg with a call still in flight at the release", async () => {
 		const h = await releaseHarness();
 		let release!: () => void;
@@ -1175,7 +1220,7 @@ describe("leg settlement across a release", () => {
 		expect(legOf(h, p.meta.legId)?.innerCallCount).toBe(1);
 	});
 
-	it("a new process settles the finished legs of a parked turn its dead owner left unsettled", async () => {
+	it("a new process settles the legs of a parked turn its dead owner left unsettled, finishing an open one as lost", async () => {
 		const workRoot = tempRoot();
 		const repo = memoryTurnRepo();
 		const parkRepo = memoryParkRepo(repo.turns);
@@ -1184,7 +1229,7 @@ describe("leg settlement across a release", () => {
 		await released(a, p);
 		await a.bridge.dispose();
 		// The rows as a crash between a leg's finish and its settle leaves
-		// them, next to a leg that never finished.
+		// them, next to a leg its owner died in.
 		const leg = repo.legs.get(p.meta.legId);
 		if (leg) delete leg.settledAt;
 		await repo.insertLeg({
@@ -1197,7 +1242,10 @@ describe("leg settlement across a release", () => {
 		const b = await releaseHarness({ workRoot, repo, parkRepo });
 		expect(b.bridge.status().releasedParks).toBe(1);
 		expect(repo.legs.get(p.meta.legId)?.settledAt).toBeNumber();
-		expect(repo.legs.get("never-finished")?.settledAt).toBeUndefined();
+		expect(repo.legs.get("never-finished")).toMatchObject({
+			errorType: "owner_lost",
+			settledAt: expect.any(Number),
+		});
 	});
 });
 

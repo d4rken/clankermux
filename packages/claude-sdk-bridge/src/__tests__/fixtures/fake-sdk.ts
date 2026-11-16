@@ -661,14 +661,17 @@ export function memoryParkRepo(
 		const turn = turns.get(id);
 		if (turn) Object.assign(turn, fields);
 	};
-	const settleFinishedLegs = (
-		turnId: string,
-		at: number,
-		except: readonly string[],
-	) => {
-		for (const leg of turns.get(turnId)?.legs ?? [])
-			if (leg.finished && !except.includes(String(leg.id)))
-				leg.settledAt ??= at;
+	/** The repository's repair of a dead owner's legs. */
+	const repairLegs = (turnId: string, at: number) => {
+		for (const leg of turns.get(turnId)?.legs ?? []) {
+			if (!leg.finished)
+				Object.assign(leg, {
+					finished: true,
+					finishedAt: at,
+					errorType: "owner_lost",
+				});
+			leg.settledAt ??= at;
+		}
 	};
 	return {
 		parks,
@@ -721,13 +724,15 @@ export function memoryParkRepo(
 				return false;
 			Object.assign(park, file, { state: "released" });
 			setTurn(turnId, { status: "released" });
-			settleFinishedLegs(turnId, settle.at, settle.except);
+			for (const leg of turns.get(turnId)?.legs ?? [])
+				if (leg.finished && settle.legIds.includes(String(leg.id)))
+					leg.settledAt ??= settle.at;
 			return true;
 		},
-		async settleParkedTurnLegs(at, token) {
-			await check("settleParkedTurnLegs");
+		async recoverParkedTurnLegs(at, token) {
+			await check("recoverParkedTurnLegs");
 			if (!leased(token)) return false;
-			for (const turnId of parks.keys()) settleFinishedLegs(turnId, at, []);
+			for (const turnId of parks.keys()) repairLegs(turnId, at);
 			return true;
 		},
 		async claim(turnId, token, claimId, at, owner) {
@@ -789,13 +794,7 @@ export function memoryParkRepo(
 			if (!leased(token)) return 0;
 			let n = 0;
 			for (const turn of turns.values()) {
-				if (
-					(turn.status !== "running" && turn.status !== "released") ||
-					turn.finishedAt ||
-					Number(turn.startedAt) >= before ||
-					parks.has(turn.id)
-				)
-					continue;
+				if (Number(turn.startedAt) >= before || parks.has(turn.id)) continue;
 				const pid = turn.ownerPid as number | null | undefined;
 				if (
 					pid != null &&
@@ -805,8 +804,14 @@ export function memoryParkRepo(
 					})
 				)
 					continue;
+				// A finished turn keeps its outcome; only its legs are repaired.
+				if (turn.finishedAt != null) {
+					repairLegs(turn.id, finish.finishedAt ?? 0);
+					continue;
+				}
+				if (turn.status !== "running" && turn.status !== "released") continue;
 				Object.assign(turn, finish);
-				settleFinishedLegs(turn.id, finish.finishedAt ?? 0, []);
+				repairLegs(turn.id, finish.finishedAt ?? 0);
 				n++;
 			}
 			return n;

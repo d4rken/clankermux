@@ -284,6 +284,17 @@ export interface SdkBridgeTurnLeg {
 	failedOver: boolean;
 }
 
+/**
+ * The outcome recovery writes on a leg whose process died before recording
+ * one: reconstructed, not observed. No status (none was recorded) and no
+ * error phase (unknown whether anything reached the client).
+ */
+export const SDK_BRIDGE_LEG_OWNER_LOST = {
+	errorType: "owner_lost",
+	message:
+		"ClankerMux stopped before this request's outcome was recorded; recovery closed it without one",
+} as const;
+
 /** Who sent a leg's outer request, as its leg row records it. */
 export type SdkBridgeLegOwner = Pick<
 	SdkBridgeTurnLeg,

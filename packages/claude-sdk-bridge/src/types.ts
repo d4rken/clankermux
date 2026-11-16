@@ -96,14 +96,14 @@ export interface SdkBridgeParkRepo {
 	find(turnId: string): Promise<SdkBridgeReleasedPark | null>;
 	list(): Promise<SdkBridgeReleasedPark[]>;
 	/**
-	 * Also settles the turn's finished legs at `settle.at`, except
-	 * `settle.except`, in the same write.
+	 * Also settles `settle.legIds`, where finished, at `settle.at`, in the
+	 * same write.
 	 */
 	markReleased(
 		turnId: string,
 		file: { sessionPath: string; fileBytes: number },
 		token: string,
-		settle: { at: number; except: readonly string[] },
+		settle: { at: number; legIds: readonly string[] },
 	): Promise<boolean>;
 	claim(
 		turnId: string,
@@ -130,10 +130,11 @@ export interface SdkBridgeParkRepo {
 		token: string,
 	): Promise<SdkBridgeParkCloseOutcome>;
 	/**
-	 * At recovery: settle the finished legs of every turn a park owns. False
-	 * without the lease.
+	 * At recovery: finish the open legs of every turn a park owns as lost
+	 * with their owner, and settle its finished legs. False without the
+	 * lease.
 	 */
-	settleParkedTurnLegs(at: number, token: string): Promise<boolean>;
+	recoverParkedTurnLegs(at: number, token: string): Promise<boolean>;
 	closeOpenTurnsWithoutPark(
 		startedBefore: number,
 		finish: SdkBridgeTurnFinish,

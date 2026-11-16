@@ -1204,6 +1204,13 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_turn ON sdk_bridge_turn_legs(turn_id, started_at)`,
 	);
+	// Legs whose settle is still owed; recovery finds a dead owner's leftovers
+	// through it. Legs written before the leg columns never settle.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_sdk_bridge_turn_legs_unsettled
+			ON sdk_bridge_turn_legs(turn_id)
+			WHERE settled_at IS NULL AND inner_call_count IS NOT NULL`,
+	);
 	// The client API's tag search over bridged requests, in the column order
 	// of idx_requests_correlation_tag.
 	db.run(

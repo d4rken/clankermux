@@ -293,13 +293,21 @@ pipeline. The client keeps executing its own tools.
   and `countInnerCall` bumps the turn's and the leg's `inner_call_count`
   in one transaction. `settled_at` is written once the leg's own in-flight
   dispatches have drained (`drainedLeg`), with the finish for legs that never
-  attach a query (`reject`, `refuseContinuation`), by the dead-turn close,
-  with a park's release (`markReleased`: every finished leg but those with a
-  call still in flight or a failed count) and at released-park recovery
-  (`settleParkedTurnLegs`), which covers a settle lost to a crash. A leg
-  whose count write failed is never settled in that process; after a crash
-  only the row count against `inner_call_count` gates it. `finishLeg` is
-  write-once.
+  attach a query (`reject`, `refuseContinuation`), and with a park's release
+  (`markReleased` settles only the legs the releasing recorder vouches for:
+  ones it finished, every count landed, no call in flight). A dead owner's
+  leftovers are repaired at recovery, under the lease: `closeOpenTurnsWithoutPark`
+  (park-less turns, open or already finished) and `recoverParkedTurnLegs`
+  (every parked turn) finish an open leg with the reconstructed
+  `SDK_BRIDGE_LEG_OWNER_LOST` outcome (no status, no error phase) and settle
+  every finished one, never overwriting a leg's stored facts or a turn's
+  outcome. `closeTurn` in a live process (expiry, supersession) settles
+  nothing. A leg whose count write failed is never settled in that process;
+  after a crash only the row count against `inner_call_count` gates it.
+  `finishLeg` is write-once. Retention keeps a turn while it finished, or
+  had a leg start, inside the window; each cleanup pass records the cutoff
+  it applies (`cleanup:applied-request-cutoff` in `strategies`) before
+  deleting requests, and client reads never go below it.
   `/client/v1/requests` reads a bridged request through its leg
   (`legCtes` in `request.repository.ts`): finished, not failed over, no
   `requests` row under its id, started inside request retention; counts

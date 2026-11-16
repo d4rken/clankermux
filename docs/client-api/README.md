@@ -167,14 +167,21 @@ request and every call it counted has its own accounting finished. That can
 come after the reply ended: a call already under way when it ended still
 counts. Until then the counts can still grow.
 
-Two residuals. If ClankerMux could not record that one of the calls began
-(a database failure, or a process that died between sending the call and
-recording it), the request stays `finalized: false` for good, so a sum known
-to be short is never reported as final; a crash at that moment loses the call
-from the counts entirely. And an operator statistics reset deletes the calls
-but not your request, which then reads with null counts and
-`finalized: false` from then on. Resolve either as unknown when your own
-reconciliation window closes.
+Residuals. If ClankerMux could not record that one of the calls began
+because a database write failed, the request stays `finalized: false` for
+good, so a sum known to be short is never reported as final. A process that
+stops between sending a call and recording it loses that call from the counts
+entirely, and the request can still turn final without it. An operator
+statistics reset deletes the calls but not your request, which then reads with
+null counts and `finalized: false` from then on. Resolve a request that never
+turns final as unknown when your own reconciliation window closes.
+
+When ClankerMux stops while serving a request (a crash, a kill), its next
+start closes what was left. A request whose reply had not ended by then reads
+with `statusCode: null`, an `error` saying recovery closed it, and the time of
+that recovery as its `timestamp`. That outcome is reconstructed, not a
+response anyone sent: your client got whatever its connection carried before
+it dropped. Its counts cover the calls recorded before the stop.
 
 A request ClankerMux tried to serve this way, then moved to another
 destination (no Claude Code process free, or the account out of extra usage
