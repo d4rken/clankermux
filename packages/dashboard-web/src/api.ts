@@ -40,6 +40,7 @@ import type {
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 import { canonicalSections } from "./lib/analytics-sections";
+import { redactForLog } from "./lib/log-redaction";
 import {
 	type RequestQueryParams,
 	requestQueryToSearchParams,
@@ -247,18 +248,20 @@ export interface AuthStatus {
 }
 
 class API extends HttpClient {
+	// Call sites pass whole request bodies, so redaction lives here rather
+	// than at each of them.
 	private logger = {
 		info: (message: string, ...args: unknown[]) => {
-			console.log(`[API] ${message}`, ...args);
+			console.log(`[API] ${message}`, ...args.map(redactForLog));
 		},
 		warn: (message: string, ...args: unknown[]) => {
-			console.warn(`[API] ${message}`, ...args);
+			console.warn(`[API] ${message}`, ...args.map(redactForLog));
 		},
 		error: (message: string, ...args: unknown[]) => {
-			console.error(`[API] ${message}`, ...args);
+			console.error(`[API] ${message}`, ...args.map(redactForLog));
 		},
 		debug: (message: string, ...args: unknown[]) => {
-			console.debug(`[API] ${message}`, ...args);
+			console.debug(`[API] ${message}`, ...args.map(redactForLog));
 		},
 	};
 
