@@ -10,6 +10,7 @@ import type {
 	UsageSource,
 } from "@clankermux/types";
 import { type CostSource, resolveCostSource } from "@clankermux/types";
+import { APPLIED_REQUEST_CUTOFF_SQL } from "../applied-request-cutoff";
 import {
 	decodeStoredPayload,
 	decodeStoredPayloadText,
@@ -347,10 +348,12 @@ const LEG_INNER_COLUMNS = `p.id AS leg_id, r.id, r.timestamp, r.model,
  * their inner rows through the partial leg and turn indexes: left to itself
  * the planner walks every inner row ever retained, or every row of the key.
  *
- * A leg stays readable only while it started inside request retention. Its
- * inner rows are written at or after its start and age out on the same
- * cutoff, so a readable leg still has every one of them, and a published sum
- * never shrinks; the turn row itself can outlive the cutoff.
+ * A leg stays readable only while it started inside request retention, and
+ * at or after the newest cutoff a cleanup pass applied (a retention raised
+ * since then does not bring back rows that pass deleted). Its inner rows are
+ * written at or after its start and age out on the same cutoff, so a readable
+ * leg still has every one of them, and a published sum never shrinks; the
+ * turn row itself can outlive the cutoff.
  */
 function legCtes(selector: string): string {
 	return `WITH legs_page AS (
@@ -365,7 +368,7 @@ function legCtes(selector: string): string {
 		WHERE ${selector}
 			AND l.finished_at IS NOT NULL
 			AND l.failed_over = 0
-			AND l.started_at >= ?
+			AND l.started_at >= MAX(?, ${APPLIED_REQUEST_CUTOFF_SQL})
 			AND NOT EXISTS (SELECT 1 FROM requests d WHERE d.id = l.id)
 			AND (l.api_key_id = ?
 				OR (l.api_key_id IS NULL AND l.inner_call_count IS NULL

@@ -435,7 +435,9 @@ operator-configurable, so read it rather than assuming the default.
 A request served through Claude Code stops being readable once it STARTED
 longer ago than that, so it can go up to its own duration earlier than a row
 written when it finished. Its counts never shrink while it is readable: every
-call it counts is retained at least as long as it is.
+call it counts is retained at least as long as it is. Raising the retention
+does not make such a request readable again once a cleanup has deleted calls
+of it under the shorter setting.
 
 ## Rate limiting
 

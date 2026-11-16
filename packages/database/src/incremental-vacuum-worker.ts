@@ -1,4 +1,8 @@
 import { Database } from "bun:sqlite";
+import {
+	APPLIED_REQUEST_CUTOFF_KEY,
+	RECORD_APPLIED_REQUEST_CUTOFF_SQL,
+} from "./applied-request-cutoff";
 import { isTransientLockError } from "./sqlite-error";
 
 /**
@@ -670,12 +674,14 @@ async function runCleanup(
 		// before the orphan-attempt pass so the attempts of the legs it removes
 		// go on this same tick. A turn still open (running, or released and
 		// waiting for its client, possibly for a day) or owning a released park
-		// is kept whatever its age.
+		// is kept whatever its age, and so is one that finished, or had a leg
+		// start (a continuation, a refused one included), inside the window.
+		// ?1 is the cutoff throughout; deleteBatched binds the batch limit next.
 		if (requestCutoff !== null) {
 			await deleteBatched(
 				db,
 				"sdk_bridge_turns",
-				"started_at < ? AND status NOT IN ('running','released') AND NOT EXISTS(SELECT 1 FROM sdk_bridge_released_parks WHERE sdk_bridge_released_parks.turn_id=sdk_bridge_turns.id)",
+				"started_at < ?1 AND COALESCE(finished_at, started_at) < ?1 AND status NOT IN ('running','released') AND NOT EXISTS(SELECT 1 FROM sdk_bridge_released_parks WHERE sdk_bridge_released_parks.turn_id=sdk_bridge_turns.id) AND NOT EXISTS(SELECT 1 FROM sdk_bridge_turn_legs l WHERE l.turn_id=sdk_bridge_turns.id AND l.started_at >= ?1)",
 				requestCutoff,
 			);
 		}
@@ -707,6 +713,13 @@ async function runCleanup(
 
 		let removedRequests = 0;
 		if (requestCutoff !== null) {
+			// Recorded first: a pass that stops partway has still deleted rows
+			// up to this cutoff.
+			db.run(RECORD_APPLIED_REQUEST_CUTOFF_SQL, [
+				APPLIED_REQUEST_CUTOFF_KEY,
+				JSON.stringify({ cutoff: requestCutoff }),
+				Date.now(),
+			]);
 			// FK ON cascades child rows (routing/tool_calls/tool_errors/payloads);
 			// deleteBatched counts request rows only.
 			removedRequests = await deleteBatched(
