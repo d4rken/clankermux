@@ -642,6 +642,12 @@ export class ReleasedParkStore {
 		park: Omit<SdkBridgeReleasedParkInsert, "sessionPath" | "fileBytes">,
 		descriptor: ResumeDescriptor,
 		source: string,
+		/**
+		 * Legs of the turn the release must not settle: a call of theirs is
+		 * still in flight, or one of their counts failed. Its other finished
+		 * legs settle with the release.
+		 */
+		keepUnsettled: readonly string[],
 		/** Checked between the steps: the release was given up (dispose). */
 		abandoned: () => boolean = () => false,
 	): Promise<ReleasedEntry> {
@@ -671,6 +677,7 @@ export class ReleasedParkStore {
 					park.turnId,
 					{ sessionPath: path, fileBytes },
 					this.token,
+					{ at: this.opts.now(), except: keepUnsettled },
 				))
 			)
 				throw new Error(
@@ -973,6 +980,10 @@ export class ReleasedParkStore {
 		const repo = this.opts.recoveryRepo ?? this.opts.repo;
 		if (!(await this.takeLease(repo))) throw new LeaseHeldElsewhere();
 		const now = this.opts.now();
+		// The parks' turns ran in a process that is gone: a leg it finished
+		// but did not get to settle can take no further call.
+		if (!(await repo.settleParkedTurnLegs(now, this.token)))
+			throw new Error("the park lease moved on during recovery");
 		const entries = new Map<string, ReleasedEntry>();
 		const byToolId = new Map<string, string>();
 		const kept = new Set<string>();

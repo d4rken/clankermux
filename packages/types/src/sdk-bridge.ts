@@ -266,12 +266,35 @@ export interface SdkBridgeTurnLeg {
 	errorMessage: string | null;
 	/** Tool-use ids this leg handed to the client. */
 	toolUseIds: string[] | null;
+	/**
+	 * The outer request's key, which a refused continuation does not share
+	 * with its turn. Null on legs written before it was kept.
+	 */
+	apiKeyId: string | null;
+	/** The outer request's validated `x-clankermux-correlation-tag`. */
+	correlationTag: string | null;
+	/** The model the outer request named, before any alias resolved it. */
+	requestedModel: string | null;
+	project: string | null;
+	/** Inner rows begun under this leg; null on legs written before it was kept. */
+	innerCallCount: number | null;
+	/** When no further inner row could begin under this leg. */
+	settledAt: number | null;
+	/** A start leg the proxy failed over from: the request was answered elsewhere. */
+	failedOver: boolean;
 }
+
+/** Who sent a leg's outer request, as its leg row records it. */
+export type SdkBridgeLegOwner = Pick<
+	SdkBridgeTurnLeg,
+	"apiKeyId" | "correlationTag" | "requestedModel" | "project"
+>;
 
 export type SdkBridgeLegInsert = Pick<
 	SdkBridgeTurnLeg,
 	"id" | "turnId" | "kind" | "startedAt"
->;
+> &
+	Partial<SdkBridgeLegOwner>;
 
 export type SdkBridgeLegFinish = Pick<SdkBridgeTurnLeg, "finishedAt"> &
 	Partial<
@@ -283,8 +306,12 @@ export type SdkBridgeLegFinish = Pick<SdkBridgeTurnLeg, "finishedAt"> &
 			| "errorType"
 			| "errorMessage"
 			| "toolUseIds"
+			| "failedOver"
 		>
-	>;
+	> & {
+		/** No inner row can begin under the leg any more: settle it with the finish. */
+		settled?: boolean;
+	};
 
 /**
  * Sums over the turn's inner `requests` rows that still exist. Inner rows follow

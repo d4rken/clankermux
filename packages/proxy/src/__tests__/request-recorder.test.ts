@@ -59,6 +59,7 @@ interface SaveRequestCall {
 	fallbackFromModel: string | null | undefined;
 	correlationTag: string | null | undefined;
 	usageSource: string | null | undefined;
+	sdkBridgeLegId: string | null | undefined;
 }
 
 type EnqueuedKind =
@@ -127,6 +128,7 @@ class FakeDbOps {
 		fallbackFromModel?: string | null;
 		correlationTag?: string | null;
 		usageSource?: string | null;
+		sdkBridgeLegId?: string | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -159,6 +161,7 @@ class FakeDbOps {
 			fallbackFromModel: data.fallbackFromModel,
 			correlationTag: data.correlationTag,
 			usageSource: data.usageSource,
+			sdkBridgeLegId: data.sdkBridgeLegId,
 		});
 	}
 
@@ -2752,6 +2755,29 @@ describe("RequestRecorder — SDK bridge inner calls", () => {
 		await plain.flush();
 		expect(plain.emitted).not.toHaveLength(0);
 		expect(plain.emitted.at(-1)?.sdkBridgeTurnId).toBeUndefined();
+	});
+
+	it("persists the leg the call was admitted under, and no leg for any other row", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({ sdkBridgeTurnId: "turn-1", sdkBridgeLegId: "leg-1" }),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(
+			h.dbOps.saveRequestCalls.map((c) => c.sdkBridgeLegId),
+		).not.toHaveLength(0);
+		for (const call of h.dbOps.saveRequestCalls)
+			expect(call.sdkBridgeLegId).toBe("leg-1");
+
+		const plain = makeHarness();
+		plain.recorder.begin(makeMeta());
+		plain.recorder.attachUsageSummary("req-1", makeSummary());
+		plain.recorder.finishTransport("req-1", "success");
+		await plain.flush();
+		for (const call of plain.dbOps.saveRequestCalls)
+			expect(call.sdkBridgeLegId ?? null).toBeNull();
 	});
 });
 

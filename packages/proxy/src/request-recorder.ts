@@ -149,6 +149,8 @@ export interface RecordMeta {
 	clientHarness?: string | null;
 	/** See RequestMeta.sdkBridgeTurnId. Optional: absent stays NULL. */
 	sdkBridgeTurnId?: string | null;
+	/** See RequestMeta.sdkBridgeLegId. Optional: absent stays NULL. */
+	sdkBridgeLegId?: string | null;
 	/** See RequestMeta.servedServiceTier. Optional: absent stays NULL. */
 	servedServiceTier?: ServiceTierGroup | null;
 	routing: RecordRouting | null;
@@ -1287,6 +1289,7 @@ export class RequestRecorder {
 			clientUserAgent: meta.clientUserAgent ?? null,
 			clientHarness: meta.clientHarness ?? null,
 			sdkBridgeTurnId: meta.sdkBridgeTurnId ?? null,
+			sdkBridgeLegId: meta.sdkBridgeLegId ?? null,
 			// Response-side facts come off the finalized usage summary; the
 			// two credit marks are ingress facts carried on the meta.
 			stopReason: record.usage?.stopReason,

@@ -224,11 +224,18 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 		return rows.map(toPark);
 	}
 
-	/** preparing → released, once the file is published; the turn row reads `released`. */
+	/**
+	 * preparing → released, once the file is published; the turn row reads
+	 * `released`. Its Claude Code process is gone, so its finished legs are
+	 * settled at `settle.at` in the same step, except `settle.except`: legs
+	 * the releasing process still has a call in flight for, or knows missed
+	 * an inner-call count.
+	 */
 	async markReleased(
 		turnId: string,
 		file: { sessionPath: string; fileBytes: number },
 		token: string,
+		settle: { at: number; except: readonly string[] },
 	): Promise<boolean> {
 		return this.adapter.runTransaction(() => {
 			const db = this.adapter.getSQLiteDb();
@@ -242,6 +249,31 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 			db.run(`UPDATE sdk_bridge_turns SET status = 'released' WHERE id = ?`, [
 				turnId,
 			]);
+			db.run(
+				`UPDATE sdk_bridge_turn_legs SET settled_at = ?
+				WHERE turn_id = ? AND finished_at IS NOT NULL AND settled_at IS NULL
+					AND id NOT IN (SELECT value FROM json_each(?))`,
+				[settle.at, turnId, JSON.stringify(settle.except)],
+			);
+			return true;
+		});
+	}
+
+	/**
+	 * Settle the finished legs of every turn a park owns, at recovery: the
+	 * process that ran them is gone, and whatever settle writes it still owed
+	 * went with it. False, settling nothing, without the lease.
+	 */
+	async settleParkedTurnLegs(at: number, token: string): Promise<boolean> {
+		return this.adapter.runTransaction(() => {
+			const db = this.adapter.getSQLiteDb();
+			if (!leaseHeld(db, token)) return false;
+			db.run(
+				`UPDATE sdk_bridge_turn_legs SET settled_at = ?
+				WHERE finished_at IS NOT NULL AND settled_at IS NULL
+					AND turn_id IN (SELECT turn_id FROM sdk_bridge_released_parks)`,
+				[at],
+			);
 			return true;
 		});
 	}
@@ -399,13 +431,21 @@ export class SdkBridgeReleasedParkRepository extends BaseRepository<SdkBridgeRel
 					})
 				)
 					continue;
-				closed += db.run(
+				const changes = db.run(
 					`UPDATE sdk_bridge_turns SET
 						finished_at = ?, status = ?, http_status = ?, error_type = ?,
 						error_message = ?
 					WHERE id = ? AND finished_at IS NULL`,
 					[...finishParams(finish), row.id],
 				).changes;
+				// Its process is gone, so no inner call can begin under its legs.
+				if (changes)
+					db.run(
+						`UPDATE sdk_bridge_turn_legs SET settled_at = COALESCE(settled_at, ?)
+						WHERE turn_id = ? AND finished_at IS NOT NULL`,
+						[finish.finishedAt, row.id],
+					);
+				closed += changes;
 			}
 			return closed;
 		});

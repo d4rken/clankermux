@@ -156,7 +156,7 @@ function failInner(
 	h.inner.respond = (_req, ctx) => {
 		const requestId = crypto.randomUUID();
 		// The proxy reports the row's start before the call's outcome.
-		ctx.onInnerRequestStarted?.(requestId);
+		ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 		const full: SdkBridgeInnerOutcome = {
 			requestId,
 			errorType: null,
@@ -2998,6 +2998,31 @@ describe("side requests", () => {
 		});
 	});
 
+	it("records its leg with its own request's identity and its one call", async () => {
+		const h = harness();
+		const { r } = await mainTurn(h);
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+		const s = sideRequest(h, recap(r), { ...side, correlationTag: "recap" });
+		const query = await h.sdk.next();
+		await innerCall(query);
+		query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "Recap." }]),
+			resultMessage(),
+		);
+		await reply(s.response);
+		const [leg] = h.repo.turns.get(s.plan.turnId)?.legs ?? [];
+		await waitFor(() => leg?.settledAt != null);
+		expect(leg).toMatchObject({
+			kind: "start",
+			correlationTag: "recap",
+			innerCallCount: 1,
+		});
+	});
+
 	it("counts against the process cap", async () => {
 		const h = harness({ limits: () => ({ maxProcesses: 1 }) });
 		const { r } = await mainTurn(h);
@@ -3331,7 +3356,7 @@ describe("errors", () => {
 			let report: (() => void) | null = null;
 			h.inner.respond = (_req, ctx) => {
 				const requestId = crypto.randomUUID();
-				ctx.onInnerRequestStarted?.(requestId);
+				ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 				report = () =>
 					ctx.onInnerOutcome?.({
 						requestId,
@@ -3366,7 +3391,7 @@ describe("errors", () => {
 			let calls = 0;
 			h.inner.respond = (_req, ctx) => {
 				const requestId = crypto.randomUUID();
-				ctx.onInnerRequestStarted?.(requestId);
+				ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 				const failure =
 					++calls === 1
 						? {
@@ -3440,7 +3465,7 @@ describe("errors", () => {
 					const index = n++;
 					const { deferred, ...call } = calls[index] ?? { status: 200 };
 					const requestId = crypto.randomUUID();
-					ctx.onInnerRequestStarted?.(requestId);
+					ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 					const outcome: SdkBridgeInnerOutcome = {
 						requestId,
 						errorType: null,
@@ -4752,11 +4777,11 @@ describe("inner call accounting", () => {
 			accountId: "acct-a",
 		});
 		h.inner.respond = (_req, ctx) => {
-			ctx.onInnerRequestStarted?.("r1");
-			ctx.onInnerRequestStarted?.("r1");
+			ctx.onInnerRequestStarted?.("r1", ctx.legId);
+			ctx.onInnerRequestStarted?.("r1", ctx.legId);
 			ctx.onInnerOutcome?.(outcome("r1", 529));
 			ctx.onInnerOutcome?.(outcome("r1", 529));
-			ctx.onInnerRequestStarted?.("r2");
+			ctx.onInnerRequestStarted?.("r2", ctx.legId);
 			ctx.onInnerOutcome?.(outcome("r2", 200));
 			return new Response("ok");
 		};

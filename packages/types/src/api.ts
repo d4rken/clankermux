@@ -158,6 +158,11 @@ export interface RequestMeta {
 	 */
 	sdkBridgeTurnId?: string | null;
 	/**
+	 * The SDK bridge leg the inner call was admitted under. Set only from the
+	 * in-process inner context, never from a header.
+	 */
+	sdkBridgeLegId?: string | null;
+	/**
 	 * The tier the request's latest upstream attempt went out at, set by each
 	 * send so a failover overwrites it. Absent when nothing reached upstream.
 	 */

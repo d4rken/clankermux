@@ -585,7 +585,7 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			const turn = turns.get(leg.turnId);
 			if (!turn) throw new Error(`FOREIGN KEY: no turn ${leg.turnId}`);
 			if (legs.has(leg.id)) throw new Error(`UNIQUE: leg ${leg.id}`);
-			const row = { ...leg } as Record<string, unknown>;
+			const row = { ...leg, innerCallCount: 0 } as Record<string, unknown>;
 			legs.set(leg.id, row);
 			turn.legs.push(row);
 			return true;
@@ -593,7 +593,26 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 		async finishLeg(id: string, finish: SdkBridgeLegFinish, fence?: string) {
 			if (fenced(fence)) return;
 			const leg = legs.get(id);
-			if (leg) Object.assign(leg, finish, { finished: true });
+			// Write-once, like the repository.
+			if (!leg || leg.finished) return;
+			const { settled, ...facts } = finish;
+			Object.assign(leg, facts, { finished: true });
+			if (settled) leg.settledAt ??= finish.finishedAt;
+		},
+		async countInnerCall(turnId: string, legId: string | null, fence?: string) {
+			if (fenced(fence)) return false;
+			const turn = turns.get(turnId);
+			if (!turn) return false;
+			turn.counters.innerCalls++;
+			const leg = legId === null ? undefined : legs.get(legId);
+			if (leg && leg.turnId === turnId)
+				leg.innerCallCount = Number(leg.innerCallCount ?? 0) + 1;
+			return true;
+		},
+		async settleLeg(id: string, at: number, fence?: string) {
+			if (fenced(fence)) return;
+			const leg = legs.get(id);
+			if (leg) leg.settledAt ??= at;
 		},
 	};
 }
@@ -642,6 +661,15 @@ export function memoryParkRepo(
 		const turn = turns.get(id);
 		if (turn) Object.assign(turn, fields);
 	};
+	const settleFinishedLegs = (
+		turnId: string,
+		at: number,
+		except: readonly string[],
+	) => {
+		for (const leg of turns.get(turnId)?.legs ?? [])
+			if (leg.finished && !except.includes(String(leg.id)))
+				leg.settledAt ??= at;
+	};
 	return {
 		parks,
 		failNext,
@@ -686,13 +714,20 @@ export function memoryParkRepo(
 			await check("list");
 			return [...parks.values()].map((p) => ({ ...p }));
 		},
-		async markReleased(turnId, file, token) {
+		async markReleased(turnId, file, token, settle) {
 			await check("markReleased");
 			const park = parks.get(turnId);
 			if (park?.state !== "preparing" || !turnOpen(turnId) || !leased(token))
 				return false;
 			Object.assign(park, file, { state: "released" });
 			setTurn(turnId, { status: "released" });
+			settleFinishedLegs(turnId, settle.at, settle.except);
+			return true;
+		},
+		async settleParkedTurnLegs(at, token) {
+			await check("settleParkedTurnLegs");
+			if (!leased(token)) return false;
+			for (const turnId of parks.keys()) settleFinishedLegs(turnId, at, []);
 			return true;
 		},
 		async claim(turnId, token, claimId, at, owner) {
@@ -771,6 +806,7 @@ export function memoryParkRepo(
 				)
 					continue;
 				Object.assign(turn, finish);
+				settleFinishedLegs(turn.id, finish.finishedAt ?? 0, []);
 				n++;
 			}
 			return n;
@@ -865,6 +901,7 @@ export function makeMeta(
 		piPromptVersion: null,
 		sideRequest: null,
 		hostedWebSearch: null,
+		correlationTag: null,
 		...overrides,
 	};
 }

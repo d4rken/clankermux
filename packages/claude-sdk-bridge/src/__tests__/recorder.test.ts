@@ -21,6 +21,13 @@ async function seedOpenTurn(
 	});
 }
 
+const OWNER = {
+	apiKeyId: "key-1",
+	correlationTag: "run-1",
+	requestedModel: "alias:balanced",
+	project: "proj",
+} as const;
+
 const PARK_IDENTITY = {
 	kind: "turn",
 	model: "claude-opus-5-5",
@@ -46,8 +53,8 @@ describe("the turn's journal line", () => {
 			clientUserAgent: "pi (linux)",
 			project: "proj",
 		});
-		void rec.insertLeg("leg-1", "start", 1_000);
-		void rec.insertLeg("leg-2", "continue", 2_000);
+		void rec.insertLeg("leg-1", "start", 1_000, OWNER);
+		void rec.insertLeg("leg-2", "continue", 2_000, OWNER);
 		void rec.bump({ toolRounds: 1 });
 		void rec.bump({ innerCalls: 1 });
 		void rec.bump({ innerCalls: 1 });
@@ -121,7 +128,7 @@ describe("the turn's journal line", () => {
 			historyMode: "fresh",
 			systemPromptPolicy: "pi-head-v1",
 		});
-		void rec.insertLeg("leg-1", "start", 1);
+		void rec.insertLeg("leg-1", "start", 1, OWNER);
 		void rec.finishLeg("leg-1", { finishedAt: 2, httpStatus: 400 });
 		await rec.finishTurn({
 			finishedAt: 2,
@@ -212,7 +219,7 @@ describe("the turn's journal line", () => {
 		repo.legInsertHold.next = new Promise((resolve) => {
 			letGo = resolve;
 		});
-		void rec.insertLeg("leg-1", "start", 1);
+		void rec.insertLeg("leg-1", "start", 1, OWNER);
 		rec.noteModelCall("msg_1", { input_tokens: 5 });
 		const finished = rec.finishTurn({ finishedAt: 2, status: "completed" });
 		void rec.bump({ toolRounds: 1 });
@@ -233,7 +240,7 @@ describe("the turn's journal line", () => {
 		const { repo, log, rec } = recorder();
 		await seedOpenTurn(repo);
 		rec.adoptIdentity(PARK_IDENTITY);
-		void rec.insertLeg("leg-2", "continue", 2_000);
+		void rec.insertLeg("leg-2", "continue", 2_000, OWNER);
 		void rec.bump({ toolRounds: 1, innerCalls: 1 });
 		rec.noteModelCall("msg_1", {
 			input_tokens: 2,
@@ -352,5 +359,110 @@ describe("the first model call", () => {
 				rec.noteModelCall("msg_next", { input_tokens: 99 });
 			}),
 		).toEqual({ input: 2, cacheRead: 1_000, cacheCreation: 0 });
+	});
+});
+
+describe("leg accounting", () => {
+	async function withLeg(fence?: string) {
+		const repo = memoryTurnRepo();
+		const log = capturingLog();
+		const rec = new TurnRecorder(repo, log, "turn-1", fence);
+		await seedOpenTurn(repo);
+		void rec.insertLeg("leg-1", "start", 1, OWNER);
+		return { repo, log, rec, leg: () => repo.legs.get("leg-1") };
+	}
+
+	it("writes the outer request's identity on the leg", async () => {
+		const { rec, leg } = await withLeg();
+		await rec.flushed();
+		expect(leg()).toMatchObject({ ...OWNER, innerCallCount: 0 });
+	});
+
+	it("counts each call on the turn and the leg it was admitted under", async () => {
+		const { repo, rec, leg } = await withLeg();
+		rec.countInnerCall("leg-1");
+		rec.countInnerCall(null);
+		await rec.flushed();
+		expect(leg()?.innerCallCount).toBe(1);
+		expect(repo.turns.get("turn-1")?.counters.innerCalls).toBe(2);
+	});
+
+	it("settles a leg behind the counts queued before it", async () => {
+		const { repo, rec, leg } = await withLeg();
+		const order: string[] = [];
+		const count = repo.countInnerCall.bind(repo);
+		repo.countInnerCall = async (...args) => {
+			await Bun.sleep(20);
+			order.push("count");
+			return count(...args);
+		};
+		const settle = repo.settleLeg.bind(repo);
+		repo.settleLeg = async (...args) => {
+			order.push("settle");
+			return settle(...args);
+		};
+		rec.countInnerCall("leg-1");
+		await rec.settleLeg("leg-1", 50);
+		expect(order).toEqual(["count", "settle"]);
+		expect(leg()).toMatchObject({ innerCallCount: 1, settledAt: 50 });
+	});
+
+	it("never settles a leg one of whose counts failed, and says so", async () => {
+		const { repo, log, rec, leg } = await withLeg();
+		void rec.insertLeg("leg-2", "continue", 2, OWNER);
+		const count = repo.countInnerCall.bind(repo);
+		let failures = 1;
+		repo.countInnerCall = async (...args) => {
+			if (failures-- > 0) throw new Error("database is locked");
+			return count(...args);
+		};
+		rec.countInnerCall("leg-1");
+		rec.countInnerCall("leg-2");
+		await rec.settleLeg("leg-1", 50);
+		await rec.settleLeg("leg-2", 60);
+		expect(leg()?.settledAt).toBeUndefined();
+		expect(repo.legs.get("leg-2")?.settledAt).toBe(60);
+		expect(
+			log.entries.some(
+				(l) => l.level === "warn" && l.message.includes("leg-1"),
+			),
+		).toBe(true);
+	});
+
+	it("treats a count that changed nothing as failed", async () => {
+		const { repo, rec, leg } = await withLeg();
+		repo.countInnerCall = async () => false;
+		rec.countInnerCall("leg-1");
+		await rec.settleLeg("leg-1", 50);
+		expect(leg()?.settledAt).toBeUndefined();
+	});
+
+	it("reports counts to the journal line as they land", async () => {
+		const live = recorder();
+		void live.rec.insertTurn({
+			startedAt: 1,
+			historyMode: "fresh",
+			systemPromptPolicy: "drop",
+		});
+		void live.rec.insertLeg("leg-1", "start", 1, OWNER);
+		live.rec.countInnerCall("leg-1");
+		await live.rec.finishTurn({ finishedAt: 9, status: "completed" });
+		expect(live.log.turns("turn-1")[0]?.data).toMatchObject({ innerCalls: 1 });
+	});
+
+	it("writes counts and settlements under the park lease when fenced", async () => {
+		const { repo, rec, leg } = await withLeg("no-such-lease");
+		await rec.flushed();
+		expect(leg()).toBeUndefined();
+		await repo.insertLeg({
+			id: "leg-1",
+			turnId: "turn-1",
+			kind: "start",
+			startedAt: 1,
+		});
+		rec.countInnerCall("leg-1");
+		await rec.settleLeg("leg-1", 50);
+		expect(leg()).toMatchObject({ innerCallCount: 0 });
+		expect(leg()?.settledAt).toBeUndefined();
 	});
 });

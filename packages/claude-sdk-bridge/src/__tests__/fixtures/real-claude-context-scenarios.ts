@@ -723,7 +723,7 @@ function makeBridge(
 		...(parkRepo ? { parkRepo } : {}),
 		dispatchInner: async (req, ctx) => {
 			const requestId = crypto.randomUUID();
-			ctx.onInnerRequestStarted?.(requestId);
+			ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 			const res = await mock.handle(req);
 			ctx.onInnerOutcome?.({
 				requestId,
@@ -783,6 +783,7 @@ function meta(
 		piPromptVersion: null,
 		sideRequest: null,
 		hostedWebSearch: null,
+		correlationTag: null,
 		...extra,
 	};
 }

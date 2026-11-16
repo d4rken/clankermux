@@ -457,6 +457,7 @@ const PRODUCTION_STAT1: ReadonlyArray<readonly [string, string, string]> = [
 	["requests", "idx_requests_project_timestamp", "995581 134 1"],
 	["requests", "idx_requests_refusal_fallback", "23 1"],
 	["requests", "idx_requests_response_time", "1068443 401 2"],
+	["requests", "idx_requests_sdk_bridge_leg", "0 0"],
 	["requests", "idx_requests_sdk_bridge_turn", "0 0"],
 	["requests", "idx_requests_success_timestamp", "1087289 401 1"],
 	[
@@ -521,6 +522,7 @@ const PRODUCTION_REQUESTS_INDEX_ORDER = [
 	"idx_requests_cost_coverage",
 	"idx_requests_correlation_tag",
 	"idx_requests_sdk_bridge_turn",
+	"idx_requests_sdk_bridge_leg",
 ];
 
 function loadProductionStats(): void {

@@ -11,6 +11,7 @@ import {
 	type SdkBridgeCounters,
 	type SdkBridgeHistoryMode,
 	type SdkBridgeInnerContext,
+	type SdkBridgeLegOwner,
 	type SdkBridgeRouteCandidate,
 	type SdkBridgeRoutePlan,
 	type SdkBridgeStatus,
@@ -202,6 +203,21 @@ function isNestingOverflow(error: unknown): boolean {
 	return (
 		error instanceof RangeError && /call stack/i.test(String(error.message))
 	);
+}
+
+/** An admission refusal the proxy fails over on rather than answers. */
+function isCapacityRefusal(reason: string): boolean {
+	return reason === "process_cap" || reason === "rebuild_cap";
+}
+
+/** Who sent the outer request, as its leg row records it. */
+function legOwner(meta: SdkBridgeTurnMeta): SdkBridgeLegOwner {
+	return {
+		apiKeyId: meta.apiKeyId,
+		correlationTag: meta.correlationTag,
+		requestedModel: meta.model || null,
+		project: meta.project,
+	};
 }
 
 export function createClaudeSdkBridge(
@@ -549,13 +565,16 @@ export function createClaudeSdkBridge(
 			clientUserAgent: meta.clientUserAgent,
 			project: meta.project,
 		});
-		void recorder.insertLeg(meta.legId, "start", startedAt);
+		void recorder.insertLeg(meta.legId, "start", startedAt, legOwner(meta));
+		// No query ever runs for it, so nothing can be counted toward it.
 		void recorder.finishLeg(meta.legId, {
 			finishedAt: now(),
 			httpStatus: error.status,
 			errorPhase: "pre_head",
 			errorType: error.type,
 			errorMessage: error.message,
+			failedOver: isCapacityRefusal(reason),
+			settled: true,
 		});
 		void recorder.finishTurn({
 			finishedAt: now(),
@@ -592,13 +611,15 @@ export function createClaudeSdkBridge(
 						turnId,
 						parks?.get(turnId) ? parks.token : undefined,
 					);
-		void recorder.insertLeg(meta.legId, "continue", startedAt);
+		void recorder.insertLeg(meta.legId, "continue", startedAt, legOwner(meta));
+		// Never attached to a query, so nothing can be counted toward it.
 		void recorder.finishLeg(meta.legId, {
 			finishedAt: now(),
 			httpStatus: error.status,
 			errorPhase: "pre_head",
 			errorType: error.type,
 			errorMessage: error.message,
+			settled: true,
 		});
 		return errorResponse(
 			error,
@@ -780,6 +801,8 @@ export function createClaudeSdkBridge(
 			// From the first durable park write on, the turn is the park's: its
 			// original recorder, and whatever it has queued, is fenced.
 			live.fenceTurn(parks.token);
+			// Counts still queued decide which legs the release may settle.
+			await live.recorder.flushed();
 			const at = now();
 			await parks.store(
 				{
@@ -798,6 +821,7 @@ export function createClaudeSdkBridge(
 				},
 				descriptor,
 				source,
+				live.legsNotToSettle(),
 				() => abandoned.has(live.turnId),
 			);
 		} catch (error) {
@@ -920,8 +944,9 @@ export function createClaudeSdkBridge(
 			: {};
 	}
 
+	/** The leg of the outer request `meta` describes. */
 	function newLeg(
-		id: string,
+		meta: SdkBridgeTurnMeta,
 		kind: Leg["kind"],
 		stream: boolean,
 		signal: AbortSignal,
@@ -930,9 +955,10 @@ export function createClaudeSdkBridge(
 		history: SdkBridgeTurnHistory | null,
 	): Leg {
 		const leg: Leg = {
-			id,
+			id: meta.legId,
 			kind,
 			startedAt: now(),
+			owner: legOwner(meta),
 			response: null as unknown as LegResponse,
 		};
 		leg.response = new LegResponse({
@@ -1018,6 +1044,8 @@ export function createClaudeSdkBridge(
 		let live: LiveQuery | null = null;
 		const context: SdkBridgeInnerContext = {
 			turnId: plan.turnId,
+			// The leg this query opens with; LiveQuery moves it on.
+			legId: meta.legId,
 			plan,
 			apiKeyId: meta.apiKeyId ?? plan.apiKeyId,
 			apiKeyName: meta.apiKeyName ?? plan.apiKeyName,
@@ -1025,8 +1053,8 @@ export function createClaudeSdkBridge(
 			project: meta.project,
 			projectAttributionSource: meta.projectAttributionSource,
 			deadlineAt: input.startedAt + limits().turnDeadlineMs,
-			onInnerRequestStarted: (requestId) =>
-				live?.onInnerRequestStarted(requestId),
+			onInnerRequestStarted: (requestId, legId) =>
+				live?.onInnerRequestStarted(requestId, legId),
 			onInnerOutcome: (outcome) => {
 				const floor = versionFloors.observe(outcome);
 				if (floor)
@@ -1243,9 +1271,9 @@ export function createClaudeSdkBridge(
 			log.info(
 				`SDK bridge turn ${plan.turnId}: ignoring ${turn.ignoredFields.join(", ")}; Claude Code does not apply them`,
 			);
-		void recorder.insertLeg(meta.legId, "start", row.startedAt);
+		void recorder.insertLeg(meta.legId, "start", row.startedAt, legOwner(meta));
 		const leg = newLeg(
-			meta.legId,
+			meta,
 			"start",
 			turn.stream,
 			start.signal,
@@ -1263,10 +1291,7 @@ export function createClaudeSdkBridge(
 		refuse: (error: BridgeError, reason: string) => Response,
 	): Response {
 		const response = refuse(rejection, rejection.reason);
-		if (
-			rejection.reason === "process_cap" ||
-			rejection.reason === "rebuild_cap"
-		)
+		if (isCapacityRefusal(rejection.reason))
 			throw new SdkBridgeCapacityError({
 				reason: rejection.reason,
 				status: rejection.status,
@@ -1909,7 +1934,7 @@ export function createClaudeSdkBridge(
 			}
 			counters.continuations++;
 			const leg = newLeg(
-				meta.legId,
+				meta,
 				"continue",
 				parsed.turn.stream,
 				input.signal,
@@ -2233,10 +2258,11 @@ export function createClaudeSdkBridge(
 		turnToolIds.set(turnId, ids);
 		counters.continuations++;
 		counters.releasedResumes++;
-		void recorder.insertLeg(meta.legId, "continue", startedAt);
+		// The outer request's own identity, not the turn's the launch ran under.
+		void recorder.insertLeg(meta.legId, "continue", startedAt, legOwner(meta));
 		void recorder.bump({ toolRounds: 1 });
 		const leg = newLeg(
-			meta.legId,
+			meta,
 			"continue",
 			turn.stream,
 			input.signal,

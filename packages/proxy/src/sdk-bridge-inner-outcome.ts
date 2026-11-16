@@ -25,11 +25,13 @@ export function noteSdkBridgeInnerSend(
  * counts. Once per request, whichever recorder path writes the row.
  */
 export function noteSdkBridgeInnerRequestStarted(meta: RequestMeta): void {
-	const report = getSdkBridgeInnerMetaContext(meta)?.onInnerRequestStarted;
-	if (!report || rowStarted.has(meta)) return;
+	// The context the call was dispatched with, which names its leg.
+	const ctx = getSdkBridgeInnerMetaContext(meta);
+	const report = ctx?.onInnerRequestStarted;
+	if (!ctx || !report || rowStarted.has(meta)) return;
 	rowStarted.add(meta);
 	try {
-		report(meta.id);
+		report(meta.id, ctx.legId);
 	} catch (error) {
 		log.warn("SDK bridge inner request callback failed", error);
 	}

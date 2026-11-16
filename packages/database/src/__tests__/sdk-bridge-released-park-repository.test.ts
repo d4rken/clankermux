@@ -31,6 +31,8 @@ const lease = (token = T, pid = 100): SdkBridgeParkLease => ({
 const nobodyDead = () => false;
 const everyoneDead = () => true;
 const owner = { pid: 4242, startTime: "77" };
+/** A release that settles nothing it would not anyway: no legs exist. */
+const NO_SETTLE = { at: 0, except: [] };
 
 beforeEach(async () => {
 	db = new Database(":memory:");
@@ -96,6 +98,7 @@ async function released(id = "turn-1") {
 		id,
 		{ sessionPath: park().sessionPath, fileBytes: 1 },
 		T,
+		NO_SETTLE,
 	);
 }
 
@@ -111,6 +114,7 @@ describe("SdkBridgeReleasedParkRepository", () => {
 				"turn-1",
 				{ sessionPath: park().sessionPath, fileBytes: 4096 },
 				T,
+				NO_SETTLE,
 			),
 		).toBe(true);
 		expect(statusOf()).toBe("released");
@@ -160,7 +164,12 @@ describe("SdkBridgeReleasedParkRepository", () => {
 		await parks.insertPreparing(park(), T);
 		await turns.finishTurn("turn-1", { finishedAt: 700, status: "failed" });
 		expect(
-			await parks.markReleased("turn-1", { sessionPath: "p", fileBytes: 1 }, T),
+			await parks.markReleased(
+				"turn-1",
+				{ sessionPath: "p", fileBytes: 1 },
+				T,
+				NO_SETTLE,
+			),
 		).toBe(false);
 		db.run(
 			"UPDATE sdk_bridge_released_parks SET state = 'released' WHERE turn_id = 'turn-1'",
@@ -259,7 +268,12 @@ describe("fencing by the lease", () => {
 		await parks.insertPreparing(park(), T);
 		await parks.releaseLease(T);
 		expect(
-			await parks.markReleased("turn-1", { sessionPath: "p", fileBytes: 1 }, T),
+			await parks.markReleased(
+				"turn-1",
+				{ sessionPath: "p", fileBytes: 1 },
+				T,
+				NO_SETTLE,
+			),
 		).toBe(false);
 		expect((await parks.find("turn-1"))?.state).toBe("preparing");
 		expect(statusOf()).toBe("running");
@@ -319,6 +333,133 @@ describe("closing turns left open", () => {
 		expect(statusOf("parked")).toBe("released");
 		expect(statusOf("done")).toBe("completed");
 		expect(statusOf("fresh")).toBe("running");
+	});
+
+	it("settles the finished legs of a turn it closes, and only those", async () => {
+		await insertTurn("dead-owner");
+		await insertTurn("live-owner");
+		db.run("UPDATE sdk_bridge_turns SET owner_pid = 7 WHERE id = 'live-owner'");
+		for (const [id, turnId] of [
+			["finished", "dead-owner"],
+			["open", "dead-owner"],
+			["settled", "dead-owner"],
+			["other", "live-owner"],
+		])
+			await turns.insertLeg({ id, turnId, kind: "start", startedAt: 600 });
+		await turns.finishLeg("finished", { finishedAt: 650 });
+		await turns.finishLeg("settled", { finishedAt: 650, settled: true });
+		await turns.finishLeg("other", { finishedAt: 650 });
+
+		await parks.closeOpenTurnsWithoutPark(
+			5_000,
+			{ finishedAt: 7_000, status: "failed", errorMessage: "gone" },
+			T,
+			(o) => o.pid !== 7,
+		);
+		const settledAt = (id: string) =>
+			(
+				db
+					.query("SELECT settled_at FROM sdk_bridge_turn_legs WHERE id = ?")
+					.get(id) as { settled_at: number | null }
+			).settled_at;
+		expect(settledAt("finished")).toBe(7_000);
+		expect(settledAt("settled")).toBe(650);
+		expect(settledAt("open")).toBeNull();
+		expect(settledAt("other")).toBeNull();
+	});
+});
+
+describe("settling a parked turn's legs", () => {
+	const settledAt = (id: string) =>
+		(
+			db
+				.query("SELECT settled_at FROM sdk_bridge_turn_legs WHERE id = ?")
+				.get(id) as { settled_at: number | null }
+		).settled_at;
+
+	/** Legs of `turnId`: finished, open, already settled, and one excluded. */
+	async function legs(turnId: string) {
+		for (const id of ["finished", "open", "settled", "uncounted"])
+			await turns.insertLeg({
+				id: `${turnId}-${id}`,
+				turnId,
+				kind: "start",
+				startedAt: 600,
+			});
+		for (const id of ["finished", "uncounted"])
+			await turns.finishLeg(`${turnId}-${id}`, { finishedAt: 650 });
+		await turns.finishLeg(`${turnId}-settled`, {
+			finishedAt: 650,
+			settled: true,
+		});
+	}
+
+	it("settles the finished legs of a turn as its park is released, except the ones named", async () => {
+		await insertTurn("turn-1");
+		await insertTurn("other");
+		await legs("turn-1");
+		await legs("other");
+		await parks.insertPreparing(park(), T);
+
+		expect(
+			await parks.markReleased(
+				"turn-1",
+				{ sessionPath: park().sessionPath, fileBytes: 1 },
+				T,
+				{ at: 9_000, except: ["turn-1-uncounted"] },
+			),
+		).toBe(true);
+		expect(settledAt("turn-1-finished")).toBe(9_000);
+		expect(settledAt("turn-1-settled")).toBe(650);
+		expect(settledAt("turn-1-open")).toBeNull();
+		expect(settledAt("turn-1-uncounted")).toBeNull();
+		expect(settledAt("other-finished")).toBeNull();
+	});
+
+	it("settles nothing when the release is refused", async () => {
+		await insertTurn();
+		await legs("turn-1");
+		await parks.insertPreparing(park(), T);
+		await parks.releaseLease(T);
+
+		await parks.markReleased("turn-1", { sessionPath: "p", fileBytes: 1 }, T, {
+			at: 9_000,
+			except: [],
+		});
+		expect(settledAt("turn-1-finished")).toBeNull();
+	});
+
+	it("settles at recovery the finished legs of every turn a park owns, and no other", async () => {
+		await insertTurn("parked");
+		await insertTurn("unparked");
+		await legs("parked");
+		await legs("unparked");
+		await released("parked");
+		// As a crash leaves them: finished, their settle never written.
+		db.run(
+			"UPDATE sdk_bridge_turn_legs SET settled_at = NULL WHERE id IN ('parked-finished', 'parked-uncounted')",
+		);
+
+		expect(await parks.settleParkedTurnLegs(9_500, T)).toBe(true);
+		expect(settledAt("parked-finished")).toBe(9_500);
+		// A dead owner's in-memory count failures are lost with it; the row
+		// count against inner_call_count still gates finality.
+		expect(settledAt("parked-uncounted")).toBe(9_500);
+		expect(settledAt("parked-open")).toBeNull();
+		expect(settledAt("unparked-finished")).toBeNull();
+	});
+
+	it("settles nothing at recovery without the lease", async () => {
+		await insertTurn("parked");
+		await legs("parked");
+		await released("parked");
+		db.run(
+			"UPDATE sdk_bridge_turn_legs SET settled_at = NULL WHERE id = 'parked-finished'",
+		);
+		await parks.releaseLease(T);
+
+		expect(await parks.settleParkedTurnLegs(9_500, T)).toBe(false);
+		expect(settledAt("parked-finished")).toBeNull();
 	});
 });
 

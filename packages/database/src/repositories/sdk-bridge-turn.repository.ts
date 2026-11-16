@@ -69,6 +69,13 @@ interface LegRow {
 	error_type: string | null;
 	error_message: string | null;
 	tool_use_ids: string | null;
+	api_key_id: string | null;
+	correlation_tag: string | null;
+	requested_model: string | null;
+	project: string | null;
+	inner_call_count: number | null;
+	settled_at: number | null;
+	failed_over: number;
 }
 
 interface InnerRequestRow {
@@ -224,6 +231,13 @@ function toLeg(row: LegRow): SdkBridgeTurnLeg {
 			row.tool_use_ids === null
 				? null
 				: (JSON.parse(row.tool_use_ids) as string[]),
+		apiKeyId: row.api_key_id,
+		correlationTag: row.correlation_tag,
+		requestedModel: row.requested_model,
+		project: row.project,
+		innerCallCount: row.inner_call_count,
+		settledAt: row.settled_at,
+		failedOver: row.failed_over === 1,
 	};
 }
 
@@ -377,9 +391,20 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				if (held?.held !== 1) return false;
 			}
 			db.run(
-				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at)
-				VALUES (?, ?, ?, ?)`,
-				[leg.id, leg.turnId, leg.kind, leg.startedAt],
+				`INSERT INTO sdk_bridge_turn_legs (
+					id, turn_id, kind, started_at, api_key_id, correlation_tag,
+					requested_model, project, inner_call_count, failed_over
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
+				[
+					leg.id,
+					leg.turnId,
+					leg.kind,
+					leg.startedAt,
+					leg.apiKeyId ?? null,
+					leg.correlationTag ?? null,
+					leg.requestedModel ?? null,
+					leg.project ?? null,
+				],
 			);
 			db.run(
 				`UPDATE sdk_bridge_turns SET leg_count = leg_count + 1 WHERE id = ?`,
@@ -389,6 +414,10 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 		});
 	}
 
+	/**
+	 * Write the leg's terminal facts, once: `finished_at` is the client API's
+	 * paging key for the leg, so a later finish must never move it.
+	 */
 	async finishLeg(
 		id: string,
 		finish: SdkBridgeLegFinish,
@@ -402,8 +431,10 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				stop_reason = ?,
 				error_type = ?,
 				error_message = ?,
-				tool_use_ids = ?
-			WHERE id = ? AND ${FENCED}`,
+				tool_use_ids = ?,
+				failed_over = ?,
+				settled_at = COALESCE(settled_at, ?)
+			WHERE id = ? AND finished_at IS NULL AND ${FENCED}`,
 			[
 				finish.finishedAt,
 				finish.httpStatus ?? null,
@@ -412,9 +443,48 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 				finish.errorType ?? null,
 				finish.errorMessage ?? null,
 				finish.toolUseIds ? JSON.stringify(finish.toolUseIds) : null,
+				finish.failedOver ? 1 : 0,
+				finish.settled ? finish.finishedAt : null,
 				id,
 				...fenceParams(fence),
 			],
+		);
+	}
+
+	/**
+	 * Count an inner call's row on its turn and, when it was admitted under
+	 * one, on its leg, in one transaction. False, counting nothing, when
+	 * fenced out or the turn is gone.
+	 */
+	async countInnerCall(
+		turnId: string,
+		legId: string | null,
+		fence?: string,
+	): Promise<boolean> {
+		return this.adapter.runTransaction(() => {
+			const db = this.adapter.getSQLiteDb();
+			const counted = db.run(
+				`UPDATE sdk_bridge_turns SET inner_call_count = inner_call_count + 1
+				WHERE id = ? AND ${FENCED}`,
+				[turnId, ...fenceParams(fence)],
+			).changes;
+			if (counted !== 1) return false;
+			if (legId !== null)
+				db.run(
+					`UPDATE sdk_bridge_turn_legs SET inner_call_count = inner_call_count + 1
+					WHERE id = ? AND turn_id = ?`,
+					[legId, turnId],
+				);
+			return true;
+		});
+	}
+
+	/** No inner row can begin under the leg any more. Write-once. */
+	async settleLeg(id: string, at: number, fence?: string): Promise<void> {
+		await this.run(
+			`UPDATE sdk_bridge_turn_legs SET settled_at = COALESCE(settled_at, ?)
+			WHERE id = ? AND ${FENCED}`,
+			[at, id, ...fenceParams(fence)],
 		);
 	}
 

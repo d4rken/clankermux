@@ -383,6 +383,13 @@ describe("RequestsTab — SDK bridge turns", () => {
 				errorType: null,
 				errorMessage: null,
 				toolUseIds: null,
+				apiKeyId: null,
+				correlationTag: null,
+				requestedModel: null,
+				project: null,
+				innerCallCount: 0,
+				settledAt: null,
+				failedOver: false,
 			},
 		],
 		inner: {

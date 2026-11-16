@@ -17,6 +17,10 @@ import {
 	sdkBridgeHeaderToken,
 	sdkBridgeSideRequestMode,
 } from "@clankermux/types";
+import {
+	CORRELATION_TAG_HEADER,
+	validateCorrelationTag,
+} from "../correlation-tag";
 import { isSdkBridgeTurnRequest } from "../official-anthropic-floor";
 import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { isOfficialAnthropicProvider } from "../provider-overload-cooldown";
@@ -130,6 +134,7 @@ export function sdkBridgeTurnMeta(
 			getNativeResponsesMetaContext(meta)?.hostedWebSearch ?? null,
 		piPromptVersion: sdkBridgeHeaderToken(headers, SDK_BRIDGE_PI_PROMPT_HEADER),
 		sideRequest: sdkBridgeSideRequestMode(headers),
+		correlationTag: validateCorrelationTag(headers.get(CORRELATION_TAG_HEADER)),
 	};
 }
 

@@ -14,6 +14,7 @@ function context(
 	const plan = makePlan();
 	return {
 		turnId: plan.turnId,
+		legId: "leg-1",
 		plan,
 		apiKeyId: "key-1",
 		apiKeyName: "key one",
@@ -49,6 +50,17 @@ function call(
 					: undefined,
 		}),
 	);
+}
+
+async function waitForCalls(
+	inner: { calls: unknown[] },
+	n: number,
+): Promise<void> {
+	const until = Date.now() + 2_000;
+	while (inner.calls.length < n) {
+		if (Date.now() > until) throw new Error("dispatch never happened");
+		await Bun.sleep(2);
+	}
 }
 
 describe("InnerListener", () => {
@@ -113,6 +125,80 @@ describe("InnerListener", () => {
 			(a?.ctx as { project: string | null }).project = "widened";
 		}).toThrow();
 		expect(Object.isFrozen(a?.ctx.plan.candidates)).toBe(true);
+	});
+
+	describe("legs", () => {
+		/** A dispatch that stays in flight until released. */
+		function holdDispatches(inner: ReturnType<typeof fakeInner>) {
+			const releases: Array<() => void> = [];
+			inner.respond = () =>
+				new Promise<Response>((resolve) => {
+					releases.push(() => resolve(new Response("ok")));
+				});
+			return releases;
+		}
+
+		const settledWithin = async (p: Promise<void>, ms = 50) =>
+			Promise.race([p.then(() => true), Bun.sleep(ms).then(() => false)]);
+
+		it("hands each call the leg open when it was admitted", async () => {
+			const { inner, listener } = setup();
+			const registration = listener.register(context());
+			await call(listener, registration.token);
+			registration.setLeg("leg-2");
+			await call(listener, registration.token);
+			registration.setLeg(null);
+			await call(listener, registration.token);
+			expect(inner.calls.map((c) => c.ctx.legId)).toEqual([
+				"leg-1",
+				"leg-2",
+				null,
+			]);
+			expect(Object.isFrozen(inner.calls[1]?.ctx)).toBe(true);
+		});
+
+		it("drains a leg once its admitted calls have been dispatched, whatever came after", async () => {
+			const { inner, listener } = setup();
+			const releases = holdDispatches(inner);
+			const registration = listener.register(context());
+			const first = call(listener, registration.token);
+			await waitForCalls(inner, 1);
+			registration.setLeg("leg-2");
+			const second = call(listener, registration.token);
+			await waitForCalls(inner, 2);
+			registration.revoke();
+
+			const leg1 = registration.drainedLeg("leg-1");
+			const leg2 = registration.drainedLeg("leg-2");
+			expect(await settledWithin(leg1)).toBe(false);
+			releases[1]?.();
+			await second;
+			expect(await settledWithin(leg2)).toBe(true);
+			expect(await settledWithin(leg1)).toBe(false);
+			releases[0]?.();
+			await first;
+			expect(await settledWithin(leg1)).toBe(true);
+		});
+
+		it("drains at once a leg with nothing in flight, refused calls included", async () => {
+			const { listener } = setup();
+			const registration = listener.register(context());
+			expect(
+				(await call(listener, registration.token, { model: "nope" })).status,
+			).toBe(400);
+			expect(await settledWithin(registration.drainedLeg("leg-1"))).toBe(true);
+			expect(await settledWithin(registration.drainedLeg("other"))).toBe(true);
+		});
+
+		it("drains a leg whose dispatch threw", async () => {
+			const { inner, listener } = setup();
+			inner.respond = () => {
+				throw new Error("proxy failed");
+			};
+			const registration = listener.register(context());
+			expect((await call(listener, registration.token)).status).toBe(502);
+			expect(await settledWithin(registration.drainedLeg("leg-1"))).toBe(true);
+		});
 	});
 
 	it("refuses forged, foreign and revoked tokens", async () => {

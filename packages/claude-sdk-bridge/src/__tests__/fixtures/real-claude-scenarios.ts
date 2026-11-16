@@ -145,7 +145,7 @@ function makeBridge(
 		dispatchInner: async (req, ctx) => {
 			const requestId = crypto.randomUUID();
 			// As the proxy does: the row begins, then the call ends.
-			ctx.onInnerRequestStarted?.(requestId);
+			ctx.onInnerRequestStarted?.(requestId, ctx.legId);
 			const res = await mock.handle(req);
 			ctx.onInnerOutcome?.({
 				requestId,
@@ -203,6 +203,7 @@ function meta(extra: Partial<SdkBridgeTurnMeta> = {}): SdkBridgeTurnMeta {
 		piPromptVersion: null,
 		sideRequest: null,
 		hostedWebSearch: null,
+		correlationTag: null,
 		...extra,
 	};
 }

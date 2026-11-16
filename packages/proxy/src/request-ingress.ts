@@ -434,6 +434,7 @@ export async function ingestProxyRequest(
 	if (sdkBridgeInner) {
 		setSdkBridgeInnerMetaContext(requestMeta, sdkBridgeInner);
 		requestMeta.sdkBridgeTurnId = sdkBridgeInner.turnId;
+		requestMeta.sdkBridgeLegId = sdkBridgeInner.legId;
 	}
 
 	return {

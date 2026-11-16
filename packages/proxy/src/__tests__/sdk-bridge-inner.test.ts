@@ -51,6 +51,7 @@ function innerContext(
 ): SdkBridgeInnerContext {
 	return {
 		turnId: "turn-1",
+		legId: "leg-1",
 		plan: plan(),
 		apiKeyId: KEY,
 		apiKeyName: "outer",
@@ -355,6 +356,7 @@ describe("SDK bridge inner calls", () => {
 		expect(begin).toHaveBeenCalledTimes(1);
 		const meta = begin.mock.calls[0][0];
 		expect(meta.sdkBridgeTurnId).toBe("turn-1");
+		expect(meta.sdkBridgeLegId).toBe("leg-1");
 		expect(meta.project).toBe("outer-project");
 		expect(meta.projectAttributionSource).toBe("header");
 		expect(meta.clientHarness).toBe("pi");
@@ -614,9 +616,10 @@ describe("SDK bridge inner calls", () => {
 		});
 	});
 
-	it("report their row's start once, apart from the outcome", async () => {
+	it("report their row's start once, apart from the outcome, with the leg it was admitted under", async () => {
 		harness = await makeBridgeHarness([a]);
 		const started: string[] = [];
+		const legs: Array<string | null> = [];
 		const ctx = innerContext({
 			plan: plan({
 				candidates: [
@@ -624,7 +627,10 @@ describe("SDK bridge inner calls", () => {
 				],
 				preferredAccountId: a.id,
 			}),
-			onInnerRequestStarted: (id) => started.push(id),
+			onInnerRequestStarted: (id, legId) => {
+				started.push(id);
+				legs.push(legId);
+			},
 		});
 		const res = await dispatchProxyRequest(
 			innerRequest(ctx),
@@ -635,6 +641,7 @@ describe("SDK bridge inner calls", () => {
 		);
 		await res.text();
 		expect(started).toHaveLength(1);
+		expect(legs).toEqual(["leg-1"]);
 		const begin = harness.ctx.requestRecorder.begin as ReturnType<typeof mock>;
 		expect(started[0]).toBe(begin.mock.calls[0][0].requestId);
 	});
@@ -662,6 +669,7 @@ describe("SDK bridge inner calls", () => {
 		>;
 		expect(synthetic).toHaveBeenCalledTimes(1);
 		expect(started).toEqual([synthetic.mock.calls[0][0].requestId]);
+		expect(synthetic.mock.calls[0][0].sdkBridgeLegId).toBe("leg-1");
 		expect(outcomes).toHaveLength(1);
 		expect(outcomes[0]?.status).toBeGreaterThanOrEqual(400);
 	});
@@ -690,5 +698,6 @@ describe("SDK bridge inner calls", () => {
 		expect(upstreamAccounts(harness)).toEqual([c.id]);
 		const begin = harness.ctx.requestRecorder.begin as ReturnType<typeof mock>;
 		expect(begin.mock.calls[0][0].sdkBridgeTurnId ?? null).toBeNull();
+		expect(begin.mock.calls[0][0].sdkBridgeLegId ?? null).toBeNull();
 	});
 });

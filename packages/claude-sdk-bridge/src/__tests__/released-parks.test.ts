@@ -162,6 +162,8 @@ async function parkTurn(
 		system?: string;
 		/** false: none; "first": only the envelopes up to the first call. */
 		envelopes?: boolean | "first";
+		/** Runs once the query exists, before its reply parks it. */
+		beforeReply?: (query: FakeQuery) => Promise<void>;
 	} = {},
 ): Promise<Parked> {
 	const ids = opts.ids ?? [`toolu_${crypto.randomUUID().slice(0, 8)}`];
@@ -178,6 +180,7 @@ async function parkTurn(
 		signal: new AbortController().signal,
 	});
 	const query = await h.sdk.next();
+	await opts.beforeReply?.(query);
 	const msgId = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
 	const blocks: Block[] = [
 		{ type: "thinking", text: "hm" },
@@ -458,6 +461,41 @@ describe("resuming a released park", () => {
 				model: MODEL,
 			}),
 		).toBeNull();
+	});
+
+	it("records the results' own request on the resumed leg, and counts the resumed calls there", async () => {
+		const h = await releaseHarness();
+		const p = await parkTurn(h, { meta: { project: "start-project" } });
+		await released(h, p);
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+		const meta = makeMeta({
+			project: "resume-project",
+			correlationTag: "tag-2",
+		});
+		const response = h.bridge.continueTurn({
+			turnId: p.turnId,
+			request: messagesRequest({ tools: [READ_TOOL], messages: results(p) }),
+			meta,
+			signal: new AbortController().signal,
+		});
+		const q2 = await h.sdk.next();
+		await finishResumed(h, q2, response);
+		// The inner rows keep the turn's attribution; the leg is the request's.
+		expect(h.inner.calls.at(-1)?.ctx).toMatchObject({
+			project: "start-project",
+			legId: meta.legId,
+		});
+		await waitFor(() => h.repo.legs.get(meta.legId)?.settledAt != null);
+		expect(h.repo.legs.get(meta.legId)).toMatchObject({
+			kind: "continue",
+			project: "resume-project",
+			correlationTag: "tag-2",
+			innerCallCount: 1,
+		});
+		expect(h.repo.turns.get(p.turnId)?.counters.innerCalls).toBe(1);
 	});
 
 	it("resumes with the system prompt the turn appended", async () => {
@@ -1019,6 +1057,98 @@ describe("the session byte ceiling", () => {
 		await waitFor(() => !existsSync(file(oldId)), 2_000);
 		expect(existsSync(file(newId))).toBe(true);
 		expect(h.bridge.status().releaseBlocked).toBeNull();
+	});
+});
+
+describe("leg settlement across a release", () => {
+	const legOf = (h: Harness, id: string) => h.repo.legs.get(id);
+
+	/** Every inner call reports its row as begun under its leg. */
+	function reportRows(h: Harness) {
+		h.inner.respond = (_req, ctx) => {
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+	}
+
+	it("settles a parked leg whose own settle write was lost when its park is released", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		// As if the process had died before the drained leg's settle landed.
+		h.repo.settleLeg = async () => {};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await waitFor(() => legOf(h, p.meta.legId)?.finished === true);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)).toMatchObject({
+			innerCallCount: 1,
+			settledAt: expect.any(Number),
+		});
+	});
+
+	it("never settles at the release a leg one of whose counts failed", async () => {
+		const h = await releaseHarness();
+		reportRows(h);
+		h.repo.countInnerCall = async () => {
+			throw new Error("database is locked");
+		};
+		const p = await parkTurn(h, { beforeReply: (q) => innerCall(q).then() });
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.finished).toBe(true);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+	});
+
+	it("leaves to its own drain a leg with a call still in flight at the release", async () => {
+		const h = await releaseHarness();
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		h.inner.respond = async (_req, ctx) => {
+			await held;
+			ctx.onInnerRequestStarted?.(crypto.randomUUID(), ctx.legId);
+			return new Response("ok");
+		};
+		let call: Promise<Response> | null = null;
+		const p = await parkTurn(h, {
+			beforeReply: async (q) => {
+				call = innerCall(q);
+				await waitFor(() => h.inner.calls.length === 1);
+			},
+		});
+		await released(h, p);
+		expect(legOf(h, p.meta.legId)?.settledAt).toBeUndefined();
+
+		release();
+		await (call as Promise<Response> | null)?.catch(() => null);
+		await waitFor(() => legOf(h, p.meta.legId)?.settledAt != null);
+		expect(legOf(h, p.meta.legId)?.innerCallCount).toBe(1);
+	});
+
+	it("a new process settles the finished legs of a parked turn its dead owner left unsettled", async () => {
+		const workRoot = tempRoot();
+		const repo = memoryTurnRepo();
+		const parkRepo = memoryParkRepo(repo.turns);
+		const a = await releaseHarness({ workRoot, repo, parkRepo, keep: true });
+		const p = await parkTurn(a);
+		await released(a, p);
+		await a.bridge.dispose();
+		// The rows as a crash between a leg's finish and its settle leaves
+		// them, next to a leg that never finished.
+		const leg = repo.legs.get(p.meta.legId);
+		if (leg) delete leg.settledAt;
+		await repo.insertLeg({
+			id: "never-finished",
+			turnId: p.turnId,
+			kind: "continue",
+			startedAt: 1,
+		});
+
+		const b = await releaseHarness({ workRoot, repo, parkRepo });
+		expect(b.bridge.status().releasedParks).toBe(1);
+		expect(repo.legs.get(p.meta.legId)?.settledAt).toBeNumber();
+		expect(repo.legs.get("never-finished")?.settledAt).toBeUndefined();
 	});
 });
 

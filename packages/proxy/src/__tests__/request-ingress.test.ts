@@ -451,6 +451,7 @@ describe("ingestProxyRequest", () => {
 			});
 			setSdkBridgeInnerRequestContext(inner, {
 				turnId: "turn-1",
+				legId: "leg-1",
 				plan: {
 					turnId: "turn-1",
 					routeSnapshot: null,
@@ -488,6 +489,7 @@ describe("ingestProxyRequest", () => {
 			const innerMeta = await via(inner);
 			expect(getSdkBridgeInnerMetaContext(innerMeta)?.turnId).toBe("turn-1");
 			expect(innerMeta.sdkBridgeTurnId).toBe("turn-1");
+			expect(innerMeta.sdkBridgeLegId).toBe("leg-1");
 		});
 
 		function responsesRequest(
