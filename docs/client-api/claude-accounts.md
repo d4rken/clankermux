@@ -78,3 +78,7 @@ What differs from a direct request:
   a 529 with Retry-After.
 * A Codex request whose model alias or fallback lands on a Claude account is
   answered by Claude through this path; that account is not skipped.
+* The client API reads such a request under the id it was answered with, its
+  counts summed over Claude Code's model calls for it; those calls are not
+  readable on their own
+  ([Requests served through Claude Code](README.md#requests-served-through-claude-code)).

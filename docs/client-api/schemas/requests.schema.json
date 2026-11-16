@@ -41,11 +41,11 @@
         },
         "timestamp": {
           "type": "number",
-          "description": "When the ROW WAS WRITTEN, ms epoch — not when the request started. The recorder stamps this as it persists, after the async writer drains, so it trails the exchange by the response duration plus queue depth. It is the paging order, and it is not a request clock."
+          "description": "When the ROW WAS WRITTEN, ms epoch — not when the request started. The recorder stamps this as it persists, after the async writer drains, so it trails the exchange by the response duration plus queue depth. For a request served through Claude Code it is when the reply to the client ended, and never moves. It is the paging order, and it is not a request clock."
         },
         "finalized": {
           "type": "boolean",
-          "description": "True when no later write can change this row's accounting."
+          "description": "True when no later write can change this row's accounting. For a request served through Claude Code: no further model call can be counted toward it, and every one counted has its own accounting finished."
         },
         "statusCode": {
           "type": [
@@ -104,7 +104,7 @@
             "integer",
             "null"
           ],
-          "description": "The attempt index the answering try was made under. Above 0 it means earlier attempts happened and their cost is missing: the proxy can discard a provider response it has already been billed for, and no column records what that cost, so the row is a lower bound. At 0 it does NOT prove none did, because a retry against the same account after a hold restarts the index. Evidence when positive, not evidence of absence when 0.",
+          "description": "The attempt index the answering try was made under. Above 0 it means earlier attempts happened and their cost is missing: the proxy can discard a provider response it has already been billed for, and no column records what that cost, so the row is a lower bound. At 0 it does NOT prove none did, because a retry against the same account after a hold restarts the index. Evidence when positive, not evidence of absence when 0. For a request served through Claude Code, the largest over its model calls.",
           "minimum": 0
         },
         "modelSubstitutionDiscards": {

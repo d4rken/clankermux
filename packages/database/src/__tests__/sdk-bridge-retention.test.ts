@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
+import { RequestRepository } from "../repositories/request.repository";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -153,6 +154,52 @@ describe("cleanup worker: SDK bridge turns", () => {
 		expect(ids(dbPath, "sdk_bridge_turns")).toEqual(["turn-new"]);
 		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["leg-new"]);
 		expect(ids(dbPath, "routing_attempts")).toEqual(["attempt-new"]);
+	});
+
+	it("leaves a kept turn's aged leg unreadable through the client API, never smaller", async () => {
+		const now = Date.now();
+		const old = now - 10 * DAY;
+		withDb(dbPath, (db) => {
+			insertTurn(db, "turn-released", old, "released");
+			db.run("UPDATE sdk_bridge_turns SET api_key_id = 'key-1' WHERE id = ?", [
+				"turn-released",
+			]);
+			insertPark(db, "turn-released", "released");
+			db.run(
+				`INSERT INTO sdk_bridge_turn_legs (id, turn_id, kind, started_at,
+					finished_at, http_status, api_key_id, inner_call_count, settled_at)
+				VALUES ('leg-tool', 'turn-released', 'start', ?, ?, 200, 'key-1', 1, ?)`,
+				[old, old + 1_000, old + 1_000],
+			);
+			db.run(
+				`INSERT INTO requests (id, timestamp, method, path, api_key_id,
+					input_tokens, usage_source, sdk_bridge_turn_id, sdk_bridge_leg_id)
+				VALUES ('inner-1', ?, 'POST', '/v1/messages', 'key-1', 10,
+					'provider', 'turn-released', 'leg-tool')`,
+				[old + 500],
+			);
+		});
+		const readLeg = async (since: number) => {
+			const dbOps = new DatabaseOperations(dbPath);
+			try {
+				return await new RequestRepository(dbOps.getAdapter()).getClientRequest(
+					"key-1",
+					"leg-tool",
+					since,
+				);
+			} finally {
+				await dbOps.close();
+			}
+		};
+		expect(await readLeg(old - DAY)).toMatchObject({ input_tokens: 10 });
+
+		await runCleanup(dbPath, 7 * DAY);
+
+		// The turn and its leg outlive the cutoff with the park; the inner row
+		// does not, and the leg is gone with it rather than read as smaller.
+		expect(ids(dbPath, "sdk_bridge_turn_legs")).toEqual(["leg-tool"]);
+		expect(ids(dbPath, "requests")).toEqual([]);
+		expect(await readLeg(now - 7 * DAY)).toBeNull();
 	});
 
 	it("keeps every turn when request retention is disabled", async () => {

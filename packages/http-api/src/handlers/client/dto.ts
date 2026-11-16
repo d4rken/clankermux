@@ -27,11 +27,17 @@ export interface ClientRequestDto {
 	/**
 	 * When the ROW WAS WRITTEN, ms epoch — not when the request started. The
 	 * recorder stamps this as it persists, after the async writer drains, so it
-	 * trails the exchange by the response duration plus queue depth. It is the
-	 * paging order, and it is not a request clock.
+	 * trails the exchange by the response duration plus queue depth. For a
+	 * request served through Claude Code it is when the reply to the client
+	 * ended, and never moves. It is the paging order, and it is not a request
+	 * clock.
 	 */
 	timestamp: number;
-	/** True when no later write can change this row's accounting. */
+	/**
+	 * True when no later write can change this row's accounting. For a request
+	 * served through Claude Code: no further model call can be counted toward
+	 * it, and every one counted has its own accounting finished.
+	 */
 	finalized: boolean;
 	statusCode: number | null;
 	error: string | null;
@@ -55,7 +61,8 @@ export interface ClientRequestDto {
 	 * a provider response it has already been billed for, and no column records
 	 * what that cost, so the row is a lower bound. At 0 it does NOT prove none
 	 * did, because a retry against the same account after a hold restarts the
-	 * index. Evidence when positive, not evidence of absence when 0.
+	 * index. Evidence when positive, not evidence of absence when 0. For a
+	 * request served through Claude Code, the largest over its model calls.
 	 */
 	failoverAttempts: number | null;
 	/**
@@ -106,11 +113,27 @@ export interface ClientRequestsDto {
  * has committed.
  */
 export function isClientRequestFinalized(row: ClientRequestRow): boolean {
+	if (row.source === "sdk_bridge_leg") return isBridgedRequestFinalized(row);
 	return (
 		row.usage_source != null ||
 		row.usage_finalized_at != null ||
 		row.model != null ||
 		row.total_tokens != null
+	);
+}
+
+/**
+ * A request served through Claude Code, summed over its model calls' rows.
+ * Final when the bridge counts no further call toward it (`leg_settled`),
+ * every call it counted has a row, and each of those rows is final. A call
+ * whose count write failed keeps the leg from ever settling, so a missed
+ * count cannot pass for a complete sum.
+ */
+function isBridgedRequestFinalized(row: ClientRequestRow): boolean {
+	return (
+		row.leg_settled === 1 &&
+		row.leg_inner_rows === row.leg_expected_calls &&
+		row.leg_inner_finalized === row.leg_inner_rows
 	);
 }
 
@@ -126,6 +149,13 @@ export function isClientRequestFinalized(row: ClientRequestRow): boolean {
 export function toClientUsageSource(
 	row: ClientRequestRow,
 ): ClientUsageSourceDto {
+	// The weakest claim any of its calls makes: one approximate call makes the
+	// sum approximate.
+	if (row.source === "sdk_bridge_leg") {
+		if (!isBridgedRequestFinalized(row)) return null;
+		if ((row.leg_inner_approximate ?? 0) > 0) return "approximate";
+		return (row.leg_inner_provider ?? 0) > 0 ? "provider" : "none";
+	}
 	switch (row.usage_source) {
 		case "provider":
 			return "provider";

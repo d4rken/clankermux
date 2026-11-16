@@ -70,8 +70,18 @@ export class ClientRouter {
 		// A thin wrapper over the adapter, built once per router rather than per
 		// request — the same way `createPublicStopsReader` builds its own.
 		const requests = new RequestRepository(dbOps.getAdapter());
-		const readById = createClientRequestByIdHandler(requests);
-		const searchByTag = createClientRequestSearchHandler(requests);
+		// A bridged request's inner rows age out on the request cutoff; its
+		// leg is readable only while all of them still exist.
+		const legsReadableSince = () =>
+			Date.now() - config.getRequestRetentionDays() * 24 * 60 * 60 * 1000;
+		const readById = createClientRequestByIdHandler(
+			requests,
+			legsReadableSince,
+		);
+		const searchByTag = createClientRequestSearchHandler(
+			requests,
+			legsReadableSince,
+		);
 
 		this.handlers = new Map<string, ClientHandler>([
 			[

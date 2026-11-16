@@ -16,6 +16,7 @@ import { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import {
 	APIRouter,
 	AuthService,
+	ClientRouter,
 	generateApiKey,
 	SessionAuthService,
 } from "@clankermux/http-api";
@@ -220,10 +221,12 @@ export async function startGateway(opts: {
 		modelPermissions,
 		getSdkBridgeStatus: () => bridge.status(),
 	});
+	const clientRouter = new ClientRouter({ config, dbOps });
 	const deps: RequestRouterDeps = {
 		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
 		handlePublicRequest: async () => null,
-		handleClientRequest: async () => null,
+		handleClientRequest: (req, url, apiKeyId) =>
+			clientRouter.handle(req, url, { apiKeyId }),
 		authenticate: (req, path, method, requirement, options) =>
 			authService.authenticateRequest(req, path, method, requirement, options),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
