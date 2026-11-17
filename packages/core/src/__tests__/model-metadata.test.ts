@@ -317,6 +317,20 @@ describe("published model metadata", () => {
 		});
 	});
 
+	it.each([
+		// The Codex catalog's defaults (openai/codex 6c0cee50); neither model's
+		// 872K maximum is verified yet.
+		["gpt-6.2-astra", 272_000],
+		["gpt-6.2-sol", 500_000],
+	])("publishes %s at its Codex routing ceiling", async (targetModel, window) => {
+		await loadCatalogue();
+		const metadata = await resolveClientModelMetadata({
+			targetModel,
+			providers: ["codex"],
+		});
+		expect(metadata.contextWindow).toBe(window);
+	});
+
 	it("caps Anthropic routes at the window this proxy can actually reach", async () => {
 		await loadCatalogue();
 		for (const provider of ["anthropic", "claude-console-api"]) {

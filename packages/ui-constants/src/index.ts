@@ -89,10 +89,10 @@ export const CHART_TOKENS = {
  * collision that is both shape-distinguished and vanishingly rare.
  *
  * Ten entries are the surviving originals, verbatim from Okabe-Ito and Paul
- * Tol's schemes. `gold` is Tol high-contrast yellow. The remaining twenty-five
+ * Tol's schemes. `gold` is Tol high-contrast yellow. The remaining twenty-seven
  * come from a Lab sweep, not a published set: those sets cluster tightly
- * enough that they are exhausted well before 36 mutually separable hues, and
- * 36 is what 35 models plus a fallback pool needs.
+ * enough that they are exhausted well before 38 mutually separable hues, and
+ * 38 is what 37 models plus a fallback pool needs.
  * `bun packages/ui-constants/scripts/extend-model-palette.ts` is that search.
  */
 export const MODEL_PALETTE = {
@@ -109,7 +109,7 @@ export const MODEL_PALETTE = {
 	grey: "#DDDDDD", // Tol pale grey
 	// Added by the search. `gold` is Tol high-contrast yellow verbatim; the rest
 	// come from the Lab sweep, because the published qualitative sets are
-	// clustered enough that they run out well before 36 mutually separable hues.
+	// clustered enough that they run out well before 38 mutually separable hues.
 	gold: "#DDAA33", // Tol high-contrast yellow
 	periwinkle: "#8582FD",
 	indigo: "#8846E5",
@@ -136,6 +136,8 @@ export const MODEL_PALETTE = {
 	clover: "#44B047",
 	lichen: "#BCCBB2",
 	thistle: "#EFD5F0",
+	basil: "#60925D",
+	denim: "#ADB8FA",
 } as const;
 
 /**
@@ -200,6 +202,8 @@ export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
 	clover: "#0B8A23", // L* 50 · 4.5:1
 	lichen: "#35412D", // L* 26 · 10.8:1
 	thistle: "#4B374D", // L* 26 · 10.8:1
+	basil: "#6D9F6A", // L* 61 · 3.1:1
+	denim: "#273B71", // L* 26 · 10.8:1
 } as const;
 
 /**

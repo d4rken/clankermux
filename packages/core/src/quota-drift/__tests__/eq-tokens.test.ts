@@ -168,6 +168,24 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
 	});
 
+	it.each([
+		"gpt-6.2-astra",
+		"gpt-6.2-sol",
+	])("prices %s's 5x output and 0.05x cache reads on its own weights", (model) => {
+		// Astra $8 in / $40 out / $0.40 cache read, Sol $2 / $10 / $0.10.
+		const entry = entriesFor("openai").find(([id]) => id === model);
+		expect(entry).toBeDefined();
+		const [, cost] = entry as [string, ModelCost];
+		expect(cost.output / cost.input).toBeCloseTo(5, 9);
+		expect((cost.cache_read as number) / cost.input).toBeCloseTo(0.05, 9);
+		const override = MODEL_EQ_WEIGHT_OVERRIDES[model];
+		expect(override).toBeDefined();
+		expect(override.output).toBeCloseTo(5, 9);
+		expect(override.cacheRead).toBeCloseTo(0.05, 9);
+		expect(override.input).toBe(OPENAI_EQ_WEIGHTS.input);
+		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
+	});
+
 	it("prices Fable/Mythos 5.1 and 5.2's cheaper cache reads on their own weights", () => {
 		// Both generations read cache at 2.5% of input — 0.025x where most
 		// Anthropic models read at 0.1x. Claude Code traffic is cache-read-

@@ -199,6 +199,8 @@ describe("provider cache policies", () => {
 
 	it("publishes the direct API minimum without asserting an undocumented request timestamp anchor", () => {
 		for (const model of [
+			"gpt-6.2-astra",
+			"gpt-6.2-sol",
 			"gpt-6-astra",
 			"gpt-6.1-sol",
 			"gpt-6-sol",

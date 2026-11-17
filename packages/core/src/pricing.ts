@@ -474,6 +474,46 @@ BUNDLED_PRICING.mimo = {
  */
 BUNDLED_PRICING.openai = {
 	models: {
+		// Mirrors models.dev on 2026-11-17, launch day. Above 272K prompt
+		// tokens OpenAI charges 2x input and cache, 1.5x output.
+		"gpt-6.2-astra": {
+			id: "gpt-6.2-astra",
+			name: "GPT-6.2 Astra",
+			cost: {
+				input: 8,
+				output: 40,
+				cache_read: 0.4,
+				cache_write: 10,
+				tiers: [
+					{
+						input: 16,
+						output: 60,
+						cache_read: 0.8,
+						cache_write: 20,
+						tier: { type: "context", size: 272_000 },
+					},
+				],
+			},
+		},
+		"gpt-6.2-sol": {
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			cost: {
+				input: 2,
+				output: 10,
+				cache_read: 0.1,
+				cache_write: 2.5,
+				tiers: [
+					{
+						input: 4,
+						output: 15,
+						cache_read: 0.2,
+						cache_write: 5,
+						tier: { type: "context", size: 272_000 },
+					},
+				],
+			},
+		},
 		// Seeded from OpenAI's own Standard-tier pricing page on 2026-09-04,
 		// before models.dev listed the model. models.dev has since listed it at
 		// the same four rates, so this is a mirror again.

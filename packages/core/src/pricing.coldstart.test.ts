@@ -674,6 +674,27 @@ describe("bundled catalogue coverage", () => {
 		expect(cost).toBeCloseTo(expected, 9);
 		expect(getPricingGaps()).toEqual([]);
 	});
+
+	it.each([
+		// Base card up to 272K prompt tokens, the long-context card above it.
+		["gpt-6.2-astra", 272_000, 2.176 + 40],
+		["gpt-6.2-astra", 272_001, 4.352016 + 60],
+		["gpt-6.2-sol", 272_000, 0.544 + 10],
+		["gpt-6.2-sol", 272_001, 1.088004 + 15],
+	])("prices %s at %d input tokens from its launch rate card offline", async (model, inputTokens, expected) => {
+		globalThis.fetch = (async () => {
+			throw new Error("offline");
+		}) as unknown as typeof fetch;
+
+		const cost = await estimateCostUSD(
+			model,
+			{ inputTokens, outputTokens: 1_000_000 },
+			{ provider: "codex", reportGaps: true },
+		);
+
+		expect(cost).toBeCloseTo(expected, 9);
+		expect(getPricingGaps()).toEqual([]);
+	});
 });
 
 describe("catalogue entry lookup", () => {

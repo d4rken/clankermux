@@ -59,6 +59,8 @@ describe("advisory model cache retention", () => {
 			for (const model of [
 				"gpt-6-astra",
 				"gpt-6-astra-2026-09-03",
+				"gpt-6.2-astra",
+				"gpt-6.2-sol",
 				"gpt-6.1-sol",
 				"gpt-6-sol",
 				"gpt-6-luna-2026-09-22",
