@@ -109,15 +109,26 @@ pipeline. The client keeps executing its own tools.
   content. A structured turn's refusal miss fails over from `giveUp`, its
   502 `structured_output_failed` the answer. An ordinary turn fails over
   from `endLeg` only on a non-streamed leg
-  (`LegResponse.holdingWholeReply`): the composer finishes the reply into
-  the reducer first, and the error carries that message (`reply`, status
-  200), which `terminalResponse` answers whole. A streamed ordinary leg
-  commits its head with its first model event, so its refusal reaches the
-  client as the reply's `stop_reason`, as a continuation's does. Leg and
-  turn record the answer the leg would have given (200 `refusal` or the
-  502) with `pre_head` and `failed_over`; the turn is `failed`. The
+  (`LegResponse.holdingWholeReply`), checked before the required-search
+  check: a turn whose required search never ran carries the 502
+  `web_search_not_performed`; otherwise the composer finishes the reply
+  into the reducer first, and the error carries that message (`reply`,
+  status 200), which `terminalResponse` answers whole. A streamed ordinary
+  leg commits its head with its first model event, so its refusal reaches
+  the client as the reply's `stop_reason`, as a continuation's does. Leg
+  and turn record the answer the leg would have given (200 `refusal` or
+  the 502) with `pre_head` and `failed_over`; the turn is `failed`. The
   category rides on the error (`category`) and on the inner row's
-  `refusal_category`, never on the client's answer.
+  `refusal_category`, never on the client's answer. Unlike the other
+  refusals, the give-up terminals answer a safety refusal whatever failed
+  after it (`sdkBridgeRefusalTerminal`), except where a client abort, an
+  overload or burst-retry give-up or a forwarded upstream response
+  answers. When it is the answer, no request row is written: the
+  terminal calls `publishAsAnswer()`, which queues
+  `publishFailedOverLeg` on the turn's recorder behind the leg's finish
+  (fenced, idempotent), clearing `failed_over` so the client API reads
+  the leg with its calls summed. A 200 refused message also gets
+  `stop_reason` `refusal` and loses its error facts; a 502 keeps them.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
@@ -302,7 +313,8 @@ pipeline. The client keeps executing its own tools.
   `sdk_bridge_turn_legs` (one per outer HTTP request; the leg id is the
   client's `x-clankermux-request-id`). Legs have no `requests` row, except
   a start leg the proxy failed over from (`failed_over`), whose request the
-  direct path or a give-up terminal records under the same id.
+  direct path or a give-up terminal records under the same id. A safety
+  refusal that ends up the answer publishes its leg instead (above).
   `GET /api/sdk-bridge-turns/:id` takes a turn id or a leg id. A leg records
   its outer request's key, validated correlation tag, requested model and
   project: a refused continuation's leg sits on another key's turn. The

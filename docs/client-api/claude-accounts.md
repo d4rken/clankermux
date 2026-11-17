@@ -48,9 +48,11 @@ What differs from a direct request:
   started streaming, the error ends the stream instead.
 * When the model refuses a turn (stop reason `refusal`) before any of the
   reply went out, the request moves on the same way, skipping the other
-  Claude accounts, which would refuse the same content. With none left, you
-  get what the refusal produced: the refused message with stop reason
-  `refusal`, or, with a response schema, the 502 `structured_output_failed`.
+  Claude accounts, which would refuse the same content. When no other
+  destination serves it, you get what the refusal produced: the refused
+  message with stop reason `refusal`, or a 502 (`structured_output_failed`
+  with a response schema, `web_search_not_performed` when a required web
+  search never ran).
   A streamed reply without a schema starts with the model's first event, so
   its refusal arrives as the reply's stop reason, as it does on tool results
   that continue a turn.
