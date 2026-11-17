@@ -626,6 +626,24 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			const leg = legs.get(id);
 			if (leg) leg.settledAt ??= at;
 		},
+		async publishFailedOverLeg(
+			id: string,
+			stopReason: string | null,
+			fence?: string,
+		) {
+			if (fenced(fence)) return false;
+			const leg = legs.get(id);
+			if (!leg?.finished || !leg.failedOver) return false;
+			leg.failedOver = false;
+			if (stopReason !== null)
+				Object.assign(leg, {
+					stopReason,
+					errorType: null,
+					errorMessage: null,
+					errorPhase: null,
+				});
+			return true;
+		},
 	};
 }
 

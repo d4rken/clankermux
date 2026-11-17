@@ -272,8 +272,10 @@ export class LegResponse {
 	 * The reply failed in a way the proxy fails over on: while nothing went
 	 * out, the response rejects with the typed error instead of answering.
 	 * False once it has committed; the caller fails it as usual then.
+	 * `publish` goes to a safety refusal, for the proxy to call when it ends
+	 * up the client's answer.
 	 */
-	failOver(error: BridgeError): boolean {
+	failOver(error: BridgeError, publish?: () => Promise<void>): boolean {
 		if (this.state !== "holding" || !error.failover) return false;
 		this.state = "done";
 		this.cleanup();
@@ -293,6 +295,7 @@ export class LegResponse {
 				...refusal,
 				category: error.refusalCategory ?? null,
 				reply: error.reply ?? null,
+				publish,
 			});
 		else rejection = new SdkBridgeExtraUsageError(refusal);
 		this.rejectResponse(rejection);

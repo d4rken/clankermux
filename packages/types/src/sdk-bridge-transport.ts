@@ -488,6 +488,8 @@ export class SdkBridgeSafetyRefusalError extends SdkBridgeRefusalError {
 	/** The refusal's `stop_details.category`, when it named one. */
 	readonly category: string | null;
 	readonly #reply: Readonly<Record<string, unknown>> | null;
+	readonly #publish: (() => Promise<void>) | null;
+	#published: Promise<void> | null = null;
 
 	constructor(
 		input: Omit<
@@ -496,12 +498,28 @@ export class SdkBridgeSafetyRefusalError extends SdkBridgeRefusalError {
 		> & {
 			category: string | null;
 			reply?: Record<string, unknown> | null;
+			/** Makes the failed-over leg the request's record; see {@link publishAsAnswer}. */
+			publish?: () => Promise<void>;
 		},
 	) {
 		super({ ...input, reason: SDK_BRIDGE_SAFETY_REFUSAL });
 		this.name = "SdkBridgeSafetyRefusalError";
 		this.category = input.category;
 		this.#reply = input.reply ?? null;
+		this.#publish = input.publish ?? null;
+	}
+
+	/**
+	 * This refusal is what the client got: its failed-over leg becomes the
+	 * request's record again, read through the client API with Claude Code's
+	 * calls summed under it, so no other row is written for the request. Once
+	 * per refusal, however often it is called; it never rejects.
+	 */
+	publishAsAnswer(): Promise<void> {
+		this.#published ??= (this.#publish?.() ?? Promise.resolve()).catch(
+			() => {},
+		);
+		return this.#published;
 	}
 
 	override terminalResponse(headers: Record<string, string> = {}): Response {

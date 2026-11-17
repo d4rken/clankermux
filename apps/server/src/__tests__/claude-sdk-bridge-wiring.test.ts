@@ -42,6 +42,7 @@ const turnRepo = {
 	finishLeg: async () => {},
 	countInnerCall: async () => true,
 	settleLeg: async () => {},
+	publishFailedOverLeg: async () => true,
 };
 
 /** A bridge module whose factory records the dependencies it was built with. */

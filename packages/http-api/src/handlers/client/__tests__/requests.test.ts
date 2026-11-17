@@ -14,6 +14,7 @@ import { join } from "node:path";
 import type { Config } from "@clankermux/config";
 import { MODEL_SUBSTITUTION_SUPPRESSION_REASON } from "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
+import type { SdkBridgeLegFinish } from "@clankermux/types";
 import { ClientRouter } from "../router";
 
 const KEY_A = "key-a";
@@ -510,6 +511,8 @@ describe("a request served through Claude Code", () => {
 		startedAt?: number;
 		settled?: boolean;
 		inner: Array<{ id: string; input: number; usageSource: string | null }>;
+		/** The leg's finish, where it differs from a plain 200 end_turn. */
+		finish?: Partial<SdkBridgeLegFinish>;
 	}): Promise<void> {
 		const turns = dbOps.sdkBridgeTurns;
 		const turnId = `turn-of-${opts.legId}`;
@@ -557,6 +560,7 @@ describe("a request served through Claude Code", () => {
 			finishedAt: startedAt + 2_000,
 			httpStatus: 200,
 			stopReason: "end_turn",
+			...opts.finish,
 		});
 		if (opts.settled !== false)
 			await turns.settleLeg(opts.legId, startedAt + 2_100);
@@ -611,6 +615,123 @@ describe("a request served through Claude Code", () => {
 		expect((await call("/client/v1/requests/leg-1", KEY_B)).status).toBe(404);
 		const { body } = await list(`tag=${TAG}`);
 		expect(body.requests.map((r) => r.id)).toEqual(["leg-1", "direct-1"]);
+	});
+
+	describe("a safety refusal the proxy failed over from, then answered with", () => {
+		const legStopReason = async (id: string) =>
+			(await dbOps
+				.getAdapter()
+				.get(
+					"SELECT stop_reason, error_type, error_phase, failed_over FROM sdk_bridge_turn_legs WHERE id = ?",
+					[id],
+				)) as Record<string, unknown>;
+
+		it("reads the refused message as the leg's 200, summed over its calls, once published", async () => {
+			await seedBridged({
+				legId: "leg-r",
+				inner: [
+					{ id: "inner-1", input: 900, usageSource: "provider" },
+					{ id: "inner-2", input: 100, usageSource: "provider" },
+				],
+				finish: {
+					httpStatus: 200,
+					stopReason: null,
+					errorPhase: "pre_head",
+					errorType: "refusal",
+					errorMessage: "The model refused to answer (category cyber)",
+					failedOver: true,
+				},
+			});
+			expect((await call("/client/v1/requests/leg-r")).status).toBe(404);
+
+			expect(
+				await dbOps.sdkBridgeTurns.publishFailedOverLeg("leg-r", "refusal"),
+			).toBe(true);
+
+			const { status, body } = await call("/client/v1/requests/leg-r");
+			expect(status).toBe(200);
+			expect(body).toMatchObject({
+				id: "leg-r",
+				finalized: true,
+				statusCode: 200,
+				error: null,
+				model: "claude-sonnet-5-20261101",
+				inputTokens: 1000,
+				outputTokens: 4,
+				usageSource: "provider",
+			});
+			expect(await legStopReason("leg-r")).toEqual({
+				stop_reason: "refusal",
+				error_type: null,
+				error_phase: null,
+				failed_over: 0,
+			});
+		});
+
+		it("keeps a 502's error facts", async () => {
+			const message =
+				"No answer matching the response schema: the model refused to answer";
+			await seedBridged({
+				legId: "leg-s",
+				inner: [{ id: "inner-1", input: 900, usageSource: "provider" }],
+				finish: {
+					httpStatus: 502,
+					stopReason: null,
+					errorPhase: "pre_head",
+					errorType: "api_error",
+					errorMessage: message,
+					failedOver: true,
+				},
+			});
+
+			await dbOps.sdkBridgeTurns.publishFailedOverLeg("leg-s", null);
+
+			const { body } = await call("/client/v1/requests/leg-s");
+			expect(body).toMatchObject({
+				finalized: true,
+				statusCode: 502,
+				error: message,
+				inputTokens: 900,
+			});
+			expect(await legStopReason("leg-s")).toMatchObject({
+				error_type: "api_error",
+				error_phase: "pre_head",
+				failed_over: 0,
+			});
+		});
+
+		it("changes nothing when published again, or for a leg that was never failed over", async () => {
+			await seedBridged({
+				legId: "leg-r",
+				inner: [{ id: "inner-1", input: 900, usageSource: "provider" }],
+				finish: {
+					httpStatus: 200,
+					errorPhase: "pre_head",
+					errorType: "refusal",
+					errorMessage: "The model refused to answer",
+					failedOver: true,
+				},
+			});
+			await seedBridged({
+				legId: "leg-plain",
+				inner: [{ id: "inner-2", input: 5, usageSource: "provider" }],
+			});
+
+			expect(
+				await dbOps.sdkBridgeTurns.publishFailedOverLeg("leg-r", "refusal"),
+			).toBe(true);
+			const first = (await call("/client/v1/requests/leg-r")).body;
+			expect(
+				await dbOps.sdkBridgeTurns.publishFailedOverLeg("leg-r", null),
+			).toBe(false);
+			expect((await call("/client/v1/requests/leg-r")).body).toEqual(first);
+			expect(
+				await dbOps.sdkBridgeTurns.publishFailedOverLeg("leg-plain", "refusal"),
+			).toBe(false);
+			expect(await legStopReason("leg-plain")).toMatchObject({
+				stop_reason: "end_turn",
+			});
+		});
 	});
 
 	it("404s a leg that started before request retention", async () => {

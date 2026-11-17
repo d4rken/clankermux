@@ -383,3 +383,77 @@ function continueRefused(query: FakeQuery) {
 		...afterRefusal(),
 	);
 }
+
+describe("a safety refusal that became the request's answer", () => {
+	/** Counts the publication writes that reach the repository. */
+	function countPublications(h: Harness) {
+		const calls: Array<[string, string | null]> = [];
+		const publish = h.repo.publishFailedOverLeg.bind(h.repo);
+		h.repo.publishFailedOverLeg = async (id, stopReason, fence) => {
+			calls.push([id, stopReason]);
+			return publish(id, stopReason, fence);
+		};
+		return calls;
+	}
+
+	it("publishes the refused message's leg as the answer, once, after its finish", async () => {
+		const h = harness();
+		const calls = countPublications(h);
+		const t = await start(h, { ...ASK, stream: false });
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([{ type: "text", text: "I can't help" }], {
+				stopReason: "refusal",
+				stopDetails: CYBER,
+			}),
+			...afterRefusal(),
+		);
+		const refused = (await rejection(
+			t.response,
+		)) as SdkBridgeSafetyRefusalError;
+		// Building the answer publishes nothing.
+		refused.terminalResponse();
+		await Bun.sleep(20);
+		expect(calls).toEqual([]);
+
+		await Promise.all([refused.publishAsAnswer(), refused.publishAsAnswer()]);
+		await refused.publishAsAnswer();
+
+		expect(calls).toEqual([[t.meta.legId, "refusal"]]);
+		expect(h.repo.legs.get(t.meta.legId)).toMatchObject({
+			finished: true,
+			failedOver: false,
+			httpStatus: 200,
+			stopReason: "refusal",
+			errorType: null,
+			errorMessage: null,
+			errorPhase: null,
+		});
+	});
+
+	it("keeps a structured refusal's error facts", async () => {
+		const h = harness();
+		const calls = countPublications(h);
+		const t = await start(h, STRUCTURED);
+		t.query.emit(
+			initMessage(),
+			...streamedMessage([], { stopReason: "refusal", stopDetails: CYBER }),
+			...afterRefusal(),
+		);
+		const refused = (await rejection(
+			t.response,
+		)) as SdkBridgeSafetyRefusalError;
+
+		await refused.publishAsAnswer();
+
+		expect(calls).toEqual([[t.meta.legId, null]]);
+		expect(h.repo.legs.get(t.meta.legId)).toMatchObject({
+			failedOver: false,
+			httpStatus: 502,
+			errorPhase: "pre_head",
+			errorType: "api_error",
+			errorMessage:
+				"No answer matching the response schema: the model refused to answer",
+		});
+	});
+});

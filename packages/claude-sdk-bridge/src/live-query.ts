@@ -1618,7 +1618,14 @@ export class LiveQuery {
 			const committed = leg.response.committed;
 			// A no-op for a client that is already gone. A start leg's failover
 			// rejects only once this teardown has closed the query.
-			const failedOver = leg.kind === "start" && leg.response.failOver(error);
+			const failedOver =
+				leg.kind === "start" &&
+				leg.response.failOver(error, () =>
+					this.init.recorder.publishFailedOverLeg(
+						leg.id,
+						error.reply ? "refusal" : null,
+					),
+				);
 			if (!failedOver) leg.response.fail(error);
 			this.finishLeg(leg, {
 				httpStatus: error.status,

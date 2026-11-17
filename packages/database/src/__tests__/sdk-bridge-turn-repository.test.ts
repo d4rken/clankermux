@@ -672,6 +672,34 @@ describe("leg accounting", () => {
 		await repo.settleLeg("leg-1", 4_500, "held");
 		expect((await leg())?.settledAt).toBe(4_500);
 	});
+
+	it("publishes a failed-over leg only once it is finished, and only under the lease", async () => {
+		expect(await repo.publishFailedOverLeg("leg-1", "refusal")).toBe(false);
+		await repo.finishLeg("leg-1", {
+			finishedAt: 3_000,
+			httpStatus: 200,
+			errorPhase: "pre_head",
+			errorType: "refusal",
+			errorMessage: "The model refused to answer",
+			failedOver: true,
+		});
+		holdLease("held");
+		expect(
+			await repo.publishFailedOverLeg("leg-1", "refusal", "not-held"),
+		).toBe(false);
+		expect((await leg())?.failedOver).toBe(true);
+		expect(await repo.publishFailedOverLeg("leg-1", "refusal", "held")).toBe(
+			true,
+		);
+		expect(await leg()).toMatchObject({
+			failedOver: false,
+			finishedAt: 3_000,
+			stopReason: "refusal",
+			errorType: null,
+			errorMessage: null,
+			errorPhase: null,
+		});
+	});
 });
 
 describe("requests.sdk_bridge_leg_id", () => {

@@ -383,10 +383,15 @@ export async function continueParkedSdkBridgeTurn(input: {
 	} catch (error) {
 		if (req.signal.aborted) return createClientAbortResponse();
 		// A continuation that fell back to a fresh start has no other route.
+		if (error instanceof SdkBridgeSafetyRefusalError) {
+			// Its failed-over leg is the record the client API reads.
+			if (!ctx.requestRecorder.hasRecord(requestMeta.id))
+				await error.publishAsAnswer();
+			return error.terminalResponse();
+		}
 		if (
 			error instanceof SdkBridgeExtraUsageError ||
-			error instanceof SdkBridgeVersionTooOldError ||
-			error instanceof SdkBridgeSafetyRefusalError
+			error instanceof SdkBridgeVersionTooOldError
 		)
 			return recordTerminal(
 				error.terminalResponse(),
