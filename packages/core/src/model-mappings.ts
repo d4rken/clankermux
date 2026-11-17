@@ -150,8 +150,10 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.6-sol": 272_000,
 	"gpt-5.6-terra": 272_000,
 	"gpt-5.6-luna": 272_000,
+	"gpt-6.2-astra": 272_000,
+	"gpt-6.2-sol": 500_000,
 	"gpt-6-astra": 272_000,
-	"gpt-6.1-sol": 272_000,
+	"gpt-6.1-sol": 500_000,
 	"gpt-6-sol": 272_000,
 	"gpt-6-luna": 272_000,
 };

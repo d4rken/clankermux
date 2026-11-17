@@ -653,10 +653,11 @@ describe("bundled catalogue coverage", () => {
 	});
 
 	it.each([
-		["gpt-6.1-sol", 12.1],
+		// 2M prompt tokens: gpt-6.1-sol is past its 272K tier, the others are flat.
+		["gpt-6.1-sol", 19.2],
 		["gpt-6-sol", 12.2],
 		["gpt-6-luna", 0.61],
-	])("prices %s at its launch rates offline", async (model, expected) => {
+	])("prices %s at its bundled rates offline", async (model, expected) => {
 		globalThis.fetch = (async () => {
 			throw new Error("offline");
 		}) as unknown as typeof fetch;
@@ -668,6 +669,29 @@ describe("bundled catalogue coverage", () => {
 				outputTokens: 1_000_000,
 				cacheReadInputTokens: 1_000_000,
 			},
+			{ provider: "codex", reportGaps: true },
+		);
+
+		expect(cost).toBeCloseTo(expected, 9);
+		expect(getPricingGaps()).toEqual([]);
+	});
+
+	it.each([
+		// Base card up to 272K prompt tokens, the long-context card above it.
+		["gpt-6.2-astra", 272_000, 2.176 + 40],
+		["gpt-6.2-astra", 272_001, 4.352016 + 60],
+		["gpt-6.2-sol", 272_000, 0.544 + 10],
+		["gpt-6.2-sol", 272_001, 1.088004 + 15],
+		["gpt-6.1-sol", 272_000, 0.544 + 10],
+		["gpt-6.1-sol", 272_001, 1.088004 + 15],
+	])("prices %s at %d input tokens from its launch rate card offline", async (model, inputTokens, expected) => {
+		globalThis.fetch = (async () => {
+			throw new Error("offline");
+		}) as unknown as typeof fetch;
+
+		const cost = await estimateCostUSD(
+			model,
+			{ inputTokens, outputTokens: 1_000_000 },
 			{ provider: "codex", reportGaps: true },
 		);
 

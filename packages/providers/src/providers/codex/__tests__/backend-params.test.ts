@@ -116,6 +116,19 @@ describe("clampChatGptBackendReasoningEffort", () => {
 				"low",
 			);
 		});
+
+		it("gives GPT-6.2 Astra and Sol the full GPT-6 set, ultra included", () => {
+			// Their catalog entries (openai/codex 6c0cee50) list low..ultra.
+			for (const model of ["gpt-6.2-astra", "gpt-6.2-sol"]) {
+				expect(chatGptBackendReasoningEffortsFor(model)).toBe(
+					CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+				);
+				expect(clampChatGptBackendReasoningEffort("ultra", model)).toBe(
+					"ultra",
+				);
+				expect(clampChatGptBackendReasoningEffort("none", model)).toBe("low");
+			}
+		});
 	});
 });
 
