@@ -23,7 +23,8 @@ import type { ClientModelMetadataMap } from "@clankermux/types";
 // Codex models (per the codex-cli models cache, 2026-06-09, plus gpt-6-astra
 // from codex-cli 0.153.1 on 2026-09-03, gpt-6-sol/gpt-6-luna from
 // codex-cli 0.155 on 2026-09-22, gpt-6.1-sol from the Codex catalog on
-// 2026-09-29 and gpt-6.2-sol/gpt-6.2-astra from it on 2026-11-17); retired slugs (gpt-5-codex, gpt-5.3-codex) were dropped.
+// 2026-09-29 and gpt-6.2-sol/gpt-6.2-astra from the same catalog on
+// 2026-11-17); retired slugs (gpt-5-codex, gpt-5.3-codex) were dropped.
 // Exported so the server can compose the operator's model-catalogue overrides
 // onto it. The LIST is the shared thing; the reply SHAPE below stays owned here.
 export const CODEX_MODELS = [

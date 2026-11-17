@@ -106,7 +106,7 @@ describe("MODEL_CONTEXT_WINDOWS", () => {
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex-spark"]).toBe(128_000);
-		// The client default stays at 272K even when routing allows more.
+		// Astra's client default stays at 272K even though routing allows 872K.
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6-astra"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6.2-astra"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6.2-sol"]).toBe(500_000);

@@ -528,7 +528,8 @@ BUNDLED_PRICING.openai = {
 			},
 		},
 		// Seeded from OpenAI's pricing page on 2026-09-29, before models.dev
-		// listed the model. Same rates as GPT-6 Sol except the cache read.
+		// listed the model. models.dev has since listed it at these rates,
+		// long-context tier included.
 		"gpt-6.1-sol": {
 			id: "gpt-6.1-sol",
 			name: "GPT-6.1 Sol",
@@ -537,6 +538,15 @@ BUNDLED_PRICING.openai = {
 				output: 10,
 				cache_read: 0.1,
 				cache_write: 2.5,
+				tiers: [
+					{
+						input: 4,
+						output: 15,
+						cache_read: 0.2,
+						cache_write: 5,
+						tier: { type: "context", size: 272_000 },
+					},
+				],
 			},
 		},
 		// Seeded from OpenAI's model pages on 2026-09-22, launch day, before
