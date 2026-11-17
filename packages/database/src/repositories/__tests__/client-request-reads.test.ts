@@ -438,6 +438,38 @@ describe("client request reads of bridged requests", () => {
 		]);
 	});
 
+	it("answers the next destination's row for a leg the proxy failed over from, leaving the refused call out of its counts", async () => {
+		turn({ id: "t1", innerCalls: 1 });
+		leg({
+			id: "r1",
+			turnId: "t1",
+			innerCalls: 1,
+			failedOver: true,
+			httpStatus: 502,
+			errorMessage:
+				"No answer matching the response schema: the model refused to answer",
+		});
+		inner({ id: "i1", turnId: "t1", legId: "r1", input: 900, output: 3 });
+		db.query(
+			`INSERT INTO requests(id,timestamp,method,path,api_key_id,correlation_tag,
+				status_code,model,input_tokens,output_tokens,failover_attempts)
+			 VALUES('r1',3000,'POST','/v1/messages',?,'run-1',200,'gpt-6.1-sol',40,8,1)`,
+		).run(KEY);
+
+		expect(await byId("r1")).toMatchObject({
+			source: "request",
+			status_code: 200,
+			error_message: null,
+			model: "gpt-6.1-sol",
+			input_tokens: 40,
+			output_tokens: 8,
+			failover_attempts: 1,
+		});
+		expect((await byTag()).map((r) => [r.id, r.source])).toEqual([
+			["r1", "request"],
+		]);
+	});
+
 	it("never publishes a leg the proxy failed over from, or one not finished yet", async () => {
 		turn({ id: "t1" });
 		leg({ id: "failed-over", turnId: "t1", failedOver: true });

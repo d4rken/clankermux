@@ -184,9 +184,11 @@ response anyone sent: your client got whatever its connection carried before
 it dropped. Its counts cover the calls recorded before the stop.
 
 A request ClankerMux tried to serve this way, then moved to another
-destination (no Claude Code process free, or the account out of extra usage
-before any of the reply went out), reads as the request the other destination
-answered.
+destination (no Claude Code process free, or, before any of the reply went
+out, the account out of extra usage or the model refusing the request), reads
+as the request the other destination answered. When no other destination
+served a request the model refused, the refusal was the answer, and the
+request reads as it, its counts summed over Claude Code's calls.
 
 Requests served this way before the version that publishes this section are
 readable only when Claude Code served them in one request with no tool round,

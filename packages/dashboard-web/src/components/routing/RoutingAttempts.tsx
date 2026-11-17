@@ -103,6 +103,7 @@ const ALIAS_REASONS: Record<string, string> = {
 	temporarily_unavailable: "temporarily unavailable",
 	extra_usage_exhausted: "out of extra usage",
 	claude_code_version_too_old: "the SDK bridge's Claude Code is too old",
+	safety_refusal: "the model refused the request",
 	pool_unavailable: "no eligible account available",
 	conversation_affinity: "continuing with this conversation's backend",
 };

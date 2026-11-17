@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
 	SDK_BRIDGE_MAX_OUTPUT_SCHEMA_BYTES,
+	SdkBridgeSafetyRefusalError,
 	type SdkBridgeTurnMeta,
 } from "@clankermux/types";
 import { INPUT_JSON_CHUNK } from "../reply-composer";
@@ -306,7 +307,7 @@ describe("structured output through the bridge", () => {
 			});
 		});
 
-		it("fails a refusal", async () => {
+		it("fails a refusal over, with the miss's 502 as the answer if nothing else serves", async () => {
 			const h = harness();
 			const t = await start(h);
 			t.query.emit(
@@ -316,9 +317,16 @@ describe("structured output through the bridge", () => {
 				}),
 				resultMessage({ isError: true, subtype: "error_during_execution" }),
 			);
-			const r = await reply(t.response);
-			expect(r.status).toBe(502);
-			expect(r.body).toMatchObject({
+			const refused = await t.response.then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(refused).toBeInstanceOf(SdkBridgeSafetyRefusalError);
+			const answer = (
+				refused as SdkBridgeSafetyRefusalError
+			).terminalResponse();
+			expect(answer.status).toBe(502);
+			expect(await answer.json()).toMatchObject({
 				error: {
 					code: "structured_output_failed",
 					message: expect.stringContaining("refused"),

@@ -83,6 +83,8 @@ const PROMPT_WRITE_MS = 20;
 const ENVELOPE_WAIT_MS = 2_000;
 /** After the SIGKILL, how long a release waits for the child and the pump to end. */
 const RELEASE_EXIT_WAIT_MS = 3_000;
+/** A structured turn's miss when its last model call stopped on `refusal`. */
+const REFUSED_MISS = "the model refused to answer";
 
 /**
  * Whether `ids` answer exactly the calls in `awaiting`: each one once, and
@@ -774,13 +776,38 @@ export class LiveQuery {
 		const content = composer.legContent();
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";
 		const parks = finalReason === "tool_use" && toolUseIds.length > 0;
+		const unsearched =
+			this.init.webSearchRequired && !parks && composer.completedSearches === 0;
+		// A start leg refused before anything went out fails over: the same
+		// content would be refused on every Claude account. What the leg would
+		// have answered answers only when no other destination serves the
+		// request: the search failure below, or the refused message.
+		if (
+			finalReason === "refusal" &&
+			leg.kind === "start" &&
+			leg.response.holdingWholeReply
+		) {
+			const category = composer.lastStopCategory;
+			if (unsearched) {
+				this.failTurn(
+					bridgeErrors.safetyRefusal(
+						category,
+						bridgeErrors.webSearchNotPerformed(),
+					),
+				);
+				return;
+			}
+			composer.finish(stopReason);
+			const reply = leg.response.heldReply();
+			if (reply) {
+				this.stopReason = finalReason;
+				this.failTurn(bridgeErrors.safetyRefusal(category, { reply }));
+				return;
+			}
+		}
 		// The client's search tool must never take an unsearched answer for
 		// one: the reply fails instead, before it closes.
-		if (
-			this.init.webSearchRequired &&
-			!parks &&
-			composer.completedSearches === 0
-		) {
+		if (unsearched) {
 			this.teardown("error", bridgeErrors.webSearchNotPerformed());
 			return;
 		}
@@ -1358,7 +1385,7 @@ export class LiveQuery {
 			message.terminal_reason === "structured_output_retry_exhausted"
 				? "the model's answers did not match it within Claude Code's retries"
 				: this.init.composer.lastStopReason === "refusal"
-					? "the model refused to answer"
+					? REFUSED_MISS
 					: !failed
 						? "Claude Code finished the turn without a structured answer"
 						: `Claude Code ended the turn with an error: ${sanitizeMessage(text)}`;
@@ -1398,10 +1425,16 @@ export class LiveQuery {
 			this.endLeg("max_tokens");
 			return;
 		}
+		const failed = bridgeErrors.structuredOutputFailed(
+			this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
+		);
 		this.failTurn(
-			bridgeErrors.structuredOutputFailed(
-				this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
-			),
+			this.structuredMiss === REFUSED_MISS
+				? bridgeErrors.safetyRefusal(
+						this.init.composer.lastStopCategory,
+						failed,
+					)
+				: failed,
 		);
 	}
 
@@ -1585,7 +1618,14 @@ export class LiveQuery {
 			const committed = leg.response.committed;
 			// A no-op for a client that is already gone. A start leg's failover
 			// rejects only once this teardown has closed the query.
-			const failedOver = leg.kind === "start" && leg.response.failOver(error);
+			const failedOver =
+				leg.kind === "start" &&
+				leg.response.failOver(error, () =>
+					this.init.recorder.publishFailedOverLeg(
+						leg.id,
+						error.reply ? "refusal" : null,
+					),
+				);
 			if (!failedOver) leg.response.fail(error);
 			this.finishLeg(leg, {
 				httpStatus: error.status,

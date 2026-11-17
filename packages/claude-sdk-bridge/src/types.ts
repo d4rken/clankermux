@@ -73,6 +73,18 @@ export interface SdkBridgeTurnRepo {
 	): Promise<boolean>;
 	/** No inner row can begin under the leg any more. Write-once. */
 	settleLeg(id: string, at: number, fence?: string): Promise<void>;
+	/**
+	 * A finished leg the proxy failed over from turned out to be the answer:
+	 * clear `failed_over`. A `stopReason` records the leg as that reply (a
+	 * refused message) and clears its error facts; null keeps them. True
+	 * when it changed the leg: false for one not finished, not failed over
+	 * (so a repeat), or fenced out.
+	 */
+	publishFailedOverLeg(
+		id: string,
+		stopReason: string | null,
+		fence?: string,
+	): Promise<boolean>;
 }
 
 /**

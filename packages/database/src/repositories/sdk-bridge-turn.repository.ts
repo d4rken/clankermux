@@ -489,6 +489,33 @@ export class SdkBridgeTurnRepository extends BaseRepository<SdkBridgeTurn> {
 	}
 
 	/**
+	 * A finished leg the proxy failed over from turned out to be the answer:
+	 * clear `failed_over`, so the client API reads it again. A `stopReason`
+	 * records the leg as that reply and clears its error facts; null keeps
+	 * them. `finished_at`, the leg's paging key, never moves. True when it
+	 * changed the leg; a repeat finds it no longer failed over.
+	 */
+	async publishFailedOverLeg(
+		id: string,
+		stopReason: string | null,
+		fence?: string,
+	): Promise<boolean> {
+		const reply = stopReason === null ? 0 : 1;
+		const changed = await this.runWithChanges(
+			`UPDATE sdk_bridge_turn_legs SET
+				failed_over = 0,
+				stop_reason = CASE WHEN ? THEN ? ELSE stop_reason END,
+				error_type = CASE WHEN ? THEN NULL ELSE error_type END,
+				error_message = CASE WHEN ? THEN NULL ELSE error_message END,
+				error_phase = CASE WHEN ? THEN NULL ELSE error_phase END
+			WHERE id = ? AND failed_over = 1 AND finished_at IS NOT NULL
+				AND ${FENCED}`,
+			[reply, stopReason, reply, reply, reply, id, ...fenceParams(fence)],
+		);
+		return changed === 1;
+	}
+
+	/**
 	 * The turn, its legs oldest first, and sums over whichever inner `requests`
 	 * rows still exist. Inner rows follow request retention on their own, so an
 	 * inner summary smaller than `innerCallCount` is expected, not an error.

@@ -25,7 +25,7 @@ import {
 import { recordRouteRejection } from "./routing-dispatch";
 import { eligibleRouteAccounts } from "./routing-service";
 import {
-	sdkBridgeRefusalLabel,
+	recordSdkBridgeRefusalAnswer,
 	sdkBridgeRefusalTerminal,
 } from "./sdk-bridge-refusal";
 import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
@@ -85,6 +85,8 @@ export function aliasFallbackReason(
 			return "extra_usage_exhausted";
 		case "sdk_bridge_version_too_old":
 			return "claude_code_version_too_old";
+		case "sdk_bridge_safety_refusal":
+			return "safety_refusal";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";
 		// Another target may be a model or provider whose translator takes the body.
@@ -343,10 +345,11 @@ export async function handleAliasProxy(
 		terminalStatus === 503 ? sdkBridgeRefusalTerminal(meta) : null;
 	if (bridgeRefusal) {
 		const refusalResponse = bridgeRefusal.terminalResponse();
-		if (!ctx.requestRecorder.hasRecord(meta.id))
-			await record(refusalResponse, sdkBridgeRefusalLabel(bridgeRefusal), {
-				failoverAttempts: attempts,
-			});
+		await recordSdkBridgeRefusalAnswer(
+			bridgeRefusal,
+			ctx.requestRecorder.hasRecord(meta.id),
+			(label) => record(refusalResponse, label, { failoverAttempts: attempts }),
+		);
 		return refusalResponse;
 	}
 	const response = Response.json(

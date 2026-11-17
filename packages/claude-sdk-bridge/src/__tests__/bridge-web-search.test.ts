@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
-import type { SdkBridgeTurnMeta } from "@clankermux/types";
+import {
+	SdkBridgeSafetyRefusalError,
+	type SdkBridgeTurnMeta,
+} from "@clankermux/types";
 import {
 	assistantMessage,
 	capturingLog,
@@ -327,16 +330,59 @@ describe("hosted web search on a bridged turn", () => {
 			).toBe("web_search_not_performed");
 		});
 
-		it("fails a refusal without a search the same way", async () => {
+		it("fails a refusal without a search over, with that 502 as the answer if nothing else serves", async () => {
 			const h = harness();
 			const t = await start(h, { ...ask, stream: false });
 			t.query.emit(
 				initMessage(),
 				...streamedMessage([{ type: "text", text: "I can't" }], {
 					stopReason: "refusal",
+					stopDetails: { type: "refusal", category: "cyber" },
 				}),
 			);
-			expect((await t.response).status).toBe(502);
+			const refused = await t.response.then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(refused).toBeInstanceOf(SdkBridgeSafetyRefusalError);
+			expect(refused).toMatchObject({ category: "cyber", status: 502 });
+			const answer = (
+				refused as SdkBridgeSafetyRefusalError
+			).terminalResponse();
+			expect(answer.status).toBe(502);
+			expect(await answer.json()).toEqual({
+				type: "error",
+				error: {
+					type: "api_error",
+					code: "web_search_not_performed",
+					message:
+						"The request requires a web search, and the model answered without completing one",
+				},
+			});
+			await waitFor(
+				() => h.repo.turns.get(t.plan.turnId)?.legs[0]?.finished === true,
+			);
+			expect(h.repo.turns.get(t.plan.turnId)?.legs[0]).toMatchObject({
+				httpStatus: 502,
+				errorPhase: "pre_head",
+				failedOver: true,
+			});
+		});
+
+		it("answers a streamed refusal without a search through the stream, as before", async () => {
+			const h = harness();
+			const t = await start(h, ask);
+			t.query.emit(
+				initMessage(),
+				...streamedMessage([{ type: "text", text: "I can't" }], {
+					stopReason: "refusal",
+				}),
+			);
+			const r = await reply(t.response);
+			expect(r.status).toBe(200);
+			expect(r.errors[0]?.data.error).toMatchObject({
+				code: "web_search_not_performed",
+			});
 		});
 
 		it("lets an answer without a search through when the search was not required", async () => {

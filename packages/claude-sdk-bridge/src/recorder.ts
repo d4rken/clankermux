@@ -186,6 +186,16 @@ export class TurnRecorder {
 	}
 
 	/**
+	 * The leg's failover answered the client after all: queued behind its
+	 * finish, fenced like every leg write. Idempotent in the repository.
+	 */
+	publishFailedOverLeg(id: string, stopReason: string | null): Promise<void> {
+		return this.enqueue("publishFailedOverLeg", async () => {
+			await this.repo.publishFailedOverLeg(id, stopReason, this.fence);
+		});
+	}
+
+	/**
 	 * Write the finish and, in the same queued step, log the turn's journal
 	 * line if the write finished the row. The line counts the writes queued
 	 * before this call that landed, and none queued after it.

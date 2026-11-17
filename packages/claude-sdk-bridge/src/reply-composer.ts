@@ -186,6 +186,8 @@ export class ReplyComposer {
 	/** tool_use ids handed to the client in the current leg. */
 	legToolUseIds: string[] = [];
 	lastStopReason: string | null = null;
+	/** The `stop_details.category` of the leg's last model message, when it named one. */
+	lastStopCategory: string | null = null;
 	/** The leg's WebSearch calls the client was shown, by tool_use id. */
 	private searches = new Map<string, Search>();
 	/**
@@ -277,6 +279,7 @@ export class ReplyComposer {
 		this.accumulated = new Map();
 		this.legToolUseIds = [];
 		this.lastStopReason = null;
+		this.lastStopCategory = null;
 		this.searches = new Map();
 		this.searchBlocks = new Map();
 		this.queuedResults = [];
@@ -625,8 +628,14 @@ export class ReplyComposer {
 		this.emit({ type: "content_block_delta", index, delta });
 	}
 
-	private endOfUpstreamMessage(stopReason: string | null): UpstreamMessageEnd {
+	private endOfUpstreamMessage(
+		stopReason: string | null,
+		stopDetails: unknown,
+	): UpstreamMessageEnd {
 		this.lastStopReason = stopReason;
+		const category = (stopDetails as { category?: unknown } | null)?.category;
+		this.lastStopCategory =
+			typeof category === "string" && category ? category : null;
 		const forwarded = this.forwardedThisMessage;
 		this.forwardedThisMessage = 0;
 		if (this.opts.structuredOutput) return { kind: "continue", stopReason };
@@ -713,12 +722,13 @@ export class ReplyComposer {
 			case "message_stop": {
 				const delta = (this.heldDelta?.delta ?? {}) as {
 					stop_reason?: string | null;
+					stop_details?: unknown;
 				};
 				const stopReason = delta.stop_reason ?? null;
 				// Before the stop decides the leg: the calls it releases end it.
 				this.releaseHeld({ cutOff: false, stopReason });
 				this.streaming = false;
-				return this.endOfUpstreamMessage(stopReason);
+				return this.endOfUpstreamMessage(stopReason, delta.stop_details);
 			}
 			default:
 				return null;
@@ -873,7 +883,10 @@ export class ReplyComposer {
 			},
 			usage: message.usage,
 		};
-		return this.endOfUpstreamMessage(String(message.stop_reason));
+		return this.endOfUpstreamMessage(
+			String(message.stop_reason),
+			message.stop_details,
+		);
 	}
 
 	/**

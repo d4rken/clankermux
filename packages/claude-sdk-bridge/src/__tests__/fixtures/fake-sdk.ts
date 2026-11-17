@@ -302,6 +302,8 @@ export function streamedMessage(
 		model?: string;
 		usage?: Record<string, number | null>;
 		deltaUsage?: Record<string, number | null>;
+		/** The message_delta's `stop_details`, a refusal's `{ type, category }`. */
+		stopDetails?: Record<string, unknown> | null;
 	} = {},
 ): SDKMessage[] {
 	const id = opts.id ?? `msg_${uuid()}`;
@@ -390,7 +392,13 @@ export function streamedMessage(
 	out.push(
 		streamEvent({
 			type: "message_delta",
-			delta: { stop_reason: stopReason, stop_sequence: null },
+			delta: {
+				stop_reason: stopReason,
+				stop_sequence: null,
+				...(opts.stopDetails !== undefined
+					? { stop_details: opts.stopDetails }
+					: {}),
+			},
 			usage: opts.deltaUsage ?? { output_tokens: 5 },
 		}),
 	);
@@ -407,6 +415,7 @@ export function assistantMessage(
 		error?: string;
 		model?: string;
 		usage?: Record<string, number | null>;
+		stopDetails?: Record<string, unknown> | null;
 	} = {},
 ): SDKMessage {
 	return {
@@ -419,6 +428,9 @@ export function assistantMessage(
 			content,
 			stop_reason: opts.stopReason ?? null,
 			stop_sequence: null,
+			...(opts.stopDetails !== undefined
+				? { stop_details: opts.stopDetails }
+				: {}),
 			usage: opts.usage ?? { input_tokens: 10, output_tokens: 5 },
 		},
 		parent_tool_use_id: null,
@@ -613,6 +625,24 @@ export function memoryTurnRepo(): SdkBridgeTurnRepo & {
 			if (fenced(fence)) return;
 			const leg = legs.get(id);
 			if (leg) leg.settledAt ??= at;
+		},
+		async publishFailedOverLeg(
+			id: string,
+			stopReason: string | null,
+			fence?: string,
+		) {
+			if (fenced(fence)) return false;
+			const leg = legs.get(id);
+			if (!leg?.finished || !leg.failedOver) return false;
+			leg.failedOver = false;
+			if (stopReason !== null)
+				Object.assign(leg, {
+					stopReason,
+					errorType: null,
+					errorMessage: null,
+					errorPhase: null,
+				});
+			return true;
 		},
 	};
 }
