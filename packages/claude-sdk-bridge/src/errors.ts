@@ -2,6 +2,7 @@ import type { TerminalReason } from "@anthropic-ai/claude-agent-sdk";
 import {
 	SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
 	SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED,
+	SDK_BRIDGE_SAFETY_REFUSAL,
 	SDK_BRIDGE_SIDE_REQUEST_FORK,
 	SDK_BRIDGE_SIDE_REQUEST_HEADER,
 	type SdkBridgeFailoverReason,
@@ -22,6 +23,13 @@ export interface BridgeError {
 	 * start leg it ends has sent nothing yet. Never sent to the client.
 	 */
 	failover?: SdkBridgeFailoverReason;
+	/** A safety refusal's `stop_details.category`. Never sent to the client. */
+	refusalCategory?: string | null;
+	/**
+	 * A safety refusal's reply as the client would have had it, when that is
+	 * a message and not this error: what the failover answers in its place.
+	 */
+	reply?: Record<string, unknown>;
 }
 
 /** Retry-After for a 429/503/529 whose cause named none. */
@@ -533,6 +541,31 @@ export const bridgeErrors = {
 			code: "structured_output_failed",
 			message: `No answer matching the response schema: ${why}`,
 			retryAfter: null,
+		};
+	},
+	/**
+	 * A start leg's model call stopped on `refusal` before anything went
+	 * out: `answer` is what the leg would have answered, a structured turn's
+	 * error or (status 200, `reply` set) the refused message.
+	 */
+	safetyRefusal(
+		category: string | null,
+		answer: BridgeError | { reply: Record<string, unknown> },
+	): BridgeError {
+		const error: BridgeError =
+			"reply" in answer
+				? {
+						status: 200,
+						type: "refusal",
+						message: `The model refused to answer${category ? ` (category ${category})` : ""}`,
+						retryAfter: null,
+						reply: answer.reply,
+					}
+				: answer;
+		return {
+			...error,
+			failover: SDK_BRIDGE_SAFETY_REFUSAL,
+			refusalCategory: category,
 		};
 	},
 	structuredOutputOnContinuation(): BridgeError {

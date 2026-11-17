@@ -475,10 +475,49 @@ export function sdkBridgeVersionTooOldMessage(input: {
 	return `Anthropic requires ${required} for ${subject}${running}. The gateway operator has to update the bridge's Claude Agent SDK.`;
 }
 
+export const SDK_BRIDGE_SAFETY_REFUSAL = "safety_refusal";
+
+/**
+ * The start leg's model call stopped on `refusal` (Anthropic's safety
+ * classifiers) before anything reached the client. The same content would be
+ * refused on any Claude account, so the request skips them all. The answer is
+ * what the client would have had: the error a structured turn fails with, or
+ * the refused message itself (`reply`, with `status` 200).
+ */
+export class SdkBridgeSafetyRefusalError extends SdkBridgeRefusalError {
+	/** The refusal's `stop_details.category`, when it named one. */
+	readonly category: string | null;
+	readonly #reply: Readonly<Record<string, unknown>> | null;
+
+	constructor(
+		input: Omit<
+			ConstructorParameters<typeof SdkBridgeRefusalError>[0],
+			"reason"
+		> & {
+			category: string | null;
+			reply?: Record<string, unknown> | null;
+		},
+	) {
+		super({ ...input, reason: SDK_BRIDGE_SAFETY_REFUSAL });
+		this.name = "SdkBridgeSafetyRefusalError";
+		this.category = input.category;
+		this.#reply = input.reply ?? null;
+	}
+
+	override terminalResponse(headers: Record<string, string> = {}): Response {
+		if (!this.#reply) return super.terminalResponse(headers);
+		return Response.json(this.#reply, {
+			status: this.status,
+			headers: { ...this.headers, ...headers },
+		});
+	}
+}
+
 /** A bridge refusal the outer attempt fails over on, by its `reason`. */
 export type SdkBridgeFailoverReason =
 	| typeof SDK_BRIDGE_EXTRA_USAGE_EXHAUSTED
-	| typeof SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD;
+	| typeof SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD
+	| typeof SDK_BRIDGE_SAFETY_REFUSAL;
 
 export interface SdkBridgeInnerOutcome {
 	requestId: string;

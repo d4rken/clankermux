@@ -1,6 +1,9 @@
 import {
 	SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD,
+	SDK_BRIDGE_SAFETY_REFUSAL,
 	SdkBridgeExtraUsageError,
+	type SdkBridgeRefusalError,
+	SdkBridgeSafetyRefusalError,
 	SdkBridgeVersionTooOldError,
 } from "@clankermux/types";
 import {
@@ -282,12 +285,33 @@ export class LegResponse {
 			code: error.code ?? null,
 			headers: this.opts.headers,
 		};
-		this.rejectResponse(
-			error.failover === SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD
-				? new SdkBridgeVersionTooOldError(refusal)
-				: new SdkBridgeExtraUsageError(refusal),
-		);
+		let rejection: SdkBridgeRefusalError;
+		if (error.failover === SDK_BRIDGE_CLAUDE_CODE_VERSION_TOO_OLD)
+			rejection = new SdkBridgeVersionTooOldError(refusal);
+		else if (error.failover === SDK_BRIDGE_SAFETY_REFUSAL)
+			rejection = new SdkBridgeSafetyRefusalError({
+				...refusal,
+				category: error.refusalCategory ?? null,
+				reply: error.reply ?? null,
+			});
+		else rejection = new SdkBridgeExtraUsageError(refusal);
+		this.rejectResponse(rejection);
 		return true;
+	}
+
+	/**
+	 * The complete non-streamed reply while nothing went out, as `end` would
+	 * answer it; null for a streamed leg or once the reply is answered.
+	 */
+	heldReply(): Record<string, unknown> | null {
+		return this.reducer && this.state === "holding"
+			? this.reducer.result()
+			: null;
+	}
+
+	/** A non-streamed leg that has answered nothing yet. */
+	get holdingWholeReply(): boolean {
+		return this.reducer !== null && this.state === "holding";
 	}
 
 	private cleanup(): void {

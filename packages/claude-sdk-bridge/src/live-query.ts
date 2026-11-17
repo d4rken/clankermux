@@ -83,6 +83,8 @@ const PROMPT_WRITE_MS = 20;
 const ENVELOPE_WAIT_MS = 2_000;
 /** After the SIGKILL, how long a release waits for the child and the pump to end. */
 const RELEASE_EXIT_WAIT_MS = 3_000;
+/** A structured turn's miss when its last model call stopped on `refusal`. */
+const REFUSED_MISS = "the model refused to answer";
 
 /**
  * Whether `ids` answer exactly the calls in `awaiting`: each one once, and
@@ -784,6 +786,24 @@ export class LiveQuery {
 			this.teardown("error", bridgeErrors.webSearchNotPerformed());
 			return;
 		}
+		// A start leg refused before anything went out fails over: the same
+		// content would be refused on every Claude account, and the refused
+		// message answers only when no other destination serves the request.
+		if (
+			finalReason === "refusal" &&
+			leg.kind === "start" &&
+			leg.response.holdingWholeReply
+		) {
+			composer.finish(stopReason);
+			const reply = leg.response.heldReply();
+			if (reply) {
+				this.stopReason = finalReason;
+				this.failTurn(
+					bridgeErrors.safetyRefusal(composer.lastStopCategory, { reply }),
+				);
+				return;
+			}
+		}
 		// Tool calls handed out now could never be answered: the query dies
 		// with the bridge. The leg fails instead, with the shutdown 503 while
 		// nothing went out, or a closing SSE error once the stream is open.
@@ -1358,7 +1378,7 @@ export class LiveQuery {
 			message.terminal_reason === "structured_output_retry_exhausted"
 				? "the model's answers did not match it within Claude Code's retries"
 				: this.init.composer.lastStopReason === "refusal"
-					? "the model refused to answer"
+					? REFUSED_MISS
 					: !failed
 						? "Claude Code finished the turn without a structured answer"
 						: `Claude Code ended the turn with an error: ${sanitizeMessage(text)}`;
@@ -1398,10 +1418,16 @@ export class LiveQuery {
 			this.endLeg("max_tokens");
 			return;
 		}
+		const failed = bridgeErrors.structuredOutputFailed(
+			this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
+		);
 		this.failTurn(
-			bridgeErrors.structuredOutputFailed(
-				this.structuredMiss ?? fallbackText ?? "Claude Code ended the turn",
-			),
+			this.structuredMiss === REFUSED_MISS
+				? bridgeErrors.safetyRefusal(
+						this.init.composer.lastStopCategory,
+						failed,
+					)
+				: failed,
 		);
 	}
 
