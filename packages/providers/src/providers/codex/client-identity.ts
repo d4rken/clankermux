@@ -12,7 +12,7 @@ import { readChatgptAccountId } from "./identity";
  * minimum versions. Revisit it when requests fail a version gate or a model is
  * missing from every Codex account's discovered models.
  */
-export const CODEX_VERSION = "0.159.2";
+export const CODEX_VERSION = "0.169.0";
 
 /** The OS/arch segment of the User-Agent. Pinned, not read from the host. */
 export const CODEX_PLATFORM = "Debian 13.0.0; x86_64";
@@ -43,12 +43,12 @@ function userAgentPrefix(originator: string): string {
 }
 
 /**
- * `codex_exec/0.159.2 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.159.2)`.
+ * `codex_exec/0.169.0 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.169.0)`.
  * The trailing group names the client that initialized the session.
  */
 export const CODEX_USER_AGENT = `${userAgentPrefix(CODEX_EXEC_ORIGINATOR)} (${CODEX_EXEC_ORIGINATOR}; ${CODEX_VERSION})`;
 
-/** `codex_cli_rs/0.159.2 (Debian 13.0.0; x86_64) xterm-256color`: no client yet. */
+/** `codex_cli_rs/0.169.0 (Debian 13.0.0; x86_64) xterm-256color`: no client yet. */
 export const CODEX_LOGIN_USER_AGENT = userAgentPrefix(CODEX_LOGIN_ORIGINATOR);
 
 /**
@@ -118,7 +118,7 @@ function isCodexClientOriginator(originator: string): boolean {
  *
  *   originator "codex-tui",
  *   "codex-tui/0.160.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.160.0)"
- *   → "codex-tui/0.159.2 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.159.2)"
+ *   → "codex-tui/0.169.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.14 (codex-tui; 0.169.0)"
  *
  * The trailing group is only rewritten when it repeats the build version: a
  * client like the VS Code extension reports its own version there.
