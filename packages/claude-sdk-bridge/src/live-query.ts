@@ -776,33 +776,40 @@ export class LiveQuery {
 		const content = composer.legContent();
 		const finalReason = stopReason ?? composer.lastStopReason ?? "end_turn";
 		const parks = finalReason === "tool_use" && toolUseIds.length > 0;
-		// The client's search tool must never take an unsearched answer for
-		// one: the reply fails instead, before it closes.
-		if (
-			this.init.webSearchRequired &&
-			!parks &&
-			composer.completedSearches === 0
-		) {
-			this.teardown("error", bridgeErrors.webSearchNotPerformed());
-			return;
-		}
+		const unsearched =
+			this.init.webSearchRequired && !parks && composer.completedSearches === 0;
 		// A start leg refused before anything went out fails over: the same
-		// content would be refused on every Claude account, and the refused
-		// message answers only when no other destination serves the request.
+		// content would be refused on every Claude account. What the leg would
+		// have answered answers only when no other destination serves the
+		// request: the search failure below, or the refused message.
 		if (
 			finalReason === "refusal" &&
 			leg.kind === "start" &&
 			leg.response.holdingWholeReply
 		) {
+			const category = composer.lastStopCategory;
+			if (unsearched) {
+				this.failTurn(
+					bridgeErrors.safetyRefusal(
+						category,
+						bridgeErrors.webSearchNotPerformed(),
+					),
+				);
+				return;
+			}
 			composer.finish(stopReason);
 			const reply = leg.response.heldReply();
 			if (reply) {
 				this.stopReason = finalReason;
-				this.failTurn(
-					bridgeErrors.safetyRefusal(composer.lastStopCategory, { reply }),
-				);
+				this.failTurn(bridgeErrors.safetyRefusal(category, { reply }));
 				return;
 			}
+		}
+		// The client's search tool must never take an unsearched answer for
+		// one: the reply fails instead, before it closes.
+		if (unsearched) {
+			this.teardown("error", bridgeErrors.webSearchNotPerformed());
+			return;
 		}
 		// Tool calls handed out now could never be answered: the query dies
 		// with the bridge. The leg fails instead, with the shutdown 503 while
