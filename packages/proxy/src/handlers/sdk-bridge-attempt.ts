@@ -9,6 +9,7 @@ import {
 	SdkBridgeExtraUsageError,
 	SdkBridgeRefusalError,
 	type SdkBridgeRoutePlan,
+	SdkBridgeSafetyRefusalError,
 	type SdkBridgeTransport,
 	type SdkBridgeTurnMeta,
 	SdkBridgeUnavailableError,
@@ -159,8 +160,9 @@ export type SdkBridgeAttemptResult =
 	/**
 	 * Nothing reached the client; the caller may move on to its next
 	 * candidate. `refusal` is set when the bridge answered with its own
-	 * refusal (every Claude Code slot taken, or Anthropic out of extra usage
-	 * before the head), and carries the answer for a request no other
+	 * refusal (every Claude Code slot taken; before the head, Anthropic out
+	 * of extra usage, refusing the bridge's Claude Code version, or the model
+	 * refusing the content), and carries the answer for a request no other
 	 * candidate serves.
 	 */
 	| { kind: "unavailable"; reason: string; refusal?: SdkBridgeRefusalError };
@@ -383,7 +385,8 @@ export async function continueParkedSdkBridgeTurn(input: {
 		// A continuation that fell back to a fresh start has no other route.
 		if (
 			error instanceof SdkBridgeExtraUsageError ||
-			error instanceof SdkBridgeVersionTooOldError
+			error instanceof SdkBridgeVersionTooOldError ||
+			error instanceof SdkBridgeSafetyRefusalError
 		)
 			return recordTerminal(
 				error.terminalResponse(),

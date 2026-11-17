@@ -64,6 +64,7 @@ import {
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	SdkBridgeExtraUsageError,
+	SdkBridgeSafetyRefusalError,
 	SdkBridgeVersionTooOldError,
 	SERVICE_TIER_ADAPTATION_HEADER,
 	transferChatContext,
@@ -347,6 +348,12 @@ export type ProxyAttemptOutcome =
 	 * other bridged account.
 	 */
 	| { kind: "sdk_bridge_version_too_old" }
+	/**
+	 * The model refused the bridged turn (`stop_reason: "refusal"`) before
+	 * anything reached the client; the request skips every other bridged
+	 * account, which would refuse the same content.
+	 */
+	| { kind: "sdk_bridge_safety_refusal" }
 	| { kind: "other" };
 
 /**
@@ -1552,7 +1559,9 @@ export async function proxyWithAccount(
 					? { kind: "sdk_bridge_extra_usage" }
 					: bridged.refusal instanceof SdkBridgeVersionTooOldError
 						? { kind: "sdk_bridge_version_too_old" }
-						: { kind: "sdk_bridge_unavailable" },
+						: bridged.refusal instanceof SdkBridgeSafetyRefusalError
+							? { kind: "sdk_bridge_safety_refusal" }
+							: { kind: "sdk_bridge_unavailable" },
 				null,
 				undefined,
 				`${bridged.refusal ? sdkBridgeRefusalLabel(bridged.refusal) : "sdk_bridge_unavailable"}: ${bridged.reason}`,

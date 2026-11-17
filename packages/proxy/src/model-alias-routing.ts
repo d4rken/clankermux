@@ -85,6 +85,8 @@ export function aliasFallbackReason(
 			return "extra_usage_exhausted";
 		case "sdk_bridge_version_too_old":
 			return "claude_code_version_too_old";
+		case "sdk_bridge_safety_refusal":
+			return "safety_refusal";
 		case "network_error":
 			return outcome.beforeDispatch ? null : "temporarily_unavailable";
 		// Another target may be a model or provider whose translator takes the body.

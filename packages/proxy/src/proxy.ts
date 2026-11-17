@@ -1360,7 +1360,8 @@ async function handleIngestedProxy(
 
 	// The last candidate tried was the SDK bridge, refused with an answer of
 	// its own: a capacity 529 and Retry-After say when to come back, Anthropic's
-	// extra-usage 400 says why; a generic 503 would say neither.
+	// extra-usage 400 says why, a safety refusal is the reply the client would
+	// have had; a generic 503 would say none of it.
 	const bridgeRefusal = sdkBridgeRefusalTerminal(requestMeta);
 	if (bridgeRefusal) {
 		const response = bridgeRefusal.terminalResponse();

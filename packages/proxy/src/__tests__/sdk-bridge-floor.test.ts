@@ -15,6 +15,7 @@ import {
 	REASONING_EFFORT_ADAPTATION_HEADER,
 	SdkBridgeCapacityError,
 	SdkBridgeExtraUsageError,
+	SdkBridgeSafetyRefusalError,
 	SdkBridgeUnavailableError,
 	SdkBridgeVersionTooOldError,
 	SERVICE_TIER_ADAPTATION_HEADER,
@@ -709,6 +710,212 @@ describe("SDK bridge floor with a bridge", () => {
 
 				expect(response.status).toBe(200);
 				expect(harness.upstreamKeys).toEqual(["key-claude-a"]);
+			});
+		});
+	});
+
+	describe("when the model refuses the bridged turn before the head", () => {
+		const STRUCTURED_MESSAGE =
+			"No answer matching the response schema: the model refused to answer";
+		const structuredRefusal = () =>
+			new SdkBridgeSafetyRefusalError({
+				status: 502,
+				type: "api_error",
+				message: STRUCTURED_MESSAGE,
+				retryAfter: null,
+				code: "structured_output_failed",
+				category: "cyber",
+				headers: { "x-clankermux-sdk-bridge-history": "fresh" },
+			});
+		const REFUSED_MESSAGE = {
+			id: "msg_refused",
+			type: "message",
+			role: "assistant",
+			model: MODEL,
+			content: [{ type: "text", text: "I can't help with that." }],
+			stop_reason: "refusal",
+			stop_sequence: null,
+			usage: { input_tokens: 10, output_tokens: 5 },
+		};
+		const refused = () =>
+			makeFakeBridge(() => {
+				throw structuredRefusal();
+			});
+
+		function aliasOf(...targets: Array<[string, Account]>): ModelAlias {
+			return {
+				id: "alias:mixed",
+				displayName: "Mixed",
+				revision: 0,
+				targets: targets.map(([model, account]) => ({
+					model,
+					accountIds: [account.id],
+				})),
+			};
+		}
+
+		it("moves on to the next alias stage, recording why", async () => {
+			const bridge = refused();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([a, o], {
+				bridge,
+				model: "alias:mixed",
+			});
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: { get: async () => aliasOf([MODEL, a], ["gpt-x", o]) },
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			const rows = sends(harness);
+			expect(rows.map((r) => r.account_id)).toEqual(["claude-a", "other"]);
+			expect(rows[0].status).toBe(502);
+			expect(rows[0].error).toBe(
+				`sdk_bridge_safety_refusal: ${STRUCTURED_MESSAGE}`,
+			);
+			expect(JSON.parse(rows[1].route_snapshot ?? "{}").alias?.reason).toBe(
+				"safety_refusal",
+			);
+		});
+
+		it("skips a later alias stage on a Claude account too", async () => {
+			const bridge = refused();
+			const a = claudeA();
+			const b = claudeB();
+			const o = other();
+			harness = await makeBridgeHarness([a, b, o], {
+				bridge,
+				model: "alias:mixed",
+			});
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: {
+					get: async () =>
+						aliasOf([MODEL, a], ["claude-haiku-4-5", b], ["gpt-x", o]),
+				},
+			});
+			await provisionRouting(harness.ctx, MODEL);
+			await provisionRouting(harness.ctx, "claude-haiku-4-5");
+			await provisionRouting(harness.ctx, "gpt-x");
+
+			const { response } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			expect(sends(harness).map((r) => r.account_id)).toEqual([
+				"claude-a",
+				"other",
+			]);
+		});
+
+		it("skips every other official account of a pooled route, changing none", async () => {
+			const bridge = refused();
+			const a = claudeA();
+			const b = claudeB();
+			harness = await makeBridgeHarness([a, b, other()], { bridge });
+
+			const { response } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(200);
+			expect(bridge.starts).toHaveLength(1);
+			expect(sends(harness).map((r) => r.account_id)).toEqual([
+				"claude-a",
+				"other",
+			]);
+			expect(harness.ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+			for (const account of [a, b]) {
+				expect(account.rate_limited_until ?? null).toBeNull();
+				expect(account.paused ?? false).toBeFalsy();
+			}
+		});
+
+		it("answers the structured turn's 502 when no other destination remains", async () => {
+			const bridge = refused();
+			harness = await makeBridgeHarness([claudeA(), claudeB()], { bridge });
+
+			const { response, text } = await run(flooredRequest(), harness.ctx);
+
+			expect(response.status).toBe(502);
+			expect(response.headers.get("x-clankermux-sdk-bridge-history")).toBe(
+				"fresh",
+			);
+			expect(JSON.parse(text)).toEqual({
+				type: "error",
+				error: {
+					type: "api_error",
+					message: STRUCTURED_MESSAGE,
+					code: "structured_output_failed",
+				},
+			});
+			expect(bridge.starts).toHaveLength(1);
+			expect(harness.upstreamKeys).toEqual([]);
+			const recorded = harness.ctx.requestRecorder
+				.recordSynthetic as ReturnType<typeof spyOn>;
+			expect(recorded).toHaveBeenCalledTimes(1);
+			expect(recorded.mock.calls[0]?.[2]).toBe("sdk_bridge_safety_refusal");
+		});
+
+		it("answers the refused message itself when that was the reply", async () => {
+			const bridge = makeFakeBridge(() => {
+				throw new SdkBridgeSafetyRefusalError({
+					status: 200,
+					type: "refusal",
+					message: "The model refused to answer (category cyber)",
+					retryAfter: null,
+					category: "cyber",
+					reply: REFUSED_MESSAGE,
+					headers: { "x-clankermux-sdk-bridge-history": "fresh" },
+				});
+			});
+			harness = await makeBridgeHarness([claudeA()], { bridge });
+
+			const { response, text } = await run(
+				flooredRequest({ stream: false }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(200);
+			expect(response.headers.get("x-clankermux-sdk-bridge-history")).toBe(
+				"fresh",
+			);
+			expect(JSON.parse(text)).toEqual(REFUSED_MESSAGE);
+		});
+
+		it("answers the 502 after the last alias stage, not the alias 503", async () => {
+			const bridge = refused();
+			const a = claudeA();
+			const o = other();
+			harness = await makeBridgeHarness([o, a], {
+				bridge,
+				model: "alias:mixed",
+				upstream: () => new Response("down", { status: 503 }),
+			});
+			Object.assign(harness.ctx.dbOps, {
+				modelAliases: { get: async () => aliasOf(["gpt-x", o], [MODEL, a]) },
+			});
+			await provisionRouting(harness.ctx, "gpt-x");
+			await provisionRouting(harness.ctx, MODEL);
+
+			const { response, text } = await run(
+				flooredRequest({ model: "alias:mixed" }),
+				harness.ctx,
+			);
+
+			expect(response.status).toBe(502);
+			expect(JSON.parse(text).error).toEqual({
+				type: "api_error",
+				message: STRUCTURED_MESSAGE,
+				code: "structured_output_failed",
 			});
 		});
 	});
@@ -1505,6 +1712,31 @@ describe("SDK bridge continuations", () => {
 			message: "Anthropic requires a newer Claude Code.",
 			code: "claude_code_version_too_old",
 		});
+	});
+
+	it("answer the safety refusal's own answer when the turn had to start afresh, not a 503", async () => {
+		const { bridge, h } = await withContinuation(KEY);
+		bridge.continueTurn = async () => {
+			throw new SdkBridgeSafetyRefusalError({
+				status: 502,
+				type: "api_error",
+				message:
+					"No answer matching the response schema: the model refused to answer",
+				retryAfter: null,
+				code: "structured_output_failed",
+				category: null,
+			});
+		};
+
+		const { response, text } = await run(flooredRequest(toolResults), h.ctx);
+
+		expect(response.status).toBe(502);
+		expect(JSON.parse(text).error.code).toBe("structured_output_failed");
+		expect(
+			(
+				h.ctx.requestRecorder.recordSynthetic as ReturnType<typeof mock>
+			).mock.calls.map((call) => call[2]),
+		).toEqual(["sdk_bridge_safety_refusal"]);
 	});
 
 	describe("record a row under the request's id when no leg answers it", () => {
