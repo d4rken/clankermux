@@ -46,6 +46,14 @@ What differs from a direct request:
   accounts (the next alias stage, or the rest of the pool), skipping the other
   Claude accounts. With none left, you get that 400. Once the reply has
   started streaming, the error ends the stream instead.
+* When the model refuses a turn (stop reason `refusal`) before any of the
+  reply went out, the request moves on the same way, skipping the other
+  Claude accounts, which would refuse the same content. With none left, you
+  get what the refusal produced: the refused message with stop reason
+  `refusal`, or, with a response schema, the 502 `structured_output_failed`.
+  A streamed reply without a schema starts with the model's first event, so
+  its refusal arrives as the reply's stop reason, as it does on tool results
+  that continue a turn.
 * `temperature` and `top_p` are ignored. Stop sequences (`stop`), a
   `tool_choice` that forces or forbids tool use, server tools (any tool
   with a `type` other than `custom`, such as Anthropic's web search) and

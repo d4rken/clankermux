@@ -53,8 +53,9 @@ pipeline. The client keeps executing its own tools.
   `SdkBridgeRefusalError` fails over too, and when it was the last failure
   the give-up terminals answer it instead of their own 503; later official
   candidates of the same request skip the bridge (`sdk-bridge-refusal.ts`).
-  Two refusals exist: `SdkBridgeCapacityError` (process or rebuild cap, its
-  529 and Retry-After) and `SdkBridgeExtraUsageError` (below).
+  The refusals: `SdkBridgeCapacityError` (process or rebuild cap, its 529
+  and Retry-After), and `SdkBridgeExtraUsageError`,
+  `SdkBridgeVersionTooOldError` and `SdkBridgeSafetyRefusalError` (below).
 - **Out of extra usage.** An inner 400 whose upstream error message says
   "out of extra usage" (`mapInnerOutcome` marks it `failover`) fails a start
   leg over while its head is still held: no event sent and not past
@@ -99,6 +100,24 @@ pipeline. The client keeps executing its own tools.
   The floors show in `/api/system/status` and on the dashboard's bridge line.
   Claude Code's own direct requests are untouched: the 400 is about that
   client's version and is forwarded as it came.
+- **Safety refusal.** A start leg's model call that stops on `refusal`
+  (Anthropic's safety classifiers; `stop_details.category` names why, such
+  as `cyber`) fails over while the leg's head is still held, under the
+  extra-usage rules (`SdkBridgeSafetyRefusalError`, alias reason
+  `safety_refusal`, label `sdk_bridge_safety_refusal`): the request skips
+  every remaining bridged account, each of which would refuse the same
+  content. A structured turn's refusal miss fails over from `giveUp`, its
+  502 `structured_output_failed` the answer. An ordinary turn fails over
+  from `endLeg` only on a non-streamed leg
+  (`LegResponse.holdingWholeReply`): the composer finishes the reply into
+  the reducer first, and the error carries that message (`reply`, status
+  200), which `terminalResponse` answers whole. A streamed ordinary leg
+  commits its head with its first model event, so its refusal reaches the
+  client as the reply's `stop_reason`, as a continuation's does. Leg and
+  turn record the answer the leg would have given (200 `refusal` or the
+  502) with `pre_head` and `failed_over`; the turn is `failed`. The
+  category rides on the error (`category`) and on the inner row's
+  `refusal_category`, never on the client's answer.
 - **Frozen `SdkBridgeRoutePlan`.** Built after alias-stage selection and
   candidate ordering: the official Anthropic subset, in order, with the
   outer-selected account preferred, the key identity and the turn id. Inner
@@ -518,8 +537,10 @@ it works with the bridge's own options (`tools: []`, `dontAsk`).
   content), status `completed`. Anything else (retries exhausted, a
   refusal, a success without the field, an exit without a result) is 502
   `structured_output_failed`, an SSE `error` once the head is committed;
-  never prose. Chat answers a mid-stream error as a JSON 502 when the client
-  asked for JSON. Measured on CLI 2.1.280 against the mock upstream: a
+  never prose. A refusal before the head fails over instead (Safety
+  refusal, above), and its 502 is the answer only when nothing else serves.
+  Chat answers a mid-stream error as a JSON 502 when the client asked for
+  JSON. Measured on CLI 2.1.280 against the mock upstream: a
   schema mismatch takes five model calls before the failed result; a
   StructuredOutput input cut off at `max_tokens` is retried the same way
   and ends as the token limit's; a complete input in a message that stopped
