@@ -2,9 +2,38 @@ import { describe, expect, it } from "bun:test";
 import {
 	costBadgeProps,
 	decodeNameSelectValue,
+	freshTokenCount,
 	nameSelectValue,
 	requestRowOutcome,
 } from "./RequestsTab";
+
+describe("freshTokenCount", () => {
+	it("counts a cold-cache write as fresh", () => {
+		// 2 input + 554,261 written to cache + 565 output, nothing read.
+		expect(
+			freshTokenCount({
+				totalTokens: 554_828,
+				cacheReadInputTokens: 0,
+				cacheCreationInputTokens: 554_261,
+			}),
+		).toBe(554_828);
+	});
+
+	it("leaves out only what was read from cache", () => {
+		expect(
+			freshTokenCount({
+				totalTokens: 528_809,
+				cacheReadInputTokens: 528_381,
+				cacheCreationInputTokens: 0,
+			}),
+		).toBe(428);
+	});
+
+	it("returns null until usage lands", () => {
+		expect(freshTokenCount(undefined)).toBeNull();
+		expect(freshTokenCount({ totalTokens: undefined })).toBeNull();
+	});
+});
 
 describe("costBadgeProps", () => {
 	it("renders neutral for plan-covered requests", () => {
