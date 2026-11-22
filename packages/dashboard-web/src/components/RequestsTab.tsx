@@ -150,6 +150,24 @@ export function costBadgeProps(billingType: string | null | undefined): {
 }
 
 /**
+ * Tokens the upstream processed rather than read from the prompt cache.
+ * Cache writes count: a cold-cache turn re-processes the whole prompt and
+ * costs more than a hit. Taken off totalTokens, the one figure a row always
+ * carries once its usage lands, rather than re-summing the parts.
+ */
+export function freshTokenCount(
+	summary:
+		| Pick<
+				RequestSummary,
+				"totalTokens" | "cacheReadInputTokens" | "cacheCreationInputTokens"
+		  >
+		| undefined,
+): number | null {
+	if (summary?.totalTokens == null) return null;
+	return Math.max(0, summary.totalTokens - (summary.cacheReadInputTokens ?? 0));
+}
+
+/**
  * One dismissible chip in the active-filters bar.
  *
  * Six byte-identical copies of this markup sat inline, which also meant six
@@ -1296,19 +1314,7 @@ export function RequestsTab() {
 								request.meta.projectAttributionSource,
 							);
 							const attributionChip = projectAttributionChip(attributionSource);
-							// Tokens that weren't served from / written to the prompt cache,
-							// so the part billed at the full rate. Taken off totalTokens,
-							// which is the one figure a row always carries once its usage
-							// lands, rather than re-summing the parts.
-							const freshTokens =
-								summary?.totalTokens != null
-									? Math.max(
-											0,
-											summary.totalTokens -
-												(summary.cacheReadInputTokens ?? 0) -
-												(summary.cacheCreationInputTokens ?? 0),
-										)
-									: null;
+							const freshTokens = freshTokenCount(summary);
 							const isZaiPeak =
 								zaiAccountNames.has(request.meta.accountName ?? "") &&
 								isZaiPeakHour(request.meta.timestamp);
