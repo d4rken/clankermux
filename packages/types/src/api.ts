@@ -50,6 +50,11 @@ export interface RequestMeta {
 	 * refusal this process observed (a restart, or another proxy served it).
 	 */
 	fallbackFromModel?: string | null;
+	/** Account and identity whose refusal issued the redeemed credit; `null` when no origin was resolved. */
+	fallbackCreditIssuer?: {
+		accountId: string | null;
+		identityExternalId: string | null;
+	} | null;
 	/**
 	 * Ingest-time context composition computed once in handleProxy from the
 	 * parsed POST /v1/messages body; null/absent when not computed (other

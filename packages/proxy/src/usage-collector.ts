@@ -12,6 +12,7 @@ import {
 	NativeTerminalJson,
 } from "./native-terminal-json";
 import {
+	type FallbackCreditIssuer,
 	hashCreditToken,
 	refusalFallbackRegistry,
 } from "./refusal-fallback-registry";
@@ -200,6 +201,8 @@ export interface UsageState {
 	 * fields can never disagree.
 	 */
 	refusalCategory: string | undefined;
+	/** The account serving this response, recorded as the issuer of any fallback credit it carries. */
+	issuer: FallbackCreditIssuer;
 }
 
 /** Threshold for switching from a buffered SSE line to selective JSON parsing. */
@@ -212,7 +215,9 @@ export function getLineBufferLength(state: UsageState): number {
 	return state.lineBuffer.length + (state.largeLine?.retainedCharacters ?? 0);
 }
 
-export function createUsageState(): UsageState {
+export function createUsageState(opts?: {
+	issuer?: FallbackCreditIssuer;
+}): UsageState {
 	return {
 		model: undefined,
 		inputTokens: undefined,
@@ -237,6 +242,10 @@ export function createUsageState(): UsageState {
 		skippingOverlongLine: false,
 		stopReason: undefined,
 		refusalCategory: undefined,
+		issuer: {
+			accountId: opts?.issuer?.accountId ?? null,
+			identityExternalId: opts?.issuer?.identityExternalId ?? null,
+		},
 	};
 }
 
@@ -386,9 +395,10 @@ interface SseParsed {
  * must not erase one already seen.
  *
  * When the accepted reason is a refusal carrying a fallback credit token, the
- * token's HASH is registered against the serving model so the retry that
- * redeems it (a separate request, arriving moments later) can name the model it
- * was refused by. The token itself is never stored or logged.
+ * token's HASH is registered against the serving model and the issuing account
+ * so the retry that redeems it (a separate, later request) can name the model it
+ * was refused by and the account that issued the credit. The token itself is
+ * never stored or logged.
  */
 function applyStopReason(
 	state: UsageState,
@@ -417,6 +427,8 @@ function applyStopReason(
 			model: state.model ?? null,
 			category: state.refusalCategory,
 			at: now,
+			accountId: state.issuer.accountId,
+			identityExternalId: state.issuer.identityExternalId,
 		});
 	}
 }

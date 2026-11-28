@@ -392,13 +392,21 @@ export async function ingestProxyRequest(
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.fallbackCreditClaimed = creditToken !== null;
 	// Resolved once, here: the registry entry is consumed on redemption, so this
-	// must not run per failover attempt. `null` when the refusal that issued the
-	// credit was not observed by this process (restart, or another proxy).
-	requestMeta.fallbackFromModel = creditToken
-		? (refusalFallbackRegistry.takeOrigin(
+	// must not run per failover attempt. Both fields are `null` when the refusal
+	// that issued the credit was not observed by this process (restart, expiry,
+	// or another proxy).
+	const creditOrigin = creditToken
+		? refusalFallbackRegistry.takeOrigin(
 				hashCreditToken(creditToken),
 				Date.now(),
-			)?.model ?? null)
+			)
+		: null;
+	requestMeta.fallbackFromModel = creditOrigin?.model ?? null;
+	requestMeta.fallbackCreditIssuer = creditOrigin
+		? {
+				accountId: creditOrigin.accountId,
+				identityExternalId: creditOrigin.identityExternalId,
+			}
 		: null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;

@@ -54,6 +54,7 @@ import {
 	type OverloadProbeEvidence,
 	type OverloadProbeToken,
 } from "./provider-overload-cooldown";
+import type { FallbackCreditIssuer } from "./refusal-fallback-registry";
 import { RequestBodyContext } from "./request-body-context";
 import {
 	NO_ACCOUNT_ID,
@@ -344,6 +345,19 @@ interface ProbeSpendSink {
 	finish(completedAt: number | null): void;
 }
 
+/** The issuer a fallback credit on this account's response is recorded against. */
+function fallbackCreditIssuerOf(
+	account: Account | null | undefined,
+): FallbackCreditIssuer {
+	if (!account?.id || account.id === NO_ACCOUNT_ID) {
+		return { accountId: null, identityExternalId: null };
+	}
+	return {
+		accountId: account.id,
+		identityExternalId: account.identity_external_id ?? null,
+	};
+}
+
 /**
  * Sink that records what ONE internal probe dispatch (a cache-keepalive replay
  * or an auto-refresh prime) actually spent.
@@ -382,7 +396,7 @@ function createProbeSpendSink(
 	const account = args.account;
 	if (source === null || !account) return null;
 
-	const state = createUsageState();
+	const state = createUsageState({ issuer: fallbackCreditIssuerOf(account) });
 	let done = false;
 	return {
 		feed(chunk: Uint8Array): void {
@@ -919,7 +933,7 @@ async function forwardToClientInner(
 	// SlimUsageSummary AFTER transport finish (see trackFinalize). Null for
 	// filtered requests (no usage computed for them, same as before).
 	const usageState: UsageState | null = shouldProcessRequest
-		? createUsageState()
+		? createUsageState({ issuer: fallbackCreditIssuerOf(account) })
 		: null;
 	// Production supplies this from the request's existing parse. Keep the body
 	// fallback for direct callers/tests without imposing a second large JSON parse

@@ -2432,6 +2432,88 @@ describe("usage-collector", () => {
 			expect(origin?.at).toBe(1100);
 		});
 
+		it("registers a streamed refusal's credit against the issuing account", () => {
+			const state = createUsageState({
+				issuer: { accountId: "acc-issuer", identityExternalId: "org-issuer" },
+			});
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: {
+							type: "refusal",
+							category: "cyber",
+							fallback_credit_token: "fbc_streamed",
+						},
+					},
+				}),
+				1000,
+			);
+
+			const origin = refusalFallbackRegistry.takeOrigin(
+				hashCreditToken("fbc_streamed"),
+				1100,
+			);
+			expect(origin?.accountId).toBe("acc-issuer");
+			expect(origin?.identityExternalId).toBe("org-issuer");
+		});
+
+		it("registers a non-stream refusal's credit against the issuing account", () => {
+			const state = createUsageState({
+				issuer: { accountId: "acc-issuer", identityExternalId: "org-issuer" },
+			});
+			feedNonStreamBody(
+				state,
+				JSON.stringify({
+					model: "claude-fable-5-1",
+					stop_reason: "refusal",
+					stop_details: {
+						type: "refusal",
+						category: "cyber",
+						fallback_credit_token: "fbc_non_stream",
+					},
+					usage: { input_tokens: 10, output_tokens: 2 },
+				}),
+			);
+
+			const origin = refusalFallbackRegistry.takeOrigin(
+				hashCreditToken("fbc_non_stream"),
+				Date.now(),
+			);
+			expect(origin?.model).toBe("claude-fable-5-1");
+			expect(origin?.accountId).toBe("acc-issuer");
+			expect(origin?.identityExternalId).toBe("org-issuer");
+		});
+
+		it("registers a null issuer when the state was created without one", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: {
+							type: "refusal",
+							category: "cyber",
+							fallback_credit_token: "fbc_no_issuer",
+						},
+					},
+				}),
+				1000,
+			);
+
+			const origin = refusalFallbackRegistry.takeOrigin(
+				hashCreditToken("fbc_no_issuer"),
+				1100,
+			);
+			expect(origin).not.toBeNull();
+			expect(origin?.accountId).toBeNull();
+			expect(origin?.identityExternalId).toBeNull();
+		});
+
 		it("registers nothing for a refusal without a credit token", () => {
 			const state = createUsageState();
 			feedChunk(
