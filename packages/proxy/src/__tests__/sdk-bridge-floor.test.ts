@@ -174,6 +174,22 @@ describe("SDK bridge floor with a bridge", () => {
 		expect(send.status).toBe(200);
 	});
 
+	it("hands the bridge no fallback credit the routed account did not issue", async () => {
+		const bridge = makeFakeBridge();
+		harness = await makeBridgeHarness([claudeA()], { bridge });
+
+		const { response } = await run(
+			flooredRequest({ fallback_credit_token: "fbc_bridge_unknown_origin" }),
+			harness.ctx,
+		);
+
+		expect(response.status).toBe(200);
+		expect(bridge.starts).toHaveLength(1);
+		expect(Object.hasOwn(bridge.starts[0].body, "fallback_credit_token")).toBe(
+			false,
+		);
+	});
+
 	it("records no audit a client planted in its own headers", async () => {
 		harness = await makeBridgeHarness([claudeA()], {
 			bridge: makeFakeBridge(),

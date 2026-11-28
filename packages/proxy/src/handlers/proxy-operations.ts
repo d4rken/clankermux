@@ -81,6 +81,7 @@ import {
 	codexTransientHoldMs,
 	holdBeforeCodexRetry,
 } from "../codex-transient-hold";
+import { bindFallbackCredit } from "../fallback-credit-binding";
 import {
 	clearFamilyWeeklyExhausted,
 	recordFamilyWeeklyExhausted,
@@ -1530,6 +1531,12 @@ export async function proxyWithAccount(
 			throw new RoutingPolicyError("Cannot apply resolved model");
 		adaptAliasEffort(effectiveBodyContext, requestMeta, account);
 		bindAnthropicAccountUuid(effectiveBodyContext, account);
+		bindFallbackCredit(
+			effectiveBodyContext,
+			account,
+			requestMeta.fallbackCreditIssuer,
+			requestMeta.id,
+		);
 		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// A distinct attempt mode, branched before anything below touches the

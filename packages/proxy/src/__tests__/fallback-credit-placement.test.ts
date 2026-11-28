@@ -56,6 +56,8 @@ describe("fallback-credit retry on the main path", () => {
 	let originalFetch: typeof globalThis.fetch;
 	/** Which account each upstream call was authenticated as. */
 	let hits: string[];
+	/** The JSON body each upstream call carried, in call order. */
+	let bodies: Record<string, unknown>[];
 
 	const reset = () => {
 		clearProviderOverloadCooldown();
@@ -67,6 +69,7 @@ describe("fallback-credit retry on the main path", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		hits = [];
+		bodies = [];
 		reset();
 	});
 
@@ -75,8 +78,14 @@ describe("fallback-credit retry on the main path", () => {
 		reset();
 	});
 
-	/** Upstream that answers 200 as whichever account's key it was called with. */
-	function installUpstream(accounts: Account[]) {
+	/**
+	 * Upstream that answers 200 as whichever account's key it was called with,
+	 * unless `answer` returns a response for that account.
+	 */
+	function installUpstream(
+		accounts: Account[],
+		answer: (accountId: string) => Response | undefined = () => undefined,
+	) {
 		globalThis.fetch = (async (
 			input: RequestInfo | URL,
 			init?: RequestInit,
@@ -98,8 +107,13 @@ describe("fallback-credit retry on the main path", () => {
 			const rawBody = asRequest
 				? await asRequest.clone().text()
 				: String(init?.body ?? "{}");
-			const body = JSON.parse(rawBody || "{}") as { model?: string };
-			return ok200(body.model ?? "claude-sonnet-4-5");
+			const body = JSON.parse(rawBody || "{}") as Record<string, unknown> & {
+				model?: string;
+			};
+			bodies.push(body);
+			return (
+				answer(account?.id ?? "") ?? ok200(body.model ?? "claude-sonnet-4-5")
+			);
 		}) as typeof globalThis.fetch;
 	}
 
@@ -142,5 +156,135 @@ describe("fallback-credit retry on the main path", () => {
 		);
 		expect(retry.status).toBe(200);
 		expect(hits).toEqual(["acc-issuer"]);
+	});
+
+	function twoAccounts(issuer: Partial<Account> = {}) {
+		return [
+			makeAccount({
+				id: "acc-issuer",
+				name: "issuer",
+				api_key: "key-issuer",
+				priority: 0,
+				identity_external_id: "org-issuer",
+				...issuer,
+			}),
+			makeAccount({
+				id: "acc-other",
+				name: "other",
+				api_key: "key-other",
+				priority: 1,
+				identity_external_id: "org-other",
+			}),
+		];
+	}
+
+	function noteIssuer() {
+		refusalFallbackRegistry.noteRefusal(hashCreditToken(CREDIT_TOKEN), {
+			model: "claude-fable-5-1",
+			category: "cyber",
+			at: Date.now(),
+			accountId: "acc-issuer",
+			identityExternalId: "org-issuer",
+		});
+	}
+
+	/** Per upstream call: the account it reached and whether it carried the credit. */
+	function sends() {
+		return hits.map((account, i) => ({
+			account,
+			credit: Object.hasOwn(bodies[i], "fallback_credit_token")
+				? bodies[i].fallback_credit_token
+				: "absent",
+		}));
+	}
+
+	it("forwards the credit to the issuing account", async () => {
+		const accounts = twoAccounts();
+		installUpstream(accounts);
+		noteIssuer();
+
+		const retry = await callHandleProxy(
+			request(CREDIT_TOKEN),
+			URL_MESSAGES,
+			makeContext(accounts),
+		);
+
+		expect(retry.status).toBe(200);
+		expect(sends()).toEqual([{ account: "acc-issuer", credit: CREDIT_TOKEN }]);
+	});
+
+	it("strips the credit when the issuing account cannot take the retry", async () => {
+		for (const unavailable of [
+			{ rate_limited_until: Date.now() + 60_000 },
+			{ paused: true },
+		] satisfies Partial<Account>[]) {
+			hits = [];
+			bodies = [];
+			reset();
+			const accounts = twoAccounts(unavailable);
+			installUpstream(accounts);
+			noteIssuer();
+
+			const retry = await callHandleProxy(
+				request(CREDIT_TOKEN),
+				URL_MESSAGES,
+				makeContext(accounts),
+			);
+
+			expect(retry.status).toBe(200);
+			expect(sends()).toEqual([{ account: "acc-other", credit: "absent" }]);
+		}
+	});
+
+	it("strips the credit from the failover after the issuing account fails", async () => {
+		const accounts = twoAccounts();
+		installUpstream(accounts, (accountId) =>
+			accountId === "acc-issuer"
+				? Response.json(
+						{ type: "error", error: { type: "api_error", message: "boom" } },
+						{ status: 500 },
+					)
+				: undefined,
+		);
+		noteIssuer();
+
+		const retry = await callHandleProxy(
+			request(CREDIT_TOKEN),
+			URL_MESSAGES,
+			makeContext(accounts),
+		);
+
+		expect(retry.status).toBe(200);
+		const calls = sends();
+		expect(calls[0]).toEqual({ account: "acc-issuer", credit: CREDIT_TOKEN });
+		expect(calls.at(-1)).toEqual({ account: "acc-other", credit: "absent" });
+		for (const call of calls)
+			expect(call.credit).toBe(
+				call.account === "acc-issuer" ? CREDIT_TOKEN : "absent",
+			);
+	});
+
+	it("never forwards a credit whose issuer is unknown", async () => {
+		const accounts = twoAccounts();
+		installUpstream(accounts, (accountId) =>
+			accountId === "acc-issuer"
+				? Response.json(
+						{ type: "error", error: { type: "api_error", message: "boom" } },
+						{ status: 500 },
+					)
+				: undefined,
+		);
+
+		const retry = await callHandleProxy(
+			request(CREDIT_TOKEN),
+			URL_MESSAGES,
+			makeContext(accounts),
+		);
+
+		expect(retry.status).toBe(200);
+		const calls = sends();
+		expect(calls.map((c) => c.account)).toContain("acc-issuer");
+		expect(calls.at(-1)?.account).toBe("acc-other");
+		for (const call of calls) expect(call.credit).toBe("absent");
 	});
 });

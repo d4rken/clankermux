@@ -181,8 +181,8 @@ export async function ingestProxyRequest(
 	const requestModel = requestBodyContext.getModel();
 	// Fallback-credit redemption: Claude Code re-sends a refused turn to the
 	// fallback model with the opaque credit token the refusal issued at the top
-	// level of the body. The body is re-encoded from `parsedBody` downstream, so
-	// reading it here forwards it unchanged.
+	// level of the body. Whether an attempt sends it is decided per attempt
+	// (counterpart: bindFallbackCredit).
 	const rawCreditToken = parsedBody?.fallback_credit_token;
 	const creditToken =
 		typeof rawCreditToken === "string" && rawCreditToken.length > 0
