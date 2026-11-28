@@ -171,6 +171,15 @@ breaker, context-window fit, and API-key account/class pinning.
     neither brings the 429s back. The last read and reading are persisted
     (`anthropic_usage_reads`) and restored at boot, so a restart neither
     re-reads early nor starts routing cold.
+13. A `fallback_credit_token` reaches only the account, under the same
+    `identity_external_id`, whose refusal issued it. Placement moves the issuer
+    to the front at the end of the gate chain (`applyFallbackCreditPlacement`);
+    every other attempt sends the body without the field (`bindFallbackCredit`).
+    Stripping is the client's own recovery shape: Claude Code 2.1.280 sends the
+    token on one HTTP attempt only, and after a credit 400 (`credit_wrong_org`
+    etc.) drops it itself and retries once. Bridged turns never redeem a
+    credit: the SDK-bridge child runs with `CLAUDE_CODE_NO_MODEL_FALLBACK=1`
+    and the bridge never forwards `stop_details`.
 
 ## References
 

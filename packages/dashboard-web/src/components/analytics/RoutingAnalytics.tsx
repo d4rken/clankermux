@@ -54,6 +54,10 @@ const DECISION_EXPLANATIONS = new Map<string, string>([
 	],
 	["combo", "An active model-family routing chain selected the account slot."],
 	[
+		"fallback_credit_issuer",
+		"A refused turn's fallback retry went to the account that issued its credit.",
+	],
+	[
 		"force_account_global",
 		"The retired global force setting selected this account within the request’s allowed destinations and model permissions (historical requests only).",
 	],

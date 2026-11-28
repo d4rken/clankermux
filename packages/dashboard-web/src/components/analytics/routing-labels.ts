@@ -8,6 +8,7 @@ const DECISION_LABELS = new Map<string, string>([
 	["affinity_reassigned", "Affinity reassigned"],
 	["auto_fallback", "Auto fallback"],
 	["combo", "Routing Chain"],
+	["fallback_credit_issuer", "Fallback credit issuer"],
 	["force_account_global", "Forced (global)"],
 	["forced_account", "Forced account"],
 	["global_session", "Global session"],

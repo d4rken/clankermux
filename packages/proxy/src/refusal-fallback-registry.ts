@@ -3,13 +3,11 @@ import { createHash } from "node:crypto";
 /**
  * How long a fallback credit token stays redeemable.
  *
- * Claude Code re-sends a refused turn to the fallback model within a few
- * seconds, so this is a generous ceiling rather than a tight bound: past it the
- * correlation would be guesswork, and a retry that arrives later simply records
- * no origin model instead of being attributed to whatever refusal happened to
- * share the token's hash prefix.
+ * The retry's first send can wait on Claude Code's interactive refusal-fallback
+ * dialog, so this has to cover a human answering it. A credit whose origin is
+ * unknown is stripped from the retry, so a TTL miss costs the credit.
  */
-export const FALLBACK_CREDIT_TTL_MS = 5 * 60_000;
+export const FALLBACK_CREDIT_TTL_MS = 60 * 60_000;
 
 /**
  * Hash a fallback credit token for correlation.
@@ -31,7 +29,17 @@ export interface RefusalOrigin {
 	category: string | undefined;
 	/** Ms epoch at which the refusal was observed. */
 	at: number;
+	/** The account whose response carried the refusal; null when it had none. */
+	accountId: string | null;
+	/** That account's `identity_external_id` when the refusal was observed. */
+	identityExternalId: string | null;
 }
+
+/** The account (and identity) a fallback credit was issued to. */
+export type FallbackCreditIssuer = Pick<
+	RefusalOrigin,
+	"accountId" | "identityExternalId"
+>;
 
 export interface RefusalFallbackRegistry {
 	/** Record that a refusal issued this credit token. */

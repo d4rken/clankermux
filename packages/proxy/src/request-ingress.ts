@@ -181,8 +181,8 @@ export async function ingestProxyRequest(
 	const requestModel = requestBodyContext.getModel();
 	// Fallback-credit redemption: Claude Code re-sends a refused turn to the
 	// fallback model with the opaque credit token the refusal issued at the top
-	// level of the body. The body is re-encoded from `parsedBody` downstream, so
-	// reading it here forwards it unchanged.
+	// level of the body. Whether an attempt sends it is decided per attempt
+	// (counterpart: bindFallbackCredit).
 	const rawCreditToken = parsedBody?.fallback_credit_token;
 	const creditToken =
 		typeof rawCreditToken === "string" && rawCreditToken.length > 0
@@ -392,13 +392,21 @@ export async function ingestProxyRequest(
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.fallbackCreditClaimed = creditToken !== null;
 	// Resolved once, here: the registry entry is consumed on redemption, so this
-	// must not run per failover attempt. `null` when the refusal that issued the
-	// credit was not observed by this process (restart, or another proxy).
-	requestMeta.fallbackFromModel = creditToken
-		? (refusalFallbackRegistry.takeOrigin(
+	// must not run per failover attempt. Both fields are `null` when the refusal
+	// that issued the credit was not observed by this process (restart, expiry,
+	// or another proxy).
+	const creditOrigin = creditToken
+		? refusalFallbackRegistry.takeOrigin(
 				hashCreditToken(creditToken),
 				Date.now(),
-			)?.model ?? null)
+			)
+		: null;
+	requestMeta.fallbackFromModel = creditOrigin?.model ?? null;
+	requestMeta.fallbackCreditIssuer = creditOrigin
+		? {
+				accountId: creditOrigin.accountId,
+				identityExternalId: creditOrigin.identityExternalId,
+			}
 		: null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;

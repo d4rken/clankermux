@@ -6,6 +6,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { makeAccount } from "@clankermux/test-support";
+import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { refusalFallbackRegistry } from "../refusal-fallback-registry";
 import { ingestProxyRequest } from "../request-ingress";
@@ -115,16 +117,17 @@ describe("refusal → fallback-credit retry", () => {
 		mock.restore();
 	});
 
-	it("attributes the retry to the model that refused it", async () => {
-		const summaries: SlimUsageSummary[] = [];
-		const ctx = createStreamingCtx(summaries);
-
+	/** Serve the refusal on `account` and drain it the way the client would. */
+	async function serveRefusal(
+		account: Account | null,
+		summaries: SlimUsageSummary[],
+	): Promise<void> {
 		const forwarded = await forwardToClient(
 			{
 				requestId: "req-refusal",
 				method: "POST",
 				path: "/v1/messages",
-				account: null,
+				account,
 				requestHeaders: new Headers({ "content-type": "application/json" }),
 				requestBody: toArrayBuffer("{}"),
 				requestedModel: REFUSED_MODEL,
@@ -136,19 +139,18 @@ describe("refusal → fallback-credit retry", () => {
 				retryAttempt: 0,
 				failoverAttempts: 0,
 			},
-			ctx,
+			createStreamingCtx(summaries),
 		);
 		// Drain what the client would read, then let the finalize IIFE settle.
 		await forwarded.text();
 		for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 2));
+	}
 
-		// The refusal itself is recorded on the summary the recorder receives.
-		const summary = summaries.at(-1);
-		expect(summary?.stopReason).toBe("refusal");
-		expect(summary?.refusalCategory).toBe("cyber");
-
-		// Claude Code re-sends the conversation to the fallback model, carrying the
-		// credit token the refusal issued.
+	/**
+	 * Claude Code re-sends the conversation to the fallback model, carrying the
+	 * credit token the refusal issued.
+	 */
+	async function ingestRetry() {
 		const retry = await ingestProxyRequest(
 			new Request("https://proxy.local/v1/messages", {
 				method: "POST",
@@ -165,10 +167,46 @@ describe("refusal → fallback-credit retry", () => {
 			null,
 			false,
 		);
-
 		if (retry.kind !== "context") throw new Error("expected a context");
-		expect(retry.context.requestMeta.fallbackCreditClaimed).toBe(true);
-		expect(retry.context.requestMeta.fallbackFromModel).toBe(REFUSED_MODEL);
-		expect(retry.context.requestMeta.requestedModel).toBe("claude-opus-4-8");
+		return retry.context;
+	}
+
+	it("attributes the retry to the model that refused it", async () => {
+		const summaries: SlimUsageSummary[] = [];
+		await serveRefusal(null, summaries);
+
+		// The refusal itself is recorded on the summary the recorder receives.
+		const summary = summaries.at(-1);
+		expect(summary?.stopReason).toBe("refusal");
+		expect(summary?.refusalCategory).toBe("cyber");
+
+		const retry = await ingestRetry();
+		expect(retry.requestMeta.fallbackCreditClaimed).toBe(true);
+		expect(retry.requestMeta.fallbackFromModel).toBe(REFUSED_MODEL);
+		expect(retry.requestMeta.requestedModel).toBe("claude-opus-4-8");
+		expect(retry.requestMeta.fallbackCreditIssuer).toEqual({
+			accountId: null,
+			identityExternalId: null,
+		});
+	});
+
+	it("names the account that issued the credit, once", async () => {
+		const issuer = makeAccount({
+			id: "acc-issuer",
+			name: "issuer",
+			identity_external_id: "org-issuer",
+		});
+		await serveRefusal(issuer, []);
+
+		const retry = await ingestRetry();
+		expect(retry.requestMeta.fallbackCreditIssuer).toEqual({
+			accountId: "acc-issuer",
+			identityExternalId: "org-issuer",
+		});
+
+		// The credit is redeemed once: a replay resolves no issuer.
+		const replay = await ingestRetry();
+		expect(replay.requestMeta.fallbackCreditClaimed).toBe(true);
+		expect(replay.requestMeta.fallbackCreditIssuer).toBeNull();
 	});
 });

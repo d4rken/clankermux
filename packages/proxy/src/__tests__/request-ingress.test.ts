@@ -244,6 +244,7 @@ describe("ingestProxyRequest", () => {
 
 			if (result.kind !== "context") throw new Error("expected a context");
 			expect(result.context.requestMeta.fallbackCreditClaimed).toBe(true);
+			expect(result.context.requestMeta.fallbackCreditIssuer).toBeNull();
 			// The proxy re-encodes the body from the parsed JSON, so the token the
 			// provider has to see must survive that round trip untouched.
 			const forwarded = JSON.parse(
@@ -271,6 +272,7 @@ describe("ingestProxyRequest", () => {
 				if (result.kind !== "context") throw new Error("expected a context");
 				expect(result.context.requestMeta.fallbackCreditClaimed).toBe(false);
 				expect(result.context.requestMeta.fallbackFromModel).toBeNull();
+				expect(result.context.requestMeta.fallbackCreditIssuer).toBeNull();
 			});
 		}
 
@@ -279,6 +281,8 @@ describe("ingestProxyRequest", () => {
 				model: "claude-fable-5-1",
 				category: "cyber",
 				at: Date.now(),
+				accountId: "acc-issuer",
+				identityExternalId: "org-issuer",
 			});
 
 			const ingest = () =>
@@ -298,12 +302,17 @@ describe("ingestProxyRequest", () => {
 			expect(first.context.requestMeta.fallbackFromModel).toBe(
 				"claude-fable-5-1",
 			);
+			expect(first.context.requestMeta.fallbackCreditIssuer).toEqual({
+				accountId: "acc-issuer",
+				identityExternalId: "org-issuer",
+			});
 
 			// The credit is redeemed once: a replay resolves no origin.
 			const second = await ingest();
 			if (second.kind !== "context") throw new Error("expected a context");
 			expect(second.context.requestMeta.fallbackCreditClaimed).toBe(true);
 			expect(second.context.requestMeta.fallbackFromModel).toBeNull();
+			expect(second.context.requestMeta.fallbackCreditIssuer).toBeNull();
 		});
 
 		it("records a null origin for a credit token this process never saw refused", async () => {
@@ -321,6 +330,7 @@ describe("ingestProxyRequest", () => {
 			if (result.kind !== "context") throw new Error("expected a context");
 			expect(result.context.requestMeta.fallbackCreditClaimed).toBe(true);
 			expect(result.context.requestMeta.fallbackFromModel).toBeNull();
+			expect(result.context.requestMeta.fallbackCreditIssuer).toBeNull();
 		});
 
 		it("captures sessionKey and cachePrefixHashes on the request meta", async () => {

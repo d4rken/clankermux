@@ -137,6 +137,13 @@ export interface AdmissionGates {
 	 */
 	applyFailureMemoDemotion: (candidates: Account[]) => Account[];
 	/**
+	 * Moves the account that issued the request's fallback credit to the front,
+	 * when it is still a candidate under the same identity. Applied to the
+	 * result of `applyFailureMemoDemotion`: a soft demotion yields to the
+	 * credit, a failure memo from that latest pass does not.
+	 */
+	applyFallbackCreditPlacement: (candidates: Account[]) => Account[];
+	/**
 	 * Accounts the context-window gate excluded, accumulated with per-account-id
 	 * dedup across EVERY gate pass this request makes (main pass, both hold-wake
 	 * re-selections, combo fallback).
@@ -491,6 +498,10 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		return passed;
 	};
 
+	// Accounts the latest applyFailureMemoDemotion() call marked, including an
+	// entirely demoted pool whose order it left alone.
+	let failureMemoDemotedIds = new Set<string>();
+
 	// Final partition over both failure memos. Separate partitions could put
 	// a transiently failing account ahead of a family-exhausted one or vice versa.
 	// Reordering never removes a last-resort account; an entirely demoted pool
@@ -529,10 +540,43 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 			}
 			kept.push(account);
 		}
+		failureMemoDemotedIds = new Set(demoted.map((account) => account.id));
 		// Deliberately NOT recorded in `familyWeeklyExcludedAccounts`: that list is
 		// what the zero-accounts terminals report as the reason a request could not
 		// be served, and these accounts are still in the pool to be tried.
 		return demoted.length > 0 ? [...kept, ...demoted] : candidates;
+	};
+
+	// A fallback credit is redeemable only on the account that issued it, so the
+	// retry goes there first. Only reorders: an issuer some gate removed, or one
+	// outside this stage's or bridge plan's candidates, is never added back.
+	const applyFallbackCreditPlacement = (candidates: Account[]): Account[] => {
+		const issuer = requestMeta.fallbackCreditIssuer;
+		if (isSyntheticProbeRequest || !issuer?.accountId) return candidates;
+		const index = candidates.findIndex((a) => a.id === issuer.accountId);
+		const account = candidates[index];
+		if (
+			index <= 0 ||
+			!account ||
+			(account.identity_external_id ?? null) !== issuer.identityExternalId ||
+			failureMemoDemotedIds.has(account.id)
+		)
+			return candidates;
+		// Before the stamp, which must survive the strategy's own decision; see
+		// "admission-gates.test.ts: fallback-credit placement".
+		deps.strategy?.reassignAffinity?.(requestMeta, account);
+		if (requestMeta.routing) {
+			requestMeta.routing.decision = "fallback_credit_issuer";
+			requestMeta.routing.selectedAccountId = account.id;
+		}
+		log.debug(
+			`Fallback-credit placement: moving issuing account "${account.name}" first for request ${requestMeta.id}`,
+		);
+		return [
+			account,
+			...candidates.slice(0, index),
+			...candidates.slice(index + 1),
+		];
 	};
 
 	// Why each demoted account was demoted, for the pre-attempt-loop DEBUG line.
@@ -813,6 +857,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		applyFamilyWeeklyGate,
 		applySoftDemotionReorder,
 		applyFailureMemoDemotion,
+		applyFallbackCreditPlacement,
 		contextExcludedAccounts,
 		familyWeeklyExcludedAccounts,
 		familyWeeklyPacedAccounts,
