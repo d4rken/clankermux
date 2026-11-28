@@ -219,8 +219,10 @@ export async function handleAliasProxy(
 		const provider = gates.applyProviderOverloadGate(selected);
 		const throttle = gates.applyUsageThrottling(provider.available);
 		const family = gates.applyFamilyWeeklyGate(throttle.available);
-		const accounts = gates.applyFailureMemoDemotion(
-			gates.applySoftDemotionReorder(gates.applyContextWindowGate(family)),
+		const accounts = gates.applyFallbackCreditPlacement(
+			gates.applyFailureMemoDemotion(
+				gates.applySoftDemotionReorder(gates.applyContextWindowGate(family)),
+			),
 		);
 		gates.reconcileAffinity(accounts);
 		const followServedAccount = gates.prepareSoftDemotionFollow(accounts);

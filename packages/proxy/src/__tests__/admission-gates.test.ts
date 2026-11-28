@@ -10,7 +10,15 @@ import { installGateRoute } from "./fixtures/gate-routing";
  * reorder.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
@@ -105,6 +113,7 @@ type GateOverrides = {
 	gateTokenEstimate?: number;
 	isSyntheticProbeRequest?: boolean;
 	config?: ProxyContext["config"];
+	strategy?: ProxyContext["strategy"];
 };
 
 /** The gates read the frozen route, so install one for the model under test. */
@@ -138,6 +147,7 @@ function makeGates(overrides: GateOverrides = {}) {
 			isSyntheticProbeRequest: overrides.isSyntheticProbeRequest ?? false,
 			config:
 				overrides.config ?? makeConfig({ fiveHour: false, weekly: false }),
+			strategy: overrides.strategy,
 		},
 		overrides.requestModel ?? MODEL,
 	);
@@ -1320,5 +1330,292 @@ describe("Astra subscription context admission", () => {
 		expect(gates.applyContextWindowGate([account])).toEqual([]);
 		gateTargets.set(account.id, "gpt-6-astra");
 		expect(gates.applyContextWindowGate([account])).toEqual([]);
+	});
+});
+
+describe("fallback-credit placement", () => {
+	const FABLE = "claude-fable-5";
+	const reset = () => {
+		clearProviderOverloadCooldown();
+		resetRateLimitProbeGatesForTests();
+		resetFamilyWeeklyMemoForTests();
+		resetCodexTransientHealthForTests();
+		for (const id of SEEDED_IDS) usageCache.delete(id);
+	};
+	beforeEach(reset);
+	afterEach(reset);
+
+	type Issuer = RequestMeta["fallbackCreditIssuer"];
+	const issuedBy = (
+		accountId: string | null,
+		identityExternalId: string | null = "org-issuer",
+	): Issuer => ({ accountId, identityExternalId });
+	const retryMeta = (issuer: Issuer) =>
+		makeRequestMeta({
+			fallbackCreditIssuer: issuer,
+			routing: {
+				strategy: "session",
+				decision: "affinity_miss",
+				selectedAccountId: "acc-b",
+			},
+		});
+	const stubStrategy = () => {
+		const reassignAffinity = mock(() => {});
+		return { reassignAffinity, strategy: { reassignAffinity } as never };
+	};
+	const ids = (accounts: Account[]) => accounts.map((a) => a.id);
+
+	/** The proxy's full gate order, ending in the placement step. */
+	const chain = (gates: ReturnType<typeof makeGates>, accounts: Account[]) => {
+		const { available } = gates.applyProviderOverloadGate(accounts);
+		const throttled = gates.applyUsageThrottling(available).available;
+		return gates.applyFallbackCreditPlacement(
+			gates.applyFailureMemoDemotion(
+				gates.applySoftDemotionReorder(
+					gates.applyContextWindowGate(gates.applyFamilyWeeklyGate(throttled)),
+				),
+			),
+		);
+	};
+
+	it("moves an issuer the strategy ranked behind to the front, and keeps its stamp", () => {
+		const first = makeAccount({ id: "acc-a", name: "a", priority: 0 });
+		const issuer = makeAccount({
+			id: "acc-b",
+			name: "b",
+			priority: 1,
+			identity_external_id: "org-issuer",
+		});
+		const strategy = new SessionStrategy();
+		const reassign = spyOn(strategy, "reassignAffinity");
+		const turn = () =>
+			makeRequestMeta({
+				affinityKey: "conversation",
+				affinityScope: "claude_session",
+			});
+		const meta = turn();
+		meta.fallbackCreditIssuer = issuedBy("acc-b");
+		const selected = strategy.select([first, issuer], meta);
+		expect(ids(selected)).toEqual(["acc-a", "acc-b"]);
+
+		const gates = makeGates({ requestMeta: meta, strategy });
+		expect(ids(chain(gates, selected))).toEqual(["acc-b", "acc-a"]);
+
+		// The strategy's reassignment stamps its own decision; the placement's
+		// stamp is the one left standing.
+		expect(meta.routing?.decision).toBe("fallback_credit_issuer");
+		expect(meta.routing?.selectedAccountId).toBe("acc-b");
+		expect(reassign).toHaveBeenCalledTimes(1);
+		expect(reassign.mock.calls[0]?.[1]).toBe(issuer);
+		// The conversation's next turn stays where the credit was redeemed.
+		expect(strategy.select([first, issuer], turn())[0]?.id).toBe("acc-b");
+	});
+
+	it.each([
+		["family reservation", 99, 10],
+		["pool liveness", 0, 95],
+	] as const)("puts the issuer ahead of a %s demotion", (reason, fiveHour, weekly) => {
+		const issuer = makeAccount({
+			id: "acc-a",
+			name: "a",
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b" });
+		seedUsage("acc-a", fiveHour, weekly);
+		seedUsage("acc-b", 20, 20);
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-a"));
+		const gates = makeGates({ requestMeta: meta, strategy });
+
+		expect(ids(chain(gates, [issuer, peer]))).toEqual(["acc-a", "acc-b"]);
+		expect(gates.softDemotionReasons.get("acc-a")).toBe(reason);
+		expect(meta.routing?.decision).toBe("fallback_credit_issuer");
+		expect(meta.routing?.selectedAccountId).toBe("acc-a");
+		expect(reassignAffinity).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves an issuer a family-weekly memo demoted behind its peer", () => {
+		const issuer = makeAccount({
+			id: "acc-a",
+			name: "a",
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b" });
+		recordFamilyWeeklyExhausted(
+			"acc-a",
+			"fable",
+			Date.now() + 4 * HOUR,
+			Date.now(),
+		);
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-a"));
+		const gates = makeGates({
+			requestMeta: meta,
+			requestModel: FABLE,
+			strategy,
+		});
+
+		expect(ids(chain(gates, [issuer, peer]))).toEqual(["acc-b", "acc-a"]);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("leaves an issuer a Codex transient memo demoted behind its peer", () => {
+		const issuer = makeAccount({
+			id: "codex-1",
+			name: "codex",
+			provider: "codex",
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b" });
+		recordCodexTransientFailure("codex-1");
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("codex-1"));
+		const gates = makeGates({ requestMeta: meta, strategy });
+
+		expect(ids(chain(gates, [issuer, peer]))).toEqual(["acc-b", "codex-1"]);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("does not promote a memo'd issuer when the memo left an entirely demoted pool in order", () => {
+		const peer = makeAccount({ id: "acc-a", name: "a" });
+		const issuer = makeAccount({
+			id: "acc-b",
+			name: "b",
+			identity_external_id: "org-issuer",
+		});
+		for (const id of ["acc-a", "acc-b"])
+			recordFamilyWeeklyExhausted(id, "fable", Date.now() + HOUR, Date.now());
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-b"));
+		const gates = makeGates({
+			requestMeta: meta,
+			requestModel: FABLE,
+			strategy,
+		});
+
+		expect(ids(chain(gates, [peer, issuer]))).toEqual(["acc-a", "acc-b"]);
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("never brings back an issuer the usage throttle removed", () => {
+		const issuer = makeAccount({
+			id: "acc-a",
+			name: "a",
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b" });
+		seedThrottled("acc-a");
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-a"));
+		const gates = makeGates({
+			requestMeta: meta,
+			config: makeConfig({ fiveHour: true, weekly: false }),
+			strategy,
+		});
+
+		expect(ids(chain(gates, [issuer, peer]))).toEqual(["acc-b"]);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("never brings back an issuer the family-weekly gate removed", () => {
+		const issuer = makeAccount({
+			id: "acc-a",
+			name: "a",
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b" });
+		seedFamilyOverpace("acc-a", 100);
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-a"));
+		const gates = makeGates({
+			requestMeta: meta,
+			requestModel: FABLE,
+			strategy,
+		});
+
+		expect(ids(chain(gates, [issuer, peer]))).toEqual(["acc-b"]);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("keeps affinity_hit when the issuer is already first", () => {
+		const issuer = makeAccount({
+			id: "acc-a",
+			name: "a",
+			priority: 0,
+			identity_external_id: "org-issuer",
+		});
+		const peer = makeAccount({ id: "acc-b", name: "b", priority: 1 });
+		const strategy = new SessionStrategy();
+		const turn = () => {
+			const meta = makeRequestMeta({
+				affinityKey: "conversation",
+				affinityScope: "claude_session",
+			});
+			meta.fallbackCreditIssuer = issuedBy("acc-a");
+			return meta;
+		};
+		strategy.select([issuer, peer], turn());
+		const meta = turn();
+		const selected = strategy.select([issuer, peer], meta);
+		expect(meta.routing?.decision).toBe("affinity_hit");
+		const reassign = spyOn(strategy, "reassignAffinity");
+		const gates = makeGates({ requestMeta: meta, strategy });
+
+		expect(ids(chain(gates, selected))).toEqual(["acc-a", "acc-b"]);
+		expect(meta.routing?.decision).toBe("affinity_hit");
+		expect(reassign).not.toHaveBeenCalled();
+	});
+
+	const untouched: Array<[string, Issuer]> = [
+		["no recorded issuer", null],
+		[
+			"a refusal whose response had no account",
+			{ accountId: null, identityExternalId: null },
+		],
+		["an empty account id", { accountId: "", identityExternalId: null }],
+		["an issuer outside the candidates", issuedBy("acc-c")],
+		["an issuer whose identity has changed", issuedBy("acc-b", "org-old")],
+	];
+	it.each(untouched)("leaves the order alone for %s", (_case, issuer) => {
+		const first = makeAccount({ id: "acc-a", name: "a" });
+		const second = makeAccount({
+			id: "acc-b",
+			name: "b",
+			identity_external_id: "org-issuer",
+		});
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuer);
+		const gates = makeGates({ requestMeta: meta, strategy });
+		const candidates = [first, second];
+
+		expect(gates.applyFallbackCreditPlacement(candidates)).toBe(candidates);
+		expect(ids(candidates)).toEqual(["acc-a", "acc-b"]);
+		expect(meta.routing?.decision).toBe("affinity_miss");
+		expect(meta.routing?.selectedAccountId).toBe("acc-b");
+		expect(reassignAffinity).not.toHaveBeenCalled();
+	});
+
+	it("leaves a synthetic probe's order alone", () => {
+		const first = makeAccount({ id: "acc-a", name: "a" });
+		const issuer = makeAccount({
+			id: "acc-b",
+			name: "b",
+			identity_external_id: "org-issuer",
+		});
+		const { reassignAffinity, strategy } = stubStrategy();
+		const meta = retryMeta(issuedBy("acc-b"));
+		const gates = makeGates({
+			requestMeta: meta,
+			isSyntheticProbeRequest: true,
+			strategy,
+		});
+		const candidates = [first, issuer];
+
+		expect(gates.applyFallbackCreditPlacement(candidates)).toBe(candidates);
+		expect(reassignAffinity).not.toHaveBeenCalled();
 	});
 });

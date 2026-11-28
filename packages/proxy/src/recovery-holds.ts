@@ -813,10 +813,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					gates.applyProviderOverloadGate(reSelected);
 				const { available: rePostThrottle } =
 					gates.applyUsageThrottling(reAvailable);
-				const candidates = gates.applyFailureMemoDemotion(
-					gates.applySoftDemotionReorder(
-						gates.applyContextWindowGate(
-							gates.applyFamilyWeeklyGate(rePostThrottle),
+				const candidates = gates.applyFallbackCreditPlacement(
+					gates.applyFailureMemoDemotion(
+						gates.applySoftDemotionReorder(
+							gates.applyContextWindowGate(
+								gates.applyFamilyWeeklyGate(rePostThrottle),
+							),
 						),
 					),
 				);
@@ -1109,9 +1111,11 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				gates.applyProviderOverloadGate(reSelected);
 			const { available: rePostThrottle } =
 				gates.applyUsageThrottling(reAvailable);
-			const candidates = gates.applyFailureMemoDemotion(
-				gates.applyFamilyWeeklyGate(
-					rePostThrottle.filter((a) => isEligible(a)),
+			const candidates = gates.applyFallbackCreditPlacement(
+				gates.applyFailureMemoDemotion(
+					gates.applyFamilyWeeklyGate(
+						rePostThrottle.filter((a) => isEligible(a)),
+					),
 				),
 			);
 			gates.reconcileAffinity(candidates);

@@ -23,6 +23,10 @@ import {
 import { clearAliasAffinity } from "../model-alias-routing";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
+import {
+	hashCreditToken,
+	refusalFallbackRegistry,
+} from "../refusal-fallback-registry";
 import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
 import { asClaudeCodeClient } from "./fixtures/routing-harness";
 
@@ -34,6 +38,7 @@ afterEach(() => {
 	cacheBodyStore.setEnabled(false);
 	clearAnthropicBurstThrottle();
 	clearProviderOverloadCooldown();
+	refusalFallbackRegistry.reset();
 	for (const db of dbs.splice(0)) db.close();
 });
 async function setup(
@@ -331,6 +336,26 @@ it("keeps a conversation on the account it moved to when the pinned one was held
 	} finally {
 		for (const a of accounts) usageCache.delete(a.id);
 	}
+});
+it("sends a fallback-credit retry to the issuing account within its stage", async () => {
+	const { ctx, accounts } = await setup();
+	const seen = upstream((model) => success(model));
+	expect((await run(ctx)).status).toBe(200);
+	refusalFallbackRegistry.noteRefusal(hashCreditToken("fbc_alias_credit"), {
+		model: "primary-model",
+		category: "cyber",
+		at: Date.now(),
+		accountId: accounts[1].id,
+		identityExternalId: null,
+	});
+	const retry = request(undefined, {
+		fallback_credit_token: "fbc_alias_credit",
+	});
+	expect((await run(ctx, retry)).status).toBe(200);
+	expect(seen.map((s) => s.url)).toEqual([
+		"https://upstream-0.test/v1/messages",
+		"https://upstream-1.test/v1/messages",
+	]);
 });
 it("invalidates conversation target preference when the alias is edited", async () => {
 	const { ctx, accounts, modelAliases } = await setup();
